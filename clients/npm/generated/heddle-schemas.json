@@ -11300,10 +11300,66 @@
       "type": "object"
     },
     "integration doctor": {
+      "$defs": {
+        "IntegrationStatusSchema": {
+          "properties": {
+            "capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "capability_paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "healthy": {
+              "type": "boolean"
+            },
+            "method": {
+              "type": "string"
+            },
+            "path_mode": {
+              "type": "string"
+            },
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "harness",
+            "scope",
+            "method",
+            "status",
+            "healthy",
+            "paths",
+            "capabilities",
+            "capability_paths",
+            "path_mode"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": true,
-      "title": "GenericJsonObjectSchema",
-      "type": "object"
+      "items": {
+        "$ref": "#/$defs/IntegrationStatusSchema"
+      },
+      "title": "IntegrationStatusListSchema",
+      "type": "array"
     },
     "integration install": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11362,10 +11418,66 @@
       "type": "object"
     },
     "integration list": {
+      "$defs": {
+        "IntegrationStatusSchema": {
+          "properties": {
+            "capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "capability_paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "healthy": {
+              "type": "boolean"
+            },
+            "method": {
+              "type": "string"
+            },
+            "path_mode": {
+              "type": "string"
+            },
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "harness",
+            "scope",
+            "method",
+            "status",
+            "healthy",
+            "paths",
+            "capabilities",
+            "capability_paths",
+            "path_mode"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": true,
-      "title": "GenericJsonObjectSchema",
-      "type": "object"
+      "items": {
+        "$ref": "#/$defs/IntegrationStatusSchema"
+      },
+      "title": "IntegrationStatusListSchema",
+      "type": "array"
     },
     "integration relay": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11948,6 +12060,419 @@
         "output_kind"
       ],
       "title": "LogReflogSchema",
+      "type": "object"
+    },
+    "log --timeline": {
+      "$defs": {
+        "TimelineActionsSchema": {
+          "properties": {
+            "can_redo": {
+              "type": "boolean"
+            },
+            "can_undo": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "can_undo",
+            "can_redo"
+          ],
+          "type": "object"
+        },
+        "TimelineBranchSchema": {
+          "properties": {
+            "branch_id": {
+              "type": "string"
+            },
+            "created_at_ms": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "forked_from_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forked_from_step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "is_active": {
+              "type": "boolean"
+            },
+            "is_on_active_path": {
+              "type": "boolean"
+            },
+            "parent_branch_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "branch_id",
+            "step_ids",
+            "is_active",
+            "is_on_active_path"
+          ],
+          "type": "object"
+        },
+        "TimelineCursorSchema": {
+          "properties": {
+            "branch_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state_full": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "TimelineNativeSchema": {
+          "properties": {
+            "harness": {
+              "type": "string"
+            },
+            "message_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "harness",
+            "tool_call_id"
+          ],
+          "type": "object"
+        },
+        "TimelineRecoverySchema": {
+          "properties": {
+            "branch_id": {
+              "type": "string"
+            },
+            "checkout_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from_state": {
+              "type": "string"
+            },
+            "from_step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "moved_at_ms": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "to_state": {
+              "type": "string"
+            },
+            "to_step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "branch_id",
+            "from_state",
+            "to_state",
+            "reason",
+            "moved_at_ms"
+          ],
+          "type": "object"
+        },
+        "TimelineStepSchema": {
+          "properties": {
+            "after_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "before_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch_id": {
+              "type": "string"
+            },
+            "can_fork": {
+              "type": "boolean"
+            },
+            "can_materialize": {
+              "type": "boolean"
+            },
+            "can_reset": {
+              "type": "boolean"
+            },
+            "can_seek": {
+              "type": "boolean"
+            },
+            "capture_oplog_batch_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "capture_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "changed": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "cursor_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cursor_state_full": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finished_at_ms": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "has_boundary_warning": {
+              "type": "boolean"
+            },
+            "is_current": {
+              "type": "boolean"
+            },
+            "is_on_active_branch_path": {
+              "type": "boolean"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "native": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimelineNativeSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "operation_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "parent_step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "payload_summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "started_at_ms": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "step_id": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "touched_paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "step_id",
+            "branch_id",
+            "touched_paths",
+            "labels",
+            "operation_ids",
+            "is_current",
+            "is_on_active_branch_path",
+            "can_seek",
+            "can_fork",
+            "can_reset",
+            "can_materialize",
+            "has_boundary_warning"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actions": {
+          "$ref": "#/$defs/TimelineActionsSchema"
+        },
+        "active_branch_path": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/TimelineBranchSchema"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "$ref": "#/$defs/TimelineCursorSchema"
+        },
+        "output_kind": {
+          "enum": [
+            "timeline_log"
+          ],
+          "type": "string"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimelineRecoverySchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository_capability": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/TimelineStepSchema"
+          },
+          "type": "array"
+        },
+        "storage_model": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "repository_capability",
+        "storage_model",
+        "thread",
+        "cursor",
+        "branches",
+        "steps",
+        "active_branch_path",
+        "actions"
+      ],
+      "title": "TimelineLogSchema",
       "type": "object"
     },
     "maintenance gc": {
@@ -25957,6 +26482,468 @@
         "output_kind"
       ],
       "title": "ThreadStartSchema",
+      "type": "object"
+    },
+    "timeline fork": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "blocker_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialization_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialized": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "timeline_action"
+          ],
+          "type": "string"
+        },
+        "parent_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovered_operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "step_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "thread": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "action",
+        "thread",
+        "blocker_count",
+        "branch_count",
+        "step_count"
+      ],
+      "title": "TimelineActionSchema",
+      "type": "object"
+    },
+    "timeline recover": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "blocker_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialization_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialized": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "timeline_action"
+          ],
+          "type": "string"
+        },
+        "parent_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovered_operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "step_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "thread": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "action",
+        "thread",
+        "blocker_count",
+        "branch_count",
+        "step_count"
+      ],
+      "title": "TimelineActionSchema",
+      "type": "object"
+    },
+    "timeline reset": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "blocker_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_step_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialization_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "materialized": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "timeline_action"
+          ],
+          "type": "string"
+        },
+        "parent_branch_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovered_operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "step_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "thread": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "action",
+        "thread",
+        "blocker_count",
+        "branch_count",
+        "step_count"
+      ],
+      "title": "TimelineActionSchema",
       "type": "object"
     },
     "transaction abort": {

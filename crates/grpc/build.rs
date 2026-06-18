@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "heddle/v1/discussion.proto",
         "heddle/v1/signals.proto",
         "heddle/v1/operations.proto",
+        "heddle/v1/timeline.proto",
         "heddle/v1/transactions.proto",
         "heddle/v1/hooks.proto",
         "heddle/v1/support.proto",

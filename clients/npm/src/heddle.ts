@@ -96,6 +96,61 @@ export interface RunOptions {
   signal?: AbortSignal | undefined;
 }
 
+export type TimelineBranchReason =
+  | "explicit-fork"
+  | "edit-from-rewound-cursor"
+  | "retry"
+  | "fan-out";
+
+export type TimelineMaterializeMode =
+  | "fail-if-dirty"
+  | "capture-current-then-seek";
+
+export type TimelineTarget =
+  | {
+      kind: "step";
+      stepId: string;
+      thread?: string | undefined;
+      fromBranch?: string | undefined;
+    }
+  | {
+      kind: "tool-call";
+      toolCallId: string;
+      thread?: string | undefined;
+      harness?: string | undefined;
+      sessionId?: string | undefined;
+      messageId?: string | undefined;
+    }
+  | {
+      kind: "undo" | "redo" | "current";
+      thread?: string | undefined;
+      fromBranch?: string | undefined;
+    };
+
+export interface TimelineLogOptions {
+  /** Timeline thread to inspect. Defaults to the CLI's `main`. */
+  thread?: string | undefined;
+}
+
+export interface TimelineForkOptions {
+  /** New branch id. Heddle generates one when omitted. */
+  branch?: string | undefined;
+  /** Branch reason recorded on the timeline branch object. */
+  reason?: TimelineBranchReason | undefined;
+}
+
+export interface TimelineResetOptions {
+  /** Also move checkout files to the target state. Defaults to logical cursor only. */
+  materialize?: boolean | undefined;
+  /** Materialization safety mode. Defaults to `fail-if-dirty`. */
+  mode?: TimelineMaterializeMode | undefined;
+}
+
+export interface TimelineRecoverOptions {
+  /** Timeline thread to recover. Defaults to the CLI's `main`. */
+  thread?: string | undefined;
+}
+
 /**
  * Transport-agnostic TypeScript API over the heddle CLI's JSON contract.
  *
@@ -264,6 +319,44 @@ export class Heddle {
     return this.run("log", args, options);
   }
 
+  /** `heddle log --timeline` — timeline navigation snapshot. Read-only. */
+  timeline(args: TimelineLogOptions = {}, options: RunOptions = {}) {
+    const argv: string[] = [];
+    if (args.thread !== undefined) argv.push("--thread", args.thread);
+    return this.run("log --timeline", argv, options);
+  }
+
+  /** `heddle timeline fork` — fork a timeline branch from a typed target. */
+  timelineFork(
+    target: TimelineTarget,
+    args: TimelineForkOptions = {},
+    options: RunOptions = {},
+  ) {
+    const argv = timelineTargetArgs(target);
+    if (args.branch !== undefined) argv.push("--branch", args.branch);
+    if (args.reason !== undefined) argv.push("--reason", args.reason);
+    return this.run("timeline fork", argv, options);
+  }
+
+  /** `heddle timeline reset` — move the logical cursor, optionally materializing checkout files. */
+  timelineReset(
+    target: TimelineTarget,
+    args: TimelineResetOptions = {},
+    options: RunOptions = {},
+  ) {
+    const argv = timelineTargetArgs(target);
+    if (args.materialize === true) argv.push("--materialize");
+    if (args.mode !== undefined) argv.push("--mode", args.mode);
+    return this.run("timeline reset", argv, options);
+  }
+
+  /** `heddle timeline recover` — finish or inspect pending timeline materialization recovery. */
+  timelineRecover(args: TimelineRecoverOptions = {}, options: RunOptions = {}) {
+    const argv: string[] = [];
+    if (args.thread !== undefined) argv.push("--thread", args.thread);
+    return this.run("timeline recover", argv, options);
+  }
+
   /** `heddle diff` — working/range diff. Read-only. */
   diff(args: readonly string[] = [], options: RunOptions = {}) {
     return this.run("diff", args, options);
@@ -288,6 +381,32 @@ export class Heddle {
   watch(args: readonly string[] = [], options: RunOptions = {}) {
     return this.stream("watch", args, options);
   }
+}
+
+function timelineTargetArgs(target: TimelineTarget): string[] {
+  const args: string[] = [];
+  if (target.thread !== undefined) args.push("--thread", target.thread);
+
+  switch (target.kind) {
+    case "step":
+      if (target.fromBranch !== undefined) args.push("--from-branch", target.fromBranch);
+      args.push("--step", target.stepId);
+      break;
+    case "tool-call":
+      args.push("--tool-call", target.toolCallId);
+      args.push("--harness", target.harness ?? "opencode");
+      if (target.sessionId !== undefined) args.push("--session", target.sessionId);
+      if (target.messageId !== undefined) args.push("--message", target.messageId);
+      break;
+    case "undo":
+    case "redo":
+    case "current":
+      if (target.fromBranch !== undefined) args.push("--from-branch", target.fromBranch);
+      args.push(`--${target.kind}`);
+      break;
+  }
+
+  return args;
 }
 
 /** Parse one JSONL line, wrapping a JSON error as a HeddleError. */

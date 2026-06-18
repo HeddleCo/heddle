@@ -120,6 +120,8 @@ struct IntegrationStatus {
     status: String,
     healthy: bool,
     paths: Vec<String>,
+    capabilities: Vec<String>,
+    capability_paths: Vec<String>,
     path_mode: String,
 }
 
@@ -222,6 +224,9 @@ fn list_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
                 "{} [{}] {} ({})",
                 status.harness, status.scope, status.status, status.method
             );
+            if !status.capabilities.is_empty() {
+                println!("  capabilities: {}", status.capabilities.join(", "));
+            }
             for path in status.paths {
                 println!("  {}", path);
             }
@@ -525,7 +530,26 @@ fn integration_status(
             PathMode::Relative => "relative".to_string(),
             PathMode::Absolute => "absolute".to_string(),
         },
+        capabilities: integration_capabilities(entry),
+        capability_paths: integration_capability_paths(entry),
     })
+}
+
+fn integration_capabilities(entry: &InstalledIntegration) -> Vec<String> {
+    if entry.harness == "opencode" && !integration_capability_paths(entry).is_empty() {
+        vec!["timeline".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn integration_capability_paths(entry: &InstalledIntegration) -> Vec<String> {
+    entry
+        .paths
+        .iter()
+        .filter(|path| path.ends_with("heddle.timeline.json"))
+        .cloned()
+        .collect()
 }
 
 fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
@@ -837,6 +861,7 @@ fn install_opencode(
     if let Some(parent) = plugin_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let timeline_manifest_path = plugin_path.with_file_name("heddle.timeline.json");
     let heddle_raw = HeddleInvocation::raw(path_mode)?;
     let script = format!(
         "const relay = async (event, payload) => {{
@@ -861,19 +886,106 @@ export default async function(ctx) {{
         repo = repo.root().display().to_string(),
     );
     write_file_atomic(&plugin_path, script.as_bytes())?;
+    let capabilities = opencode_timeline_capabilities(repo, &heddle_raw);
+    write_file_atomic(
+        &timeline_manifest_path,
+        serde_json::to_string_pretty(&capabilities)?.as_bytes(),
+    )?;
     upsert_manifest(
         manifest,
         InstalledIntegration {
             harness: "opencode".to_string(),
             scope: scope.clone(),
             method: "plugin".to_string(),
-            paths: vec![plugin_path.display().to_string()],
+            paths: vec![
+                plugin_path.display().to_string(),
+                timeline_manifest_path.display().to_string(),
+            ],
             status: "installed".to_string(),
             heddle_version: env!("CARGO_PKG_VERSION").to_string(),
             path_mode,
         },
     );
     Ok(())
+}
+
+fn opencode_timeline_capabilities(repo: &Repository, heddle_raw: &str) -> Value {
+    let repo_path = repo.root().display().to_string();
+    serde_json::json!({
+        "schema_version": 1,
+        "producer": "heddle",
+        "harness": "opencode",
+        "repo": repo_path,
+        "binary": heddle_raw,
+        "privacy": {
+            "native_payloads": "summaries-and-hashes",
+            "raw_payloads_synced_by_default": false
+        },
+        "timeline": {
+            "schema_version": 1,
+            "default_thread": "main",
+            "default_harness": "opencode",
+            "output_kinds": ["timeline_log", "timeline_action"],
+            "selectors": {
+                "step": ["--step", "<timeline_step_id>"],
+                "tool_call": [
+                    "--tool-call",
+                    "<opencode_tool_call_id>",
+                    "--harness",
+                    "opencode",
+                    "--session",
+                    "<opencode_session_id>"
+                ],
+                "undo": ["--undo"],
+                "redo": ["--redo"],
+                "current": ["--current"]
+            },
+            "verbs": [
+                {
+                    "name": "timeline_log",
+                    "verb": "log --timeline",
+                    "intent": "Inspect the current timeline cursor, branches, and recent steps.",
+                    "argv": ["--repo", repo_path, "log", "--timeline", "--thread", "<thread>", "--output", "json"],
+                    "mutates_checkout": false
+                },
+                {
+                    "name": "timeline_fork_from_tool_call",
+                    "verb": "timeline fork",
+                    "intent": "Create a branch from an OpenCode tool call or timeline step before experimenting.",
+                    "argv": ["--repo", repo_path, "timeline", "fork", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--reason", "fan-out", "--output", "json"],
+                    "mutates_checkout": false
+                },
+                {
+                    "name": "timeline_reset_to_tool_call",
+                    "verb": "timeline reset",
+                    "intent": "Move the timeline cursor to an OpenCode tool call and optionally materialize checkout files.",
+                    "argv": ["--repo", repo_path, "timeline", "reset", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "mutates_checkout": true
+                },
+                {
+                    "name": "timeline_undo",
+                    "verb": "timeline reset",
+                    "intent": "Move one reversible timeline step backward.",
+                    "argv": ["--repo", repo_path, "timeline", "reset", "--undo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "mutates_checkout": true
+                },
+                {
+                    "name": "timeline_redo",
+                    "verb": "timeline reset",
+                    "intent": "Move one reversible timeline step forward.",
+                    "argv": ["--repo", repo_path, "timeline", "reset", "--redo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "mutates_checkout": true
+                },
+                {
+                    "name": "timeline_recover",
+                    "verb": "timeline recover",
+                    "intent": "Inspect or complete recovery after an interrupted timeline materialization.",
+                    "argv": ["--repo", repo_path, "timeline", "recover", "--thread", "<thread>", "--output", "json"],
+                    "mutates_checkout": false
+                }
+            ]
+        }
+    })
 }
 
 fn uninstall_one(
@@ -1140,9 +1252,42 @@ mod tests {
             plugin_contents.contains("\"heddle\""),
             "opencode plugin should reference PATH-relative `heddle`, got: {plugin_contents}"
         );
+        let timeline_manifest_path = repo
+            .root()
+            .join(".opencode")
+            .join("plugins")
+            .join("heddle.timeline.json");
+        assert!(timeline_manifest_path.exists());
+        let timeline_manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&timeline_manifest_path).unwrap()).unwrap();
+        assert_eq!(timeline_manifest["schema_version"], 1);
+        assert_eq!(timeline_manifest["harness"], "opencode");
+        assert_eq!(timeline_manifest["timeline"]["schema_version"], 1);
+        assert_eq!(timeline_manifest["timeline"]["default_harness"], "opencode");
+        assert!(
+            timeline_manifest["timeline"]["verbs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|verb| verb["name"] == "timeline_reset_to_tool_call")
+        );
+        assert!(
+            timeline_manifest["timeline"]["verbs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|verb| verb["name"] == "timeline_undo")
+        );
+        let status = integration_status(&repo, &manifest.integrations[0]).unwrap();
+        assert_eq!(status.capabilities, vec!["timeline"]);
+        assert_eq!(
+            status.capability_paths,
+            vec![timeline_manifest_path.display().to_string()]
+        );
 
         uninstall_one(&repo, &mut manifest, "opencode").unwrap();
         assert!(!plugin_path.exists());
+        assert!(!timeline_manifest_path.exists());
         assert!(manifest.integrations.is_empty());
     }
 

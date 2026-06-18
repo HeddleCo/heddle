@@ -142,6 +142,9 @@ const SWEPT: &[&str] = &[
     "start",
     "switch",
     "sync",
+    "timeline fork",
+    "timeline reset",
+    "timeline recover",
     "thread cleanup",
     "thread create",
     "thread drop",
@@ -264,6 +267,9 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // Rebase emits JSONL progress records rather than a single
         // command-shaped object.
         "rebase" => Some("rebase_progress"),
+        // Timeline navigation subcommands intentionally share one action
+        // envelope so agents can handle fork/reset/recover uniformly.
+        "timeline fork" | "timeline reset" | "timeline recover" => Some("timeline_action"),
         _ => None,
     }
 }
@@ -1098,6 +1104,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(&oplog, &bytes[..cut]).expect("truncate fixture oplog");
             (t, sv(&["oplog", "recover"]))
         }
+        "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
         _ => return None,
     };
     Some(case)

@@ -198,37 +198,37 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 188,
-      "catalog_mutating_commands_total": 97,
-      "json_commands_total": 158,
-      "json_mutating_commands_total": 96,
-      "json_commands_with_schema": 109,
-      "json_commands_with_accepted_opaque_schema": 49,
+      "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 192,
+      "catalog_mutating_commands_total": 100,
+      "json_commands_total": 161,
+      "json_mutating_commands_total": 99,
+      "json_commands_with_schema": 114,
+      "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 37,
       "verified_scope_json_commands_with_schema": 37,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 121,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
-      "mutating_commands_total": 96,
-      "mutating_commands_with_schema": 69,
+      "advanced_scope_json_commands_total": 124,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
+      "mutating_commands_total": 99,
+      "mutating_commands_with_schema": 72,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 73,
+      "advanced_scope_mutating_commands_total": 76,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 163,
-      "documented_schema_verbs_total": 163,
+      "schema_verbs_total": 167,
+      "documented_schema_verbs_total": 167,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 49,
-      "accepted_opaque_schema_verbs_total": 49,
+      "opaque_schema_verbs_total": 47,
+      "accepted_opaque_schema_verbs_total": 47,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 91,
+      "supports_op_id_total": 94,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -1856,6 +1856,105 @@ State history walking from a given starting state.
 }
 ```
 
+`heddle log --timeline --output json` emits the current agent
+tool-call navigation state:
+
+```json
+{
+  "output_kind": "timeline_log",
+  "status": "ok",
+  "repository_capability": "git-overlay",
+  "storage_model": "git+heddle-sidecar",
+  "thread": "main",
+  "cursor": {
+    "branch_id": "tlb-main",
+    "step_id": "tls-2",
+    "state": "hd-def456",
+    "state_full": "hd-def4561234567890abcdef"
+  },
+  "branches": [
+    {
+      "branch_id": "tlb-main",
+      "parent_branch_id": null,
+      "forked_from_step_id": null,
+      "forked_from_state": null,
+      "reason": null,
+      "created_at_ms": 1770000000000,
+      "step_ids": ["tls-1", "tls-2"],
+      "is_active": true,
+      "is_on_active_path": true
+    }
+  ],
+  "steps": [
+    {
+      "step_id": "tls-2",
+      "branch_id": "tlb-main",
+      "parent_step_id": "tls-1",
+      "native": {
+        "harness": "opencode",
+        "session_id": "ses-123",
+        "message_id": "msg-456",
+        "tool_call_id": "call-789"
+      },
+      "tool_name": "edit",
+      "status": "succeeded",
+      "changed": true,
+      "touched_paths": ["src/lib.rs"],
+      "labels": ["repo-reversible"],
+      "before_state": "hd-abc123",
+      "after_state": "hd-def456",
+      "capture_state": "hd-def456",
+      "cursor_state": "hd-def456",
+      "cursor_state_full": "hd-def4561234567890abcdef",
+      "payload_summary": "edit src/lib.rs",
+      "payload_hash": "hpb-abc123",
+      "capture_oplog_batch_id": 42,
+      "started_at_ms": 1770000000100,
+      "finished_at_ms": 1770000000200,
+      "operation_ids": ["hop-1"],
+      "is_current": true,
+      "is_on_active_branch_path": true,
+      "can_seek": true,
+      "can_fork": true,
+      "can_reset": true,
+      "can_materialize": true,
+      "has_boundary_warning": false
+    }
+  ],
+  "active_branch_path": ["tlb-main"],
+  "actions": {
+    "can_undo": true,
+    "can_redo": false
+  },
+  "recovery": null
+}
+```
+
+`heddle timeline fork|reset|recover --output json` emit timeline
+action results:
+
+```json
+{
+  "output_kind": "timeline_action",
+  "status": "ok",
+  "action": "reset",
+  "thread": "main",
+  "branch_id": "tlb-main",
+  "parent_branch_id": null,
+  "from_step_id": "tls-1",
+  "cursor_branch_id": "tlb-main",
+  "cursor_step_id": "tls-2",
+  "operation_id": "top-1",
+  "recovered_operation_id": null,
+  "materialized": true,
+  "materialization_status": "applied",
+  "recovery_status": null,
+  "blocker_count": 0,
+  "branch_count": 1,
+  "step_count": 2
+}
+```
+
 ---
 
 ## `heddle show <state> --output json`
@@ -2444,7 +2543,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "accepted_opaque_schema_verbs_total": 49,
+    "accepted_opaque_schema_verbs_total": 47,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -2456,26 +2555,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 121,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
-    "advanced_scope_mutating_commands_total": 73,
+    "advanced_scope_json_commands_total": 124,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
+    "advanced_scope_mutating_commands_total": 76,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 188,
-    "catalog_mutating_commands_total": 97,
-    "json_commands_total": 158,
-    "json_commands_with_accepted_opaque_schema": 49,
-    "json_commands_with_schema": 109,
+    "catalog_commands_total": 192,
+    "catalog_mutating_commands_total": 100,
+    "json_commands_total": 161,
+    "json_commands_with_accepted_opaque_schema": 47,
+    "json_commands_with_schema": 114,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 96,
+    "json_mutating_commands_total": 99,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 96,
+    "mutating_commands_total": 99,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 69,
+    "mutating_commands_with_schema": 72,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 49,
+    "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+    "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -2513,7 +2612,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+  "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -2858,7 +2957,25 @@ itself):
 {"hooks": [{"event": "pre-capture", "command": "cargo test"}], "installed": true, "uninstalled": false, "events": [{"name": "pre-capture", "description": "before capture"}]}
 ```
 
-`heddle integration list|install|doctor|uninstall|upgrade --output json` emit:
+`heddle integration list|doctor --output json` emit:
+
+```json
+[
+  {
+    "harness": "opencode",
+    "scope": "repo",
+    "method": "hooks",
+    "status": "installed",
+    "healthy": true,
+    "paths": [".opencode/plugin/heddle.ts"],
+    "capabilities": ["timeline"],
+    "capability_paths": [".opencode/plugin/heddle.timeline.json"],
+    "path_mode": "repo-relative"
+  }
+]
+```
+
+`heddle integration install|uninstall|upgrade --output json` emit:
 
 ```json
 {"integrations": [{"name": "github", "installed": true, "version": "1"}], "installed": true, "uninstalled": false, "upgraded": false, "issues": []}

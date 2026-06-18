@@ -17,6 +17,7 @@ mod hook_events;
 mod operation_log_query;
 mod signal;
 mod state_review;
+mod timeline;
 mod transaction;
 
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use repo::{
 };
 pub use signal::LocalSignalService;
 pub use state_review::LocalStateReviewService;
+pub use timeline::LocalTimelineService;
 pub use transaction::LocalTransactionService;
 
 /// Shared state for the local gRPC services. Handlers borrow the repository

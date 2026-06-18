@@ -11,6 +11,13 @@ export type {
   HeddleWatchModeVerb,
   HeddleJsonlVerb,
   HeddleRunVerb,
+  TimelineBranchReason,
+  TimelineForkOptions,
+  TimelineLogOptions,
+  TimelineMaterializeMode,
+  TimelineRecoverOptions,
+  TimelineResetOptions,
+  TimelineTarget,
 } from "./heddle.js";
 export {
   SpawnExecutor,
@@ -20,6 +27,38 @@ export {
   type ExecResult,
   type SpawnExecutorOptions,
 } from "./executor.js";
+export {
+  DEFAULT_NATIVE_TOOL_CALL_HARNESS,
+  DEFAULT_TIMELINE_BRANCH_REASON,
+  DEFAULT_TIMELINE_THREAD,
+  HeddleTimelineDaemon,
+  TimelineMaterializeModeCode,
+  forkTimelineFromSelectorRequest,
+  getTimelineNavigationRequest,
+  recoverTimelineMaterializationRequest,
+  resetTimelineCursorRequest,
+  timelineMaterializeModeToCode,
+  timelineTargetToSeekSelector,
+} from "./timeline-daemon.js";
+export type {
+  ForkTimelineFromSelectorRequest,
+  ForkTimelineFromSelectorResponse,
+  GetTimelineNavigationRequest,
+  HeddleTimelineDaemonOptions,
+  RecoverTimelineMaterializationRequest,
+  RecoverTimelineMaterializationResponse,
+  ResetTimelineCursorRequest,
+  ResetTimelineCursorResponse,
+  TimelineCursorSelector,
+  TimelineDaemonCallOptions,
+  TimelineDaemonRecord,
+  TimelineDaemonTransport,
+  TimelineNavigationSnapshot,
+  TimelineSeekNativeToolCallSelector,
+  TimelineSeekSelector,
+  TimelineSeekStepSelector,
+  TimelineTargetSelectorOptions,
+} from "./timeline-daemon.js";
 export {
   HeddleError,
   HeddleStreamingVerbError,

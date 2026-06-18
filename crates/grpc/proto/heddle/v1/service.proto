@@ -18,6 +18,7 @@ import public "heddle/v1/state_review.proto";
 import public "heddle/v1/discussion.proto";
 import public "heddle/v1/signals.proto";
 import public "heddle/v1/operations.proto";
+import public "heddle/v1/timeline.proto";
 import public "heddle/v1/transactions.proto";
 import public "heddle/v1/hooks.proto";
 import public "heddle/v1/support.proto";

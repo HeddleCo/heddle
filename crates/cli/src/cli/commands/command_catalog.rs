@@ -13,7 +13,7 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands, ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
@@ -1831,7 +1831,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
-        surface(opaque_schemas(READ_JSON, &["integration list"]), "admin"),
+        surface(documented_schemas(READ_JSON, &["integration list"]), "admin"),
     ),
     entry(
         &["integration", "install"],
@@ -1839,7 +1839,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "doctor"],
-        surface(opaque_schemas(READ_JSON, &["integration doctor"]), "admin"),
+        surface(documented_schemas(READ_JSON, &["integration doctor"]), "admin"),
     ),
     entry(
         &["integration", "uninstall"],
@@ -1863,10 +1863,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["log"],
         front_door(
             json_discriminators(
-                documented_schemas(READ_JSON, &["log", "log --reflog"]),
+                documented_schemas(READ_JSON, &["log", "log --reflog", "log --timeline"]),
                 &[
                     json_discriminator(Some("log"), "output_kind", "log"),
                     json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
+                    json_discriminator(Some("log --timeline"), "output_kind", "timeline_log"),
                 ],
             ),
             130,
@@ -2702,6 +2703,49 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "output_kind",
                 "thread_marker_show",
             )],
+        ),
+    ),
+    entry(&["timeline"], surface(GROUP, "automation")),
+    entry(
+        &["timeline", "fork"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline fork"]),
+                &[json_discriminator(
+                    Some("timeline fork"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "reset"],
+        surface(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["timeline reset"]),
+                &[json_discriminator(
+                    Some("timeline reset"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "recover"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline recover"]),
+                &[json_discriminator(
+                    Some("timeline recover"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
         ),
     ),
     entry(&["transaction"], hidden(GROUP)),
@@ -4311,6 +4355,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 ThreadMarkerCommands::Show { .. } => vec!["thread", "marker", "show"],
             },
         },
+        Commands::Timeline(args) => match &args.command {
+            TimelineCommands::Fork(_) => vec!["timeline", "fork"],
+            TimelineCommands::Reset(_) => vec!["timeline", "reset"],
+            TimelineCommands::Recover(_) => vec!["timeline", "recover"],
+        },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
@@ -4795,6 +4844,15 @@ mod tests {
             &["thread", "marker", "show"],
             &["thread", "marker", "show", "checkpoint"],
         ),
+        sample(
+            &["timeline", "fork"],
+            &["timeline", "fork", "--step", "tls-abc"],
+        ),
+        sample(
+            &["timeline", "reset"],
+            &["timeline", "reset", "--step", "tls-abc"],
+        ),
+        sample(&["timeline", "recover"], &["timeline", "recover"]),
         sample(&["transaction", "begin"], &["transaction", "begin"]),
         sample(
             &["transaction", "commit"],
@@ -5734,8 +5792,10 @@ mod tests {
                 "oplog recover",
                 "help",
                 "init",
-                // `log` appears twice: the entry advertises both `log` and the
-                // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
+                // `log` appears three times: the entry advertises `log`,
+                // `log --reflog`, and `log --timeline` variants, mirroring
+                // `undo`/`clone`.
+                "log",
                 "log",
                 "log",
                 "maintenance gc",
@@ -5789,6 +5849,9 @@ mod tests {
                 "thread marker create",
                 "thread marker delete",
                 "thread marker show",
+                "timeline fork",
+                "timeline reset",
+                "timeline recover",
                 "verify",
                 "visibility set",
                 "visibility promote",

@@ -82,6 +82,7 @@ mod thread_approval;
 mod thread_cmd;
 mod thread_landing;
 mod thread_shaping;
+mod timeline_cmd;
 mod transaction;
 mod try_cmd;
 mod undo;
@@ -200,6 +201,7 @@ pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{
     cmd_capture_split, cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve,
 };
+pub use timeline_cmd::cmd_timeline;
 pub use transaction::run as cmd_transaction;
 pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo};

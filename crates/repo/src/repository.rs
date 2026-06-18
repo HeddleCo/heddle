@@ -42,7 +42,7 @@ mod repository_thread_materialize;
 #[path = "repository_tree.rs"]
 mod repository_tree;
 #[path = "repository_worktree_apply.rs"]
-mod repository_worktree_apply;
+pub(crate) mod repository_worktree_apply;
 #[path = "repository_worktree_status.rs"]
 mod repository_worktree_status;
 #[path = "status_tracked_refresh.rs"]

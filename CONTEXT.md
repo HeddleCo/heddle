@@ -108,6 +108,34 @@ _Avoid_: done agent, generic blocked agent
 Operational metadata that defines an agent's delegated work and execution policy, such as whether offline continuation is allowed. Its identifier can be referenced by collaboration operations as optional provenance, but it is not repository collaboration history in v1.
 _Avoid_: discussion task, collaboration assignment
 
+**Agent Timeline**:
+A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local daemon storage are in place; richer cursor views, capture automation, and hosted projection are still planned. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
+_Avoid_: raw transcript, runner log, chat history
+
+**Timeline Operation**:
+An immutable event in an agent timeline, such as creating a timeline step, moving a cursor, opening a timeline branch, or linking a tool capture. Timeline operations use Heddle-native attribution, versioned durable encoding, and explicit operation kinds rather than mutable log rows.
+_Avoid_: latest timeline JSON, append-only text log
+
+**Timeline Step**:
+The durable timeline unit for one OpenCode tool call. A timeline step records the native tool call identity, scrubbed summary, result status, side-effect classification, and links to any tool capture without making raw tool payloads the default shared record.
+_Avoid_: raw tool invocation, console transcript
+
+**Timeline Cursor**:
+The explicit position of a human, agent, or runner view within an agent timeline. Cursor movement is recorded as timeline history, not inferred from the latest displayed step.
+_Avoid_: UI scroll position, implicit last step
+
+**Timeline Branch**:
+A divergent continuation of an agent timeline from a prior timeline point, used for retries, alternate attempts, or reviewable forks of agent execution. Timeline branches do not create source branches by themselves.
+_Avoid_: source branch, Git branch, thread fork
+
+**Native Tool Call ID**:
+The stable identifier emitted by the OpenCode adapter or another native tool runtime for a single tool invocation. Heddle uses it to correlate timeline steps, deduplicate retries, and link tool captures; it is not a human display label or a source history change id.
+_Avoid_: display name, request log line, change id
+
+**Tool Capture**:
+A Heddle capture created because a tool call changed repository or worktree state. Repo-changing tool calls create tool captures, and failed tool calls still create captures when they changed tracked state before failing.
+_Avoid_: screenshot, raw command archive, tool transcript
+
 **Task Provenance**:
 Metadata that explains why or under which local delegation an agent produced collaboration operations. It is distinct from agent attribution, which names the actor that authored an operation.
 _Avoid_: agent attribution, task authority

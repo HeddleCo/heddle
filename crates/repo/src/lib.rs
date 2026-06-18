@@ -52,6 +52,11 @@ mod thread_record_store;
 mod thread_stack;
 mod thread_storage;
 mod thread_worktree_target;
+mod timeline_actions;
+mod timeline_materialize;
+mod timeline_navigation;
+mod timeline_store;
+mod timeline_view;
 pub mod visibility;
 mod worktree_ignore;
 pub mod worktree_index;
@@ -65,6 +70,13 @@ pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
+pub use objects::object::{
+    BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
+    TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
+    TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
+    TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
+    TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
+};
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
     store::{
@@ -117,6 +129,24 @@ pub use thread_stack::{
 pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
 pub use thread_worktree_target::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
+};
+pub use timeline_actions::{TimelineForkOutcome, TimelineRecoverOutcome, TimelineResetOutcome};
+pub use timeline_materialize::{
+    TimelineMaterializationBlocker, TimelineMaterializationBoundaryStatus,
+    TimelineMaterializationRecoveryBlocker, TimelineMaterializationRecoveryOutcome,
+    TimelineMaterializationRecoveryStatus, TimelineMaterializeMode, TimelineMaterializeOutcome,
+    TimelineMaterializeStatus, TimelineSeekBranchConstraint, TimelineSeekPreview,
+    TimelineSeekSelector,
+};
+pub use timeline_navigation::{
+    TimelineNavigationActionAvailability, TimelineNavigationBranch, TimelineNavigationCursor,
+    TimelineNavigationRecovery, TimelineNavigationRecoveryStatus, TimelineNavigationSnapshot,
+    TimelineNavigationStep,
+};
+pub use timeline_store::{TimelineMaterializationRecoveryRecord, TimelineStore};
+pub use timeline_view::{
+    TimelineBranchKey, TimelineBranchSummary, TimelineCursorMoveRecord, TimelineNativeToolKey,
+    TimelineSeekTarget, TimelineStepKey, TimelineStepSummary, TimelineThreadStatus, TimelineView,
 };
 pub use visibility::{
     AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,

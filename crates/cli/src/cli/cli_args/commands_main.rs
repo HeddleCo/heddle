@@ -17,8 +17,8 @@ use super::{
         CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
         LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
         RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-        SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs,
-        WatchArgs,
+        SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TimelineArgs,
+        TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -209,6 +209,16 @@ Examples:
     /// `--all` (which lists every state regardless of ancestry).
     #[command(visible_alias = "history")]
     Log(LogArgs),
+
+    /// Navigate, fork, reset, and recover agent tool-call timelines.
+    #[command(after_help = "\
+Examples:
+  heddle log --timeline
+  heddle timeline fork --tool-call call_123 --branch tlb-alt
+  heddle timeline reset --step tls-abc --materialize
+  heddle timeline recover
+")]
+    Timeline(TimelineArgs),
 
     /// Show state details.
     Show {

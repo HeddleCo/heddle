@@ -26,9 +26,10 @@ pub use cli_args::{
     SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
     StashCommands, SwitchArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs,
     ThreadListArgs, ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs,
-    VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
-    VisibilityShowArgs, VisibilityTierArg, WatchArgs, WorkspaceModeArg,
+    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs,
+    TimelineCommands, TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineTargetArgs,
+    TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs,
+    VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
