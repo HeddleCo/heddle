@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Timeline navigation action commands.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow};
 use repo::{
     Repository, TimelineBranchId, TimelineBranchReason, TimelineMaterializationRecoveryStatus,
     TimelineMaterializeMode, TimelineMaterializeStatus, TimelineNativeToolKey,
@@ -9,10 +9,15 @@ use repo::{
 };
 use serde::Serialize;
 
+use super::advice::RecoveryAdvice;
 use crate::cli::{
     Cli, TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs,
     TimelineTargetArgs, should_output_json, style,
 };
+
+const TIMELINE_RESET_CURRENT_COMMAND: &str = "heddle timeline reset --thread <thread> --current";
+const TIMELINE_TOOL_CALL_COMMAND: &str =
+    "heddle timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
 
 pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
     let start = cli
@@ -268,7 +273,12 @@ struct TimelineSelection {
 
 fn target_selection(args: &TimelineTargetArgs) -> Result<TimelineSelection> {
     if args.thread.trim().is_empty() {
-        bail!("--thread is required");
+        return Err(anyhow!(RecoveryAdvice::missing_option(
+            "timeline_thread_required",
+            "--thread",
+            "timeline navigation",
+            TIMELINE_RESET_CURRENT_COMMAND,
+        )));
     }
     let selected = args.step.is_some() as u8
         + args.tool_call.is_some() as u8
@@ -276,9 +286,12 @@ fn target_selection(args: &TimelineTargetArgs) -> Result<TimelineSelection> {
         + args.redo as u8
         + args.current as u8;
     if selected != 1 {
-        bail!(
-            "select exactly one timeline target: --step, --tool-call, --undo, --redo, or --current"
-        );
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "timeline_target_required",
+            "select exactly one timeline target: --step, --tool-call, --undo, --redo, or --current",
+            "Set exactly one timeline selector. Use `--current` to target the current cursor.",
+            TIMELINE_RESET_CURRENT_COMMAND,
+        )));
     }
 
     let branch = args
@@ -292,7 +305,12 @@ fn target_selection(args: &TimelineTargetArgs) -> Result<TimelineSelection> {
         )
     } else if let Some(tool_call_id) = &args.tool_call {
         if args.harness.trim().is_empty() {
-            bail!("--harness is required with --tool-call");
+            return Err(anyhow!(RecoveryAdvice::missing_option(
+                "timeline_tool_call_harness_required",
+                "--harness",
+                "--tool-call timeline targets",
+                TIMELINE_TOOL_CALL_COMMAND,
+            )));
         }
         (
             TimelineSeekSelector::NativeToolCall(TimelineNativeToolKey {
@@ -333,9 +351,13 @@ fn parse_branch_reason(value: &str) -> Result<TimelineBranchReason> {
         "edit-from-rewound-cursor" => Ok(TimelineBranchReason::EditFromRewoundCursor),
         "retry" => Ok(TimelineBranchReason::Retry),
         "fan-out" => Ok(TimelineBranchReason::FanOut),
-        other => bail!(
-            "unknown timeline branch reason '{other}'; expected explicit-fork, edit-from-rewound-cursor, retry, or fan-out"
-        ),
+        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
+            "timeline_branch_reason_invalid",
+            "--reason",
+            other,
+            "explicit-fork, edit-from-rewound-cursor, retry, or fan-out",
+            "heddle timeline fork --thread <thread> --current --reason explicit-fork",
+        ))),
     }
 }
 
@@ -343,9 +365,13 @@ fn parse_materialize_mode(value: &str) -> Result<TimelineMaterializeMode> {
     match value {
         "fail-if-dirty" => Ok(TimelineMaterializeMode::FailIfDirty),
         "capture-current-then-seek" => Ok(TimelineMaterializeMode::CaptureCurrentThenSeek),
-        other => bail!(
-            "unknown timeline materialization mode '{other}'; expected fail-if-dirty or capture-current-then-seek"
-        ),
+        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
+            "timeline_materialize_mode_invalid",
+            "--mode",
+            other,
+            "fail-if-dirty or capture-current-then-seek",
+            "heddle timeline reset --thread <thread> --current --mode fail-if-dirty",
+        ))),
     }
 }
 

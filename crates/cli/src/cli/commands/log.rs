@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use objects::object::{
     Agent, ChangeId, State, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
     TimelineToolCallStatus,
@@ -22,6 +22,7 @@ use serde::Serialize;
 
 use super::{
     action_line::{format_next_step_dim, print_next_step},
+    advice::RecoveryAdvice,
     expand::{CollapseAnnotation, collapse_annotations_for_states},
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
@@ -253,7 +254,12 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     let repo = Repository::open(start)?;
 
     if options.timeline && options.reflog {
-        anyhow::bail!("--timeline cannot be combined with --reflog");
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "log_timeline_reflog_conflict",
+            "--timeline cannot be combined with --reflog",
+            "Choose either `heddle log --timeline` for agent timeline state or `heddle log --reflog` for ref movement history.",
+            "heddle log --timeline",
+        )));
     }
 
     if options.timeline {
