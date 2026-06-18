@@ -5,7 +5,7 @@ use grpc::heddle::v1::{
     ReviseContextRequest, ReviseContextResponse, SetContextRequest, SetContextResponse,
     SupersedeContextRequest, SupersedeContextResponse,
 };
-use proto::ProtocolError;
+use wire::ProtocolError;
 use tonic::Request;
 
 use super::{HostedGrpcClient, helpers::status_to_protocol_error};

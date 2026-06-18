@@ -67,7 +67,7 @@
 //! CLI-dispatched variant the issue AC requires — the daemon
 //! follow-up adds gRPC + per-mount sockets — and a single
 //! inherited socketpair carrying length-prefixed JSON frames is
-//! the right shape for the CLI variant: no proto crate, no
+//! the right shape for the CLI variant: no wire crate, no
 //! `tokio` in the worker, no UDS discovery file. Each frame is a
 //! [`worker::SupervisorCommand`] (parent → worker; today
 //! `Stop` + `Status`, with `Capture` + `Invalidate` joining when

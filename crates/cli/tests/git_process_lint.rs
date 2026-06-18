@@ -343,7 +343,7 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/mount/src",
         "crates/objects/src",
         "crates/oplog/src",
-        "crates/proto/src",
+        "crates/wire/src",
         "crates/refs/src",
         "crates/repo/src",
         "crates/review/src",

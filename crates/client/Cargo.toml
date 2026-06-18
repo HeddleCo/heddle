@@ -29,14 +29,14 @@ tracing.workspace = true
 # Workspace heddle crates — sibling paths plus crates.io versions so
 # downstream consumers (closed weft, third parties) pull the published
 # matching versions from the registry.
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.3" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.3" }
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
-proto = { path = "../proto", package = "heddle-proto", version = "0.3", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.3" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.3", default-features = false, features = ["git-overlay", "native"] }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.3" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.4", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.4", default-features = false, features = ["git-overlay", "native"] }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.4" }
 
 [dev-dependencies]
 tempfile.workspace = true

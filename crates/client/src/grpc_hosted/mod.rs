@@ -16,7 +16,7 @@ use grpc::heddle::v1::{
     repo_sync_service_client::RepoSyncServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
-use proto::ProtocolError;
+use wire::ProtocolError;
 use repo::Repository;
 use tonic::{
     Request,
@@ -79,7 +79,7 @@ impl HostedGrpcClient {
             // `check_received_transfer_blob_size` calls are kept as cheap
             // defense-in-depth, but this is the load-bearing guard.
             inner: RepoSyncServiceClient::new(channel.clone())
-                .max_decoding_message_size(proto::MAX_PULL_DECODE_MESSAGE_SIZE),
+                .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
             content: ContentServiceClient::new(channel),
@@ -302,7 +302,7 @@ impl HostedGrpcClient {
             let Some(change_id) = repo.refs().get_marker(&marker)? else {
                 continue;
             };
-            if !proto::is_ancestor(repo.store(), change_id, pushed_state)? {
+            if !wire::is_ancestor(repo.store(), change_id, pushed_state)? {
                 continue;
             }
 

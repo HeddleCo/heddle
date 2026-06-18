@@ -37,7 +37,7 @@ tokio = { workspace = true, optional = true }
 
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-async = { workspace = true, optional = true }
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.3", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
 
 [features]
 bench = []

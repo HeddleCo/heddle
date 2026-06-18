@@ -141,12 +141,12 @@ jobs:
           fi
 
           # mount: use the transitive mount-relevant path set (mount → repo →
-          # {crypto, oplog, proto, objects, refs} → optional runtime-bridge,
+          # {crypto, oplog, wire, objects, refs} → optional runtime-bridge,
           # plus the compare script, the workflow, and shared workspace
           # inputs) so mount adapters and their read-path dependencies trigger
           # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs|oplog|crypto|proto|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else
@@ -715,7 +715,7 @@ jobs:
               --gate mount=68 \
               --gate semantic=78 \
               --gate oplog=78 \
-              --gate proto=60 \
+              --gate wire=60 \
               --gate state_review=76 \
               --gate crypto=64 \
               --gate daemon=80 \

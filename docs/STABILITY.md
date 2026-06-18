@@ -151,7 +151,7 @@ floor below what we already have, which doesn't gate anything.
 <TBD: maintainer> — proposed: **65 % line per crate** for the
 storage-format and identity-bearing crates (`heddle-objects`,
 `heddle-refs`, `heddle-oplog`, `heddle-repo`, `heddle-crypto`,
-`heddle-proto`, `heddle-grpc`), and **no floor** for the rest. The
+`heddle-wire`, `heddle-grpc`), and **no floor** for the rest. The
 distinction is "if this crate is wrong, on-disk or on-wire data is
 wrong" vs. "if this crate is wrong, the CLI prints a worse string".
 The integration-test crates and CLI dispatch crates are better
@@ -284,9 +284,9 @@ crates are committed to the stability contract and which remain
 - `heddle-objects` — `ContentHash`, `ChangeId`, blob/tree/state
   types, format constants. Anything that downstream tooling or
   alternative storage backends must agree on.
-- `heddle-proto` — proto-generated types and any thin Rust adapters
-  on top. The wire boundary itself is gated separately (§3.4); this
-  is the Rust-side handle on it.
+- `heddle-wire` — native Heddle wire/protocol types, transfer
+  planners, and thin Rust adapters. The protobuf/gRPC boundary itself
+  is gated separately (§3.4); this is the Rust-side handle on it.
 - `heddle-grpc` — service trait shapes and client stubs, so
   downstream gRPC clients can compile against a stable surface.
 

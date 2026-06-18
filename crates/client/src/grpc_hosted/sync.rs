@@ -14,7 +14,7 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::{ObjectStore, PackObjectId},
 };
-use proto::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
+use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -175,7 +175,7 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let objects = proto::enumerate_state_closure(repo.store(), local_state)?;
+        let objects = wire::enumerate_state_closure(repo.store(), local_state)?;
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
         let transport_mode = preferred_transport_mode(&self.transport, objects.len());
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
@@ -258,7 +258,7 @@ impl HostedGrpcClient {
             .partition(|info| is_out_of_pack_transfer_object_type(info.obj_type));
 
         if !wanted_packable.is_empty() {
-            let bundle = proto::build_native_pack(repo.store(), &wanted_packable)?;
+            let bundle = wire::build_native_pack(repo.store(), &wanted_packable)?;
             for message in encode_native_pack_messages(
                 &bundle,
                 &transfer_id,
@@ -666,7 +666,7 @@ impl HostedGrpcClient {
         drop(tx);
 
         let receive_start = Instant::now();
-        let mut pack_state = proto::PackChunkState::default();
+        let mut pack_state = wire::PackChunkState::default();
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -688,7 +688,7 @@ impl HostedGrpcClient {
                         ));
                     }
                     let decode_start = Instant::now();
-                    proto::receive_pack_chunk(
+                    wire::receive_pack_chunk(
                         &mut pack_state,
                         stream_kind == PackStreamKind::Index,
                         transfer.resume_offset,
@@ -708,9 +708,9 @@ impl HostedGrpcClient {
                     // for signature + trust-list verification. The
                     // server emitted these only for blobs in our want
                     // set that carry an active redaction.
-                    proto::check_received_transfer_blob_size(
+                    wire::check_received_transfer_blob_size(
                         transfer.redactions_blob.len(),
-                        proto::MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+                        wire::MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
                         "redactions",
                     )?;
                     profile.bytes_received = profile
@@ -734,9 +734,9 @@ impl HostedGrpcClient {
                     profile.store_receive_object += decode_elapsed;
                 }
                 Some(pull_message::Body::StateVisibility(transfer)) => {
-                    proto::check_received_transfer_blob_size(
+                    wire::check_received_transfer_blob_size(
                         transfer.state_visibility_blob.len(),
-                        proto::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+                        wire::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
                         "state-visibility",
                     )?;
                     profile.bytes_received = profile
@@ -778,7 +778,7 @@ impl HostedGrpcClient {
                                 ));
                             }
                             let store_start = Instant::now();
-                            let installed_ids = proto::install_received_pack(
+                            let installed_ids = wire::install_received_pack(
                                 repo.store(),
                                 &pack_state.pack_data,
                                 &pack_state.index_data,
@@ -927,9 +927,9 @@ impl HostedGrpcClient {
 
 fn redaction_push_message(
     repo: &Repository,
-    info: proto::ObjectInfo,
+    info: wire::ObjectInfo,
 ) -> Result<PushMessage, ProtocolError> {
-    let proto::ObjectId::Hash(blob) = info.id else {
+    let wire::ObjectId::Hash(blob) = info.id else {
         return Err(ProtocolError::InvalidState(
             "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
         ));
@@ -972,7 +972,7 @@ fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedT
             .values()
             .flatten()
             .copied()
-            .any(proto::is_native_packable_object_type)
+            .any(wire::is_native_packable_object_type)
 }
 
 fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj_type: ObjectType) {
@@ -987,13 +987,13 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
         types
             .iter()
             .copied()
-            .find(|obj_type| proto::is_native_packable_object_type(*obj_type))
+            .find(|obj_type| wire::is_native_packable_object_type(*obj_type))
     })
 }
 
 fn sidecar_push_message(
     repo: &Repository,
-    info: proto::ObjectInfo,
+    info: wire::ObjectInfo,
 ) -> Result<PushMessage, ProtocolError> {
     match info.obj_type {
         ObjectType::Redaction => redaction_push_message(repo, info),
@@ -1006,9 +1006,9 @@ fn sidecar_push_message(
 
 fn state_visibility_push_message(
     repo: &Repository,
-    info: proto::ObjectInfo,
+    info: wire::ObjectInfo,
 ) -> Result<PushMessage, ProtocolError> {
-    let proto::ObjectId::ChangeId(state) = info.id else {
+    let wire::ObjectId::ChangeId(state) = info.id else {
         return Err(ProtocolError::InvalidState(
             "wanted StateVisibility must be keyed by ObjectId::ChangeId(state)".to_string(),
         ));
@@ -1069,13 +1069,13 @@ fn plan_pull_wants(
     for descriptor in objects_to_fetch {
         let info = parse_descriptor_to_info(descriptor)?;
         let pack_id = match &info.id {
-            proto::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-            proto::ObjectId::ChangeId(change_id) => PackObjectId::ChangeId(*change_id),
+            wire::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
+            wire::ObjectId::ChangeId(change_id) => PackObjectId::ChangeId(*change_id),
         };
         let include = if request_full_closure {
             true
         } else {
-            let has = proto::has_object(repo.store(), &info)?;
+            let has = wire::has_object(repo.store(), &info)?;
             !(has || (allow_partial_fetch && matches!(info.obj_type, ObjectType::Blob)))
         };
 
@@ -1376,7 +1376,7 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
 }
 
 fn encode_native_pack_messages(
-    bundle: &proto::NativePackBundle,
+    bundle: &wire::NativePackBundle,
     transfer_id: &str,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
@@ -1385,10 +1385,10 @@ fn encode_native_pack_messages(
     let mut messages = Vec::new();
     let chunk_size = chunk_size.max(1);
 
-    let pack_total_chunks = proto::chunk_count(bundle.pack_data.len(), chunk_size);
+    let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
     for chunk_index in 0..pack_total_chunks.max(1) {
         let Some((start, len)) =
-            proto::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
+            wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
         else {
             break;
         };
@@ -1409,10 +1409,10 @@ fn encode_native_pack_messages(
         });
     }
 
-    let index_total_chunks = proto::chunk_count(bundle.index_data.len(), chunk_size);
+    let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
     for chunk_index in 0..index_total_chunks.max(1) {
         let Some((start, len)) =
-            proto::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
+            wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
         else {
             break;
         };
@@ -1460,7 +1460,7 @@ mod tests {
         },
         store::ObjectStore,
     };
-    use proto::{ObjectId, ObjectInfo};
+    use wire::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
     use tonic::{Response, Status, transport::Server};
 
@@ -1565,7 +1565,7 @@ mod tests {
 
     #[test]
     fn non_packable_object_types_are_in_out_of_pack_transfer_partition() {
-        for obj_type in proto::native_pack_excluded_object_types() {
+        for obj_type in wire::native_pack_excluded_object_types() {
             assert!(
                 is_out_of_pack_transfer_object_type(*obj_type),
                 "{obj_type:?} is excluded from native packs but missing from the out-of-pack transfer partition"
@@ -1899,7 +1899,7 @@ mod tests {
             "blob must exceed tonic's 4 MiB default to exercise the raised decode limit"
         );
         assert!(
-            (state_visibility_blob.len() as u64) <= proto::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+            (state_visibility_blob.len() as u64) <= wire::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
             "blob must stay within the legitimate sidecar receive cap"
         );
 
@@ -1960,7 +1960,7 @@ mod tests {
 
         // One byte past the decode limit. Content is irrelevant: decode is
         // refused before the blob is ever handed to the accept path.
-        let oversized = vec![0u8; proto::MAX_PULL_DECODE_MESSAGE_SIZE + 1];
+        let oversized = vec![0u8; wire::MAX_PULL_DECODE_MESSAGE_SIZE + 1];
         let Some((mut client, server)) = connect_sidecar_only_service(SidecarOnlyPullService {
             state: state_id,
             state_visibility_blob: oversized,
@@ -2010,7 +2010,7 @@ mod tests {
     #[derive(Clone)]
     struct StateAndVisibilityPullService {
         state: ChangeId,
-        pack_bundle: proto::NativePackBundle,
+        pack_bundle: wire::NativePackBundle,
         state_visibility_blob: Vec<u8>,
     }
 
@@ -2163,17 +2163,17 @@ mod tests {
     }
 
     fn encode_pull_native_pack_messages(
-        bundle: &proto::NativePackBundle,
+        bundle: &wire::NativePackBundle,
         transfer_id: &str,
         chunk_size: usize,
     ) -> Vec<PullMessage> {
         let mut messages = Vec::new();
         let chunk_size = chunk_size.max(1);
 
-        let pack_total_chunks = proto::chunk_count(bundle.pack_data.len(), chunk_size);
+        let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
         for chunk_index in 0..pack_total_chunks.max(1) {
             let Some((start, len)) =
-                proto::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
+                wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
             else {
                 break;
             };
@@ -2195,10 +2195,10 @@ mod tests {
             });
         }
 
-        let index_total_chunks = proto::chunk_count(bundle.index_data.len(), chunk_size);
+        let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
         for chunk_index in 0..index_total_chunks.max(1) {
             let Some((start, len)) =
-                proto::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
+                wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
             else {
                 break;
             };
@@ -2284,7 +2284,7 @@ mod tests {
         source_repo
             .accept_wire_state_visibility(state_id, &state_visibility_blob)
             .expect("put source state visibility");
-        let pack_bundle = proto::build_native_pack(source_repo.store(), &[state_info(state_id)])
+        let pack_bundle = wire::build_native_pack(source_repo.store(), &[state_info(state_id)])
             .expect("build state pack");
 
         assert!(

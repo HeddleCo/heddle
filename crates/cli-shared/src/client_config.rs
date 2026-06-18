@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client configuration.
 
-use proto::AuthToken;
+use wire::AuthToken;
 
 /// Client configuration.
 #[derive(Debug, Clone)]

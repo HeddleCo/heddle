@@ -20,7 +20,7 @@ use objects::{
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
 };
 use oplog::OpLogRecorder;
-use proto::{
+use wire::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };

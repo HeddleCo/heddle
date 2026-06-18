@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use cli_shared::{ClientConfig, UserConfig};
-use proto::{AuthToken, ProtocolError};
+use wire::{AuthToken, ProtocolError};
 
 use crate::{credentials, grpc_hosted::HostedGrpcClient};
 

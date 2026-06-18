@@ -4,10 +4,12 @@ Workspace-internal tooling. Not published to crates.io.
 
 ## Commands
 
-- `heddle-devtools web-proto [--check]` — regenerate (or audit) the
-  TypeScript bindings for the gRPC service. With `--check` the tool
-  generates into a tempdir and diffs against the checked-in output;
-  used as a CI gate. Without it, writes to `web/src/lib/gen/proto/`.
+- `heddle-devtools grpc-ts [--check]` — regenerate (or audit) the
+  TypeScript protobuf and Connect client package for the gRPC service.
+  With `--check` the tool generates into a tempdir and diffs against
+  the checked-in output; used as a CI gate. Without it, writes to
+  `clients/grpc/src/gen/` and syncs `clients/grpc/package.json` to the
+  `heddle-grpc` crate version.
 - `heddle-devtools audit-idempotency` — fail if any state-changing
   RPC's request message is missing `string client_operation_id = 15`.
 - `heddle-devtools audit-coverage <lcov> --gate <crate>=<pct> ...` —
@@ -29,8 +31,8 @@ Every consumer reads from that path:
 
 - `crates/grpc/build.rs` — tonic-prost codegen for the Rust server
   and client.
-- `crates/devtools/src/main.rs::run_web_proto` — TypeScript bindings
-  (consumed by tapestry).
+- `crates/devtools/src/main.rs::run_grpc_ts` — TypeScript protobuf
+  and Connect client package (consumed by tapestry).
 - `crates/devtools/src/main.rs::run_audit_idempotency` — proto-side
   idempotency lint.
 - `crates/cli/tests/idempotency_lint.rs` — server-side dedup lint.

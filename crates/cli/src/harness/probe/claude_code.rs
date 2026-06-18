@@ -84,7 +84,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             native_instance_key: transcript_path
                 .clone()
                 .map(|path| format!("claude-code:transcript:{path}")),
-            usage_totals: proto::UsageTotals {
+            usage_totals: wire::UsageTotals {
                 input_tokens: parse_u64(metadata.get("input_tokens")),
                 output_tokens: parse_u64(metadata.get("output_tokens")),
                 reasoning_tokens: parse_u64(metadata.get("reasoning_tokens")),
@@ -101,7 +101,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             touched_paths: csv_paths(metadata.get("touched_paths")),
             transcript_refs: transcript_path
                 .map(|path| {
-                    vec![proto::TranscriptAttachmentRef {
+                    vec![wire::TranscriptAttachmentRef {
                         attachment_id: path,
                         kind: Some("transcript_path".to_string()),
                         summary: None,

@@ -28,7 +28,7 @@ Create a root workspace with these members:
 Cargo.toml                  # workspace manifest
 crates/
   objects/
-  proto/
+  wire/
   server/
   cli/
   semantic/           # optional but recommended
@@ -38,7 +38,7 @@ crates/
 
 - `objects`
   - repository model, object model, refs, oplog, worktree, storage abstractions, merge/diff core, bridge logic
-- `proto`
+- `wire`
   - shared protocol/message/auth/client transport surface used by CLI and server
 - `server`
   - hosted gRPC services, auth, Postgres-backed hosted registry, event fanout, server runtime
@@ -56,7 +56,7 @@ The current repo has at least four real boundaries:
 - hosted server/runtime logic
 - semantic/parser-heavy logic
 
-Splitting only into `cli` and `server` would still leave `core`, `proto`, and `semantic` tangled and would not materially reduce coupling enough.
+Splitting only into `cli` and `server` would still leave `core`, `wire`, and `semantic` tangled and would not materially reduce coupling enough.
 
 ## Module Move Plan
 
@@ -83,7 +83,7 @@ Strong candidate utility moves into core support modules:
 - shared fs/atomic helpers from `src/store/atomic.rs`
 - generic config or path helpers that are reused by refs/store/worktree
 
-### `proto`
+### `wire`
 
 Move shared transport-facing modules here:
 
@@ -154,7 +154,7 @@ Keep only dependencies needed for core functionality:
 
 Try to keep `tokio` out of `objects` unless it is truly required for storage backends that stay there.
 
-### `proto`
+### `wire`
 
 - `tokio`
 - `tokio-util`
@@ -196,16 +196,16 @@ Try to keep `tokio` out of `objects` unless it is truly required for storage bac
 
 ## Known Cyclic Dependency Risks
 
-### Risk 1: `core` <-> `proto`
+### Risk 1: `core` <-> `wire`
 
-Current compression and pack paths use protocol delta helpers. If `protocol::delta` stays outside core, `core` will depend on `proto`.
+Current compression and pack paths use protocol delta helpers. If `protocol::delta` stays outside core, `core` will depend on `wire`.
 
 Resolution:
 
 - move `protocol/delta` into `objects`
 - move `protocol/sync.rs` into `objects`
 
-### Risk 2: `proto` <-> `server`
+### Risk 2: `wire` <-> `server`
 
 Current protocol error mapping includes server-side registry conversions.
 
@@ -242,7 +242,7 @@ Resolution:
 ### Phase 2: Extract `objects`
 
 - move pure/shared modules first
-- move delta/sync logic into core before introducing `proto`
+- move delta/sync logic into core before introducing `wire`
 - make tests for moved modules pass in the new crate
 
 ### Phase 3: Extract `semantic`
@@ -250,7 +250,7 @@ Resolution:
 - move semantic analysis and tree-sitter deps out
 - update CLI/core call sites to depend on `semantic`
 
-### Phase 4: Extract `proto`
+### Phase 4: Extract `wire`
 
 - move protocol auth/capabilities/message/client/remote modules
 - remove server-specific protocol error conversions
@@ -258,7 +258,7 @@ Resolution:
 ### Phase 5: Extract `server`
 
 - move hosted runtime and Postgres-backed server pieces
-- make `server` depend on `objects` and `proto`
+- make `server` depend on `objects` and `wire`
 
 ### Phase 6: Extract `cli`
 
@@ -321,14 +321,14 @@ If we want the smallest credible first step, do this:
 2. extract `objects`
 3. extract `server`
 4. extract `cli`
-5. then peel off `semantic` and `proto`
+5. then peel off `semantic` and `wire`
 
 If we want the cleanest long-term boundaries immediately, do this:
 
 1. create workspace
 2. extract `objects`
 3. move `delta` and sync logic into core
-4. extract `proto`
+4. extract `wire`
 5. extract `server`
 6. extract `cli`
 7. extract `semantic`

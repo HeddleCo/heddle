@@ -82,7 +82,7 @@ env:
     heddle-objects
     heddle-crypto
     heddle-oplog
-    heddle-proto
+    heddle-wire
     heddle-refs
     heddle-semantic
     heddle-state-review

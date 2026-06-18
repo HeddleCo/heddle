@@ -2,7 +2,7 @@
 use std::fs;
 
 use objects::object::ChangeId;
-use proto::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
+use wire::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
 use repo::Repository;
 use tempfile::TempDir;
 

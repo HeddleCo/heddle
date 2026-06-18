@@ -24,7 +24,7 @@ cargo run -p heddle-devtools --quiet -- \
     --gate mount=68 \
     --gate semantic=78 \
     --gate oplog=78 \
-    --gate proto=60 \
+    --gate wire=60 \
     --gate state_review=76 \
     --gate crypto=64 \
     --gate daemon=80 \
@@ -64,7 +64,7 @@ Two numbers per crate:
 | `mount` | 68% | 70% | ratchet — platform-gated (FUSE/projfs) |
 | `semantic` | 78% | 80% | ratchet — current ≈ 78.4% |
 | `oplog` | 78% | 80% | ratchet — current ≈ 78.3% |
-| `proto` | 60% | 80% | ratchet — current ≈ 60.3% |
+| `wire` | 60% | 80% | ratchet — current ≈ 60.3% |
 | `state_review` | 76% | 80% | ratchet — current ≈ 76.6% |
 | `crypto` | 64% | 80% | ratchet — current ≈ 64.4% |
 | `daemon` | 80% | 80% | at goal |

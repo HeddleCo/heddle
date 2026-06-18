@@ -1,5 +1,5 @@
 [package]
-name = "heddle-proto"
+name = "heddle-wire"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,7 +16,7 @@ categories.workspace = true
 # when they explicitly built with `--no-default-features`. Default-on
 # preserves the historical behavior; downstream can disable with
 # `--no-default-features` cleanly.
-objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -28,9 +28,9 @@ zstd = ["objects/zstd"]
 [lib]
 path = "src/lib.rs"
 
-name = "proto"
+name = "wire"
 [dev-dependencies]
-# Circular: heddle-repo depends on heddle-proto. We keep the path-dep
+# Circular: heddle-repo depends on heddle-wire. We keep the path-dep
 # for local testing but omit `version` so cargo strips this entry from
 # the published manifest (dev-deps without version are not packaged).
 repo = { path = "../repo", package = "heddle-repo" }

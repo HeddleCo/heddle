@@ -16,16 +16,16 @@ chrono.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.3" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.3" }
-proto = { path = "../proto", package = "heddle-proto", version = "0.3", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.3" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.4", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
 notify.workspace = true
 rmp-serde.workspace = true
 rusqlite.workspace = true
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.3", optional = true }
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.3", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.4", optional = true }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.4", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
@@ -58,10 +58,10 @@ default = ["git-overlay", "native", "zstd"]
 git-overlay = []
 native = []
 # Forward zstd compression through to objects (where the pack
-# format lives) and proto (which uses pack via the sync
+# format lives) and wire (which uses pack via the sync
 # protocol). Default-on so a plain `cargo build` keeps compression;
 # turn off with `--no-default-features` for raw packs.
-zstd = ["objects/zstd", "proto/zstd"]
+zstd = ["objects/zstd", "wire/zstd"]
 s3 = ["objects/s3", "dep:tokio"]
 # Symbol resolution. The implementation lives in `semantic`;
 # enabling the feature here pulls in the dep with the parsers our

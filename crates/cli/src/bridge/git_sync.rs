@@ -91,7 +91,7 @@ fn thread_can_adopt_change(
     if thread_is_unclaimed_bootstrap(bridge.heddle_repo, existing)? {
         return Ok(true);
     }
-    proto::is_ancestor(bridge.heddle_repo.store(), *existing, *change_id)
+    wire::is_ancestor(bridge.heddle_repo.store(), *existing, *change_id)
         .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
 }
 
