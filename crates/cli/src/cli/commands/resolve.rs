@@ -8,18 +8,29 @@ use objects::store::ObjectStore;
 use repo::{MergeState, Repository};
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
+use super::{action_line::print_next_step, advice::RecoveryAdvice};
 use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize)]
 struct ResolveOutput {
+    output_kind: &'static str,
     message: String,
     resolved: Vec<String>,
     remaining: Vec<String>,
+    continued: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommended_action: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ConflictList {
+    output_kind: &'static str,
     conflicts: Vec<String>,
 }
 
@@ -69,9 +80,15 @@ fn cmd_resolve_abort(
         println!(
             "{}",
             serde_json::to_string(&ResolveOutput {
+                output_kind: "resolve",
                 message: "Merge aborted".to_string(),
                 resolved: vec![],
                 remaining: vec![],
+                continued: false,
+                continuation_status: None,
+                continuation_message: None,
+                next_action: None,
+                recommended_action: None,
             })?
         );
     } else {
@@ -114,6 +131,7 @@ fn cmd_resolve_list(
         println!(
             "{}",
             serde_json::to_string(&ConflictList {
+                output_kind: "resolve",
                 conflicts: unresolved.clone(),
             })?
         );
@@ -150,24 +168,25 @@ fn cmd_resolve_all(
     }
 
     let remaining = merge_manager.unresolved()?;
+    let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
+    let output = resolve_output(
+        format!("Resolved {} conflict(s)", unresolved.len()),
+        unresolved.clone(),
+        remaining.clone(),
+        continuation,
+    );
 
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&ResolveOutput {
-                message: format!("Resolved {} conflict(s)", unresolved.len()),
-                resolved: unresolved.clone(),
-                remaining: remaining.clone(),
-            })?
-        );
+        println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Resolved {} conflict(s)", unresolved.len());
+        println!("{}", output.message);
         for path in &unresolved {
             println!("  {}", path);
         }
         if !remaining.is_empty() {
             println!("Remaining: {} conflict(s)", remaining.len());
         }
+        print_continuation(&output);
     }
 
     Ok(())
@@ -195,24 +214,82 @@ fn cmd_resolve_file(
     merge_manager.resolve(path)?;
 
     let remaining = merge_manager.unresolved()?;
+    let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
+    let output = resolve_output(
+        format!("Resolved {}", path),
+        vec![path.to_string()],
+        remaining.clone(),
+        continuation,
+    );
 
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&ResolveOutput {
-                message: format!("Resolved {}", path),
-                resolved: vec![path.to_string()],
-                remaining,
-            })?
-        );
+        println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Resolved {}", path);
+        println!("{}", output.message);
         if !remaining.is_empty() {
             println!("{} conflict(s) remaining", remaining.len());
         }
+        print_continuation(&output);
     }
 
     Ok(())
+}
+
+fn continue_if_resolution_complete(
+    repo: &Repository,
+    complete: bool,
+) -> Result<Option<super::operator_core::OperatorCommandOutput>> {
+    if complete {
+        super::operator_core::continue_operator(repo).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn resolve_output(
+    message: String,
+    resolved: Vec<String>,
+    remaining: Vec<String>,
+    continuation: Option<super::operator_core::OperatorCommandOutput>,
+) -> ResolveOutput {
+    let continued = continuation.is_some();
+    let continuation_status = continuation.as_ref().map(|output| output.status.clone());
+    let continuation_message = continuation.as_ref().map(|output| output.message.clone());
+    let next_action = continuation
+        .as_ref()
+        .and_then(|output| output.next_action.clone());
+    let recommended_action = continuation
+        .as_ref()
+        .and_then(|output| output.recommended_action.clone());
+    let message = if continued {
+        format!("{message}; completed merge")
+    } else {
+        message
+    };
+    ResolveOutput {
+        output_kind: "resolve",
+        message,
+        resolved,
+        remaining,
+        continued,
+        continuation_status,
+        continuation_message,
+        next_action,
+        recommended_action,
+    }
+}
+
+fn print_continuation(output: &ResolveOutput) {
+    if let Some(message) = output.continuation_message.as_deref() {
+        println!("{message}");
+    }
+    if let Some(action) = output
+        .recommended_action
+        .as_deref()
+        .or(output.next_action.as_deref())
+    {
+        print_next_step(action);
+    }
 }
 
 fn ensure_resolved_file_has_no_conflict_markers(

@@ -167,7 +167,7 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
 }
 
 #[test]
-fn stale_managed_thread_suggests_sync_not_refresh_or_merge_preview() {
+fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     let (main, checkout_owner, execution_path) = setup_managed_thread("feature/stale-sync");
     let checkout = std::path::Path::new(&execution_path);
     std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
@@ -187,13 +187,18 @@ fn stale_managed_thread_suggests_sync_not_refresh_or_merge_preview() {
         main.path(),
     );
     assert_eq!(
+        ready["status"], "completed",
+        "clean stale ready should refresh and finish readiness: {ready}"
+    );
+    assert_eq!(
         ready["recommended_action"],
-        "heddle sync --thread feature/stale-sync"
+        "heddle land --thread feature/stale-sync --no-push"
     );
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle sync --thread feature/stale-sync"
+        "heddle land --thread feature/stale-sync --no-push"
     );
+    assert_eq!(ready["report"]["freshness"], "current", "{ready}");
     assert_no_banned_next_actions(&ready);
 
     let shown = json(
@@ -202,8 +207,9 @@ fn stale_managed_thread_suggests_sync_not_refresh_or_merge_preview() {
     );
     assert_eq!(
         shown["next_action"],
-        "heddle sync --thread feature/stale-sync"
+        "heddle land --thread feature/stale-sync --no-push"
     );
+    assert_eq!(shown["freshness"], "current", "{shown}");
     assert_no_banned_next_actions(&shown);
 
     drop(checkout_owner);

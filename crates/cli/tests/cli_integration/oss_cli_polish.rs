@@ -6738,6 +6738,7 @@ feature
     assert_eq!(preview["output_kind"], "merge");
     assert_eq!(preview["preview_only"], true);
     assert_eq!(preview["would_merge"], true);
+    assert_eq!(preview["applied"], false);
     assert_eq!(
         preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["land", "--thread", "feature/a", "--no-push"])
@@ -6763,6 +6764,7 @@ feature
     assert_eq!(merged["output_kind"], "merge");
     assert_eq!(merged["fast_forward"], true);
     assert_eq!(merged["would_merge"], false);
+    assert_eq!(merged["applied"], true);
     assert_eq!(merged["recommended_action"], Value::Null);
     assert_eq!(merged["recommended_action_argv"], Value::Null);
     assert_eq!(
@@ -10401,6 +10403,7 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    assert_eq!(parsed["output_kind"], "actor_explain", "{parsed}");
     assert_eq!(parsed["attached"], false);
     assert!(parsed.get("active_actor").is_none());
     assert_eq!(parsed["detected"]["harness"], "codex");
@@ -10496,6 +10499,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    assert_eq!(parsed["output_kind"], "actor_explain", "{parsed}");
     assert_eq!(parsed["attached"], false);
     // Detached HEAD: recommend the minting form (mints a dedicated thread),
     // NOT `--no-thread`, which cannot succeed without a current thread.
@@ -10533,6 +10537,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
 
     let actor_list = json_value(temp.path(), &["actor", "list", "--output", "json"]);
     assert_schema_declares_runtime_top_level(&["actor", "list"], &actor_list);
+    assert_eq!(actor_list["output_kind"], "actor_list", "{actor_list}");
     assert!(
         actor_list["actors"].as_array().is_some(),
         "actor list should emit an envelope with an actors array: {actor_list}"
@@ -10553,6 +10558,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
         ],
     );
     assert_schema_declares_runtime_top_level(&["actor", "spawn"], &actor_spawn);
+    assert_eq!(actor_spawn["output_kind"], "actor_spawn", "{actor_spawn}");
     assert!(actor_spawn.get("actor").is_some());
     assert!(actor_spawn.get("verification").is_some());
     assert!(actor_spawn["actor"].get("native_actor_key").is_none());
@@ -10574,6 +10580,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
         &["actor", "show", actor_session, "--output", "json"],
     );
     assert_schema_declares_runtime_top_level(&["actor", "show"], &actor_show);
+    assert_eq!(actor_show["output_kind"], "actor_show", "{actor_show}");
     assert_eq!(actor_show["actor"]["session_id"], actor_session);
     assert!(
         actor_show["actor"]["actor_chain"].as_array().is_some(),
@@ -10592,6 +10599,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
         ],
     );
     assert_schema_declares_runtime_top_level(&["actor", "done"], &actor_done);
+    assert_eq!(actor_done["output_kind"], "actor_done", "{actor_done}");
     assert_eq!(actor_done["status"], "complete");
     assert!(actor_done.get("verification").is_some());
 
@@ -10612,6 +10620,7 @@ fn actor_and_session_json_outputs_match_registered_schemas() {
     );
     let auto_actor: Value =
         serde_json::from_slice(&auto_actor_output.stdout).expect("auto actor spawn JSON");
+    assert_eq!(auto_actor["output_kind"], "actor_spawn");
     assert_eq!(auto_actor["actor"]["harness"], "codex");
     assert_eq!(auto_actor["actor"]["provider"], "openai");
     assert_eq!(auto_actor["actor"]["model"], "gpt-5.3-codex");

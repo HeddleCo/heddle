@@ -46,12 +46,14 @@ export interface ActorDoneSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "actor_done";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
   session_id: string;
   status: string;
   thread: string;
+  verification: RepositoryVerificationStateSchema;
 }
 
 export interface ActorEntrySchema {
@@ -94,6 +96,7 @@ export interface ActorExplainSchema {
   native_actor_key?: string | null;
   native_instance_key?: string | null;
   native_parent_actor_key?: string | null;
+  output_kind: "actor_explain";
   probe_confidence?: number | null;
   probe_source?: string | null;
   reason?: string | null;
@@ -114,11 +117,14 @@ export interface ActorInfoSchema {
 export interface ActorListSchema {
   active_only: boolean;
   actors: ActorEntrySchema[];
+  output_kind: "actor_list";
   verification: RepositoryVerificationStateSchema;
 }
 
 export interface ActorShowSchema {
   actor: ActorEntrySchema;
+  output_kind: "actor_show";
+  verification: RepositoryVerificationStateSchema;
 }
 
 export interface ActorSpawnSchema {
@@ -126,7 +132,9 @@ export interface ActorSpawnSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "actor_spawn";
   replayed?: boolean | null;
+  verification: RepositoryVerificationStateSchema;
 }
 
 export interface AdoptSchema {
@@ -1316,6 +1324,7 @@ export interface MaintenanceRunSchema {
 
 export interface MergePreviewSchema {
   action?: string | null;
+  applied: boolean;
   blockers?: string[] | null;
   changed_path_count?: number | null;
   changed_paths?: string[] | null;
@@ -1672,10 +1681,16 @@ export type RequiredNullableNextState = ReviewNextStateSchema | null;
 
 export interface ResolveSchema {
   conflicts?: string[] | null;
+  continuation_message?: string | null;
+  continuation_status?: string | null;
+  continued?: boolean | null;
   idempotency_status?: string | null;
   message?: string | null;
+  next_action?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "resolve";
+  recommended_action?: string | null;
   remaining?: string[] | null;
   replayed?: boolean | null;
   resolved?: string[] | null;

@@ -777,10 +777,16 @@ pub struct FsckErrorSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ResolveSchema {
+    pub output_kind: String,
     pub message: Option<String>,
     pub resolved: Option<Vec<String>>,
     pub remaining: Option<Vec<String>>,
     pub conflicts: Option<Vec<String>>,
+    pub continued: Option<bool>,
+    pub continuation_status: Option<String>,
+    pub continuation_message: Option<String>,
+    pub next_action: Option<String>,
+    pub recommended_action: Option<String>,
 }
 
 #[allow(dead_code, clippy::large_enum_variant)]
@@ -1186,6 +1192,7 @@ pub struct MergePreviewSchema {
     pub action: Option<String>,
     pub message: Option<String>,
     pub would_merge: bool,
+    pub applied: bool,
     pub blockers: Option<Vec<String>>,
     pub warnings: Option<Vec<String>>,
     pub next_action: Option<String>,
@@ -1627,11 +1634,15 @@ pub struct RemoteMutationSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorSingleSchema {
+    pub output_kind: String,
     pub actor: ActorEntrySchema,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorListSchema {
+    pub output_kind: String,
     pub actors: Vec<ActorEntrySchema>,
     pub active_only: bool,
     #[serde(rename = "verification")]
@@ -1640,6 +1651,7 @@ pub struct ActorListSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorDoneSchema {
+    pub output_kind: String,
     pub session_id: String,
     pub status: String,
     pub thread: String,
@@ -1649,10 +1661,13 @@ pub struct ActorDoneSchema {
     pub recommended_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action_template: Option<ActionTemplateSchema>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorExplainSchema {
+    pub output_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

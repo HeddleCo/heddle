@@ -482,7 +482,9 @@ pub(crate) fn abort_operator(repo: &Repository) -> Result<OperatorCommandOutput>
     })
 }
 
-fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option<String>> {
+pub(crate) fn complete_current_thread_manual_resolution(
+    repo: &Repository,
+) -> Result<Option<String>> {
     let Some(current_thread) = repo.current_lane()? else {
         return Ok(None);
     };

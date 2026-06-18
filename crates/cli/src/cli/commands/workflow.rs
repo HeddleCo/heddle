@@ -15,7 +15,9 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
     collapse::{CollapsePublishedRef, collapse_resolved_states},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    git_overlay_health::{
+        RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
+    },
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
@@ -26,10 +28,13 @@ use super::{
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{
-        current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
+        current_thread, load_thread, refresh_thread, refresh_thread_freshness, thread_manager,
+        thread_not_found_advice,
     },
     thread_landing::{land_local_command, switch_thread_command},
+    worktree_safety::ensure_worktree_clean,
 };
+use crate::bridge::GitBridge;
 use crate::{
     cli::{
         Cli,
@@ -320,6 +325,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         None
     };
+    let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
     if let Some(advice) = land_checkpoint_preflight_advice(&repo, &thread.id) {
         return Err(anyhow!(advice));
     }
@@ -351,17 +357,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         }
     }
 
-    let mut synced = false;
+    let mut synced = remote_synced;
     let mut refreshed_thread = resolve_thread(
         &repo,
         Some(&thread.id),
         "land",
         "heddle land --thread <name>",
     )?;
+    refresh_thread_freshness(&repo, &mut refreshed_thread)?;
     if refreshed_thread.freshness == repo::ThreadFreshness::Stale {
         let preview = build_thread_preview_report(&repo, &mut refreshed_thread, true)?;
         let stale_blockers = non_staleness_blockers(&preview.blockers);
-        if preview.conflict_count > 0 || !stale_blockers.is_empty() {
+        if preview.conflict_count == 0 && !stale_blockers.is_empty() {
             update_integration_policy(
                 &repo,
                 &refreshed_thread.id,
@@ -410,8 +417,63 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             );
         }
 
-        refreshed_thread = refresh_thread(&repo, &refreshed_thread.id, cli)?;
-        synced = true;
+        match refresh_thread(&repo, &refreshed_thread.id, cli) {
+            Ok(refreshed) => {
+                update_integration_policy(
+                    &repo,
+                    &refreshed.id,
+                    "current",
+                    "thread synced during land",
+                )?;
+                refreshed_thread = refreshed;
+                synced = true;
+            }
+            Err(error) => {
+                if !sync_conflict_merge_in_progress(&repo, &refreshed_thread) {
+                    return Err(error);
+                }
+                update_integration_policy(
+                    &repo,
+                    &refreshed_thread.id,
+                    "blocked",
+                    "land sync produced conflicts requiring manual resolution",
+                )?;
+                let recommended_action = scoped_resolve_list_command(&refreshed_thread);
+                return write_land_output(
+                    cli,
+                    &repo,
+                    &LandOutput {
+                        operator: OperatorCommandOutput {
+                            status: "blocked".to_string(),
+                            action: OperatorAction::Land,
+                            message: format!(
+                                "Thread '{}' has merge conflicts to resolve",
+                                refreshed_thread.id
+                            ),
+                            blockers: land_blockers_for_preview(&preview, &stale_blockers),
+                            warnings: Vec::new(),
+                            next_action: Some(recommended_action.clone()),
+                            recommended_action: Some(recommended_action),
+                        },
+                        thread: refreshed_thread.id.clone(),
+                        captured,
+                        checkpointed: false,
+                        git_commit: None,
+                        synced: false,
+                        integrated: false,
+                        pushed: false,
+                        pushed_remote: None,
+                        merge_state: None,
+                        trust: build_repository_verification_state(&repo),
+                        chosen_path: "blocked".to_string(),
+                        performed_steps: land_performed_steps(
+                            captured, synced, false, false, false,
+                        ),
+                        skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                    },
+                );
+            }
+        }
     }
 
     let mut merge_thread = resolve_thread(
@@ -573,18 +635,56 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             .first()
             .cloned()
             .unwrap_or_else(|| "integration requires manual review".to_string());
-        // Never fall back to `preview.recommended_action` here: this is the
-        // pre-merge bail, so no merge state is materialized (a `resolve`
-        // breadcrumb would die with `no_merge_in_progress`) and the preview's
-        // own land recommendation would self-loop this very command. Drive the
-        // operator through `sync`, which materializes and resolves a genuine
-        // conflict before a land retry. (heddle#464 close-the-class.)
         let recovery_scope = recovery_scope_checkout(&merge_thread, repo.root());
-        let recommended_action = integration_blocker_recommended_action(
+        let policy_recovery_action = integration_blocker_recommended_action(
             &integration_blockers,
             recovery_scope.as_deref(),
-        )
-        .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
+        );
+        if preview.conflict_count > 0
+            && policy_recovery_action.is_none()
+            && materialize_land_conflict_for_thread(&repo, &merge_thread)?
+        {
+            update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
+            let recommended_action = scoped_resolve_list_command(&merge_thread);
+            return write_land_output(
+                cli,
+                &repo,
+                &LandOutput {
+                    operator: OperatorCommandOutput {
+                        status: "blocked".to_string(),
+                        action: OperatorAction::Land,
+                        message: format!(
+                            "Thread '{}' has merge conflicts to resolve",
+                            merge_thread.id
+                        ),
+                        blockers: land_blockers_for_preview(&preview, &integration_blockers),
+                        warnings: Vec::new(),
+                        next_action: Some(recommended_action.clone()),
+                        recommended_action: Some(recommended_action),
+                    },
+                    thread: merge_thread.id.clone(),
+                    captured,
+                    checkpointed: false,
+                    git_commit: None,
+                    synced: false,
+                    integrated: false,
+                    pushed: false,
+                    pushed_remote: None,
+                    merge_state: None,
+                    trust: build_repository_verification_state(&repo),
+                    chosen_path: "blocked".to_string(),
+                    performed_steps: land_performed_steps(captured, synced, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                },
+            );
+        }
+        // Never fall back to `preview.recommended_action` here: this is the
+        // pre-merge bail, so a preview-originated `resolve` breadcrumb could
+        // die with `no_merge_in_progress`, and the preview's own land
+        // recommendation would self-loop this very command. When materializing
+        // was not possible, drive the operator through the explicit sync path.
+        let recommended_action = policy_recovery_action
+            .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
         return write_land_output(
             cli,
@@ -788,6 +888,78 @@ fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
     !args.no_squash && user_config.land.squash
 }
 
+fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Result<bool> {
+    let Some(remote) = repo.git_remote_tracking_status()? else {
+        return Ok(false);
+    };
+    let remote_decision = remote_drift_decision(repo, &remote);
+    if remote_decision.status != "remote_behind" {
+        return Ok(false);
+    }
+
+    ensure_worktree_clean(repo, "land")?;
+    let remote_name = super::remote::resolve_default_remote_name(repo, None)?;
+    let mut bridge = GitBridge::new(repo);
+    bridge.pull(&remote_name)?;
+
+    let trust = build_repository_verification_state(repo);
+    if !trust.verified {
+        let primary_command = if trust.recommended_action.trim().is_empty() {
+            "heddle status".to_string()
+        } else {
+            trust.recommended_action.clone()
+        };
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "land_remote_sync_blocked",
+            format!(
+                "Synced remote state before landing '{thread_id}', but repository verification is still blocked"
+            ),
+            format!("Run `{primary_command}`, then retry the land."),
+            format!(
+                "repository verification reports {}: {}",
+                trust.status, trust.summary
+            ),
+            "land must not continue into integration while repository verification is blocked",
+            "remote state was imported; thread refs and worktree changes from the land were left unchanged",
+            primary_command.clone(),
+            vec![primary_command],
+        )));
+    }
+
+    Ok(true)
+}
+
+fn materialize_land_conflict_for_thread(repo: &Repository, thread: &Thread) -> Result<bool> {
+    let Some(target_thread) = thread.target_thread.as_deref() else {
+        return Ok(false);
+    };
+
+    if thread.execution_path.as_os_str().is_empty() {
+        if repo.current_lane()?.as_deref() != Some(thread.thread.as_str()) {
+            return Ok(false);
+        }
+        return materialize_land_conflict_in_repo(repo, target_thread);
+    }
+
+    if !thread.execution_path.exists() {
+        return Ok(false);
+    }
+    let thread_repo = Repository::open(&thread.execution_path).with_context(|| {
+        format!(
+            "opening thread '{}' worktree at {} to materialize land conflict",
+            thread.id,
+            thread.execution_path.display()
+        )
+    })?;
+    materialize_land_conflict_in_repo(&thread_repo, target_thread)
+}
+
+fn materialize_land_conflict_in_repo(repo: &Repository, target_thread: &str) -> Result<bool> {
+    let output =
+        merge_thread_into_current(repo, target_thread, None, false, false, false, false, false)?;
+    Ok(!output.conflicts.is_empty() && repo.merge_state_manager().is_merge_in_progress())
+}
+
 fn collapse_thread_for_land(
     repo: &Repository,
     user_config: &UserConfig,
@@ -944,10 +1116,7 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
         return None;
     }
     let trust = build_repository_verification_state(repo);
-    if matches!(
-        trust.remote_drift.as_str(),
-        "remote_behind" | "remote_diverged"
-    ) {
+    if trust.remote_drift == "remote_diverged" {
         let remote_decision = repo
             .git_remote_tracking_status()
             .ok()
@@ -1074,13 +1243,14 @@ fn update_integration_policy(
     } else {
         reason
     };
+    if status == "blocked" {
+        thread.state = repo::ThreadState::Blocked;
+    }
     thread.integration_policy_result = ThreadIntegrationPolicy {
         status: Some(next_status.to_string()),
         reason: Some(next_reason),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
-        conflicts_resolved_manually: thread
-            .integration_policy_result
-            .conflicts_resolved_manually,
+        conflicts_resolved_manually: thread.integration_policy_result.conflicts_resolved_manually,
     };
     manager.save(&thread)?;
     Ok(())
@@ -1379,7 +1549,7 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
         .unwrap_or(false)
 }
 
-fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
+pub(crate) fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
     blockers
         .iter()
         .filter(|blocker| !blocker.contains(" is stale against "))

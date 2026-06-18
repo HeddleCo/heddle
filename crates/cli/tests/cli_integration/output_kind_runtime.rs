@@ -19,7 +19,7 @@ use repo::{OutputFormat, RepoConfig};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{heddle, heddle_output, heddle_output_with_env};
 
 /// Init a repo, write a tracked file, capture one state.
 fn init_and_capture() -> TempDir {
@@ -47,6 +47,31 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
     let stdout = heddle(&argv, Some(temp.path())).unwrap_or_else(|err| {
         panic!("heddle {argv:?} failed: {err}");
     });
+    if let Ok(value) = serde_json::from_str(stdout.trim()) {
+        return value;
+    }
+    let line = stdout
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("heddle {argv:?} produced no stdout"));
+    serde_json::from_str(line)
+        .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
+}
+
+fn heddle_json_with_env(args: &[&str], temp: &TempDir, envs: &[(&str, &str)]) -> Value {
+    let mut argv: Vec<&str> = vec!["--output", "json"];
+    argv.extend(args.iter().copied());
+    let output = heddle_output_with_env(&argv, Some(temp.path()), envs).unwrap_or_else(|err| {
+        panic!("heddle {argv:?} failed to run: {err}");
+    });
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        panic!(
+            "heddle {argv:?} failed: status={:?} stdout={stdout} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     if let Ok(value) = serde_json::from_str(stdout.trim()) {
         return value;
     }
@@ -871,20 +896,42 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
 #[test]
 fn discuss_open_show_append_emit_output_kind() {
     let temp = init_and_capture();
+    let env_principal = [
+        ("HEDDLE_PRINCIPAL_NAME", "Discussion Env"),
+        ("HEDDLE_PRINCIPAL_EMAIL", "discussion@example.com"),
+    ];
 
-    let open = heddle_json(&["discuss", "open", "main.rs", "main", "first turn"], &temp);
+    let open = heddle_json_with_env(
+        &["discuss", "open", "main.rs", "main", "first turn"],
+        &temp,
+        &env_principal,
+    );
     assert_output_kind(&open, "discuss_open");
+    assert_eq!(open["turns"][0]["author_name"], "Discussion Env", "{open}");
+    assert_eq!(
+        open["turns"][0]["author_email"], "discussion@example.com",
+        "{open}"
+    );
     let discussion_id = open["id"]
         .as_str()
         .expect("discuss open envelope must flatten the discussion `id`")
         .to_string();
 
-    let append = heddle_json(
+    let append = heddle_json_with_env(
         &["discuss", "append", &discussion_id, "follow-up turn"],
         &temp,
+        &env_principal,
     );
     assert_output_kind(&append, "discuss_append");
     assert_eq!(append["id"].as_str(), Some(discussion_id.as_str()));
+    assert_eq!(
+        append["turns"][1]["author_name"], "Discussion Env",
+        "{append}"
+    );
+    assert_eq!(
+        append["turns"][1]["author_email"], "discussion@example.com",
+        "{append}"
+    );
 
     let show = heddle_json(&["discuss", "show", &discussion_id], &temp);
     assert_output_kind(&show, "discuss_show");

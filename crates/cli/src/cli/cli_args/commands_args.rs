@@ -764,9 +764,13 @@ pub struct ThreadStartArgs {
 /// Arguments for the `merge` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
+Everyday managed-thread flow:
+  heddle land --thread feature/auth --no-push
+
+Advanced/manual merge examples:
 Examples:
   heddle merge feature/auth --preview         # structured blockers + recommendation
-  heddle merge feature/auth -m 'land auth'    # integrate with a commit message
+  heddle merge feature/auth -m 'merge auth'   # integrate with a commit message
   heddle merge feature/auth --with-diff       # preview with the resulting diff
   heddle merge feature/auth --no-semantic     # opt out to hunk-only merge
 ")]

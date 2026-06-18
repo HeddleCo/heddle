@@ -90,15 +90,15 @@ struct ActorChainOutput {
 
 #[derive(Serialize)]
 struct ActorSingleOutput {
+    output_kind: &'static str,
     actor: ActorOutput,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
 
 #[derive(Serialize)]
 struct ActorListOutput {
+    output_kind: &'static str,
     actors: Vec<ActorOutput>,
     active_only: bool,
     #[serde(rename = "verification")]
@@ -107,6 +107,7 @@ struct ActorListOutput {
 
 #[derive(Serialize)]
 struct ActorDoneOutput {
+    output_kind: &'static str,
     session_id: String,
     status: &'static str,
     thread: String,
@@ -116,14 +117,13 @@ struct ActorDoneOutput {
     recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action_template: Option<ActionTemplate>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
 
 #[derive(Serialize)]
 struct ActorExplainOutput {
+    output_kind: &'static str,
     session_id: String,
     thread: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +151,7 @@ struct ActorExplainOutput {
 
 #[derive(Serialize)]
 struct ActorExplainDetectedOutput {
+    output_kind: &'static str,
     attached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_actor: Option<serde_json::Value>,
@@ -400,6 +401,7 @@ pub async fn cmd_actor_spawn(
     if should_output_json(cli, None) {
         let chain = registry.actor_chain_for_session(&entry.session_id)?;
         let output = ActorSingleOutput {
+            output_kind: "actor_spawn",
             actor: ActorOutput::from(&entry).with_chain(chain),
             trust: build_repository_verification_state(&repo),
         };
@@ -433,6 +435,7 @@ pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorListOutput {
+            output_kind: "actor_list",
             actors: entries.iter().map(ActorOutput::from).collect(),
             active_only,
             trust: build_repository_verification_state(&repo),
@@ -482,6 +485,7 @@ pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()>
     if should_output_json(cli, None) {
         let chain = registry.actor_chain_for_session(&entry.session_id)?;
         let output = ActorSingleOutput {
+            output_kind: "actor_show",
             actor: ActorOutput::from(&entry).with_chain(chain),
             trust: build_repository_verification_state(&repo),
         };
@@ -546,6 +550,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
 
     if should_output_json(cli, None) {
         let output = ActorDoneOutput {
+            output_kind: "actor_done",
             session_id: entry.session_id,
             status: "complete",
             thread: entry.thread,
@@ -595,6 +600,7 @@ pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<
 
     if should_output_json(cli, None) {
         let output = ActorExplainOutput {
+            output_kind: "actor_explain",
             session_id: entry.session_id,
             thread: entry.thread,
             heddle_session_id: entry.heddle_session_id,
@@ -677,6 +683,7 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorExplainDetectedOutput {
+            output_kind: "actor_explain",
             attached: false,
             active_actor: None,
             reason: "No active actor is registered for this checkout.",

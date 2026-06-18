@@ -51,20 +51,11 @@ fn test_merge_auto_resolve_creates_merge_commit() {
     );
 }
 
-// Pre-existing limitation (predates the OSS-improvements squash):
-// `thread refresh` is implemented on top of `cmd_rebase_silent`,
-// whose `compute_tree_diff` in `rebase_ops.rs` compares only blob
-// hashes. A commit that changes only the executable bit (same blob
-// hash) is silently a no-op on replay, so the rebase-based refresh
-// never propagates main's exec-bit change onto feature. The 3-way
-// merge fallback in `try_three_way_merge_refresh` *does* preserve
-// the bit via `merge_mode_content_orthogonal_change` in
-// `executor.rs`, but it only runs when rebase reports a conflict.
-//
-// Fixing this needs `TreeChange` to carry mode, plus apply_commit's
-// `Modified` arm to update mode-only changes. Tracked separately.
+// Regression: `thread refresh` replays feature states onto main via
+// rebase, so its tree diff/apply path must carry full entry metadata.
+// Comparing only blob hashes drops main's executable-bit-only change
+// when feature changed the file content.
 #[test]
-#[ignore = "pre-existing: rebase-based refresh ignores mode-only changes (compute_tree_diff is hash-only)"]
 #[serial]
 #[cfg(unix)]
 fn test_merge_executable_bit_vs_content_change_preserves_both() {
@@ -256,13 +247,33 @@ fn test_merge_conflict_resolve_then_snapshot() {
     refresh_thread_expect_conflict(temp.path(), "feature");
 
     fs::write(temp.path().join("file.txt"), "resolved content").unwrap();
-    heddle(&["resolve", "--all"], Some(temp.path())).unwrap();
+    let resolved = heddle(&["resolve", "--all", "--output", "json"], Some(temp.path())).unwrap();
+    let resolved: Value = serde_json::from_str(&resolved).expect("resolve JSON");
+    assert_eq!(resolved["continued"], true, "{resolved}");
+    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
+    let thread_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect("thread show after capture-completed refresh");
+    let thread_show: Value = serde_json::from_str(&thread_show).expect("thread show JSON");
+    assert_eq!(thread_show["freshness"], "current", "{thread_show}");
+    assert_eq!(thread_show["thread_state"], "ready", "{thread_show}");
+    assert_eq!(
+        thread_show["integration_policy_result"]["status"], "manual_resolved",
+        "{thread_show}"
+    );
 
-    let result = heddle(&["capture", "-m", "Merge resolved"], Some(temp.path()));
-    assert!(
-        result.is_ok(),
-        "snapshot after resolve should succeed: {:?}",
-        result.err()
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    let merged = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()))
+        .expect("merge after capture-completed refresh");
+    let merged: Value = serde_json::from_str(&merged).expect("merge output should be JSON");
+    assert_eq!(merged["status"], "completed", "{merged}");
+    assert_eq!(merged["applied"], true, "{merged}");
+    assert_eq!(merged["conflict_count"], 0, "{merged}");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "resolved content"
     );
 }
 
