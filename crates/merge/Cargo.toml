@@ -1,6 +1,6 @@
 [package]
 name = "heddle-merge"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true

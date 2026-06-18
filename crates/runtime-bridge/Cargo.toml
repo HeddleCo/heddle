@@ -1,6 +1,6 @@
 [package]
 name = "heddle-runtime-bridge"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Sync→async runtime bridge for Heddle: worker thread + private Tokio runtime, safe to call from any caller flavor."

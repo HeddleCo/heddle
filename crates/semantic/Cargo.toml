@@ -1,6 +1,6 @@
 [package]
 name = "heddle-semantic"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -28,8 +28,8 @@ lang-java = ["dep:tree-sitter-java"]
 
 [dependencies]
 anyhow.workspace = true
-merge = { path = "../merge", package = "heddle-merge", version = "0.2" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
+merge = { path = "../merge", package = "heddle-merge", version = "0.3" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3", features = ["memory-backend"] }
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c = { workspace = true, optional = true }

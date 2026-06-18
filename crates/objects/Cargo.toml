@@ -1,6 +1,6 @@
 [package]
 name = "heddle-objects"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -37,7 +37,7 @@ tokio = { workspace = true, optional = true }
 
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-async = { workspace = true, optional = true }
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.3", optional = true }
 
 [features]
 bench = []

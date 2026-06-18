@@ -1,6 +1,6 @@
 [package]
 name = "heddle-state-review"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.3" }
 serde.workspace = true
 
 [lib]

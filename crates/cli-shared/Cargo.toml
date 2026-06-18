@@ -1,6 +1,6 @@
 [package]
 name = "heddle-cli-shared"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "CLI-side utilities shared between Heddle's OSS cli crate and the closed heddle-client crate: user config, remote target resolution, client config."
@@ -11,9 +11,9 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
-proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
-repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay", "native"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
+proto = { path = "../proto", package = "heddle-proto", version = "0.3", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.3", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

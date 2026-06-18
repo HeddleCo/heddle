@@ -1,6 +1,6 @@
 [package]
 name = "heddle-refs"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -12,14 +12,14 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
 rand.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.3", optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
