@@ -1,6 +1,6 @@
 [package]
 name = "heddle-daemon"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description = "Heddle local-mode gRPC daemon and service implementations"
@@ -11,27 +11,27 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.3" }
 futures.workspace = true
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
 hex.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2", default-features = false }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.3", default-features = false }
 prost.workspace = true
 prost-types.workspace = true
-refs = { path = "../refs", package = "heddle-refs", version = "0.2", default-features = false }
-repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay", "native"] }
+refs = { path = "../refs", package = "heddle-refs", version = "0.3", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.3", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 serde_json.workspace = true
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.2" }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.3" }
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.3", optional = true }
 
 [dev-dependencies]
 objects = { path = "../objects", package = "heddle-objects", features = ["memory-backend"] }

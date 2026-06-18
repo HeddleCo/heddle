@@ -1,6 +1,6 @@
 [package]
 name = "heddle-mount"
-version = "0.2.4"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 description.workspace = true
@@ -18,10 +18,10 @@ libc.workspace = true
 # the same blob from the object store on every kernel `read` call.
 # This cache short-circuits that into an `Arc<[u8]>` clone.
 lru = { workspace = true }
-objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
-refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.3" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.3" }
+refs = { path = "../refs", package = "heddle-refs", version = "0.3" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.3" }
 # `serde`/`serde_json` carry the framed control-plane messages between
 # the `heddle-fuse-worker` subprocess and its supervisor (CLI or
 # daemon). The framing lives in `src/worker.rs`; both ends of the
