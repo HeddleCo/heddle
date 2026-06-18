@@ -885,16 +885,6 @@ const fn documented_schemas(
     }
 }
 
-const fn runtime_schemas(
-    contract: CommandContract,
-    schema_verbs: &'static [&'static str],
-) -> CommandContract {
-    CommandContract {
-        schema_verbs,
-        ..contract
-    }
-}
-
 const fn opaque_schemas(
     contract: CommandContract,
     schema_verbs: &'static [&'static str],
@@ -1841,7 +1831,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
-        surface(runtime_schemas(READ_JSON, &["integration list"]), "admin"),
+        surface(documented_schemas(READ_JSON, &["integration list"]), "admin"),
     ),
     entry(
         &["integration", "install"],
@@ -1849,7 +1839,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "doctor"],
-        surface(runtime_schemas(READ_JSON, &["integration doctor"]), "admin"),
+        surface(documented_schemas(READ_JSON, &["integration doctor"]), "admin"),
     ),
     entry(
         &["integration", "uninstall"],
@@ -1873,10 +1863,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["log"],
         front_door(
             json_discriminators(
-                runtime_schemas(
-                    documented_schemas(READ_JSON, &["log", "log --reflog"]),
-                    &["log", "log --reflog", "log --timeline"],
-                ),
+                documented_schemas(READ_JSON, &["log", "log --reflog", "log --timeline"]),
                 &[
                     json_discriminator(Some("log"), "output_kind", "log"),
                     json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
@@ -2723,7 +2710,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "fork"],
         surface(
             json_discriminators(
-                runtime_schemas(MUTATING, &["timeline fork"]),
+                documented_schemas(MUTATING, &["timeline fork"]),
                 &[json_discriminator(
                     Some("timeline fork"),
                     "output_kind",
@@ -2737,7 +2724,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "reset"],
         surface(
             json_discriminators(
-                runtime_schemas(WORKTREE_MUTATION, &["timeline reset"]),
+                documented_schemas(WORKTREE_MUTATION, &["timeline reset"]),
                 &[json_discriminator(
                     Some("timeline reset"),
                     "output_kind",
@@ -2751,7 +2738,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "recover"],
         surface(
             json_discriminators(
-                runtime_schemas(MUTATING, &["timeline recover"]),
+                documented_schemas(MUTATING, &["timeline recover"]),
                 &[json_discriminator(
                     Some("timeline recover"),
                     "output_kind",
