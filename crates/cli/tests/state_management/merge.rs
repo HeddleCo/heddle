@@ -117,6 +117,7 @@ fn test_merge_preview_counts_match_isolated_added_file_materialization() {
     assert_eq!(preview["status"], "preview", "{preview}");
     assert_eq!(preview["preview_only"], true, "{preview}");
     assert_eq!(preview["would_merge"], true, "{preview}");
+    assert_eq!(preview["applied"], false, "{preview}");
     assert_eq!(
         preview["changed_path_count"], 1,
         "preview must count the file a real materialization will add: {preview}"
@@ -179,6 +180,7 @@ fn test_merge_preview_counts_match_isolated_added_file_materialization() {
     let merged: Value = serde_json::from_str(&merged_out).expect("merge JSON");
     assert_eq!(merged["status"], "completed", "{merged}");
     assert_eq!(merged["preview_only"], false, "{merged}");
+    assert_eq!(merged["applied"], true, "{merged}");
     assert_eq!(
         merged["changed_path_count"], preview["changed_path_count"],
         "materialized merge count must match preview: preview={preview} merged={merged}"
@@ -337,11 +339,15 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
             .contains("mark each file resolved with `heddle resolve <path>`")
     );
 
-    heddle(&["resolve", "file.txt"], Some(temp.path())).unwrap();
-    let continued = heddle(&["--output", "json", "continue"], Some(temp.path())).unwrap();
-    let continued: serde_json::Value =
-        serde_json::from_str(&continued).expect("continue output should be JSON");
-    assert_eq!(continued["status"], "continued");
+    let resolved = heddle(
+        &["--output", "json", "resolve", "file.txt"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let resolved: serde_json::Value =
+        serde_json::from_str(&resolved).expect("resolve output should be JSON");
+    assert_eq!(resolved["continued"], true);
+    assert_eq!(resolved["continuation_status"], "continued");
 }
 
 #[test]
@@ -748,10 +754,14 @@ fn test_thread_resolve_accepts_manual_rebase_resolution_snapshot() {
         "main version\nfeature version\n",
     )
     .unwrap();
-    heddle(&["resolve", "conflict.txt"], Some(temp.path())).unwrap();
-    let continued = heddle(&["--output", "json", "continue"], Some(temp.path())).unwrap();
-    let continued_json: Value = serde_json::from_str(&continued).unwrap();
-    assert_eq!(continued_json["status"], "continued");
+    let resolved = heddle(
+        &["--output", "json", "resolve", "conflict.txt"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let resolved_json: Value = serde_json::from_str(&resolved).unwrap();
+    assert_eq!(resolved_json["continued"], true);
+    assert_eq!(resolved_json["continuation_status"], "continued");
 
     let content = fs::read_to_string(temp.path().join("conflict.txt")).unwrap();
     assert_eq!(content, "main version\nfeature version\n");

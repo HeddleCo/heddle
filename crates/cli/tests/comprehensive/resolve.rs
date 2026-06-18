@@ -189,8 +189,9 @@ fn test_resolve_double_resolution() {
 
     let result = heddle(&["resolve", "file.txt", "--ours"], Some(temp.path()));
     assert!(
-        result.is_ok(),
-        "double resolve should succeed: {:?}",
-        result.err()
+        result
+            .as_ref()
+            .is_err_and(|err| err.contains("No merge in progress")),
+        "after the final conflict auto-continues, a second resolve should see no merge: {result:?}"
     );
 }

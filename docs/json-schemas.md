@@ -1247,6 +1247,7 @@ array.
 
 ```json
 {
+  "output_kind": "actor_spawn",
   "actor": {
     "session_id": "agent-4dvta2dd6as3uzjrszmq",
     "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1272,6 +1273,7 @@ array.
 
 ```json
 {
+  "output_kind": "actor_list",
   "actors": [],
   "active_only": false,
   "verification": {
@@ -1303,6 +1305,7 @@ array.
 
 ```json
 {
+  "output_kind": "actor_done",
   "session_id": "agent-4dvta2dd6as3uzjrszmq",
   "status": "complete",
   "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1316,6 +1319,7 @@ array.
 
 ```json
 {
+  "output_kind": "actor_explain",
   "attached": false,
   "reason": "No active actor is registered for this checkout.",
   "repository": "/work/project",
@@ -2960,7 +2964,7 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"message": "Resolved src/lib.rs", "resolved": ["src/lib.rs"], "remaining": []}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth --no-push", "recommended_action": "heddle land --thread feature/auth --no-push"}
 ```
 
 `heddle retro --output json` emits:

@@ -6,7 +6,7 @@ use chrono::Utc;
 use objects::object::Tree;
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
-    ThreadState,
+    ThreadFreshness, ThreadState,
 };
 use serde::{
     Serialize, Serializer,
@@ -31,7 +31,9 @@ use super::{
     },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
-    thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
+    thread_cmd::{
+        current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
+    },
     thread_landing::land_local_command,
 };
 use crate::{
@@ -283,6 +285,13 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
+    if report.freshness == ThreadFreshness::Stale.to_string()
+        && report.conflict_count == 0
+        && super::workflow::non_staleness_blockers(&report.blockers).is_empty()
+    {
+        thread = refresh_thread(&repo, &thread.id, cli)?;
+        report = build_thread_preview_report(&repo, &mut thread, true)?;
+    }
     let has_integration_target = report.merge_relation != "no_target";
     if has_integration_target {
         let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);

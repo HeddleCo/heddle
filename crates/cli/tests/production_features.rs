@@ -195,8 +195,39 @@ mod resolve {
 
         fs::write(temp.path().join("file.txt"), "resolved content").unwrap();
 
-        let result = heddle(&["resolve", "--all"], Some(temp.path()));
+        let result = heddle(&["--output", "json", "resolve", "--all"], Some(temp.path()));
         assert!(result.is_ok(), "resolve --all failed: {:?}", result.err());
+        let output: Value = serde_json::from_str(&result.unwrap()).expect("resolve all JSON");
+        assert_eq!(output["output_kind"], "resolve", "{output}");
+        assert_eq!(output["resolved"][0], "file.txt", "{output}");
+    }
+
+    #[test]
+    #[timeout(15000)]
+    #[serial]
+    fn test_thread_refresh_conflict_continue_then_merge_lands_resolved_thread() {
+        let temp = TempDir::new().unwrap();
+        create_conflict(&temp);
+
+        fs::write(temp.path().join("file.txt"), "resolved content").unwrap();
+        let resolved = heddle(&["--output", "json", "resolve", "--all"], Some(temp.path()))
+            .expect("resolve all");
+        let resolved: Value = serde_json::from_str(&resolved).expect("resolve JSON");
+        assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
+        assert_eq!(resolved["continued"], true, "{resolved}");
+        assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
+
+        heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+        let merged = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()))
+            .expect("merge resolved thread");
+        let merged: Value = serde_json::from_str(&merged).expect("merge JSON");
+        assert_eq!(merged["status"], "completed", "{merged}");
+        assert_eq!(merged["applied"], true, "{merged}");
+        assert_eq!(merged["conflict_count"], 0, "{merged}");
+        assert_eq!(
+            fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+            "resolved content"
+        );
     }
 
     #[test]
@@ -206,11 +237,15 @@ mod resolve {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
 
-        let result = heddle(&["resolve", "--list"], Some(temp.path()));
+        let result = heddle(
+            &["--output", "json", "resolve", "--list"],
+            Some(temp.path()),
+        );
         assert!(result.is_ok(), "resolve --list failed: {:?}", result.err());
 
-        let output = result.unwrap();
-        assert!(output.contains("file.txt"), "should list conflicting file");
+        let output: Value = serde_json::from_str(&result.unwrap()).expect("resolve list JSON");
+        assert_eq!(output["output_kind"], "resolve", "{output}");
+        assert_eq!(output["conflicts"][0], "file.txt", "{output}");
     }
 
     #[test]
@@ -325,21 +360,14 @@ mod resolve {
 
         assert_stale_merge_refuses(temp.path(), "feature");
         refresh_thread_expect_conflict(temp.path(), "feature");
-        heddle(&["resolve", "file.txt", "--ours"], Some(temp.path())).unwrap();
         heddle_with_env(
-            &[
-                "capture",
-                "-m",
-                "resolved",
-                "--agent-provider",
-                "openai",
-                "--agent-model",
-                "gpt-resolver",
-            ],
+            &["resolve", "file.txt", "--ours"],
             Some(temp.path()),
             &[
                 ("HEDDLE_PRINCIPAL_NAME", "Test User"),
                 ("HEDDLE_PRINCIPAL_EMAIL", "test@example.com"),
+                ("HEDDLE_AGENT_PROVIDER", "openai"),
+                ("HEDDLE_AGENT_MODEL", "gpt-resolver"),
             ],
         )
         .unwrap();
@@ -366,21 +394,14 @@ mod resolve {
         create_conflict(&temp);
 
         fs::write(temp.path().join("file.txt"), "custom resolved\n").unwrap();
-        heddle(&["resolve", "file.txt"], Some(temp.path())).unwrap();
         heddle_with_env(
-            &[
-                "capture",
-                "-m",
-                "resolved",
-                "--agent-provider",
-                "openai",
-                "--agent-model",
-                "gpt-resolver",
-            ],
+            &["resolve", "file.txt"],
             Some(temp.path()),
             &[
                 ("HEDDLE_PRINCIPAL_NAME", "Test User"),
                 ("HEDDLE_PRINCIPAL_EMAIL", "test@example.com"),
+                ("HEDDLE_AGENT_PROVIDER", "openai"),
+                ("HEDDLE_AGENT_MODEL", "gpt-resolver"),
             ],
         )
         .unwrap();

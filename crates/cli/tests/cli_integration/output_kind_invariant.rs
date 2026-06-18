@@ -64,6 +64,11 @@ const SWEPT: &[&str] = &[
     "bridge git sync",
     "bridge git reconcile",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
+    "actor spawn",
+    "actor list",
+    "actor show",
+    "actor explain",
+    "actor done",
     "revert",
     "redact apply",
     "redact list",
@@ -99,6 +104,7 @@ const SWEPT: &[&str] = &[
     "review sign",
     "review next",
     "review health",
+    "resolve",
     "cherry-pick",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict-resolution success.
@@ -168,11 +174,6 @@ const KIND_FIELD_EXCEPTIONS: &[&str] = &["help"];
 /// up the sweep instead. This list is the rolldown surface for
 /// follow-up work tracked separately from #272.
 const UNSWEPT_TODO: &[&str] = &[
-    "actor done",
-    "actor explain",
-    "actor list",
-    "actor show",
-    "actor spawn",
     "agent heartbeat",
     "agent list",
     "agent release",
@@ -198,7 +199,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "maintenance inspect",
     "maintenance monitor",
     "maintenance run",
-    "resolve",
     "retro",
     "semantic hot",
     "session end",

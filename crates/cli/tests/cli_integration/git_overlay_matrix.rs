@@ -2056,25 +2056,16 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
             "feature/stale-ready",
         ],
     );
-    assert_eq!(ready["status"], "blocked", "{ready}");
+    assert_eq!(ready["status"], "completed", "{ready}");
     assert_eq!(
-        ready["recommended_action"], "heddle sync --thread feature/stale-ready",
-        "thread-scoped ready should keep the stale-thread recovery primary, not global push: {ready}"
+        ready["recommended_action"], "heddle land --thread feature/stale-ready --no-push",
+        "thread-scoped ready should refresh clean stale work and keep land primary, not global push: {ready}"
     );
     assert_eq!(
-        ready["report"]["recommended_action"], "heddle sync --thread feature/stale-ready",
+        ready["report"]["recommended_action"], "heddle land --thread feature/stale-ready --no-push",
         "nested report should match the top-level ready action: {ready}"
     );
-    assert!(
-        ready["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker
-                .as_str()
-                .is_some_and(|text| text.contains("stale against"))),
-        "ready should explain the stale-thread blocker: {ready}"
-    );
+    assert_eq!(ready["report"]["freshness"], "current", "{ready}");
 }
 
 #[test]
@@ -5490,20 +5481,31 @@ fn git_overlay_matrix_stale_conflict_ship_blocks_with_guidance() {
         land["next_action"]
             .as_str()
             .unwrap_or("")
-            .contains("sync --thread feature/conflict"),
-        "blocked land should surface the next operator step: {land}"
+            .contains("resolve --list"),
+        "blocked land should materialize conflicts and surface resolve: {land}"
+    );
+    let resolve_list = heddle_output(
+        &["--output", "json", "resolve", "--list"],
+        Some(&thread_path),
+    )
+    .expect("land conflict should leave runnable resolve state in the thread checkout");
+    assert!(
+        resolve_list.status.success(),
+        "resolve --list after blocked land should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&resolve_list.stdout),
+        String::from_utf8_lossy(&resolve_list.stderr),
     );
 
     let thread_show = json(
         temp.path(),
         &["thread", "show", "feature/conflict", "--output", "json"],
     );
-    assert_eq!(thread_show["thread_state"], "active");
+    assert_eq!(thread_show["thread_state"], "blocked");
     assert!(
         thread_show["recommended_action"]
             .as_str()
             .unwrap_or("")
-            .contains("sync --thread feature/conflict")
+            .contains("resolve --list")
     );
 }
 
@@ -6125,8 +6127,8 @@ fn git_overlay_matrix_manual_conflict_land_reports_manual_resolution() {
         &["--output", "json", "resolve", "--all", "--theirs"],
     );
     assert_eq!(resolve["remaining"], serde_json::json!([]), "{resolve}");
-    let continued = json(&thread_path, &["--output", "json", "continue"]);
-    assert_eq!(continued["status"], "continued", "{continued}");
+    assert_eq!(resolve["continued"], true, "{resolve}");
+    assert_eq!(resolve["continuation_status"], "continued", "{resolve}");
 
     let after_resolve = json(
         temp.path(),
@@ -6136,7 +6138,14 @@ fn git_overlay_matrix_manual_conflict_land_reports_manual_resolution() {
 
     let land = json(
         temp.path(),
-        &["--output", "json", "land", "--thread", "feature/manual", "--no-push"],
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/manual",
+            "--no-push",
+        ],
     );
     assert_eq!(land["status"], "landed", "{land}");
 
@@ -7327,7 +7336,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
 }
 
 #[test]
-fn git_overlay_matrix_ship_no_push_refuses_known_upstream_drift_before_mutation() {
+fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let local = temp.path().join("local");
@@ -7404,43 +7413,39 @@ fn git_overlay_matrix_ship_no_push_refuses_known_upstream_drift_before_mutation(
     )
     .expect("invoke land --no-push with known upstream drift");
     assert!(
-        !land.status.success(),
-        "land should fail before landing when checkpoint cannot move Git safely"
+        land.status.success(),
+        "land should pull upstream, refresh the thread, and land: stdout={} stderr={}",
+        String::from_utf8_lossy(&land.stdout),
+        String::from_utf8_lossy(&land.stderr)
     );
+    let land: Value = serde_json::from_slice(&land.stdout)
+        .unwrap_or_else(|err| panic!("land should emit JSON on stdout: {err}"));
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(land["synced"], true, "{land}");
+    assert_eq!(land["integrated"], true, "{land}");
+    assert_eq!(land["checkpointed"], true, "{land}");
     assert!(
-        land.stdout.is_empty(),
-        "JSON refusal should not emit partial stdout: {}",
-        String::from_utf8_lossy(&land.stdout)
-    );
-    let stderr = std::str::from_utf8(&land.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "land_requires_current_upstream");
-    assert_eq!(envelope["primary_command"], "heddle pull");
-    assert!(
-        envelope["preserved"]
-            .as_str()
-            .is_some_and(|preserved| preserved.contains("left unchanged")),
-        "refusal should clearly promise no local land occurred: {envelope}"
+        land["performed_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step == "sync"),
+        "land should report the automatic remote/thread sync step: {land}"
     );
 
     let after_status = json(&local, &["--output", "json", "status"]);
-    assert_eq!(
+    assert_ne!(
         after_status["current_state"], before_state,
-        "failed land must not fast-forward the parent Heddle thread"
+        "successful land should advance the parent Heddle thread"
     );
-    assert_eq!(git_stdout(&local, &["rev-parse", "HEAD"]), before_git);
-    assert_eq!(
-        git_ref_snapshot(&local),
-        before_refs,
-        "failed land must not move visible Git refs"
-    );
-    let undo_list = json(&local, &["--output", "json", "undo", "--list"]);
+    assert_ne!(git_stdout(&local, &["rev-parse", "HEAD"]), before_git);
     assert!(
-        !undo_list
-            .to_string()
-            .contains("fast-forward isolated into main"),
-        "failed land must not leave an undo batch for a merge that should not have happened: {undo_list}"
+        git_ref_snapshot(&local) != before_refs,
+        "successful land should move visible Git refs"
+    );
+    assert_eq!(
+        after_status["verification"]["remote_drift"], "remote_ahead",
+        "after --no-push land, publish should be the remaining remote step: {after_status}"
     );
 }
 
@@ -8065,15 +8070,18 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
         "main change\nthread change\n",
     )
     .unwrap();
-    heddle(&["resolve", "conflict.txt"], Some(&thread_path)).unwrap();
-    let continued = json(&thread_path, &["--output", "json", "continue"]);
-    assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "continue");
+    let resolved = json(
+        &thread_path,
+        &["--output", "json", "resolve", "conflict.txt"],
+    );
+    assert_eq!(resolved["continued"], true, "{resolved}");
+    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
+    assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
     assert!(
-        continued["recommended_action"]
+        resolved["recommended_action"]
             .as_str()
             .is_some_and(|action| action.contains("land")),
-        "continue should hand the operator back to the parent land flow: {continued}"
+        "resolve should hand the operator back to the parent land flow: {resolved}"
     );
 
     let after_continue = json(
@@ -8211,10 +8219,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
         "main change\nthread change\n",
     )
     .unwrap();
-    heddle(&["resolve", "conflict.txt"], Some(&thread_path)).unwrap();
-    let continued = json(&thread_path, &["--output", "json", "continue"]);
-    assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "continue");
+    let resolved = json(
+        &thread_path,
+        &["--output", "json", "resolve", "conflict.txt"],
+    );
+    assert_eq!(resolved["continued"], true, "{resolved}");
+    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
+    assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
     heddle(
         &["thread", "resolve", "feature/manual-push"],
         Some(temp.path()),
@@ -8610,10 +8621,12 @@ fn git_overlay_matrix_continue_and_abort_unify_operator_flow() {
                 && hint.contains("heddle resolve --abort")),
         "active merge refusal should name recovery commands: {stderr}"
     );
-    heddle(&["resolve", "--all", "--ours"], Some(temp.path())).unwrap();
-
-    let continued = json(temp.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued["status"], "continued");
+    let resolved = json(
+        temp.path(),
+        &["--output", "json", "resolve", "--all", "--ours"],
+    );
+    assert_eq!(resolved["continued"], true, "{resolved}");
+    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
 
     let status_after_continue = json(temp.path(), &["status", "--output", "json"]);
     assert!(status_after_continue["operation"].is_null());
@@ -8798,9 +8811,15 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
         "heddle resolve conflict.txt"
     );
 
-    heddle(&["resolve", "--all", "--ours"], Some(heddle_merge.path())).unwrap();
-    let continued_merge = json(heddle_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued_merge["status"], "continued");
+    let resolved_merge = json(
+        heddle_merge.path(),
+        &["--output", "json", "resolve", "--all", "--ours"],
+    );
+    assert_eq!(resolved_merge["continued"], true, "{resolved_merge}");
+    assert_eq!(
+        resolved_merge["continuation_status"], "continued",
+        "{resolved_merge}"
+    );
     assert!(json(heddle_merge.path(), &["status", "--output", "json"])["operation"].is_null());
 
     // Raw Git merge: Heddle must not shell out to `git merge --continue`.
@@ -9116,10 +9135,12 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
     let blocked = json(heddle_merge.path(), &["--output", "json", "continue"]);
     assert_eq!(blocked["status"], "blocked");
     assert_operator_json_contract(&blocked, "continue");
-    heddle(&["resolve", "--all", "--ours"], Some(heddle_merge.path())).unwrap();
-    let continued = json(heddle_merge.path(), &["--output", "json", "continue"]);
-    assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "continue");
+    let resolved = json(
+        heddle_merge.path(),
+        &["--output", "json", "resolve", "--all", "--ours"],
+    );
+    assert_eq!(resolved["continued"], true, "{resolved}");
+    assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
 
     let git_merge = TempDir::new().unwrap();
     init_git_repo_with_branch(git_merge.path(), "feature/drop-in");

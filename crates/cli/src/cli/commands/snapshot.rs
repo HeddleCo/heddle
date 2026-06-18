@@ -29,6 +29,7 @@ use super::{
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
     next_action::{NextActionValidationContext, write_command_json},
+    operator_core::complete_current_thread_manual_resolution,
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
 };
@@ -190,7 +191,16 @@ pub async fn cmd_snapshot(
         return Err(anyhow!(advice));
     }
     preflight_large_capture(&repo, force)?;
-    let output = match create_snapshot(&repo, &user_config, Some(intent), confidence, agent) {
+    let complete_thread_resolution =
+        repo.merge_state_manager()
+            .load()?
+            .is_some_and(|merge_state| {
+                merge_state
+                    .conflicts
+                    .iter()
+                    .all(|path| merge_state.resolved.contains(path))
+            });
+    let mut output = match create_snapshot(&repo, &user_config, Some(intent), confidence, agent) {
         Ok(output) => output,
         Err(err) => {
             // ENOSPC is the only mid-capture failure where the user's
@@ -208,6 +218,14 @@ pub async fn cmd_snapshot(
             return Err(err);
         }
     };
+    if complete_thread_resolution
+        && let Some(next_action) = complete_current_thread_manual_resolution(&repo)?
+    {
+        output.next_action = Some(next_action.clone());
+        output.next_action_template = action_template(&next_action);
+        output.recommended_action = Some(next_action.clone());
+        output.recommended_action_template = action_template(&next_action);
+    }
 
     let as_json = should_output_json(cli, Some(repo.config()));
     let git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;

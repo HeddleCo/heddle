@@ -193,16 +193,13 @@ fn save_discussions_blob(
     Ok(new_state)
 }
 
-/// Pull the active principal off the repo config; fall back to a placeholder
-/// when no identity has been configured. We deliberately don't fail here —
-/// discussion authorship should never block on missing config, and the
-/// fallback string is recognisable to a human reader.
+/// Resolve the active principal using the repository's identity chain
+/// (env/repo/Git config) and fall back to a placeholder only when that lookup
+/// itself fails. We deliberately don't fail here — discussion authorship
+/// should never block on missing config.
 fn principal_for(repo: &Repository) -> Principal {
-    if let Some(pc) = &repo.config().principal {
-        Principal::new(&pc.name, &pc.email)
-    } else {
-        Principal::new("<unknown>", "")
-    }
+    repo.get_principal()
+        .unwrap_or_else(|_| Principal::new("<unknown>", ""))
 }
 
 /// Resolve the HEAD state. Returns `Status::failed_precondition` when the

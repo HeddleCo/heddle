@@ -351,7 +351,7 @@ Examples:
         subject: CompletionSubject,
     },
 
-    /// Preview or land a thread into the current thread.
+    /// Advanced/manual merge primitive. Prefer `heddle land` for managed threads.
     Merge(MergeArgs),
 
     /// Resolve merge conflicts.

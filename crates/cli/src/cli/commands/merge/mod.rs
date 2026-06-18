@@ -96,6 +96,7 @@ pub(crate) struct MergeOutput {
     #[serde(flatten)]
     pub operator: OperatorCommandOutput,
     pub would_merge: bool,
+    pub applied: bool,
     pub fast_forward: bool,
     pub preview_only: bool,
     pub merge_state: Option<String>,
@@ -805,6 +806,7 @@ pub(crate) fn merge_thread_into_current(
                 recommended_action: recommended_action.clone(),
             },
             would_merge: preview,
+            applied: !preview,
             fast_forward: true,
             preview_only: preview,
             merge_state: (!preview).then(|| merge_target_id.short()),
@@ -1261,9 +1263,7 @@ fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
         status: Some("previewed".to_string()),
         reason: Some("clean merge preview established land path".to_string()),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
-        conflicts_resolved_manually: thread
-            .integration_policy_result
-            .conflicts_resolved_manually,
+        conflicts_resolved_manually: thread.integration_policy_result.conflicts_resolved_manually,
     };
     manager.save(&thread)?;
     Ok(())
@@ -2042,8 +2042,9 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         // Clean apply: nothing to do.
         None
     };
-    let would_merge =
-        input.preview_only && status == "completed" && input.message != "Already up to date";
+    let meaningful_merge = status == "completed" && input.message != "Already up to date";
+    let would_merge = input.preview_only && meaningful_merge;
+    let applied = !input.preview_only && meaningful_merge;
     MergeOutput {
         operator: OperatorCommandOutput {
             status: status.to_string(),
@@ -2055,6 +2056,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
             recommended_action: recommended_action.clone(),
         },
         would_merge,
+        applied,
         fast_forward: input.fast_forward,
         preview_only: input.preview_only,
         merge_state: input.merge_state,
@@ -2287,6 +2289,7 @@ fn merge_blocked_by_trust_output(
             &trust,
         ),
         would_merge: false,
+        applied: false,
         fast_forward: false,
         preview_only,
         merge_state: None,
@@ -2389,6 +2392,7 @@ fn stale_thread_merge_blocked_output(
             recommended_action: Some(recommended_action.clone()),
         },
         would_merge: false,
+        applied: false,
         fast_forward: false,
         preview_only,
         merge_state: None,

@@ -28,7 +28,7 @@ use sley::Repository as SleyRepository;
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_template},
+    command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, canonical_adopt_ref_command,
@@ -616,6 +616,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         summary.blockers = advice.blockers;
         summary.recommended_action = advice.recommended_action;
         apply_terminal_thread_advice(&mut summary);
+        apply_materialized_merge_advice(repo, &mut summary);
         if let Some(branch_tip) = branch_tips.get(&summary.name)
             && !has_heddle_tip
         {
@@ -1049,6 +1050,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
     summary.blockers = advice.blockers;
     summary.recommended_action = advice.recommended_action;
     apply_terminal_thread_advice(&mut summary);
+    apply_materialized_merge_advice(repo, &mut summary);
     if is_current {
         // Current-thread next-action enrichment. Same as the full path,
         // but we skip the operation/remote_tracking/import_hint reads
@@ -1065,6 +1067,44 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
     }
     summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
     Ok(Some(summary))
+}
+
+fn apply_materialized_merge_advice(repo: &Repository, summary: &mut ThreadSummary) {
+    let Some(action) = materialized_merge_resolve_action(repo, summary) else {
+        return;
+    };
+    summary.thread_health = "blocked".to_string();
+    if summary.blockers.is_empty() {
+        summary
+            .blockers
+            .push("Merge conflicts need resolution".to_string());
+    }
+    summary.recommended_action = action;
+    summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
+}
+
+fn materialized_merge_resolve_action(repo: &Repository, summary: &ThreadSummary) -> Option<String> {
+    if let Some(path) = summary.execution_path.as_deref() {
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            return None;
+        }
+        let thread_repo = Repository::open(&path).ok()?;
+        return thread_repo
+            .merge_state_manager()
+            .is_merge_in_progress()
+            .then(|| {
+                heddle_action(vec![
+                    "--repo".to_string(),
+                    path.display().to_string(),
+                    "resolve".to_string(),
+                    "--list".to_string(),
+                ])
+            });
+    }
+
+    (summary.is_current && repo.merge_state_manager().is_merge_in_progress())
+        .then(|| heddle_action(["resolve", "--list"]))
 }
 
 pub(crate) fn contextual_thread_action(

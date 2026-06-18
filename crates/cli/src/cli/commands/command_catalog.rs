@@ -1068,26 +1068,73 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["actor"], surface(GROUP, "automation")),
     entry(
         &["actor", "spawn"],
-        surface(documented_schemas(MUTATING, &["actor spawn"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["actor spawn"]),
+                &[json_discriminator(
+                    Some("actor spawn"),
+                    "output_kind",
+                    "actor_spawn",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(
         &["actor", "list"],
-        surface(documented_schemas(READ_JSON, &["actor list"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["actor list"]),
+                &[json_discriminator(
+                    Some("actor list"),
+                    "output_kind",
+                    "actor_list",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(
         &["actor", "show"],
-        surface(documented_schemas(READ_JSON, &["actor show"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["actor show"]),
+                &[json_discriminator(
+                    Some("actor show"),
+                    "output_kind",
+                    "actor_show",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(
         &["actor", "explain"],
         surface(
-            documented_schemas(READ_JSON, &["actor explain"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["actor explain"]),
+                &[json_discriminator(
+                    Some("actor explain"),
+                    "output_kind",
+                    "actor_explain",
+                )],
+            ),
             "automation",
         ),
     ),
     entry(
         &["actor", "done"],
-        surface(documented_schemas(MUTATING, &["actor done"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["actor done"]),
+                &[json_discriminator(
+                    Some("actor done"),
+                    "output_kind",
+                    "actor_done",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(&["agent"], surface(GROUP, "automation")),
     entry(
@@ -2208,7 +2255,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["resolve"],
-        front_door(documented_schemas(MUTATING, &["resolve"]), 300),
+        front_door(
+            json_discriminators(
+                documented_schemas(MUTATING, &["resolve"]),
+                &[json_discriminator(
+                    Some("resolve"),
+                    "output_kind",
+                    "resolve",
+                )],
+            ),
+            300,
+        ),
     ),
     entry(
         &["retro"],

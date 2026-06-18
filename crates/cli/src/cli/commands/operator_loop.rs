@@ -101,6 +101,9 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     SYNC_OPERATOR_EMISSION,
                 );
             }
+            if args.thread.is_some() {
+                return cmd_sync(cli, args).await;
+            }
             return emit(
                 cli,
                 &repo,
