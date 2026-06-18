@@ -33,17 +33,15 @@ env:
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
-  # Path gate for the heavy Rust jobs. Mirrors `fuse-bench-gate`'s
-  # fail-closed contract (push ⇒ run everything; any fetch/diff error ⇒
-  # run everything) but emits a broader set of outputs so check-and-test,
-  # coverage, postgres-tests, and the two mount-smoke jobs can skip on PRs
-  # that can't affect them. Most of the CI bill on this repo is doc/spike
-  # PRs (often several Codex rounds) re-running the full matrix per round.
+  # Path gate for the heavy Rust jobs. Pushes run everything; PRs fetch/diff
+  # against the base branch, and any uncertainty falls back to running the full
+  # matrix. Most of the CI bill on this repo is doc/spike PRs (often several
+  # Codex rounds) re-running the full matrix per round.
   #
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   rust      — !docs_only; gates check-and-test / coverage / postgres / CLI fault-injection.
-  #   mount     — a mount-relevant path changed; gates fuse/projfs smoke.
+  #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
@@ -112,11 +110,11 @@ jobs:
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
 
-          # mount: reuse the exact transitive mount-relevant path set
-          # `fuse-bench-gate` computes (mount → repo → {crypto, oplog,
-          # proto, objects, refs} → optional runtime-bridge, plus the
-          # compare script, the workflow, and shared workspace inputs).
-          # Keep this regex in sync with the one in `fuse-bench-gate`.
+          # mount: use the transitive mount-relevant path set (mount → repo →
+          # {crypto, oplog, proto, objects, refs} → optional runtime-bridge,
+          # plus the compare script, the workflow, and shared workspace
+          # inputs) so mount adapters and their read-path dependencies trigger
+          # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
               '^(crates/(mount|objects|repo|refs|oplog|crypto|proto|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
@@ -159,61 +157,21 @@ jobs:
       - name: Clippy (OSS features)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      # 3a-bis. Round-trip fidelity conformance gate (heddle#533) — run BEFORE
-      #     the broad `cargo test --workspace` so a fidelity regression fails
-      #     THIS clearly-named step first instead of being buried in the
-      #     generic Tests run. heddle's foundational promise is lossless git
-      #     overlay: adopt/import a public repo and export it back must
-      #     reproduce byte-identical git object SHAs (commit/tree/blob/
-      #     annotated-tag) and be `git fsck` clean, across a spread of
-      #     generated repos (linear / merge / octopus / tags / notes /
-      #     submodule-gitlink / binary / unicode / exec-bit / nested trees).
-      #     Correctness, asserted per-PR — NOT a weekly perf bench.
-      - name: Round-trip fidelity conformance gate
-        run: cargo test --locked -p heddle-cli --test roundtrip_fidelity -- --nocapture
-
-      # 3. Run tests — test binaries already compiled in step 1.
+      # 3. Run tests — test binaries already compiled in step 1. This covers
+      #    the round-trip fidelity and CLI release-gate integration tests; keep
+      #    targeted re-runs out of this job unless they add coverage rather than
+      #    just a friendlier step name.
       - name: Tests
         run: cargo test --locked --workspace
 
-      # 3a. World-class CLI release gates. These duplicate a narrow slice
-      #     of the full test run on purpose: the job log names the hard
-      #     gates from docs/CLI_WORLD_CLASS_RUBRIC.md directly, so schema
-      #     drift, docs drift, hidden runtime git dependencies, no-git
-      #     overlay workflows, Sley Git-engine parity, public help
-      #     reachability, auto output, TTY output, exit-code,
-      #     corrupt-repo recovery, and destructive-safety regressions are
-      #     easy to diagnose.
-      - name: CLI world-class release gates
-        run: |
-          cargo test --locked -p heddle-cli --test git_process_lint -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration git_replacement_matrix -- --nocapture
-          cargo test --locked -p heddle-cli --test git_bridge_integration round_trip_preserves_annotated_tag_object_sha -- --nocapture
-          cargo test --locked -p heddle-cli --test git_bridge_integration import_populates_mirror_with_identical_annotated_tag_object -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration remotes::test_cli_raw_git_clone_adopt_fetches_notes_before_import -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration remotes::git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration public_command_paths_have_all_required_help_entrypoints -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration narrow_no_color_text_outputs_cover_everyday_read_surfaces -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration tty_auto_mode_renders_text_and_explicit_json_stays_json -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration global_exit_codes_and_failure_streams_are_predictable -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration start_merge_undo_json_workflow_keeps_machine_streams_clean -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration thread_cleanup -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration test_cli_capture_blocks_large_git_overlay_deletion_without_force -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration doctor_schemas_has_no_drift_or_unmatched_registered_verbs -- --nocapture
-          cargo test --locked -p heddle-cli --test cli_integration doctor_docs -- --nocapture
-          target/debug/heddle --repo "$PWD" doctor schemas --output json
-          target/debug/heddle --repo "$PWD" doctor docs --all --output json
-
-      # 3b. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
+      # 3a. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
       #     is only as honest as the compare script; these tests pin the
       #     "missing or corrupt estimates fail closed" contract (Codex r1
       #     P1 on heddle#89). Plain `unittest`, no third-party deps.
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      # 3c. Compile every workspace benchmark target in the dev profile
+      # 3b. Compile every workspace benchmark target in the dev profile
       #     without running the measurements. The weekly benchmark workflow
       #     owns optimized performance trend tracking and shares the same
       #     discovery helper. This cheap PR-safe guard catches rotten bench
@@ -221,9 +179,9 @@ jobs:
       #     including non-default required features.
       #     Invariant: every target enumerated by `discover-benches.py` is
       #     compile-checked by a PR-time gate. Non-FUSE benches are checked
-      #     here; FUSE benches are skipped here only because the dedicated
-      #     `fuse-bench` job below has libfuse and compile-checks all
-      #     `heddle-mount` benches with `cargo build --features fuse --benches`.
+      #     here; FUSE benches are compile-checked by `fuse-smoke` when
+      #     mount-relevant paths change because that job already installs
+      #     libfuse.
       - name: Compile benchmark targets
         run: |
           python3 scripts/discover-benches.py > benchmark-plan.tsv
@@ -246,7 +204,7 @@ jobs:
             echo "::endgroup::"
           done < benchmark-plan.tsv
 
-      # 3d. Compile gate for the `postgres` storage backends used by hosted /
+      # 3c. Compile gate for the `postgres` storage backends used by hosted /
       #     weft code. This is the silent-rot guard: these backends are not
       #     exercised by the default-feature build above, so a server-path
       #     regression (e.g. a backend that wasn't updated after a newtype
@@ -422,6 +380,15 @@ jobs:
           fusermount3 --version
           ls -l /dev/fuse
 
+      # Compile-check all FUSE benchmark targets without running the
+      # measurements. The scheduled/manual `Benchmarks` workflow owns perf
+      # trends; this PR gate only keeps FUSE bench code from rotting.
+      - name: Compile FUSE benchmark targets
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "false"
+        run: cargo build --locked --features fuse -p heddle-mount --benches
+
       # Single-threaded so a kernel-side hang on one mount can't
       # cascade into the others' tempdir lifetimes. `--nocapture` so
       # the CI log shows the FUSE write/release path if a test
@@ -558,13 +525,11 @@ jobs:
         shell: pwsh
         run: sccache --show-stats
 
-  # FUSE end-to-end bench gate. Decides whether the (expensive)
-  # `fuse-bench` job needs to run for this PR. Skipping the bench on
-  # docs-only / unrelated-crate PRs keeps the CI bill manageable, but
-  # any change that could plausibly move FUSE perf numbers — the
-  # mount adapter itself, or one of its read-path dependencies
-  # (objects, repo, refs) — has to be measured. On `push` to main the
-  # bench always runs so the cache + baseline stay current.
+  # FUSE end-to-end bench gate. PRs compile-check FUSE benches in
+  # `fuse-smoke` when mount-relevant paths change; actual performance
+  # measurements live in the scheduled/manual `Benchmarks` workflow and on
+  # pushes to main. That keeps PRs from waiting on noisy timing measurements
+  # while still refreshing the baseline after merge.
   fuse-bench-gate:
     name: FUSE bench gate
     runs-on: ubuntu-latest
@@ -572,59 +537,9 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # Two commits is enough for a PR diff; pushes set run=true
-          # unconditionally so depth doesn't matter there.
-          fetch-depth: 2
       - id: decide
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # PR: diff against base. Bench runs if any mount-relevant
-          # path is touched.
-          #
-          # Fail-closed contract: if `git diff` itself errors (shallow
-          # history, missing merge-base, network flake on the fetch),
-          # we run the bench. The alternative — silently `run=false`
-          # because the regex didn't match an empty/error diff — is
-          # exactly the "infrastructure failure removes perf coverage"
-          # pattern Codex r1 flagged. Capture diff output + check
-          # exit codes separately so we can distinguish "no matching
-          # files" from "diff failed". (heddle#89 / PR #91 r1.)
-          if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
-            echo "fetch failed; running bench fail-closed" >&2
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          set +e
-          diff_output=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
-          diff_rc=$?
-          set -e
-          if [ "$diff_rc" -ne 0 ]; then
-            echo "git diff exited $diff_rc; running bench fail-closed" >&2
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Mount-relevant paths include the bench's own crate + every
-          # transitive read-path dependency, the compare script, the
-          # workflow, AND shared workspace inputs (Cargo.lock, root
-          # Cargo.toml) that can move codegen / dependency versions
-          # under the bench without touching the per-crate sources.
-          #
-          # Transitive set (mount → repo → {crypto, oplog, proto,
-          # objects, refs} → optional runtime-bridge). Keep this in
-          # sync with `crates/mount/Cargo.toml` + the transitive
-          # closure under it; Codex r3 P2 flagged that the original
-          # list (mount|objects|repo|refs) skipped the perf gate when
-          # a PR touched only `crypto`, `oplog`, or `proto` — all of
-          # which compile into the bench binary via `Repository`'s
-          # use sites in `build_heddle_mount`.
-          if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs|oplog|crypto|proto|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
-              > /dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -836,6 +751,8 @@ jobs:
   # the HeddleFSKit bridge, so the Swift side is validated too.
   fskit-check:
     name: FSKit compile check (macOS)
+    needs: changes
+    if: needs.changes.outputs.mount == 'true'
     runs-on: macos-26
     timeout-minutes: 30
     env:
