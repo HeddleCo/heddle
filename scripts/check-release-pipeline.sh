@@ -8,8 +8,11 @@
 #
 #   - tag-push trigger
 #   - all 5 target triples
-#   - tarball/zip packaging for CLI targets
+#   - tarball/zip packaging for CLI targets, with macOS archives produced by
+#     the cask job so Apple binaries are built once
 #   - signed/notarized macOS cask DMG
+#   - final-DMG app signature verification
+#   - non-publishing branch dry-run path for release-only verification
 #   - sha256 checksums
 #   - signing step
 #   - GitHub Release upload
@@ -84,6 +87,15 @@ if grep -F 'workflow_dispatch refuses stable tag' "$WF" >/dev/null; then
   ok "validate-tag refuses stable tags from workflow_dispatch (downgrade-attack guard)"
 else
   err "validate-tag must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
+fi
+
+if grep -F 'branch_dry_run:' "$WF" >/dev/null \
+   && grep -F 'publish_release=false' "$WF" >/dev/null \
+   && grep -F "if: \${{ github.event_name != 'workflow_dispatch' || !inputs.branch_dry_run }}" "$WF" >/dev/null \
+   && grep -F "if: needs.validate-tag.outputs.publish_release == 'true'" "$WF" >/dev/null; then
+  ok "temporary branch dry-run path skips generic builds and GitHub Release publication"
+else
+  err "temporary branch dry-run path must be explicit and must skip generic builds and GitHub Release publication"
 fi
 
 # All five active target triples (win-arm64 parked, see below).
@@ -165,11 +177,44 @@ else
   err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with --features mount"
 fi
 
+if ! grep -F "target: aarch64-apple-darwin" "$WF" >/dev/null \
+   && ! grep -F "target: x86_64-apple-darwin" "$WF" >/dev/null \
+   && grep -F "dist/heddle-\${{ needs.validate-tag.outputs.tag }}-aarch64-apple-darwin.tar.gz" "$WF" >/dev/null \
+   && grep -F "dist/heddle-\${{ needs.validate-tag.outputs.tag }}-x86_64-apple-darwin.tar.gz" "$WF" >/dev/null; then
+  ok "macOS CLI archives are packaged by the cask job from the single Apple build"
+else
+  err "macOS CLI archives must be packaged by build-macos-cask, and Apple targets must not be duplicated in the generic build matrix"
+fi
+
 if ! grep -F "com.apple.security.temporary-exception.files." \
   crates/mount/swift/HeddleHost/HeddleFSModule/HeddleFSModule.entitlements >/dev/null; then
   ok "FSKit extension avoids profile-gated temporary path exceptions"
 else
   err "FSKit extension must not request temporary-exception.files entitlements; Developer ID profiles do not authorize them"
+fi
+
+staged_app_verify_count="$(grep -F 'verify_app_signature "$STAGED_APP"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$staged_app_verify_count" -ge 2 ]]; then
+  ok "macOS cask build verifies app signature before and after app notarization"
+else
+  err "macOS cask build must verify Heddle.app signature before and after app notarization/stapling"
+fi
+
+final_dmg_app_verify_count="$(grep -F 'verify_dmg_app_signature "$DMG_PATH"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$final_dmg_app_verify_count" -ge 2 ]] \
+   && grep -F 'HEDDLE_DMG_VERIFY_APP_SIGNATURE=1' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'HEDDLE_DMG_VERIFY_APP_SIGNATURE' crates/mount/swift/HeddleHost/dmg/make-dmg.sh >/dev/null; then
+  ok "macOS cask build verifies app signature inside staged and final DMGs"
+else
+  err "macOS cask build must verify Heddle.app inside the staged and final DMG, not only before packaging"
+fi
+
+dmg_signature_verify_count="$(grep -F 'codesign --verify --strict --verbose=4 "$DMG_PATH"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$dmg_signature_verify_count" -ge 2 ]] \
+   && grep -F 'xcrun stapler validate "$DMG_PATH"' scripts/build-macos-cask-artifact.sh >/dev/null; then
+  ok "macOS cask build verifies DMG signature before and after DMG notarization"
+else
+  err "macOS cask build must verify the DMG code signature before and after DMG notarization/stapling"
 fi
 
 if [[ -x scripts/render-homebrew-cask.sh ]] \
@@ -283,7 +328,7 @@ else
   else
     oks << "validate-tag exports tag_sha output"
   end
-  errors << "validate-tag must declare 'tag' and 'kind' outputs" unless outs.key?("tag") && outs.key?("kind")
+  errors << "validate-tag must declare 'tag', 'kind', and 'publish_release' outputs" unless outs.key?("tag") && outs.key?("kind") && outs.key?("publish_release")
 end
 
 downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
@@ -366,15 +411,10 @@ if build_job.is_a?(Hash)
   apple_legs = include.select do |entry|
     entry.is_a?(Hash) && entry.fetch("target", "").to_s.end_with?("-apple-darwin")
   end
-  errors << "build matrix has no *-apple-darwin legs to pin to macos-26" if apple_legs.empty?
-  apple_legs.each do |entry|
-    runner = entry.fetch("runner", "").to_s
-    target = entry["target"]
-    if runner == "macos-26"
-      oks << "#{target} pinned to macos-26 (FSKit SDK floor)"
-    else
-      errors << "#{target} builds on '#{runner}', not macos-26 - risks missing the FSKit SDK floor"
-    end
+  if apple_legs.empty?
+    oks << "generic build matrix omits Apple targets; build-macos-cask owns the single macOS build"
+  else
+    errors << "generic build matrix still includes Apple targets: #{apple_legs.map { |entry| entry["target"] }.join(", ")}"
   end
   cask = jobs["build-macos-cask"]
   if cask.is_a?(Hash)
@@ -383,6 +423,14 @@ if build_job.is_a?(Hash)
       oks << "build-macos-cask runs on macos-26"
     else
       errors << "build-macos-cask runs on '#{runner}', not macos-26"
+    end
+    cask_text = cask.inspect
+    if cask_text.include?("aarch64-apple-darwin,x86_64-apple-darwin") &&
+       cask_text.include?("heddle-${TAG}-aarch64-apple-darwin.tar.gz") &&
+       cask_text.include?("heddle-${TAG}-x86_64-apple-darwin.tar.gz")
+      oks << "build-macos-cask builds both Apple targets and packages standalone macOS CLI archives"
+    else
+      errors << "build-macos-cask must build both Apple targets and package standalone macOS CLI archives"
     end
   end
 end
@@ -436,6 +484,8 @@ else:
         oks.append("validate-tag exports tag_sha output")
     if "tag" not in outs or "kind" not in outs:
         errors.append("validate-tag must declare 'tag' and 'kind' outputs")
+    if "publish_release" not in outs:
+        errors.append("validate-tag must declare a 'publish_release' output so dry-runs cannot publish releases")
 
 # Every job that runs AFTER validate-tag (i.e. that produces or ships
 # artifacts) must declare it as a needs dependency. Listing the set
@@ -530,16 +580,12 @@ if isinstance(build_job, dict):
     apple_legs = [e for e in include if isinstance(e, dict)
                   and str(e.get("target", "")).endswith("-apple-darwin")]
     if not apple_legs:
-        errors.append("build matrix has no *-apple-darwin legs to pin to macos-26")
-    for e in apple_legs:
-        runner = str(e.get("runner", ""))
-        target = e.get("target")
-        if runner == "macos-26":
-            oks.append(f"{target} pinned to macos-26 (FSKit SDK floor)")
-        else:
-            errors.append(
-                f"{target} builds on '{runner}', not macos-26 — risks missing the FSKit SDK floor"
-            )
+        oks.append("generic build matrix omits Apple targets; build-macos-cask owns the single macOS build")
+    else:
+        errors.append(
+            "generic build matrix still includes Apple targets: "
+            + ", ".join(str(e.get("target")) for e in apple_legs)
+        )
     cask = jobs.get("build-macos-cask")
     if isinstance(cask, dict):
         runner = str(cask.get("runs-on", ""))
@@ -547,6 +593,15 @@ if isinstance(build_job, dict):
             oks.append("build-macos-cask runs on macos-26")
         else:
             errors.append(f"build-macos-cask runs on '{runner}', not macos-26")
+        cask_text = repr(cask)
+        if (
+            "aarch64-apple-darwin,x86_64-apple-darwin" in cask_text
+            and "heddle-${TAG}-aarch64-apple-darwin.tar.gz" in cask_text
+            and "heddle-${TAG}-x86_64-apple-darwin.tar.gz" in cask_text
+        ):
+            oks.append("build-macos-cask builds both Apple targets and packages standalone macOS CLI archives")
+        else:
+            errors.append("build-macos-cask must build both Apple targets and package standalone macOS CLI archives")
 
 print("OKS:")
 for o in oks:

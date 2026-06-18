@@ -35,6 +35,67 @@ require_file() {
   fi
 }
 
+bundle_executable() {
+  local bundle="$1"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist"
+}
+
+verify_app_signature() {
+  local app="$1"
+  local app_exe
+  local extension
+  local extension_exe
+
+  if [[ ! -d "$app" ]]; then
+    echo "error: app bundle not found: $app" >&2
+    return 1
+  fi
+
+  echo "Verifying app signature: $app"
+  codesign --verify --deep --strict --verbose=4 "$app" || return $?
+
+  app_exe="$(bundle_executable "$app")" || return $?
+  codesign --verify --strict --verbose=4 "$app/Contents/MacOS/$app_exe" || return $?
+
+  codesign --verify --strict --verbose=4 "$app/Contents/Resources/bin/heddle" || return $?
+
+  extension="$app/Contents/Extensions/HeddleFSModule.appex"
+  codesign --verify --deep --strict --verbose=4 "$extension" || return $?
+
+  extension_exe="$(bundle_executable "$extension")" || return $?
+  codesign --verify --strict --verbose=4 "$extension/Contents/MacOS/$extension_exe" || return $?
+}
+
+verify_dmg_app_signature() {
+  local dmg="$1"
+  local mount_dir
+  local status=0
+
+  if [[ ! -f "$dmg" ]]; then
+    echo "error: DMG not found: $dmg" >&2
+    return 1
+  fi
+
+  mount_dir="$(mktemp -d "${TMPDIR:-/tmp}/heddle-release-dmg.XXXXXX")"
+  if ! hdiutil attach "$dmg" \
+    -mountpoint "$mount_dir" \
+    -nobrowse \
+    -readonly \
+    -noautoopen \
+    -quiet; then
+    rm -rf "$mount_dir"
+    return 1
+  fi
+
+  if ! verify_app_signature "$mount_dir/Heddle.app"; then
+    status=1
+  fi
+
+  hdiutil detach "$mount_dir" -quiet || status=1
+  rm -rf "$mount_dir"
+  return "$status"
+}
+
 require_env HEDDLE_TAG "$TAG"
 require_env HEDDLE_VERSION "$VERSION"
 require_env HEDDLE_TEAM_ID "$TEAM_ID"
@@ -130,7 +191,7 @@ codesign --force --timestamp --options runtime \
   --sign "$DEVELOPER_ID" \
   "$STAGED_APP"
 
-codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
+verify_app_signature "$STAGED_APP"
 
 ditto -c -k --keepParent "$STAGED_APP" "$NOTARY_ZIP"
 xcrun notarytool submit "$NOTARY_ZIP" \
@@ -141,17 +202,23 @@ xcrun notarytool submit "$NOTARY_ZIP" \
 xcrun stapler staple "$STAGED_APP"
 xcrun stapler validate "$STAGED_APP"
 spctl -a -vvv -t install "$STAGED_APP"
+verify_app_signature "$STAGED_APP"
 
-"$HOST_DIR/dmg/make-dmg.sh" "$STAGED_APP" "$DMG_PATH"
+HEDDLE_DMG_VERIFY_APP_SIGNATURE=1 "$HOST_DIR/dmg/make-dmg.sh" "$STAGED_APP" "$DMG_PATH"
+verify_dmg_app_signature "$DMG_PATH"
 codesign --force --timestamp --sign "$DEVELOPER_ID" "$DMG_PATH"
+codesign --verify --strict --verbose=4 "$DMG_PATH"
 xcrun notarytool submit "$DMG_PATH" \
   --key "$NOTARY_KEY" \
   --key-id "$NOTARY_KEY_ID" \
   --issuer "$NOTARY_ISSUER_ID" \
   --wait
 xcrun stapler staple "$DMG_PATH"
+xcrun stapler validate "$DMG_PATH"
+codesign --verify --strict --verbose=4 "$DMG_PATH"
 hdiutil verify "$DMG_PATH"
 spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH"
+verify_dmg_app_signature "$DMG_PATH"
 
 ( cd "$OUTPUT_DIR" && shasum -a 256 "$(basename "$DMG_PATH")" > "$(basename "$DMG_PATH").sha256" )
 echo "Created $DMG_PATH"

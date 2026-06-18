@@ -95,12 +95,11 @@ pub fn open_settings() {
 }
 
 /// One-line setup hint to print to stderr when the extension
-/// isn't ready. Kept here so the wording stays consistent across
-/// every call site that hits the prompt.
+/// isn't ready. The CLI's full approval flow expands this into the
+/// System Settings path, the By Category / Extension Type instruction,
+/// and a wait spinner.
 pub fn setup_hint() -> &'static str {
-    "Heddle FSKit extension not enabled.\n\
-     Opening System Settings — toggle \"Heddle\" on under \
-     File System Extensions, then re-run."
+    "Heddle FSKit extension is installed, but macOS has not enabled it yet."
 }
 
 /// One-line notice when a Mac is too old for Heddle's native FSKit

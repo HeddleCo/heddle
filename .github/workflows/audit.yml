@@ -4,20 +4,20 @@ name: Supply-chain audit
 #
 # - cargo-deny enforces the policy in deny.toml (licenses, banned crates,
 #   advisories, registry/git sources).
-# - cargo-audit cross-checks the RustSec advisory DB. cargo-deny already
-#   reads the same DB; running cargo-audit too gives us a second tool's
-#   take and surfaces yanked-crate warnings explicitly.
+# - cargo-audit cross-checks the RustSec advisory DB on main/schedule/manual.
+#   cargo-deny already reads the same DB, so it remains the PR gate while
+#   cargo-audit gives us a second tool's take outside the hot PR path.
 #
 # The weekly cron catches advisories filed against unchanged dependencies
 # (a new CVE against a crate we already ship will trip the gate on Monday
 # even if no one has pushed code).
 
 on:
-  # Run on every PR (no paths filter). If we limited to Cargo*/deny.toml
+  # cargo-deny runs on every PR (no paths filter). If we limited to Cargo*/deny.toml
   # changes and this workflow is set as a Required check, GitHub leaves the
   # required-but-skipped run pending forever for PRs that don't touch those
   # files, blocking merge. Always-run keeps the gate workable as a Required
-  # check; the work itself is fast enough that it doesn't matter.
+  # check; cargo-audit is scheduled/main/manual only below.
   pull_request:
     branches:
       - main
@@ -58,6 +58,7 @@ jobs:
 
   cargo-audit:
     name: cargo-audit
+    if: github.event_name != 'pull_request'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
