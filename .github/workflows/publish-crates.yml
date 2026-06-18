@@ -188,6 +188,12 @@ jobs:
             # First version line under [package] (the [[bin]] /
             # [[example]] sections don't carry a version key).
             local_version=$(awk -F'"' '/^\[package\]/{in_pkg=1; next} /^\[/{in_pkg=0} in_pkg && /^version\s*=/{print $2; exit}' "$manifest")
+            # Workspace-inherited version (version.workspace = true): the awk
+            # above only reads a literal [package] version, so fall back to the
+            # shared version in the root [workspace.package] table.
+            if [[ -z "$local_version" ]] && grep -qE '^version\.workspace[[:space:]]*=[[:space:]]*true' "$manifest"; then
+              local_version=$(awk -F'"' '/^\[workspace.package\]/{in_ws=1; next} /^\[/{in_ws=0} in_ws && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+            fi
             if [[ -z "$local_version" ]]; then
               echo "::error::${manifest} has no [package] version"
               exit 1
