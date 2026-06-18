@@ -49,17 +49,16 @@ jobs:
       - name: Assert publish pipeline contract
         run: bash scripts/check-publish-pipeline.sh
 
-  no-silent-default-tree-load:
-    name: no silent-default tree load (heddle#90 + #93)
+  rust-ast-invariants:
+    name: Rust AST invariant checks
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      # The asserter is now a Rust binary (heddle-devtools subcommand)
-      # using `syn` to walk the AST — replaced the regex implementation
-      # after three rounds of bypass-and-patch (heddle#103). Rust
-      # toolchain + cache so the build is fast on warm caches.
+      # The asserters are Rust binaries (heddle-devtools subcommands) using
+      # `syn` to walk the AST. Build once, then run every AST-backed invariant
+      # check so PRs do not pay for duplicate toolchain/cache setup.
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -70,37 +69,22 @@ jobs:
       - name: Build asserter binary
         run: cargo build -p heddle-devtools --quiet
 
-      # The mutation tests run first: if a future edit defeats the
-      # asserter (e.g. by loosening the chain walk or widening the
-      # allowlist to prefix match), the self-tests fail before the
+      # Silent-default tree load (heddle#90 + heddle#93): reject the bug
+      # class where `get_tree(...)?.unwrap_or_default()` silently substituted
+      # `Tree::default()` for a missing subtree, masking store corruption as
+      # empty content / silent erase / silent no-op. The mutation tests run
+      # first so a future edit that defeats the asserter fails before the
       # asserter has a chance to silently pass on production code.
-      - name: Asserter self-tests (mutation fixtures)
+      - name: Silent-default tree-load asserter self-tests
         run: bash scripts/test-check-no-silent-default-tree-load.sh
 
-      - name: Assert no `get_tree(...)?.unwrap_or_default()` regressions
+      - name: Assert no silent-default tree-load regressions
         run: bash scripts/check-no-silent-default-tree-load.sh
 
-  no-publish-first-snapshot:
-    name: no cross-crate publish-first snapshot (heddle#354 r8)
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      # Workspace-wide `syn` AST walker (heddle-devtools subcommand): a
-      # snapshot must record its `OpRecord::Snapshot` before publishing
-      # the paired ref. Closes the cross-crate coverage hole the
-      # refs-internal r7 conformance left.
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: asserter-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Build asserter binary
-        run: cargo build -p heddle-devtools --quiet
-
+      # Cross-crate publish-first snapshot (heddle#354 r8): a snapshot must
+      # record its `OpRecord::Snapshot` before publishing the paired ref.
+      # Closes the cross-crate coverage hole the refs-internal r7 conformance
+      # left.
       - name: Assert no cross-crate publish-first snapshot regressions
         run: bash scripts/check-snapshot-atomicity.sh
 

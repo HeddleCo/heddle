@@ -40,7 +40,9 @@ jobs:
   #
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
-  #   rust      — !docs_only; gates check-and-test / coverage / postgres / CLI fault-injection.
+  #   release_only — every changed path is release/publish workflow plumbing.
+  #   rust      — !docs_only && !release_only; gates check-and-test / postgres / CLI fault-injection.
+  #   coverage  — Rust source or coverage config changed; gates instrumented coverage.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   changes:
     name: Detect changed paths
@@ -48,8 +50,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
+      coverage: ${{ steps.decide.outputs.coverage }}
       mount: ${{ steps.decide.outputs.mount }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
+      release_only: ${{ steps.decide.outputs.release_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,12 +66,14 @@ jobs:
           # diff failure, empty diff) run the full matrix. The alternative
           # — silently skipping because an errored/empty diff matched no
           # path regex — is the "infrastructure failure removes coverage"
-          # pattern Codex hardened `fuse-bench-gate` against (heddle#89).
+          # pattern hardened in heddle#89.
           run_all() {
             echo "$1; running full matrix fail-closed" >&2
             echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "coverage=true" >> "$GITHUB_OUTPUT"
             echo "mount=true" >> "$GITHUB_OUTPUT"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "release_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
           if [ "${{ github.event_name }}" != "pull_request" ]; then
@@ -99,16 +105,40 @@ jobs:
           # and are NOT doc-only — only `docs/spikes/**` is exempt there,
           # making it the sole doc-only prefix. Fail-safe: any path outside
           # it ⇒ not doc-only ⇒ rust=true (run the suite).
-          if printf '%s\n' "$diff_output" | grep -vE '^(docs/spikes/|[[:space:]]*$)' \
+          if ! printf '%s\n' "$diff_output" | grep -vE '^(docs/spikes/|[[:space:]]*$)' \
               > /dev/null; then
-            docs_only=false
-            rust=true
-          else
             docs_only=true
-            rust=false
+          else
+            docs_only=false
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+          # release_only: release/publish workflow plumbing that has its own
+          # static contract workflow and should not burn the Rust test matrix.
+          # Any source, Cargo, non-release script, or product doc path falls
+          # through to rust=true below.
+          if ! printf '%s\n' "$diff_output" | grep -vE '^((\.github/workflows/(release|release-pipeline-check|publish-crates)\.yml|RELEASING\.md|scripts/(check-release-pipeline|check-publish-pipeline|render-homebrew-cask|build-macos-cask-artifact)\.sh|crates/mount/swift/HeddleHost/(README\.md|dmg/.*))|[[:space:]]*)$' \
+              > /dev/null; then
+            release_only=true
+          else
+            release_only=false
+          fi
+          echo "release_only=$release_only" >> "$GITHUB_OUTPUT"
+
+          if [ "$docs_only" = "true" ] || [ "$release_only" = "true" ]; then
+            rust=false
+          else
+            rust=true
+          fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
+          if [ "$rust" = "true" ] && printf '%s\n' "$diff_output" | grep -E \
+              '^(crates/|Cargo\.lock$|Cargo\.toml$|codecov\.yml$|docs/contributor-guide/coverage\.md$|\.github/workflows/rust-tests\.yml)' \
+              > /dev/null; then
+            echo "coverage=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "coverage=false" >> "$GITHUB_OUTPUT"
+          fi
 
           # mount: use the transitive mount-relevant path set (mount → repo →
           # {crypto, oplog, proto, objects, refs} → optional runtime-bridge,
@@ -189,7 +219,7 @@ jobs:
           while IFS=$'\t' read -r package bench features; do
             [ -n "$package" ] || continue
             if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
-              echo "skipping $package/$bench: fuse benches are covered by the fuse-bench job"
+              echo "skipping $package/$bench: fuse benches are covered by the fuse-smoke job"
               continue
             fi
             echo "::group::$package/$bench"
@@ -525,26 +555,6 @@ jobs:
         shell: pwsh
         run: sccache --show-stats
 
-  # FUSE end-to-end bench gate. PRs compile-check FUSE benches in
-  # `fuse-smoke` when mount-relevant paths change; actual performance
-  # measurements live in the scheduled/manual `Benchmarks` workflow and on
-  # pushes to main. That keeps PRs from waiting on noisy timing measurements
-  # while still refreshing the baseline after merge.
-  fuse-bench-gate:
-    name: FUSE bench gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      run: ${{ steps.decide.outputs.run }}
-    steps:
-      - id: decide
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
   # FUSE end-to-end bench. Drives the `fuse_e2e` criterion suite
   # through a real `FuseShell::mount_background` session, then
   # `scripts/fuse-bench-compare.py` flags any workload that
@@ -556,8 +566,10 @@ jobs:
   fuse-bench:
     name: FUSE bench (Linux)
     runs-on: ubuntu-latest
-    needs: fuse-bench-gate
-    if: needs.fuse-bench-gate.outputs.run == 'true'
+    # PRs compile-check FUSE benches in `fuse-smoke` when mount-relevant paths
+    # change. Run noisy timing measurements only after merge to refresh the
+    # committed baseline signal.
+    if: github.event_name == 'push'
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -642,7 +654,7 @@ jobs:
   coverage:
     name: Coverage
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.coverage == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 60
 
