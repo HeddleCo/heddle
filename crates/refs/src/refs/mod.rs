@@ -29,7 +29,7 @@ mod refs_packed_tests;
 #[cfg(test)]
 mod reftable_tests;
 
-pub use backend::CoreRefBackend;
+pub use backend::{AsyncFromCoreRefs, AsyncFromCoreRefsRef, AsyncRefBackend, CoreRefBackend};
 pub use head::{Head, HeadParseError};
 pub use name::{RefNameError, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
