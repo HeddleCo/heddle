@@ -497,6 +497,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v7
+        with:
+          # Keep the publication job anchored to the same validated commit as
+          # the artifact builders. The release action itself uses downloaded
+          # artifacts, but the contract checker requires every downstream job
+          # to avoid re-resolving a mutable tag ref.
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
+
       - name: Download all build outputs
         uses: actions/download-artifact@v4
         with:
