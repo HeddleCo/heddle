@@ -1069,9 +1069,7 @@ pub fn file_byte_stream(path: PathBuf) -> ByteStream {
     Box::pin(stream::unfold(
         Some((path, None::<File>)),
         |state| async move {
-            let Some((path, file)) = state else {
-                return None;
-            };
+            let (path, file) = state?;
             let mut file = match file {
                 Some(file) => file,
                 None => match File::open(&path) {

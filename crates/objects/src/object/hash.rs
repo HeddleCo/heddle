@@ -38,7 +38,7 @@ impl<const N: usize> SizedHash<N> {
     }
 
     /// Convert to hexadecimal string.
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         hex::encode(self.bytes)
     }
 
@@ -180,7 +180,7 @@ impl ContentHash {
     }
 
     /// Convert to hexadecimal string.
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         self.0.to_hex()
     }
 
@@ -258,7 +258,7 @@ impl ChangeId {
 
     /// Parse from string (with or without hd- prefix).
     pub fn parse(s: &str) -> Result<Self, ChangeIdParseError> {
-        let bytes = Self::strip_prefix(s.as_bytes()).unwrap_or_else(|| s.as_bytes());
+        let bytes = Self::strip_prefix(s.as_bytes()).unwrap_or(s.as_bytes());
         let s = std::str::from_utf8(bytes).map_err(|_| ChangeIdParseError::InvalidBase32)?;
         let bytes = base32::decode(base32::Alphabet::Crockford, &s.to_uppercase())
             .ok_or(ChangeIdParseError::InvalidBase32)?;

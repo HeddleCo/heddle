@@ -787,9 +787,8 @@ export const ReviewSignatureSchema: GenMessage<ReviewSignature> = /*@__PURE__*/
   messageDesc(file_heddle_v1_state_review, 17);
 
 /**
- * State review surface. Distinct from the GitHub-PR-focused ReviewService
- * above. Ships the review payload that powers both the CLI's
- * `heddle review show` and the web's state-review route.
+ * State review surface for immutable Heddle states. Ships the review payload
+ * that powers the CLI's `heddle review show` flow.
  *
  * @generated from service heddle.v1.StateReviewService
  */
