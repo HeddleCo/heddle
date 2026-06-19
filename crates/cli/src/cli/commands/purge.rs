@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use objects::object::ChangeId;
-use oplog::OpLogRecorder;
+use oplog::BlockingOpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
 
@@ -81,7 +81,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
     let outcome = repo.purge_blob(&blob, &principal)?;
 
     if let Some(redaction_id) = &outcome.redaction_id {
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         repo.oplog()
             .record_purge(redaction_id, &blob, Some(&scope))?;
     }

@@ -13,7 +13,7 @@
 //! asserts the new error path doesn't false-positive.
 use std::{fs, path::Path};
 
-use objects::{object::ThreadName, store::ObjectStore};
+use objects::{object::ThreadName, store::BlockingObjectStore};
 use repo::Repository;
 use tempfile::TempDir;
 

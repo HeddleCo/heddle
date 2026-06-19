@@ -1,0 +1,23 @@
+[package]
+name = "heddle-query"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Heddle operation-log query engine"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.4", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_query"

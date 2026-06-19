@@ -8,7 +8,7 @@ use std::{collections::HashSet, path::Path};
 use anyhow::{Result, anyhow};
 use objects::{
     object::{ChangeId, ContentHash},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 

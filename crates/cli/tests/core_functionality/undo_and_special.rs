@@ -3233,7 +3233,7 @@ fn test_undo_list_hides_atomic_commit_marker_batches() {
 
     // The RAW oplog does contain the marker-only commit batch (the sentinel)...
     let repo = Repository::open(temp.path()).unwrap();
-    let scope = repo.op_scope();
+    let scope = repo.op_scope_key();
     let raw = repo
         .oplog()
         .recent_batches_scoped(50, Some(&scope))

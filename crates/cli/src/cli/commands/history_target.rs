@@ -27,7 +27,7 @@ use anyhow::{Result, anyhow};
 use objects::{
     error::HeddleError,
     object::{ChangeId, State},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 
@@ -118,6 +118,7 @@ fn tip_only_tag_history_advice(tag: &str) -> RecoveryAdvice {
 ///
 /// Convenience wrapper used by services that hand state IDs across a
 /// gRPC boundary. Equivalent to `resolve_state_id(...)?.as_bytes().to_vec()`.
+#[cfg(feature = "local-services")]
 pub(crate) fn resolve_state_id_bytes(repo: &Repository, spec: &str) -> Result<Vec<u8>> {
     Ok(resolve_state_id(repo, spec)?.as_bytes().to_vec())
 }

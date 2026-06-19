@@ -28,7 +28,7 @@ use objects::{
         ReviewScope, ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, State, SymbolAnchor,
         signing_payload,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
     worktree::diff_blobs,
 };
 use prost::Message;

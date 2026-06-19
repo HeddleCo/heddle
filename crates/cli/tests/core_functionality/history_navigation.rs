@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 
 use super::*;
 

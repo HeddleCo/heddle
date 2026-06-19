@@ -18,6 +18,7 @@ hex.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4", default-features = false }
+heddle-query = { path = "../query", package = "heddle-query", version = "0.4" }
 prost.workspace = true
 prost-types.workspace = true
 refs = { path = "../refs", package = "heddle-refs", version = "0.4", default-features = false }

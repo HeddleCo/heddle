@@ -524,7 +524,7 @@ fn bench_build_walk(c: &mut Criterion) {
 ///   `decompress_only`          — zstd decompress of already-loaded
 ///                                compressed bytes. The CPU half of the cold
 ///                                path.
-///   `store_get_blob`           — `ObjectStore::get_blob` end-to-end (the
+///   `store_get_blob`           — `BlockingObjectStore::get_blob` end-to-end (the
 ///                                composition of open + read + decompress).
 ///   `load_blob_bytes_cold`     — `ContentAddressedMount::read` after
 ///                                `clear_blob_cache()` (full mount cold path

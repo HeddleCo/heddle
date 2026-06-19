@@ -43,7 +43,7 @@
 
 use std::path::PathBuf;
 
-use objects::fs_atomic::write_file_atomic;
+use objects::{fs_atomic::write_file_atomic, object::TransactionId};
 use oplog::OpRecord;
 use repo::Repository;
 use serde::{Deserialize, Serialize};
@@ -299,7 +299,7 @@ pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
         // audit-trail entry — track it on the report rather than
         // pretending the transaction is unrecovered.
         if let Err(err) = repo.oplog().record_batch(vec![OpRecord::TransactionAbort {
-            transaction_id: txn_id.clone(),
+            transaction_id: TransactionId::new(txn_id.clone()),
             reason: REPLAY_RECOVERY_REASON.to_string(),
         }]) {
             tracing::warn!(error = %err, txn = %txn_id,
@@ -316,7 +316,7 @@ pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
 mod tests {
     use std::{fs, path::Path};
 
-    use oplog::OpLogBackend;
+    use oplog::BlockingOpLogBackend;
     use proptest::prelude::*;
     use repo::Repository;
     use tempfile::TempDir;
@@ -431,7 +431,7 @@ buffered_ops = {buffered}
                 transaction_id,
                 reason,
             } => {
-                assert_eq!(transaction_id, "tx-stuck");
+                assert_eq!(transaction_id.as_str(), "tx-stuck");
                 assert_eq!(reason, REPLAY_RECOVERY_REASON);
             }
             other => panic!("expected TransactionAbort, got {other:?}"),
@@ -782,7 +782,7 @@ buffered_ops = []
                     transaction_id,
                     reason,
                 } => {
-                    prop_assert_eq!(transaction_id, txn_id);
+                    prop_assert_eq!(transaction_id.as_str(), txn_id);
                     prop_assert_eq!(reason, REPLAY_RECOVERY_REASON);
                 }
                 _ => prop_assert!(false, "expected TransactionAbort at oplog tail"),

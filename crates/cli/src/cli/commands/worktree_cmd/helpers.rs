@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::ChangeId, store::BlockingObjectStore};
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;

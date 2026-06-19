@@ -19,18 +19,10 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
-sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
-
 [dev-dependencies]
 criterion = "0.8"
 pollster = "0.4"
 tempfile.workspace = true
-
-[features]
-postgres = ["dep:sqlx", "dep:tokio", "dep:uuid", "dep:runtime-bridge"]
 
 [lib]
 path = "src/lib.rs"

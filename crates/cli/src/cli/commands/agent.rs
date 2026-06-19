@@ -1,26 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle agent serve|status|stop` handlers.
 
+#[cfg(feature = "local-services")]
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
-#[cfg(unix)]
+use anyhow::Result;
+#[cfg(feature = "local-services")]
+use anyhow::{Context, anyhow};
+#[cfg(all(unix, feature = "local-services"))]
 use daemon::local_daemon::{
     LocalDaemonConfig, PidFileContents, default_pid_path, default_socket_path, is_heddle_process,
     serve,
 };
+#[cfg(feature = "local-services")]
 use repo::Repository;
+#[cfg(feature = "local-services")]
 use serde::Serialize;
 
+#[cfg(feature = "local-services")]
 use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
 };
-use crate::cli::{
-    cli_args::{AgentCommands, AgentServeArgs, Cli},
-    should_output_json,
-};
+use crate::cli::cli_args::{AgentCommands, Cli};
+#[cfg(feature = "local-services")]
+use crate::cli::{cli_args::AgentServeArgs, should_output_json};
 
+#[cfg(feature = "local-services")]
 #[derive(Serialize)]
 pub(crate) struct AgentServeOutput {
     pub output_kind: &'static str,
@@ -33,6 +39,7 @@ pub(crate) struct AgentServeOutput {
     pub trust: RepositoryVerificationState,
 }
 
+#[cfg(feature = "local-services")]
 #[derive(Serialize)]
 pub(crate) struct AgentStatusOutput {
     output_kind: &'static str,
@@ -44,6 +51,7 @@ pub(crate) struct AgentStatusOutput {
     trust: RepositoryVerificationState,
 }
 
+#[cfg(feature = "local-services")]
 #[derive(Serialize)]
 pub(crate) struct AgentStopOutput {
     output_kind: &'static str,
@@ -59,8 +67,11 @@ pub(crate) struct AgentStopOutput {
 
 pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
     match command {
+        #[cfg(feature = "local-services")]
         AgentCommands::Serve(args) => run_serve(cli, args).await,
+        #[cfg(feature = "local-services")]
         AgentCommands::Status => run_status(cli).await,
+        #[cfg(feature = "local-services")]
         AgentCommands::Stop => run_stop(cli).await,
         // Reservation-API variants delegate to the cmd_agent_* fns
         // in agent_cmd.rs. We dispatch here so main.rs has a single
@@ -76,6 +87,7 @@ pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
     }
 }
 
+#[cfg(feature = "local-services")]
 async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -144,6 +156,7 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
     }
 }
 
+#[cfg(feature = "local-services")]
 async fn run_status(cli: &Cli) -> Result<()> {
     let repo = cli.open_repo()?;
     let pid_path = pid_path(&repo);
@@ -178,6 +191,7 @@ async fn run_status(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "local-services")]
 async fn run_stop(cli: &Cli) -> Result<()> {
     let repo = cli.open_repo()?;
     let pid_path = pid_path(&repo);
@@ -316,27 +330,28 @@ async fn run_stop(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "local-services")]
 fn print_stop_output(_repo: &Repository, output: AgentStopOutput) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "local-services"))]
 fn pid_path(repo: &Repository) -> PathBuf {
     default_pid_path(repo.heddle_dir())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "local-services"))]
 fn socket_path(repo: &Repository) -> PathBuf {
     default_socket_path(repo.heddle_dir())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "local-services"))]
 fn pid_path(_repo: &Repository) -> PathBuf {
     PathBuf::from("/dev/null/heddle-agent-not-supported.pid")
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "local-services"))]
 fn socket_path(_repo: &Repository) -> PathBuf {
     PathBuf::from("/dev/null/heddle-agent-not-supported.sock")
 }
@@ -345,7 +360,7 @@ fn socket_path(_repo: &Repository) -> PathBuf {
 /// format and the structured `(pid, marker, started_at)` format used by
 /// daemons started after this PR — `status` only needs the PID, but the
 /// `stop` path additionally checks the marker via [`PidFileContents`].
-#[cfg(unix)]
+#[cfg(all(unix, feature = "local-services"))]
 fn read_pid(path: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(path).ok()?;
     if let Some(structured) = PidFileContents::parse(&raw) {
@@ -354,18 +369,18 @@ fn read_pid(path: &Path) -> Option<u32> {
     raw.trim().parse::<u32>().ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "local-services"))]
 fn read_pid(_path: &Path) -> Option<u32> {
     None
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "local-services"))]
 fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) returns 0 on success and -1 on missing process.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "local-services"))]
 fn pid_alive(_pid: u32) -> bool {
     false
 }

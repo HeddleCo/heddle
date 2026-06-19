@@ -31,9 +31,9 @@ use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepositoryLockExt,
-    object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
+    object::{ChangeId, ContentHash, Scope, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
+use oplog::{BlockingOpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
     namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
@@ -420,7 +420,7 @@ impl Repository {
         if take_visibility_commit_fault(VisibilityCommitFault::Append) {
             anyhow::bail!("injected visibility audit-append failure");
         }
-        let scope = self.op_scope();
+        let scope = Scope::new(self.op_scope());
         let snapshots = VisibilitySidecarSnapshots {
             prior: put.prior_sidecar.clone(),
             new: put.new_sidecar.clone(),
@@ -854,7 +854,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use objects::object::{Principal, VisibilityTier};
-    use oplog::OpLogBackend;
+    use oplog::BlockingOpLogBackend;
     use tempfile::TempDir;
 
     use super::*;

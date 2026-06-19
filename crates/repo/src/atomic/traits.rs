@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use objects::error::Result;
+use objects::{error::Result, object::TransactionId};
 use oplog::{IsolationKey, OpRecord};
 
 use super::tx::{RewindLedger, Tx};
@@ -65,7 +65,7 @@ pub trait AtomicMutation {
     /// prior commit, and the second run is a no-op. Required (no default), so the
     /// "minted fresh" footgun is unrepresentable. Only the *root* mutation's key
     /// is used — an enrolled child never reaches the commit point.
-    fn transaction_id(&self) -> String;
+    fn transaction_id(&self) -> TransactionId;
 
     /// Logical thread/head keys this root mutation read or may write. The root
     /// executor captures these keys with the current oplog head before apply and

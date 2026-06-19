@@ -3,7 +3,7 @@ name = "weft-client-shim"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Trait surface for client extensions to the Heddle CLI. OSS default is a noop impl; closed builds replace it via [patch.crates-io]."
+description = "Trait surface for hosted client extensions to the Heddle CLI."
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
@@ -11,7 +11,6 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 repo = { path = "../repo", package = "heddle-repo", version = "0.4", default-features = false, features = ["git-overlay", "native"] }
 
 [lib]

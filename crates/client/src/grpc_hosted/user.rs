@@ -9,8 +9,8 @@ use grpc::heddle::v1::{
     UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
     grant_target_ref::Target as GrantTargetKind,
 };
-use wire::ProtocolError;
 use tonic::Request;
+use wire::ProtocolError;
 
 use super::{
     HostedGrpcClient,

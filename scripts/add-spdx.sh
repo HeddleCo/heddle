@@ -5,8 +5,7 @@
 #
 # Run from the repo root: `bash scripts/add-spdx.sh`
 #
-# Excluded: server/, hosted/, hosted-client/ (closed-bound, will live
-# in the private heddle-hosted workspace post-split).
+# Excluded: server/ and hosted/ concerns owned by Weft.
 
 set -euo pipefail
 
@@ -26,9 +25,8 @@ OSS_CRATES=(
   crates/daemon
   crates/cli
   crates/cli-shared
-  crates/hosted-client-shim
+  crates/weft-client-shim
   crates/devtools
-  crates/review
   crates/state_review
 )
 

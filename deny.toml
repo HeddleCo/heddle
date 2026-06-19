@@ -42,17 +42,6 @@ ignore = [
     # rsa 0.10 (with constant-time decryption) ships.
     { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 Marvin timing sidechannel; precondition (attacker-chosen ciphertext decryption) not present in Heddle's signature-verification use; tracked upstream" },
 
-    # The next four advisories all stem from a single transitive dep chain:
-    #   aws-sdk-s3 → aws-smithy-runtime → aws-smithy-http-client → hyper-rustls 0.24 → rustls 0.21 → rustls-webpki 0.101 / rustls-pemfile 2
-    # Heddle's *direct* deps pin rustls 0.23 (see workspace Cargo.toml) but
-    # aws-smithy-http-client 1.1.x is on the old rustls 0.21 line. Fixing it
-    # requires bumping aws-sdk-s3 to a version whose smithy stack uses
-    # rustls 0.23 — out of scope for this gate-landing PR. Tracked as a
-    # follow-up; remove these ignores in the same PR that bumps aws-sdk-s3.
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101: wildcard SAN constraint bypass. Transitive via aws-sdk-s3 → smithy-http-client → old rustls 0.21. Heddle doesn't validate certificates with wildcard name constraints on attacker-supplied trust anchors; mitigation is the aws-sdk-s3 bump tracked as a follow-up." },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101: URI name constraint accepted. Same transitive chain as RUSTSEC-2026-0099; same mitigation path." },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101: reachable panic parsing malformed CRL. Heddle does not consume attacker-supplied CRLs over the aws-sdk-s3 path (S3 endpoint TLS uses a small fixed root set); same mitigation path." },
-
     # proc-macro-error2 2.0.1: unmaintained (RUSTSEC-2026-0173). Pulled
     # transitively via biscuit-quote → biscuit-auth 6.0 (heddle-client's auth
     # lib). It is a BUILD-TIME proc-macro helper, not a runtime dependency, and
@@ -139,8 +128,7 @@ deny = [
     { crate = "native-tls", reason = "wraps OpenSSL/SChannel/SecureTransport; rustls is the project standard" },
     # Note: openssl-probe is intentionally NOT banned. It's a small helper
     # for locating the system CA-bundle path (env vars + file probes) and
-    # does not link libssl. rustls-native-certs depends on it on Linux,
-    # which is reached transitively via aws-sdk-s3 → smithy-http-client.
+    # does not link libssl.
 ]
 
 # Crates that legitimately appear multiple times in the graph today. Each

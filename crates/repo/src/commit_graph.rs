@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use objects::{
     object::{ChangeId, ContentHash, Tree, diff_trees},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use tracing::warn;
 

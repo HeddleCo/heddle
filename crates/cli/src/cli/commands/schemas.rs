@@ -205,7 +205,6 @@ fn resolve_schema_verb(verb: &str) -> Option<&'static str> {
     {
         return Some(registered);
     }
-
     let matches = matching_schema_verbs(verb, schema_verbs());
     if matches.len() == 1 {
         matches.first().copied()
@@ -3267,7 +3266,9 @@ mod tests {
             );
         }
         for verb in &implemented {
-            if cfg!(all(feature = "git-overlay", feature = "semantic")) {
+            if cfg!(all(feature = "git-overlay", feature = "semantic"))
+                && !schema_implementation_is_feature_gated_out(verb)
+            {
                 assert!(
                     advertised.contains(verb),
                     "verb '{verb}' has a schema implementation but is not advertised by active command contracts"
@@ -3279,6 +3280,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn schema_implementation_is_feature_gated_out(verb: &str) -> bool {
+        !cfg!(feature = "local-services")
+            && matches!(
+                verb,
+                "agent serve"
+                    | "agent status"
+                    | "agent stop"
+                    | "discuss open"
+                    | "discuss append"
+                    | "discuss resolve"
+                    | "discuss show"
+                    | "discuss list"
+                    | "review show"
+                    | "review sign"
+                    | "review next"
+                    | "review health"
+                    | "transaction commit"
+            )
     }
 
     #[test]
@@ -3674,10 +3695,15 @@ mod tests {
             "fsck",
             "resolve",
             "retro",
+            #[cfg(feature = "local-services")]
             "discuss open",
+            #[cfg(feature = "local-services")]
             "discuss append",
+            #[cfg(feature = "local-services")]
             "discuss resolve",
+            #[cfg(feature = "local-services")]
             "discuss list",
+            #[cfg(feature = "local-services")]
             "discuss show",
             "query",
             "query --attribution",

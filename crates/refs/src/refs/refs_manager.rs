@@ -12,7 +12,7 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     fs_ops::remove_path_recursively,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{ChangeId, MarkerName, RemoteName, Scope, ThreadName},
 };
 
 use super::{
@@ -154,13 +154,12 @@ impl RefManager {
     /// against that reconciled state, BEFORE the record is appended (phase 4),
     /// and the publish (phase 5) follows under the same lock — so a failed
     /// expectation never leaks a record, and two concurrent callers can never
-    /// append in one order and publish in another. (For `PgRefBackend` the single
-    /// `pool.begin()…commit()` gives the same atomicity natively.)
+    /// append in one order and publish in another.
     pub fn commit_and_publish(
         &self,
         encoded_records: &[Vec<u8>],
         ref_updates: &[RefUpdate],
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<()> {
         self.write_chokepoint(|lock| {
             self.validate_commit_publish(ref_updates, lock, || {
@@ -635,11 +634,19 @@ impl RefManager {
         self.list_markers_from_storage()
     }
 
-    fn raw_list_remotes(&self) -> Result<Vec<String>> {
+    fn raw_list_remotes(&self) -> Result<Vec<RemoteName>> {
         if let Some(summary) = self.try_read_ref_summary_index() {
-            return Ok(summary.remote_names());
+            return Ok(summary
+                .remote_names()
+                .into_iter()
+                .map(RemoteName::new)
+                .collect());
         }
-        self.list_remotes_from_storage()
+        Ok(self
+            .list_remotes_from_storage()?
+            .into_iter()
+            .map(RemoteName::new)
+            .collect())
     }
 
     fn raw_list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>> {
@@ -895,7 +902,7 @@ impl RefManager {
 
     pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         self.reconciled_point(LoadRequest::RemoteThread {
-            remote: remote.to_string(),
+            remote: RemoteName::new(remote),
             thread: thread.clone(),
         })
     }
@@ -988,7 +995,7 @@ impl RefManager {
         Ok(state)
     }
 
-    pub fn list_remotes(&self) -> Result<Vec<String>> {
+    pub fn list_remotes(&self) -> Result<Vec<RemoteName>> {
         match self.reconciled_load(LoadRequest::RemoteList)? {
             Loaded::RemoteList(names) => Ok(names),
             _ => unreachable!("RemoteList request yields RemoteList"),
@@ -997,7 +1004,7 @@ impl RefManager {
 
     pub fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>> {
         match self.reconciled_load(LoadRequest::RemoteThreadList {
-            remote: remote.to_string(),
+            remote: RemoteName::new(remote),
         })? {
             Loaded::RemoteThreadList(names) => Ok(names),
             _ => unreachable!("RemoteThreadList request yields RemoteThreadList"),
@@ -1148,26 +1155,39 @@ impl CoreRefBackend for RefManager {
 }
 
 impl RefBackend for RefManager {
-    fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
-        RefManager::get_remote_thread(self, remote, thread)
+    fn get_remote_thread(
+        &self,
+        remote: &RemoteName,
+        thread: &ThreadName,
+    ) -> Result<Option<ChangeId>> {
+        RefManager::get_remote_thread(self, remote.as_str(), thread)
     }
-    fn set_remote_thread(&self, remote: &str, thread: &ThreadName, state: &ChangeId) -> Result<()> {
-        RefManager::set_remote_thread(self, remote, thread, state)
+    fn set_remote_thread(
+        &self,
+        remote: &RemoteName,
+        thread: &ThreadName,
+        state: &ChangeId,
+    ) -> Result<()> {
+        RefManager::set_remote_thread(self, remote.as_str(), thread, state)
     }
-    fn delete_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
-        RefManager::delete_remote_thread(self, remote, thread)
+    fn delete_remote_thread(
+        &self,
+        remote: &RemoteName,
+        thread: &ThreadName,
+    ) -> Result<Option<ChangeId>> {
+        RefManager::delete_remote_thread(self, remote.as_str(), thread)
     }
-    fn list_remotes(&self) -> Result<Vec<String>> {
+    fn list_remotes(&self) -> Result<Vec<RemoteName>> {
         RefManager::list_remotes(self)
     }
-    fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>> {
-        RefManager::list_remote_threads(self, remote)
+    fn list_remote_threads(&self, remote: &RemoteName) -> Result<Vec<ThreadName>> {
+        RefManager::list_remote_threads(self, remote.as_str())
     }
     fn commit_and_publish(
         &self,
         encoded_records: &[Vec<u8>],
         ref_updates: &[RefUpdate],
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<()> {
         RefManager::commit_and_publish(self, encoded_records, ref_updates, scope)
     }

@@ -19,7 +19,9 @@ use repo::{OutputFormat, RepoConfig};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output, heddle_output_with_env};
+#[cfg(feature = "local-services")]
+use super::heddle_output_with_env;
+use super::{heddle, heddle_output};
 
 /// Init a repo, write a tracked file, capture one state.
 fn init_and_capture() -> TempDir {
@@ -58,6 +60,7 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
 }
 
+#[cfg(feature = "local-services")]
 fn heddle_json_with_env(args: &[&str], temp: &TempDir, envs: &[(&str, &str)]) -> Value {
     let mut argv: Vec<&str> = vec!["--output", "json"];
     argv.extend(args.iter().copied());
@@ -894,6 +897,7 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
 }
 
 #[test]
+#[cfg(feature = "local-services")]
 fn discuss_open_show_append_emit_output_kind() {
     let temp = init_and_capture();
     let env_principal = [
@@ -961,6 +965,7 @@ fn discuss_open_show_append_emit_output_kind() {
 }
 
 #[test]
+#[cfg(feature = "local-services")]
 fn review_show_emits_output_kind() {
     let temp = init_and_capture();
     let value = heddle_json(&["review", "show", "HEAD"], &temp);
@@ -975,6 +980,7 @@ fn review_show_emits_output_kind() {
 }
 
 #[test]
+#[cfg(feature = "local-services")]
 fn review_next_envelope_is_emitted_when_window_empty() {
     // Smoke test: `review next` against a fresh repo with no
     // pending review work hits the `None`-branch of the envelope —

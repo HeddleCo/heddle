@@ -6,7 +6,7 @@
 //! [`OperationLogQuery`] / [`IndexedOperation`] types. No state changes,
 //! no idempotency wrapper.
 
-use std::{collections::BTreeMap, path::Path, pin::Pin};
+use std::pin::Pin;
 
 use chrono::TimeZone;
 use futures::Stream;
@@ -14,9 +14,7 @@ use grpc::heddle::v1::{
     OperationHit, QueryOperationsRequest, QueryOperationsResponse, StreamOperationsRequest,
     operation_log_query_service_server::OperationLogQueryService,
 };
-use objects::{error::Result as HeddleResult, object::ChangeId};
-use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
-use refs::operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
+use heddle_query::{IndexedOperation, OperationLogQuery};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -43,11 +41,6 @@ fn parse_unix_secs(secs: i64) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::Utc.timestamp_opt(secs, 0).single()
 }
 
-/// Query is an operator-facing inspection command, so it should answer from
-/// the live oplog even before the rebuildable index sidecar has been warmed.
-/// Keep the scan bounded; long-tail history can use the index once populated.
-const OPLOG_FALLBACK_SCAN_WINDOW: usize = 100_000;
-
 fn build_query(req: &QueryOperationsRequest) -> OperationLogQuery {
     let mut q = OperationLogQuery {
         actor: (!req.actor.is_empty()).then(|| req.actor.clone()),
@@ -59,18 +52,7 @@ fn build_query(req: &QueryOperationsRequest) -> OperationLogQuery {
         until: parse_unix_secs(req.until_secs),
         limit: (req.limit > 0).then_some(req.limit as usize),
     };
-    if !req.include_checkpoints && q.verbs.is_none() {
-        // Derived from the oplog verb catalog (the single source of truth), not
-        // a hand-maintained list — so a new `OpRecord` variant is surfaced by
-        // default the moment it joins the catalog, instead of being silently
-        // dropped from the default query (heddle#354 r9, cid 3330304663).
-        q.verbs = Some(
-            OpRecord::verbs(false)
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
-    }
+    heddle_query::apply_checkpoint_filter(&mut q, req.include_checkpoints);
     q
 }
 
@@ -91,161 +73,6 @@ fn hit_to_proto(hit: IndexedOperation) -> OperationHit {
     }
 }
 
-fn query_combined(
-    heddle_dir: &Path,
-    query: &OperationLogQuery,
-) -> HeddleResult<Vec<IndexedOperation>> {
-    let index = OperationLogIndex::new(heddle_dir);
-    let mut unbounded = query.clone();
-    unbounded.limit = None;
-
-    let mut by_seq = BTreeMap::new();
-    for hit in index.query(&unbounded)? {
-        by_seq.insert(hit.seq, hit);
-    }
-
-    if unbounded.symbol.is_none() && unbounded.signal_kind.is_none() {
-        for hit in query_oplog_fallback(heddle_dir, &unbounded)? {
-            by_seq.entry(hit.seq).or_insert(hit);
-        }
-    }
-
-    let mut hits: Vec<_> = by_seq.into_values().collect();
-    hits.sort_by_key(|hit| hit.seq);
-    if let Some(limit) = query.limit {
-        hits.truncate(limit);
-    }
-    Ok(hits)
-}
-
-fn query_oplog_fallback(
-    heddle_dir: &Path,
-    query: &OperationLogQuery,
-) -> HeddleResult<Vec<IndexedOperation>> {
-    let log = OpLog::new_unattributed(heddle_dir);
-    let mut entries = log.recent(OPLOG_FALLBACK_SCAN_WINDOW)?;
-    entries.reverse();
-    let mut hits = Vec::new();
-    for entry in entries {
-        let hit = indexed_from_oplog_entry(&entry);
-        if indexed_operation_matches(&hit, query) {
-            hits.push(hit);
-        }
-    }
-    Ok(hits)
-}
-
-fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
-    IndexedOperation {
-        seq: entry.id,
-        timestamp_secs: entry.timestamp.timestamp(),
-        verb: entry.operation.verb().to_string(),
-        actor_email: entry.actor.email.clone(),
-        operation_id: entry.operation_id,
-        thread: thread_for(&entry.operation),
-        symbols: Vec::new(),
-        signal_kinds: Vec::new(),
-        change_id: primary_change_id(&entry.operation),
-    }
-}
-
-fn indexed_operation_matches(hit: &IndexedOperation, query: &OperationLogQuery) -> bool {
-    if let Some(actor) = &query.actor
-        && &hit.actor_email != actor
-    {
-        return false;
-    }
-    if let Some(symbol) = &query.symbol
-        && !hit.symbols.iter().any(|candidate| candidate == symbol)
-    {
-        return false;
-    }
-    if let Some(kind) = &query.signal_kind
-        && !hit.signal_kinds.iter().any(|candidate| candidate == kind)
-    {
-        return false;
-    }
-    if let Some(thread) = &query.thread
-        && hit.thread.as_deref() != Some(thread.as_str())
-    {
-        return false;
-    }
-    if let Some(verbs) = &query.verbs
-        && !verbs.iter().any(|verb| verb == &hit.verb)
-    {
-        return false;
-    }
-    let timestamp = hit.timestamp();
-    if let Some(start) = query.since
-        && timestamp < start
-    {
-        return false;
-    }
-    if let Some(end) = query.until
-        && timestamp > end
-    {
-        return false;
-    }
-    true
-}
-
-fn thread_for(op: &OpRecord) -> Option<String> {
-    match op {
-        OpRecord::Snapshot { thread, .. } => thread.clone(),
-        OpRecord::ThreadCreate { name, .. } => Some(name.clone()),
-        OpRecord::ThreadDelete { name, .. } => Some(name.clone()),
-        OpRecord::ThreadUpdate { name, .. } => Some(name.clone()),
-        OpRecord::MarkerCreate { name, .. } => Some(name.clone()),
-        OpRecord::MarkerDelete { name, .. } => Some(name.clone()),
-        OpRecord::Checkpoint { thread, .. } => thread.clone(),
-        OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
-        OpRecord::FastForward { target_thread, .. } => Some(target_thread.clone()),
-        OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
-        OpRecord::RemoteThreadUpdate { thread, .. }
-        | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
-        OpRecord::Goto { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. }
-        | OpRecord::Purge { .. } => None,
-    }
-}
-
-fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
-    match op {
-        OpRecord::Snapshot { new_state, .. } => Some(*new_state),
-        OpRecord::Goto { target, .. } => Some(*target),
-        OpRecord::ThreadCreate { state, .. } => Some(*state),
-        OpRecord::ThreadDelete { state, .. } => Some(*state),
-        OpRecord::ThreadUpdate { new_state, .. } => Some(*new_state),
-        OpRecord::Fork { new_state, .. } => Some(*new_state),
-        OpRecord::Collapse { result, .. } => Some(*result),
-        OpRecord::MarkerCreate { state, .. } => Some(*state),
-        OpRecord::MarkerDelete { state, .. } => Some(*state),
-        OpRecord::Checkpoint { state, .. } => Some(*state),
-        OpRecord::GitCheckpoint { state, .. } => Some(*state),
-        OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
-        OpRecord::Redact { state, .. } => Some(*state),
-        OpRecord::StateVisibilitySet { state, .. }
-        | OpRecord::StateVisibilityPromote { state, .. } => Some(*state),
-        OpRecord::RemoteThreadUpdate { state, .. } | OpRecord::RemoteThreadDelete { state, .. } => {
-            Some(*state)
-        }
-        OpRecord::UndoRecoveryUpdate { state } => Some(*state),
-        OpRecord::TransactionAbort { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. } => None,
-    }
-}
-
 #[tonic::async_trait]
 impl OperationLogQueryService for LocalOperationLogQueryService {
     type StreamOperationsStream = Pin<Box<dyn Stream<Item = Result<OperationHit, Status>> + Send>>;
@@ -256,7 +83,8 @@ impl OperationLogQueryService for LocalOperationLogQueryService {
     ) -> Result<Response<QueryOperationsResponse>, Status> {
         let req = request.into_inner();
         let q = build_query(&req);
-        let hits = query_combined(self.inner.repo().heddle_dir(), &q).map_err(to_status)?;
+        let hits = heddle_query::query_operations(self.inner.repo().heddle_dir(), &q)
+            .map_err(to_status)?;
         let proto_hits = hits.into_iter().map(hit_to_proto).collect();
         Ok(Response::new(QueryOperationsResponse { hits: proto_hits }))
     }
@@ -268,7 +96,8 @@ impl OperationLogQueryService for LocalOperationLogQueryService {
         let req = request.into_inner();
         let inner_req = req.query.unwrap_or_default();
         let q = build_query(&inner_req);
-        let hits = query_combined(self.inner.repo().heddle_dir(), &q).map_err(to_status)?;
+        let hits = heddle_query::query_operations(self.inner.repo().heddle_dir(), &q)
+            .map_err(to_status)?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move {
@@ -287,8 +116,9 @@ mod tests {
     use std::sync::Arc;
 
     use futures::StreamExt;
+    use heddle_query::OperationLogIndex;
     use objects::object::ChangeId;
-    use refs::operation_index::IndexedOperation;
+    use oplog::{OpLog, OpRecord};
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 

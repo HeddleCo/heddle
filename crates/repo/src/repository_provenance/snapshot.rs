@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use objects::{
     object::{ContentHash, EntryType, FileProvenance, State, Tree, TreeEntry},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use super::{

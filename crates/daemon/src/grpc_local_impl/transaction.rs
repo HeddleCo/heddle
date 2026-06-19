@@ -23,7 +23,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, OperationId, ThreadName},
+    object::{ChangeId, OperationId, ThreadName, TransactionId},
 };
 use oplog::OpRecord;
 use prost::Message;
@@ -249,7 +249,7 @@ impl TransactionService for LocalTransactionService {
                 save_sentinel(&path, &sentinel)?;
 
                 if let Err(err) = repo.oplog().record_batch(vec![OpRecord::TransactionCommit {
-                    transaction_id,
+                    transaction_id: TransactionId::new(transaction_id),
                     op_count,
                 }]) {
                     tracing::warn!(error = %err, txn = %sentinel.transaction_id,
@@ -317,7 +317,7 @@ impl TransactionService for LocalTransactionService {
                 // is follow-on work — today the worktree stays where the
                 // (still-execute-immediately) buffered verbs left it.
                 if let Err(err) = repo.oplog().record_batch(vec![OpRecord::TransactionAbort {
-                    transaction_id,
+                    transaction_id: TransactionId::new(transaction_id),
                     reason: reason.unwrap_or_default(),
                 }]) {
                     tracing::warn!(error = %err, txn = %sentinel.transaction_id,
@@ -358,7 +358,7 @@ impl TransactionService for LocalTransactionService {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use oplog::OpLogBackend;
+    use oplog::BlockingOpLogBackend;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 
@@ -664,7 +664,7 @@ mod tests {
                 transaction_id,
                 op_count,
             } => {
-                assert_eq!(transaction_id, &begin.transaction_id);
+                assert_eq!(transaction_id.as_str(), begin.transaction_id.as_str());
                 assert_eq!(*op_count, 2);
             }
             other => panic!("expected TransactionCommit at oplog tail, got {other:?}"),
@@ -709,7 +709,7 @@ mod tests {
                 transaction_id,
                 reason,
             } => {
-                assert_eq!(transaction_id, &begin.transaction_id);
+                assert_eq!(transaction_id.as_str(), begin.transaction_id.as_str());
                 assert_eq!(reason, "rollback please");
             }
             other => panic!("expected TransactionAbort at oplog tail, got {other:?}"),

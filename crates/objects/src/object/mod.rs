@@ -39,7 +39,7 @@ pub use discussion::{
     DiscussionsBlob,
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash};
-pub use identifiers::{MarkerName, Scope, ThreadName};
+pub use identifiers::{MarkerName, RemoteName, Scope, ThreadName, TransactionId};
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
     REDACTION_SIGNING_PAYLOAD_VERSION_TAG, Redaction, RedactionError, RedactionsBlob,
@@ -80,5 +80,5 @@ pub use timeline::{
 pub use tree::{
     EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name,
 };
-pub use tree_diff::{diff_trees, diff_trees_visit};
+pub use tree_diff::{diff_trees, diff_trees_async, diff_trees_visit, diff_trees_visit_async};
 pub use visibility_tier::VisibilityTier;

@@ -15,7 +15,7 @@
 
 use objects::{
     object::{Blob, ContentHash, RiskSignalBlob, State},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use state_review::{
     ReviewSignalsConfig, SemanticContext,

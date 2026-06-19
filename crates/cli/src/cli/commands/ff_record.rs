@@ -17,7 +17,7 @@
 
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
-use oplog::{OpLogRecorder, OpRecord};
+use oplog::{BlockingOpLogRecorder, OpRecord};
 use refs::Head;
 use repo::Repository;
 
@@ -178,12 +178,12 @@ fn record_ff_advance_inner(
                 thread,
                 pre_target_id,
                 post_target_id,
-                Some(&repo.op_scope()),
+                Some(&repo.op_scope_key()),
             )?;
         }
         Head::Detached { state } => {
             repo.oplog()
-                .record_goto(post_target_id, Some(state), Some(&repo.op_scope()))?;
+                .record_goto(post_target_id, Some(state), Some(&repo.op_scope_key()))?;
         }
     }
     Ok(())
@@ -240,7 +240,7 @@ mod tests {
         ));
         let batches = repo
             .oplog()
-            .recent_batches_scoped(4, Some(&repo.op_scope()))
+            .recent_batches_scoped(4, Some(&repo.op_scope_key()))
             .unwrap();
         assert!(
             batches

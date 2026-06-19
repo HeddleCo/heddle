@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use crypto::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 use serial_test::serial;
 
 use super::*;

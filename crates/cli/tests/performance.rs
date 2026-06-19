@@ -11,13 +11,13 @@ use std::{
 use objects::{
     object::{Blob, ChangeId, ContentHash},
     store::{
-        CompressionConfig, ObjectStore, PackBuilder, PackObjectId,
+        BlockingObjectStore, CompressionConfig, PackBuilder, PackObjectId,
         pack::ObjectType as PackObjectType,
     },
 };
-use wire::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;
 use tempfile::TempDir;
+use wire::{ObjectData, ObjectId, ObjectType};
 
 #[derive(Debug)]
 struct SnapshotProfile {

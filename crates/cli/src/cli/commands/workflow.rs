@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, anyhow};
 use objects::{
     object::{ChangeId, State, ThreadName},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
-use oplog::{OpBatch, OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpBatch, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 
@@ -1299,7 +1299,7 @@ fn find_recent_land_collapse_batch(
     collapse_state: &ChangeId,
 ) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .recent_batches_scoped(12, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch.entries.iter().any(|entry| {
@@ -1314,7 +1314,7 @@ fn find_recent_land_collapse_batch(
 
 fn find_recent_land_integration_batch(repo: &Repository, merge_state: &str) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .recent_batches_scoped(12, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch
@@ -1327,7 +1327,7 @@ fn find_recent_land_integration_batch(repo: &Repository, merge_state: &str) -> R
 
 fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .recent_batches_scoped(12, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch.entries.iter().any(|entry| {

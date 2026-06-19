@@ -10,9 +10,12 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use objects::error::{HeddleError, Result};
+use objects::{
+    error::{HeddleError, Result},
+    object::{Scope, TransactionId},
+};
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
+    BlockingOpLogBackend, ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpRecord,
 };
 
 use super::traits::{DeferredMutation, EagerMutation, StagedCommit};
@@ -45,7 +48,7 @@ pub(crate) type EnrolledRoot<M> = Rc<RefCell<M>>;
 pub struct RewindLedger {
     /// The checkout lane (`Repository::op_scope`) the transaction recorded
     /// under (heddle#330 §1.5).
-    pub scope: String,
+    pub scope: Scope,
     /// Nesting depth at which the mutation was enrolled.
     pub depth: u32,
 }
@@ -58,8 +61,8 @@ pub struct RewindLedger {
 /// targets in impl-a); the hosted/Postgres path uses its own gRPC handlers.
 pub struct Tx<'a> {
     repo: &'a Repository,
-    scope: String,
-    transaction_id: String,
+    scope: Scope,
+    transaction_id: TransactionId,
     isolation: IsolationPrecondition,
     depth: u32,
     ledger: Vec<RewindAction<'a>>,
@@ -76,12 +79,12 @@ impl<'a> Tx<'a> {
     /// minting a new key and double-applying.
     pub(crate) fn root(
         repo: &'a Repository,
-        transaction_id: String,
+        transaction_id: TransactionId,
         isolation: IsolationPrecondition,
     ) -> Self {
         Self {
             repo,
-            scope: repo.op_scope(),
+            scope: Scope::new(repo.op_scope()),
             transaction_id,
             isolation,
             depth: 0,
@@ -97,13 +100,13 @@ impl<'a> Tx<'a> {
 
     /// The checkout lane (`op_scope`) every record in this transaction is
     /// keyed under, so a sibling checkout's executor never unwinds this one.
-    pub fn scope(&self) -> &str {
+    pub fn scope(&self) -> &Scope {
         &self.scope
     }
 
     /// The idempotency key — the same id used for the `TransactionCommit`
     /// marker and (eventually) the on-disk sentinel (§3.4).
-    pub fn transaction_id(&self) -> &str {
+    pub fn transaction_id(&self) -> &TransactionId {
         &self.transaction_id
     }
 

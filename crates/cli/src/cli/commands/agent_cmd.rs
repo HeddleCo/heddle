@@ -6,11 +6,11 @@ use chrono::Utc;
 use objects::{
     object::ThreadName,
     store::{
-        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore, ReserveOutcome,
-        current_boot_id,
+        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, BlockingObjectStore,
+        ReserveOutcome, current_boot_id,
     },
 };
-use oplog::OpLogRecorder;
+use oplog::BlockingOpLogRecorder;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
@@ -333,7 +333,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             // that aren't expected to participate in human undo/redo
             // flows in 0.3. heddle#23 r2.
             repo.oplog()
-                .record_thread_create(&tn, &anchor, None, Some(&repo.op_scope()))?;
+                .record_thread_create(&tn, &anchor, None, Some(&repo.op_scope_key()))?;
         }
 
         // Ensure a Thread record exists so downstream commands

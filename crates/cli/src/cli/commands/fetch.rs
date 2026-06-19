@@ -9,9 +9,9 @@ use anyhow::Context;
 use anyhow::Result;
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
-use objects::object::{MarkerName, ThreadName};
+use objects::object::{MarkerName, RemoteName, ThreadName};
 #[cfg(feature = "client")]
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
@@ -52,15 +52,15 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
         let remotes = if all {
             let configured = repo.refs().list_remotes()?;
             if configured.is_empty() {
-                vec!["origin".to_string()]
+                vec![RemoteName::new("origin")]
             } else {
                 configured
             }
         } else {
             let selected = if let Some(remote) = remote.as_ref() {
-                remote.clone()
+                RemoteName::new(remote)
             } else if let Some(default) = resolved_default_remote_name(&repo)? {
-                default
+                RemoteName::new(default)
             } else {
                 return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
             };
@@ -69,7 +69,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
         for remote_name in &remotes {
             let mut bridge = GitBridge::new(&repo);
-            bridge.fetch(remote_name)?;
+            bridge.fetch(remote_name.as_str())?;
         }
 
         if should_output_json(cli, Some(repo.config())) {
@@ -82,7 +82,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                     } else {
                         remotes
                             .first()
-                            .cloned()
+                            .map(ToString::to_string)
                             .unwrap_or_else(|| "origin".to_string())
                     },
                     ref_scope: Some("branches_and_heddle_notes"),
@@ -99,7 +99,8 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 if all {
                     style::bold("all remotes")
                 } else {
-                    style::bold(&remotes.join(", "))
+                    let remote_names = remotes.iter().map(ToString::to_string).collect::<Vec<_>>();
+                    style::bold(&remote_names.join(", "))
                 }
             );
         }
@@ -109,9 +110,9 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     let remotes = if all {
         repo.refs().list_remotes()?
     } else if let Some(remote) = remote.as_ref() {
-        vec![remote.clone()]
+        vec![RemoteName::new(remote)]
     } else if let Some(default) = resolved_default_remote_name(&repo)? {
-        vec![default]
+        vec![RemoteName::new(default)]
     } else {
         return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
     };
@@ -131,7 +132,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
         match target {
             RemoteTarget::Local(path) => {
-                let (refs, objects) = fetch_local(&repo, &path, remote_name, cli).await?;
+                let (refs, objects) = fetch_local(&repo, &path, remote_name.as_str(), cli).await?;
                 total_refs += refs;
                 total_objects += objects;
             }
@@ -145,7 +146,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                             repo_path: repo_path.as_deref(),
                             user_config: &user_config,
                             server_key,
-                            remote_name,
+                            remote_name: remote_name.as_str(),
                             cli,
                         },
                     )
@@ -178,7 +179,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 } else {
                     remotes
                         .first()
-                        .cloned()
+                        .map(ToString::to_string)
                         .unwrap_or_else(|| "origin".to_string())
                 },
                 ref_scope: None,

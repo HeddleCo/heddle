@@ -11,7 +11,7 @@
 
 use objects::{
     error::Result,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{ChangeId, MarkerName, RemoteName, Scope, ThreadName},
 };
 
 use super::{Head, RefUpdate};
@@ -38,11 +38,16 @@ pub enum LoadRequest {
     Thread(ThreadName),
     Marker(MarkerName),
     UndoRecovery,
-    RemoteThread { remote: String, thread: ThreadName },
+    RemoteThread {
+        remote: RemoteName,
+        thread: ThreadName,
+    },
     ThreadList,
     MarkerList,
     RemoteList,
-    RemoteThreadList { remote: String },
+    RemoteThreadList {
+        remote: RemoteName,
+    },
 }
 
 impl LoadRequest {
@@ -64,7 +69,7 @@ pub enum Loaded {
     Point(Option<ChangeId>),
     ThreadList(Vec<ThreadName>),
     MarkerList(Vec<MarkerName>),
-    RemoteList(Vec<String>),
+    RemoteList(Vec<RemoteName>),
     RemoteThreadList(Vec<ThreadName>),
 }
 
@@ -81,7 +86,7 @@ pub struct ReconcileOutcome {
     pub loaded: Loaded,
     pub republish: Vec<RefUpdate>,
     /// `(remote, thread, Some(state) | None == delete)` materializations.
-    pub remote_updates: Vec<(String, ThreadName, Option<ChangeId>)>,
+    pub remote_updates: Vec<(RemoteName, ThreadName, Option<ChangeId>)>,
     /// New undo-recovery pointer to materialize, if a lagged batch set it.
     pub undo_recovery: Option<ChangeId>,
 }
@@ -96,7 +101,7 @@ pub struct ReconcileOutcome {
 pub trait RefCommitter: Send + Sync {
     /// Append the (opaque-encoded) ref-carrying `OpRecord` batch under the
     /// oplog write lock — phase 4, the commit point.
-    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()>;
+    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&Scope>) -> Result<()>;
 }
 
 /// The oplog-backed fold, injected into `RefManager` from the `repo`/`oplog`

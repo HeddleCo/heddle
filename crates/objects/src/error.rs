@@ -3,6 +3,41 @@
 
 use crate::object::{ChangeId, ContentHash, TreeError};
 
+/// Machine-readable storage error category.
+///
+/// Hosted/cloud adapters should return errors that classify into these
+/// buckets so callers can decide retry, CAS handling, and corruption policy
+/// without parsing human-facing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageErrorKind {
+    Missing,
+    Conflict,
+    CasMismatch,
+    AlreadyExists,
+    Transient,
+    Corrupt,
+    Unsupported,
+    Invalid,
+    Other,
+}
+
+impl std::fmt::Display for StorageErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            StorageErrorKind::Missing => "missing",
+            StorageErrorKind::Conflict => "conflict",
+            StorageErrorKind::CasMismatch => "cas-mismatch",
+            StorageErrorKind::AlreadyExists => "already-exists",
+            StorageErrorKind::Transient => "transient",
+            StorageErrorKind::Corrupt => "corrupt",
+            StorageErrorKind::Unsupported => "unsupported",
+            StorageErrorKind::Invalid => "invalid",
+            StorageErrorKind::Other => "other",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Error type for repository/storage-adjacent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum HeddleError {
@@ -12,6 +47,11 @@ pub enum HeddleError {
     StateNotFound(ChangeId),
     #[error("invalid object: {0}")]
     InvalidObject(String),
+    #[error("storage {kind}: {message}")]
+    Storage {
+        kind: StorageErrorKind,
+        message: String,
+    },
     #[error("repository not found at {0}")]
     RepositoryNotFound(std::path::PathBuf),
     #[error("repository already exists at {0}")]
@@ -63,6 +103,43 @@ pub enum HeddleError {
     InvalidTreeEntry(#[from] TreeError),
 }
 
+impl HeddleError {
+    pub fn storage(kind: StorageErrorKind, message: impl Into<String>) -> Self {
+        Self::Storage {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn storage_kind(&self) -> StorageErrorKind {
+        match self {
+            HeddleError::NotFound(_)
+            | HeddleError::StateNotFound(_)
+            | HeddleError::MissingObject { .. } => StorageErrorKind::Missing,
+            HeddleError::Conflict(_) => StorageErrorKind::Conflict,
+            HeddleError::Corruption { .. } => StorageErrorKind::Corrupt,
+            HeddleError::InvalidObject(_) | HeddleError::InvalidTreeEntry(_) => {
+                StorageErrorKind::Invalid
+            }
+            HeddleError::RepositoryExists(_) => StorageErrorKind::AlreadyExists,
+            HeddleError::Io(err) => match err.kind() {
+                std::io::ErrorKind::NotFound => StorageErrorKind::Missing,
+                std::io::ErrorKind::AlreadyExists => StorageErrorKind::AlreadyExists,
+                std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock => StorageErrorKind::Transient,
+                _ => StorageErrorKind::Other,
+            },
+            HeddleError::Storage { kind, .. } => *kind,
+            _ => StorageErrorKind::Other,
+        }
+    }
+
+    pub fn is_retryable_storage_error(&self) -> bool {
+        self.storage_kind() == StorageErrorKind::Transient
+    }
+}
+
 impl From<rmp_serde::encode::Error> for HeddleError {
     fn from(e: rmp_serde::encode::Error) -> Self {
         HeddleError::Serialization(e.to_string())
@@ -95,3 +172,23 @@ impl From<serde_json::Error> for HeddleError {
 
 /// Result type for repository/storage-adjacent operations.
 pub type Result<T> = std::result::Result<T, HeddleError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{HeddleError, StorageErrorKind};
+
+    #[test]
+    fn storage_error_kind_classifies_io_and_explicit_storage_errors() {
+        let timed_out = HeddleError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "remote store timed out",
+        ));
+        assert_eq!(timed_out.storage_kind(), StorageErrorKind::Transient);
+        assert!(timed_out.is_retryable_storage_error());
+
+        let unsupported =
+            HeddleError::storage(StorageErrorKind::Unsupported, "backend cannot write packs");
+        assert_eq!(unsupported.storage_kind(), StorageErrorKind::Unsupported);
+        assert!(!unsupported.is_retryable_storage_error());
+    }
+}

@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, State, ThreadName, Tree, VisibilityTier},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use oplog::OpRecord;
 use refs::RefExpectation;

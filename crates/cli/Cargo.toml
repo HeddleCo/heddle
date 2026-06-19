@@ -34,17 +34,17 @@ ignore.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.4", features = ["memory-backend"] }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
-daemon = { path = "../daemon", package = "heddle-daemon", version = "0.4" }
+daemon = { path = "../daemon", package = "heddle-daemon", version = "0.4", optional = true }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.4" }
-grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
+grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7", optional = true }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
+heddle-query = { path = "../query", package = "heddle-query", version = "0.4" }
 heddle-client = { path = "../client", version = "0.4", optional = true }
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.4" }
-async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
 # end-to-end. Without these breaks, every dep's own default-on `zstd`
@@ -60,7 +60,7 @@ notify.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
-prost-types.workspace = true
+prost-types = { workspace = true, optional = true }
 rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -71,7 +71,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, optional = true }
 # `uuid::Uuid::new_v4().simple()` suffixes rebase transaction ids
 # (`rebase_ops::mint_rebase_transaction_id`) so a nanosecond-resolution
 # clock collision can't silently drop the later rebase's batch via
@@ -80,17 +80,17 @@ uuid.workspace = true
 # Health.Check probe for the local daemon UDS handshake. Only
 # pulled in for the client side; the local daemon binary itself does
 # not (yet) install a health reporter — see `client::local_daemon`.
-tonic-health.workspace = true
+tonic-health = { workspace = true, optional = true }
 # `tower::service_fn` adapts `tokio::net::UnixStream::connect` into a
 # `tower::Service<Uri>` that tonic's `connect_with_connector` accepts.
 # 0.5 is what tonic itself resolves transitively; pinning to the same
 # major version keeps the trait impls compatible.
-tower = { version = "0.5", default-features = false, features = ["util"] }
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
 # `hyper-util`'s `TokioIo` adapter wraps a `UnixStream` into something
 # that satisfies hyper's `Read`/`Write` traits — required by tonic
 # 0.14's connector contract. Already a workspace dep used by the
 # server crate; promoting it here for first-class consumption.
-hyper-util.workspace = true
+hyper-util = { workspace = true, optional = true }
 rustls.workspace = true
 tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
@@ -117,7 +117,7 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.4", optional
 # workflow. Heavier import/hosted surfaces are opt-in for release
 # builds that need them. `semantic` is included in defaults because
 # `heddle diff --semantic` and the
-# agent-loop self-review (`/heddle-review`) all reach for it; gating
+# agent-loop self-review (`heddle review`) all reach for it; gating
 # the default install behind an extra `--features semantic` flag
 # turns these documented commands into an opaque error for first-run
 # users. The binary cost is the four `tree-sitter-*` parsers
@@ -146,13 +146,12 @@ local = []
 # build adds `client` on top of either / both.
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
-client = ["dep:heddle-client", "dep:tokio-tungstenite"]
+client = ["dep:heddle-client", "dep:prost-types", "dep:tokio-tungstenite", "dep:tonic"]
 # Deep git import + AI-session reasoning extraction now backs every Git
 # overlay import path. Kept as a feature name for existing feature sets,
 # but the dependency is always present so no legacy bridge importer is
 # compiled as a fallback.
 ingest = []
-s3 = ["repo/s3"]
 semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
 semantic-extended = ["semantic", "semantic?/extended-languages"]
 observability = [
@@ -160,6 +159,15 @@ observability = [
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
+]
+local-services = [
+    "dep:daemon",
+    "dep:grpc",
+    "dep:hyper-util",
+    "dep:prost-types",
+    "dep:tonic",
+    "dep:tonic-health",
+    "dep:tower",
 ]
 # Forward zstd compression to every layer that touches the pack
 # format. The `?` syntax on optional deps activates the feature only
@@ -199,7 +207,6 @@ mount = [
 [dev-dependencies]
 criterion = "0.8"
 hyper-util.workspace = true
-review = { path = "../review", package = "heddle-review" }
 ntest.workspace = true
 proptest.workspace = true
 tokio-tungstenite.workspace = true

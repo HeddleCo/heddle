@@ -10,9 +10,9 @@ use objects::{
         Blob, ChangeId, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType,
         State, Tree,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
-use oplog::OpLogBackend;
+use oplog::BlockingOpLogBackend;
 use refs::RefBackend;
 
 use crate::{HeddleError, Repository, Result, discussion_anchor_travel::travel_anchors};
@@ -20,8 +20,8 @@ use crate::{HeddleError, Repository, Result, discussion_anchor_travel::travel_an
 impl<R, O, S> Repository<R, O, S>
 where
     R: RefBackend,
-    O: OpLogBackend,
-    S: ObjectStore,
+    O: BlockingOpLogBackend,
+    S: BlockingObjectStore,
 {
     pub(crate) fn compute_and_persist_discussion_anchor_travel(
         &self,

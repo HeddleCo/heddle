@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
 use objects::{
     object::{Blob, ContentHash, EntryType, FileMode, SemanticChange, Tree, TreeEntry},
-    store::{InMemoryStore, ObjectStore},
+    store::{BlockingObjectStore, InMemoryStore},
 };
 
 use super::{

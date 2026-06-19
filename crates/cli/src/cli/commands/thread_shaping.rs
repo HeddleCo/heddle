@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;

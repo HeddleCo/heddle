@@ -15,7 +15,7 @@ use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ThreadName, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability};

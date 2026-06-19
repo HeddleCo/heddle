@@ -13,8 +13,8 @@
 //! convention.
 
 use anyhow::{Result, anyhow};
-use objects::{object::ThreadName, store::ObjectStore};
-use oplog::{OpLogBackend, OpRecord};
+use objects::{object::ThreadName, store::BlockingObjectStore};
+use oplog::{BlockingOpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
@@ -193,7 +193,7 @@ fn create_git_checkpoint_inner(
             previous_git_oid,
             new_git_oid: git_commit,
         }],
-        Some(&repo.op_scope()),
+        Some(&repo.op_scope_key()),
     )?;
     Ok(record)
 }

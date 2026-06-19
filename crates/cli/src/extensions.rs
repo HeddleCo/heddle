@@ -2,9 +2,7 @@
 //! Local glue between cli's dispatch and the `WeftExtensions`
 //! trait surface.
 //!
-//! In OSS builds without the `client` feature, `main.rs` constructs a
-//! `NoopWeftExtensions` from the shim crate directly. With
-//! `client` enabled, this module provides
+//! With `client` enabled, this module provides
 //! [`EnabledWeftExtensions`], which downcasts the trait's opaque
 //! arguments back to the concrete `cli::cli::AuthCommands` /
 //! `SupportCommands` / `PresenceCommands` types and delegates to the
@@ -20,8 +18,7 @@
 use std::any::Any;
 
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
-use weft_client_shim::{CliContext, WeftExtensions};
+use weft_client_shim::{CliContext, WeftExtensions, WeftFuture};
 
 use crate::cli::{
     AuthCommands,
@@ -31,33 +28,36 @@ use crate::cli::{
 
 pub struct EnabledWeftExtensions;
 
-#[async_trait]
 impl WeftExtensions for EnabledWeftExtensions {
-    async fn auth(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        let command = downcast::<AuthCommands>(command, "AuthCommands")?;
-        cmd_auth(ctx, command.clone()).await
+    fn auth<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
+        command: &'a (dyn Any + Send + Sync),
+    ) -> WeftFuture<'a> {
+        Box::pin(async move {
+            let command = downcast::<AuthCommands>(command, "AuthCommands")?;
+            cmd_auth(ctx, command.clone()).await
+        })
     }
 
-    async fn support(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        let command = downcast::<SupportCommands>(command, "SupportCommands")?;
-        cmd_support(ctx, command.clone()).await
+    fn support<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
+        command: &'a (dyn Any + Send + Sync),
+    ) -> WeftFuture<'a> {
+        Box::pin(async move {
+            let command = downcast::<SupportCommands>(command, "SupportCommands")?;
+            cmd_support(ctx, command.clone()).await
+        })
     }
 
-    async fn presence_publish(
-        &self,
-        ctx: &(dyn CliContext + 'static),
+    fn presence_publish<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
         session: String,
         interval_secs: u64,
-    ) -> Result<()> {
-        cmd_presence_publish(ctx, session, interval_secs).await
+    ) -> WeftFuture<'a> {
+        Box::pin(async move { cmd_presence_publish(ctx, session, interval_secs).await })
     }
 }
 

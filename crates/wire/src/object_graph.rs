@@ -3,7 +3,7 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{ChangeId, ContentHash, EntryType},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,14 +57,14 @@ pub struct StateClosureOptions {
 }
 
 pub fn enumerate_state_closure(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state_id: ChangeId,
 ) -> Result<Vec<ObjectInfo>> {
     enumerate_state_closure_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_with_options(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<ObjectInfo>> {
@@ -134,14 +134,14 @@ pub fn enumerate_state_closure_with_options(
 }
 
 pub fn enumerate_state_closure_plan(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state_id: ChangeId,
 ) -> Result<Vec<PlannedObject>> {
     enumerate_state_closure_plan_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_plan_with_options(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
@@ -208,7 +208,7 @@ pub fn enumerate_state_closure_plan_with_options(
 }
 
 fn enumerate_tree_closure_filtered(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -284,7 +284,7 @@ fn enumerate_tree_closure_filtered(
 /// `ObjectInfo` keyed by the state id. No-op when the state is public by
 /// absence.
 fn emit_state_visibility_info(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state: &ChangeId,
     out: &mut Vec<ObjectInfo>,
 ) -> Result<()> {
@@ -300,7 +300,7 @@ fn emit_state_visibility_info(
 }
 
 fn emit_state_visibility_plan(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     state: &ChangeId,
     out: &mut Vec<PlannedObject>,
 ) -> Result<()> {
@@ -323,7 +323,7 @@ fn emit_state_visibility_plan(
 /// the closure (dedup'd by hash), so its redaction can only be emitted
 /// once too.
 fn emit_redaction_info(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     blob: &ContentHash,
     out: &mut Vec<ObjectInfo>,
 ) -> Result<()> {
@@ -339,7 +339,7 @@ fn emit_redaction_info(
 }
 
 fn enumerate_tree_plan_filtered(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -386,7 +386,7 @@ fn enumerate_tree_plan_filtered(
 }
 
 fn emit_redaction_plan(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     blob: &ContentHash,
     out: &mut Vec<PlannedObject>,
 ) -> Result<()> {
@@ -400,7 +400,7 @@ fn emit_redaction_plan(
 }
 
 fn collect_excluded(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     roots: &[ChangeId],
 ) -> Result<(HashSet<ChangeId>, HashSet<ContentHash>)> {
     if roots.is_empty() {
@@ -442,7 +442,7 @@ fn collect_excluded(
 }
 
 fn collect_tree_hashes(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     tree_hash: ContentHash,
     excluded: &mut HashSet<ContentHash>,
 ) -> Result<()> {
@@ -470,7 +470,7 @@ fn collect_tree_hashes(
 }
 
 pub fn is_ancestor(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     ancestor: ChangeId,
     descendant: ChangeId,
 ) -> Result<bool> {
@@ -511,7 +511,7 @@ mod tests {
             Attribution, Blob, ChangeId, Principal, Redaction, State, StateVisibility, Tree,
             TreeEntry, VisibilityTier,
         },
-        store::ObjectStore,
+        store::BlockingObjectStore,
     };
     use repo::Repository;
     use tempfile::TempDir;

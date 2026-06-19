@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use objects::{object::ThreadName, store::ObjectStore};
+use objects::{object::ThreadName, store::BlockingObjectStore};
 use refs::Head;
 use repo::Repository;
 use serde_json::{Value, json};

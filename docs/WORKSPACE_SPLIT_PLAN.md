@@ -145,14 +145,12 @@ Keep only dependencies needed for core functionality:
   - `signature`
   - `sha2`
   - `base64`
-- optional storage/compression crates as needed:
+- optional compression crates as needed:
   - `zstd`
-  - `aws-config`
-  - `aws-sdk-s3`
-  - `async-trait`
 - possibly `gix` if Git bridge remains in core
 
-Try to keep `tokio` out of `objects` unless it is truly required for storage backends that stay there.
+Keep remote object-store backends out of `objects`; Weft owns hosted storage
+implementations.
 
 ### `wire`
 

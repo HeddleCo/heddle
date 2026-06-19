@@ -12,7 +12,7 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use objects::store::ObjectStore;
+use objects::store::{BlockingObjectStore, PackMaintenanceStoreExt};
 use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]

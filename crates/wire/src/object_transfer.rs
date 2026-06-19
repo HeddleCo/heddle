@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
     object::{State, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use crate::{ObjectData, ObjectId, ObjectRequest, ObjectType, ProtocolError, Result};
@@ -84,7 +84,6 @@ pub fn check_received_transfer_blob_size(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn chunk_count(object_size: usize, chunk_size: usize) -> usize {
     if object_size == 0 || chunk_size == 0 {
         return 0;
@@ -92,7 +91,6 @@ pub fn chunk_count(object_size: usize, chunk_size: usize) -> usize {
     object_size.div_ceil(chunk_size)
 }
 
-#[allow(dead_code)]
 pub fn chunk_bounds(
     object_size: usize,
     chunk_size: usize,
@@ -110,12 +108,14 @@ pub fn chunk_bounds(
     Some((start, end - start))
 }
 
-#[allow(dead_code)]
 pub fn chunk_offset(chunk_index: usize, chunk_size: usize) -> Option<usize> {
     chunk_index.checked_mul(chunk_size)
 }
 
-pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> Result<ObjectData> {
+pub fn load_requested_object(
+    store: &impl BlockingObjectStore,
+    req: &ObjectRequest,
+) -> Result<ObjectData> {
     // Note on sidecar objects: redactions and state visibility are keyed by
     // ids that also identify primary objects. `load_requested_object`
     // resolves blob-vs-tree or state by id shape/probe; it cannot
@@ -149,7 +149,7 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
 }
 
 pub fn load_object_data(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     id: &ObjectId,
     obj_type: ObjectType,
 ) -> Result<ObjectData> {
@@ -192,7 +192,7 @@ pub fn load_object_data(
     })
 }
 
-pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Result<()> {
+pub fn store_received_object(store: &impl BlockingObjectStore, data: &ObjectData) -> Result<()> {
     match (&data.id, data.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => {
             store.put_blob_bytes_with_hash(&data.data, *hash)?;
@@ -254,7 +254,7 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
 mod tests {
     use objects::{
         object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
-        store::{FsStore, ObjectStore},
+        store::{BlockingObjectStore, FsStore},
     };
     use tempfile::TempDir;
 

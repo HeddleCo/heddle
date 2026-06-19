@@ -249,7 +249,7 @@ mod tests {
 
     use objects::{
         object::{Blob, ContentHash},
-        store::ObjectStore,
+        store::BlockingObjectStore,
     };
     use tempfile::TempDir;
 

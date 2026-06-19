@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish all 17 OSS Heddle crates at 0.2.0 to crates.io in topological order.
+# Publish all 16 OSS Heddle crates at 0.2.0 to crates.io in topological order.
 #
 # - heddle-objects has already been published; this script skips it.
 # - Upgrades (existing 0.0.0 stubs) publish quickly with 60s gaps.
@@ -36,7 +36,6 @@ PUBLISHES=(
   "new:heddle-semantic"
   "new:heddle-devtools"
   "new:heddle-grpc"
-  "new:heddle-review"
   "new:heddle-state-review"
   "upgrade:heddle-repo"
   "new:heddle-mount"

@@ -240,8 +240,7 @@ impl TimelineView {
                 return Ok(checkpoint.view);
             }
 
-            let mut new_records =
-                read_timeline_operation_records_by_id(store, new_operation_ids)?;
+            let mut new_records = read_timeline_operation_records_by_id(store, new_operation_ids)?;
             sort_operation_records(&mut new_records);
             if incremental_replay_is_ordered(checkpoint.last_replay_key.as_ref(), &new_records) {
                 let mut view = checkpoint.view;
@@ -791,9 +790,9 @@ fn incremental_replay_is_ordered(
     let Some(last_replay_key) = last_replay_key else {
         return true;
     };
-    new_records.first().is_none_or(|record| {
-        operation_replay_key(record) >= *last_replay_key
-    })
+    new_records
+        .first()
+        .is_none_or(|record| operation_replay_key(record) >= *last_replay_key)
 }
 
 fn checkpoint_processed_prefix_matches(
@@ -807,9 +806,7 @@ fn checkpoint_processed_prefix_matches(
             .all(|(checkpoint, current)| checkpoint == current)
 }
 
-fn read_timeline_view_checkpoint(
-    store: &TimelineStore,
-) -> Result<Option<TimelineViewCheckpoint>> {
+fn read_timeline_view_checkpoint(store: &TimelineStore) -> Result<Option<TimelineViewCheckpoint>> {
     let Some(bytes) = store.read_view_checkpoint_bytes()? else {
         return Ok(None);
     };

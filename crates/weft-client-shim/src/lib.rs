@@ -2,15 +2,10 @@
 //! Trait surface separating the OSS Heddle CLI from the closed
 //! heddle-client implementation.
 //!
-//! OSS builds use [`NoopWeftExtensions`], which returns a friendly
-//! "hosted features not enabled" error on every method. Closed builds
-//! ship a real implementation in the `heddle-client` crate and inject
-//! it via Cargo features (today) or `[patch.crates-io]` (post-split).
-//!
 //! Why a separate crate (and not just a trait in `cli`)? When the
 //! repos physically split, the OSS `heddle-cli` crate ships on
 //! crates.io. The closed `heddle-client` crate published in the
-//! private workspace depends on this shim to satisfy `cli`'s trait
+//! private workspace depends on this trait crate to satisfy `cli`'s trait
 //! bound without `cli` ever knowing about closed-source code. Same
 //! trait surface, two impls, no circular deps.
 //!
@@ -20,10 +15,9 @@
 //! `cli` because their git-overlay-without-hosted code paths must
 //! work in OSS-only builds too.
 
-use std::{any::Any, error::Error, fmt, path::Path};
+use std::{any::Any, error::Error, fmt, future::Future, path::Path, pin::Pin};
 
-use anyhow::{Result, anyhow};
-use async_trait::async_trait;
+use anyhow::Result;
 
 /// Small projection of `cli::Cli` that hosted commands rely on.
 /// Defining the surface here rather than passing `&Cli` lets the
@@ -158,71 +152,31 @@ impl Error for HostedRecoveryAdvice {}
 /// downstream concrete impls downcast to the real types. This avoids
 /// a circular dependency between `cli` (which defines `Cli`,
 /// `AuthCommands`, etc.) and the heddle-client crate.
-#[async_trait]
+pub type WeftFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
 pub trait WeftExtensions: Send + Sync {
     /// `heddle auth <subcommand>` — login, logout, whoami, device
     /// authorization, service account issuance.
-    async fn auth(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()>;
+    fn auth<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
+        command: &'a (dyn Any + Send + Sync),
+    ) -> WeftFuture<'a>;
 
     /// `heddle support <subcommand>` — hosted-side support and
     /// diagnostic operations.
-    async fn support(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()>;
+    fn support<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
+        command: &'a (dyn Any + Send + Sync),
+    ) -> WeftFuture<'a>;
 
     /// `heddle presence publish` — stream presence/heartbeat over the
     /// websocket transport to the hosted backend.
-    async fn presence_publish(
-        &self,
-        ctx: &(dyn CliContext + 'static),
+    fn presence_publish<'a>(
+        &'a self,
+        ctx: &'a (dyn CliContext + 'static),
         session: String,
         interval_secs: u64,
-    ) -> Result<()>;
-}
-
-/// Noop implementation used in OSS builds. Every method returns the
-/// same friendly error pointing the user at the closed-build
-/// installation path.
-pub struct NoopWeftExtensions;
-
-#[async_trait]
-impl WeftExtensions for NoopWeftExtensions {
-    async fn auth(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("auth")))
-    }
-
-    async fn support(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("support")))
-    }
-
-    async fn presence_publish(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _session: String,
-        _interval_secs: u64,
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("presence publish")))
-    }
-}
-
-fn not_enabled_error(command: &str) -> String {
-    format!(
-        "`heddle {command}` requires the client build of Heddle. \
-         Install it from https://heddleco.com or rebuild the CLI with \
-         `--features client` if you're working from source."
-    )
+    ) -> WeftFuture<'a>;
 }

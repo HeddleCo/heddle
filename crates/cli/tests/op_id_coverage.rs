@@ -117,7 +117,7 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         }
     }
 
-    for read_only in [
+    let read_only_commands = [
         "thread list",
         "thread show",
         "status",
@@ -125,9 +125,11 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         "hook list",
         "remote list",
         "context get",
+        #[cfg(feature = "local-services")]
         "review show",
         "agent list",
-    ] {
+    ];
+    for read_only in read_only_commands {
         let entry = catalog
             .commands
             .iter()
@@ -151,7 +153,7 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         );
     }
 
-    for mutating in [
+    let mutating_commands = [
         "init",
         "adopt",
         "clone",
@@ -161,9 +163,11 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         "bridge git export",
         "bridge git import",
         "context set",
+        #[cfg(feature = "local-services")]
         "review sign",
         "agent capture",
-    ] {
+    ];
+    for mutating in mutating_commands {
         let entry = catalog
             .commands
             .iter()

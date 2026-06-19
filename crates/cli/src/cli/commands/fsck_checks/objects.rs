@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use objects::{
     object::{ContentHash, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 

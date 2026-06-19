@@ -11,6 +11,7 @@
 //! which controls the FUSE mount daemon — different subsystem, different
 //! UX. `heddle help daemon` contrasts the two.
 
+#[cfg(feature = "local-services")]
 use std::path::PathBuf;
 
 use clap::Subcommand;
@@ -26,12 +27,15 @@ pub enum AgentCommands {
     ///
     /// The daemon binds a Unix socket inside the repo's `.heddle/sockets/`
     /// directory and serves local same-user CLI calls.
+    #[cfg(feature = "local-services")]
     Serve(AgentServeArgs),
 
     /// Report whether the local agent daemon is running for this repo.
+    #[cfg(feature = "local-services")]
     Status,
 
     /// Ask the running daemon to drain and exit.
+    #[cfg(feature = "local-services")]
     Stop,
 
     // --- Reservation API (orchestration surface) ----------------
@@ -59,6 +63,7 @@ pub enum AgentCommands {
     List(AgentApiListArgs),
 }
 
+#[cfg(feature = "local-services")]
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentServeArgs {
     /// Override the default socket path (`<heddle_dir>/sockets/grpc.sock`).

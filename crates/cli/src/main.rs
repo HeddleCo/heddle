@@ -5,8 +5,12 @@ use std::{any::Any, time::Instant};
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
+#[cfg(feature = "local-services")]
+use cli::cli::AgentCommands;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
+#[cfg(feature = "local-services")]
+use cli::cli::commands::{cmd_discuss, cmd_review, cmd_transaction};
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands,
@@ -14,10 +18,10 @@ use cli::cli::{
 };
 use cli::{
     cli::{
-        ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
-        DaemonCommands, DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs,
-        MergeArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
+        ActorCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
+        DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs, MergeArgs, ResolveArgs,
+        RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
+        SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
@@ -27,15 +31,15 @@ use cli::{
             cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
-            cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
-            cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
-            cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
-            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_doctor_docs,
+            cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook, cmd_init,
+            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog, cmd_pull,
+            cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve,
+            cmd_retro, cmd_revert, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
+            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
+            cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat, cmd_sync_smart,
+            cmd_thread, cmd_timeline, cmd_try, cmd_undo, cmd_verify, cmd_watch,
+            command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
         render::write_json_stdout,
@@ -90,19 +94,15 @@ async fn async_main() -> Result<()> {
     #[cfg(feature = "client")]
     heddle_client::grpc_hosted::register_hosted_factory();
 
-    // Pick the WeftExtensions implementation at startup. OSS builds
-    // get NoopWeftExtensions (returns friendly errors for `auth`,
-    // `support`, `presence` commands). client builds get the
-    // EnabledWeftExtensions adapter that delegates to the existing
-    // in-cli command impls; Step 5 of the OSS extraction plan moves
-    // those impls into a separate closed crate.
+    // Pick the WeftExtensions implementation at startup for hosted
+    // client builds. OSS builds do not compile the hosted command
+    // variants, so there is no fallback implementation here.
     #[cfg(feature = "client")]
     let hosted: Box<dyn weft_client_shim::WeftExtensions> =
         Box::new(cli::extensions::EnabledWeftExtensions);
     // OSS builds dispatch no hosted commands (those `Commands` variants
-    // are gated behind `client`), so the trait object is unused
-    // and we drop the binding entirely. Keeping the shim trait + Noop
-    // visible for downstream consumers and post-split closed builds.
+    // are gated behind `client`), so the trait object is unused and we
+    // drop the binding entirely.
 
     let total_start = Instant::now();
     let profile = profile_enabled();
@@ -720,14 +720,17 @@ async fn async_main() -> Result<()> {
 
         Commands::Agent { command } => cmd_agent(&cli, command).await,
 
+        #[cfg(feature = "local-services")]
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
 
         Commands::Query(args) => cmd_query(&cli, args).await,
 
         Commands::Checkpoint(args) => cmd_checkpoint(&cli, args).await,
 
+        #[cfg(feature = "local-services")]
         Commands::Transaction { command } => cmd_transaction(&cli, command).await,
 
+        #[cfg(feature = "local-services")]
         Commands::Review { command } => cmd_review(&cli, command).await,
 
         Commands::Redact { command } => cli::cli::commands::cmd_redact(&cli, command.clone()),
@@ -1103,14 +1106,26 @@ fn install_broken_pipe_panic_hook() {
 /// audit log. These keep an INFO-level default; everything else defaults to
 /// WARN so a human running `heddle status` doesn't see internal tracing.
 fn is_daemon_invocation(command: &Commands) -> bool {
-    matches!(
+    let is_mount_daemon = matches!(
         command,
         Commands::Daemon {
             command: DaemonCommands::Serve
-        } | Commands::Agent {
-            command: AgentCommands::Serve(_)
         }
-    )
+    );
+    #[cfg(feature = "local-services")]
+    {
+        is_mount_daemon
+            || matches!(
+                command,
+                Commands::Agent {
+                    command: AgentCommands::Serve(_)
+                }
+            )
+    }
+    #[cfg(not(feature = "local-services"))]
+    {
+        is_mount_daemon
+    }
 }
 
 #[cfg(test)]

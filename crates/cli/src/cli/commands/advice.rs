@@ -569,6 +569,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(feature = "local-services")]
     pub(crate) fn discuss_resolve_missing_annotation_kind() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_annotation_kind",
@@ -578,6 +579,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(feature = "local-services")]
     pub(crate) fn discuss_resolve_missing_annotation_content() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_annotation_content",
@@ -587,6 +589,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(feature = "local-services")]
     pub(crate) fn discuss_resolve_missing_dismiss_reason() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_dismiss_reason",
@@ -596,6 +599,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(feature = "local-services")]
     pub(crate) fn review_symbols_malformed(raw: &str) -> Self {
         Self::malformed_option_value(
             "review_symbols_malformed",

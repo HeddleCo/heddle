@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use oplog::{OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpRecord};
 
 use super::*;
 

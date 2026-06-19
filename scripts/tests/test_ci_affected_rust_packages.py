@@ -28,7 +28,7 @@ def metadata():
     add("heddle-objects", "crates/objects")
     add("heddle-repo", "crates/repo", ["heddle-objects"])
     add("heddle-cli", "crates/cli", ["heddle-repo"])
-    add("heddle-review", "crates/review")
+    add("heddle-state-review", "crates/state_review")
     return {
         "packages": packages,
         "workspace_members": members,
@@ -101,7 +101,12 @@ class AffectedRustPackagesTests(unittest.TestCase):
         self.assertTrue(result["bench_all"])
         self.assertEqual(
             result["selected"],
-            ["heddle-objects", "heddle-repo", "heddle-cli", "heddle-review"],
+            [
+                "heddle-objects",
+                "heddle-repo",
+                "heddle-cli",
+                "heddle-state-review",
+            ],
         )
 
     def test_script_only_change_can_skip_cargo(self):

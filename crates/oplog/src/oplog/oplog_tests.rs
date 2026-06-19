@@ -5,10 +5,10 @@ use std::{
     thread,
 };
 
-use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
+use objects::object::{ChangeId, ContentHash, MarkerName, Scope, ThreadName, TransactionId};
 use tempfile::TempDir;
 
-use super::{OpLog, OpLogRecorder, OpRecord, oplog_backend::OpLogBackend};
+use super::{BlockingOpLogRecorder, OpLog, OpRecord, oplog_backend::BlockingOpLogBackend};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -19,13 +19,21 @@ fn create_oplog() -> (TempDir, OpLog) {
     (temp_dir, oplog)
 }
 
+fn scope(name: &str) -> Scope {
+    Scope::new(name)
+}
+
+fn transaction_id(id: &str) -> TransactionId {
+    TransactionId::new(id)
+}
+
 #[test]
 fn test_record_snapshot() {
     let (_temp, oplog) = create_oplog();
     let state = ChangeId::generate();
 
     let id = oplog
-        .record_snapshot(&state, None, None, Some("lane-a"))
+        .record_snapshot(&state, None, None, Some(&scope("lane-a")))
         .unwrap();
     assert_eq!(id, 1);
 
@@ -46,7 +54,7 @@ fn test_record_snapshot() {
         }
         _ => panic!("Expected Snapshot"),
     }
-    assert_eq!(entry.scope.as_deref(), Some("lane-a"));
+    assert_eq!(entry.scope.as_ref().map(Scope::as_str), Some("lane-a"));
 }
 
 #[test]
@@ -57,10 +65,10 @@ fn test_record_multiple() {
     let state2 = ChangeId::generate();
 
     oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
         .unwrap();
 
     let entries = oplog.recent(2).unwrap();
@@ -102,10 +110,10 @@ fn test_undo_batches() {
     let state2 = ChangeId::generate();
 
     oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
         .unwrap();
 
     let batches = oplog.undo_batches(1).unwrap();
@@ -124,10 +132,10 @@ fn test_redo_batches() {
     let state2 = ChangeId::generate();
 
     oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
         .unwrap();
 
     let batches = oplog.undo_batches(1).unwrap();
@@ -156,7 +164,7 @@ fn test_record_snapshot_serializes_concurrent_writers() {
                 let state = ChangeId::generate();
                 barrier.wait();
                 oplog
-                    .record_snapshot(&state, None, None, Some("lane-a"))
+                    .record_snapshot(&state, None, None, Some(&scope("lane-a")))
                     .unwrap()
             })
         })
@@ -183,23 +191,36 @@ fn test_undo_batches_scoped() {
     let state3 = ChangeId::generate();
 
     oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-b"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-b")))
         .unwrap();
     oplog
-        .record_snapshot(&state3, Some(&state2), None, Some("lane-a"))
+        .record_snapshot(&state3, Some(&state2), None, Some(&scope("lane-a")))
         .unwrap();
 
-    let lane_a = oplog.undo_batches_scoped(2, Some("lane-a")).unwrap();
+    let lane_a = oplog
+        .undo_batches_scoped(2, Some(&scope("lane-a")))
+        .unwrap();
     assert_eq!(lane_a.len(), 2);
-    assert_eq!(lane_a[0].entries[0].scope.as_deref(), Some("lane-a"));
-    assert_eq!(lane_a[1].entries[0].scope.as_deref(), Some("lane-a"));
+    assert_eq!(
+        lane_a[0].entries[0].scope.as_ref().map(Scope::as_str),
+        Some("lane-a")
+    );
+    assert_eq!(
+        lane_a[1].entries[0].scope.as_ref().map(Scope::as_str),
+        Some("lane-a")
+    );
 
-    let lane_b = oplog.undo_batches_scoped(2, Some("lane-b")).unwrap();
+    let lane_b = oplog
+        .undo_batches_scoped(2, Some(&scope("lane-b")))
+        .unwrap();
     assert_eq!(lane_b.len(), 1);
-    assert_eq!(lane_b[0].entries[0].scope.as_deref(), Some("lane-b"));
+    assert_eq!(
+        lane_b[0].entries[0].scope.as_ref().map(Scope::as_str),
+        Some("lane-b")
+    );
 }
 
 #[test]
@@ -210,18 +231,20 @@ fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
     let state3 = ChangeId::generate();
 
     let first = oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     let middle = oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
         .unwrap();
     let last = oplog
-        .record_snapshot(&state3, Some(&state2), None, Some("lane-a"))
+        .record_snapshot(&state3, Some(&state2), None, Some(&scope("lane-a")))
         .unwrap();
 
     oplog.coalesce_batches(first, last).unwrap();
 
-    let batches = oplog.recent_batches_scoped(2, Some("lane-a")).unwrap();
+    let batches = oplog
+        .recent_batches_scoped(2, Some(&scope("lane-a")))
+        .unwrap();
 
     assert_eq!(
         batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
@@ -244,7 +267,9 @@ fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
         vec![0, 1]
     );
 
-    let limited = oplog.recent_batches_scoped(1, Some("lane-a")).unwrap();
+    let limited = oplog
+        .recent_batches_scoped(1, Some(&scope("lane-a")))
+        .unwrap();
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].id, first);
     assert_eq!(limited[0].entries.len(), 2);
@@ -271,21 +296,33 @@ fn committed_batch_records_uses_rebuilt_index_for_non_adjacent_coalesced_batch()
                     op_count: 1,
                 },
             ],
-            Some("lane-a"),
-            "tx-coalesced",
+            Some(&scope("lane-a")),
+            &transaction_id("tx-coalesced"),
         )
         .unwrap()
         .unwrap();
     let middle = oplog
-        .record_snapshot(&middle_state, Some(&committed_state), None, Some("lane-a"))
+        .record_snapshot(
+            &middle_state,
+            Some(&committed_state),
+            None,
+            Some(&scope("lane-a")),
+        )
         .unwrap();
     let later = oplog
-        .record_snapshot(&later_state, Some(&middle_state), None, Some("lane-a"))
+        .record_snapshot(
+            &later_state,
+            Some(&middle_state),
+            None,
+            Some(&scope("lane-a")),
+        )
         .unwrap();
 
     oplog.coalesce_batches(committed[0], later).unwrap();
 
-    let records = oplog.committed_batch_records("tx-coalesced").unwrap();
+    let records = oplog
+        .committed_batch_records(&transaction_id("tx-coalesced"))
+        .unwrap();
     let recovered = records
         .iter()
         .filter_map(|record| match record {
@@ -302,49 +339,49 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
     // The CLI calls OpLog's inherent (sync) batch methods; the generic
     // backend plumbing and the hosted server reach the async trait
     // surface. Drive the trait methods explicitly so the
-    // `impl OpLogBackend for OpLog` async bodies and the non-scoped trait
+    // `impl BlockingOpLogBackend for OpLog` async bodies and the non-scoped trait
     // defaults that delegate to them are covered.
     let (_temp, oplog) = create_oplog();
     let state1 = ChangeId::generate();
     let state2 = ChangeId::generate();
     oplog
-        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
         .unwrap();
     oplog
-        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
         .unwrap();
 
     // Non-scoped trait defaults delegate to the *_scoped overrides.
-    let recent = pollster::block_on(OpLogBackend::recent_batches(&oplog, 2)).unwrap();
+    let recent = pollster::block_on(BlockingOpLogBackend::recent_batches(&oplog, 2)).unwrap();
     assert_eq!(recent.len(), 2);
-    let undo = pollster::block_on(OpLogBackend::undo_batches(&oplog, 2)).unwrap();
+    let undo = pollster::block_on(BlockingOpLogBackend::undo_batches(&oplog, 2)).unwrap();
     assert_eq!(undo.len(), 2);
     oplog.mark_batch_undone(&undo[0]).unwrap();
-    let redo = pollster::block_on(OpLogBackend::redo_batches(&oplog, 2)).unwrap();
+    let redo = pollster::block_on(BlockingOpLogBackend::redo_batches(&oplog, 2)).unwrap();
     assert_eq!(redo.len(), 1);
 
     // OpLog's override of the dedup'd transaction commit: first append
     // records, the second call with the same transaction id is deduped.
     let tx_op = || {
         vec![OpRecord::TransactionCommit {
-            transaction_id: "tx-1".to_string(),
+            transaction_id: "tx-1".into(),
             op_count: 0,
         }]
     };
-    let first = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction(
+    let first = pollster::block_on(BlockingOpLogBackend::record_batch_scoped_if_no_transaction(
         &oplog,
         tx_op(),
-        Some("lane-a"),
-        "tx-1",
+        Some(&scope("lane-a")),
+        &transaction_id("tx-1"),
         16,
     ))
     .unwrap();
     assert!(first.is_some());
-    let dup = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction(
+    let dup = pollster::block_on(BlockingOpLogBackend::record_batch_scoped_if_no_transaction(
         &oplog,
         tx_op(),
-        Some("lane-a"),
-        "tx-1",
+        Some(&scope("lane-a")),
+        &transaction_id("tx-1"),
         16,
     ))
     .unwrap();
@@ -360,14 +397,18 @@ fn record_batch_exactly_once_dedups_past_any_window() {
     let (_temp, oplog) = create_oplog();
     let commit_ops = || {
         vec![OpRecord::TransactionCommit {
-            transaction_id: "tx-delayed".to_string(),
+            transaction_id: "tx-delayed".into(),
             op_count: 0,
         }]
     };
 
     // First commit lands.
     let first = oplog
-        .record_batch_exactly_once(commit_ops(), Some("lane"), "tx-delayed")
+        .record_batch_exactly_once(
+            commit_ops(),
+            Some(&scope("lane")),
+            &transaction_id("tx-delayed"),
+        )
         .unwrap();
     assert!(first.is_some(), "first commit must append");
 
@@ -375,14 +416,18 @@ fn record_batch_exactly_once_dedups_past_any_window() {
     // recent-window the bounded helper would scan.
     for _ in 0..200 {
         oplog
-            .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+            .record_snapshot(&ChangeId::generate(), None, None, Some(&scope("lane")))
             .unwrap();
     }
 
     // A delayed retry still finds the original commit and refuses to
     // double-append — exact-once regardless of how much aged out.
     let retry = oplog
-        .record_batch_exactly_once(commit_ops(), Some("lane"), "tx-delayed")
+        .record_batch_exactly_once(
+            commit_ops(),
+            Some(&scope("lane")),
+            &transaction_id("tx-delayed"),
+        )
         .unwrap();
     assert!(retry.is_none(), "delayed retry must dedup to None");
 
@@ -390,11 +435,11 @@ fn record_batch_exactly_once_dedups_past_any_window() {
     let other = oplog
         .record_batch_exactly_once(
             vec![OpRecord::TransactionCommit {
-                transaction_id: "tx-other".to_string(),
+                transaction_id: "tx-other".into(),
                 op_count: 0,
             }],
-            Some("lane"),
-            "tx-other",
+            Some(&scope("lane")),
+            &transaction_id("tx-other"),
         )
         .unwrap();
     assert!(other.is_some(), "a different transaction id must commit");
@@ -444,8 +489,8 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
                     op_count: 1,
                 },
             ],
-            Some("lane"),
-            "tx-shared",
+            Some(&scope("lane")),
+            &transaction_id("tx-shared"),
         )
         .unwrap();
     assert!(appended.is_some(), "A's commit must append");
@@ -468,8 +513,8 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
                     op_count: 1,
                 },
             ],
-            Some("lane"),
-            "tx-shared",
+            Some(&scope("lane")),
+            &transaction_id("tx-shared"),
         )
         .unwrap();
     assert!(replay.is_none(), "cross-process replay must dedup to None");
@@ -477,7 +522,9 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
     // The reconstruction must read the FRESH oplog and recover A's record,
     // even though B's cache predates A's commit. Pre-fix (stale `load_cached`)
     // this returned an empty vec.
-    let prior = proc_b.committed_batch_records("tx-shared").unwrap();
+    let prior = proc_b
+        .committed_batch_records(&transaction_id("tx-shared"))
+        .unwrap();
     let recovered: Vec<_> = prior
         .iter()
         .filter_map(|op| match op {
@@ -722,14 +769,14 @@ fn record_methods_persist_expected_variants() {
     let redaction = ContentHash::from_bytes([9u8; 32]);
 
     oplog
-        .record_goto(&result, Some(&from), Some("lane"))
+        .record_goto(&result, Some(&from), Some(&scope("lane")))
         .unwrap();
     oplog
         .record_thread_create(
             &ThreadName::new("feat"),
             &result,
             Some(vec![9, 8, 7]),
-            Some("lane"),
+            Some(&scope("lane")),
         )
         .unwrap();
     oplog
@@ -740,7 +787,7 @@ fn record_methods_persist_expected_variants() {
             &ThreadName::new("old"),
             &ThreadName::new("new"),
             &result,
-            Some("lane"),
+            Some(&scope("lane")),
         )
         .unwrap();
     assert_eq!(rename_ids.len(), 2);
@@ -757,16 +804,24 @@ fn record_methods_persist_expected_variants() {
         .record_marker_delete(&MarkerName::new("v1"), &result)
         .unwrap();
     oplog
-        .record_redact(&redaction, &blob, &result, "secret.txt", Some("lane"))
+        .record_redact(
+            &redaction,
+            &blob,
+            &result,
+            "secret.txt",
+            Some(&scope("lane")),
+        )
         .unwrap();
-    oplog.record_purge(&redaction, &blob, Some("lane")).unwrap();
+    oplog
+        .record_purge(&redaction, &blob, Some(&scope("lane")))
+        .unwrap();
     oplog
         .record_fast_forward(
             &ThreadName::new("topic"),
             &ThreadName::new("main"),
             &from,
             &result,
-            Some("lane"),
+            Some(&scope("lane")),
         )
         .unwrap();
 
@@ -826,7 +881,7 @@ fn head_id_tracks_generation() {
     assert_eq!(oplog.head_id().unwrap(), 0);
 
     oplog
-        .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+        .record_snapshot(&ChangeId::generate(), None, None, Some(&scope("lane")))
         .unwrap();
     assert_eq!(oplog.head_id().unwrap(), 1);
 
@@ -853,7 +908,11 @@ fn record_batch_exactly_once_empty_and_distinct_ids() {
     let (_temp, oplog) = create_oplog();
 
     let empty = oplog
-        .record_batch_exactly_once(Vec::new(), Some("lane"), "tx-empty")
+        .record_batch_exactly_once(
+            Vec::new(),
+            Some(&scope("lane")),
+            &transaction_id("tx-empty"),
+        )
         .unwrap();
     assert_eq!(empty, Some(Vec::new()));
     assert_eq!(oplog.head_id().unwrap(), 0, "empty commit writes nothing");
@@ -864,8 +923,8 @@ fn record_batch_exactly_once_empty_and_distinct_ids() {
                 transaction_id: "tx-a".into(),
                 op_count: 1,
             }],
-            Some("lane"),
-            "tx-a",
+            Some(&scope("lane")),
+            &transaction_id("tx-a"),
         )
         .unwrap();
     let b = oplog
@@ -874,8 +933,8 @@ fn record_batch_exactly_once_empty_and_distinct_ids() {
                 transaction_id: "tx-b".into(),
                 op_count: 1,
             }],
-            Some("lane"),
-            "tx-b",
+            Some(&scope("lane")),
+            &transaction_id("tx-b"),
         )
         .unwrap();
     assert!(a.is_some() && b.is_some());
@@ -889,11 +948,14 @@ mod default_backend {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use objects::{error::Result, object::Principal};
+    use objects::{
+        error::Result,
+        object::{Principal, Scope},
+    };
 
     use super::{
         super::oplog_types::{OpBatch, OpEntry, OpRecord},
-        OpLogBackend, OpLogRecorder,
+        BlockingOpLogBackend, BlockingOpLogRecorder, scope, transaction_id,
     };
 
     #[derive(Default)]
@@ -902,11 +964,11 @@ mod default_backend {
         next_id: Mutex<u64>,
     }
 
-    impl OpLogBackend for MemOpLog {
+    impl BlockingOpLogBackend for MemOpLog {
         fn record_batch_scoped(
             &self,
             operations: Vec<OpRecord>,
-            scope: Option<&str>,
+            scope: Option<&Scope>,
         ) -> Result<Vec<u64>> {
             let mut next = self.next_id.lock().unwrap();
             let batch_id = *next + 1;
@@ -922,7 +984,7 @@ mod default_backend {
                     undone: false,
                     batch_id,
                     batch_index: i as u32,
-                    scope: scope.map(str::to_string),
+                    scope: scope.cloned(),
                     actor: Arc::new(Principal::new("test", "test@example.com")),
                     operation_id: None,
                 });
@@ -943,7 +1005,7 @@ mod default_backend {
         async fn recent_batches_scoped(
             &self,
             count: usize,
-            _scope: Option<&str>,
+            _scope: Option<&Scope>,
         ) -> Result<Vec<OpBatch>> {
             Ok(self
                 .batches
@@ -958,14 +1020,14 @@ mod default_backend {
         async fn undo_batches_scoped(
             &self,
             _count: usize,
-            _scope: Option<&str>,
+            _scope: Option<&Scope>,
         ) -> Result<Vec<OpBatch>> {
             Ok(Vec::new())
         }
         async fn redo_batches_scoped(
             &self,
             _count: usize,
-            _scope: Option<&str>,
+            _scope: Option<&Scope>,
         ) -> Result<Vec<OpBatch>> {
             Ok(Vec::new())
         }
@@ -983,7 +1045,7 @@ mod default_backend {
         let backend = MemOpLog::default();
         let ops = || {
             vec![OpRecord::TransactionCommit {
-                transaction_id: "tx-9".to_string(),
+                transaction_id: "tx-9".into(),
                 op_count: 1,
             }]
         };
@@ -991,8 +1053,8 @@ mod default_backend {
         // Nothing recorded yet → the default appends and returns the ids.
         let first = pollster::block_on(backend.record_batch_scoped_if_no_transaction(
             ops(),
-            Some("scope"),
-            "tx-9",
+            Some(&scope("scope")),
+            &transaction_id("tx-9"),
             16,
         ))
         .unwrap();
@@ -1001,16 +1063,16 @@ mod default_backend {
         // tx-9 now appears in the recent window → deduped to None.
         let second = pollster::block_on(backend.record_batch_scoped_if_no_transaction(
             ops(),
-            Some("scope"),
-            "tx-9",
+            Some(&scope("scope")),
+            &transaction_id("tx-9"),
             16,
         ))
         .unwrap();
         assert!(second.is_none());
     }
 
-    /// The `record_*` convenience wrappers on `OpLogRecorder` are default trait
-    /// methods layered above `OpLogBackend`. A backend that only implements the
+    /// The `record_*` convenience wrappers on `BlockingOpLogRecorder` are default trait
+    /// methods layered above `BlockingOpLogBackend`. A backend that only implements the
     /// storage contract can still opt into this domain recorder surface, and
     /// these calls assert that the expected variants land in recorded batches.
     #[test]
@@ -1033,38 +1095,45 @@ mod default_backend {
             .unwrap();
 
         backend
-            .record_snapshot(&cid, Some(&from), Some("thread"), Some("s"))
-            .unwrap();
-        backend.record_goto(&cid, Some(&from), Some("s")).unwrap();
-        backend
-            .record_thread_create(&ThreadName::new("ft"), &cid, Some(vec![1, 2, 3]), Some("s"))
+            .record_snapshot(&cid, Some(&from), Some("thread"), Some(&scope("s")))
             .unwrap();
         backend
-            .record_thread_delete(&ThreadName::new("ft"), &cid, Some("s"))
+            .record_goto(&cid, Some(&from), Some(&scope("s")))
+            .unwrap();
+        backend
+            .record_thread_create(
+                &ThreadName::new("ft"),
+                &cid,
+                Some(vec![1, 2, 3]),
+                Some(&scope("s")),
+            )
+            .unwrap();
+        backend
+            .record_thread_delete(&ThreadName::new("ft"), &cid, Some(&scope("s")))
             .unwrap();
         let rename_ids = backend
             .record_thread_rename(
                 &ThreadName::new("old"),
                 &ThreadName::new("new"),
                 &cid,
-                Some("s"),
+                Some(&scope("s")),
             )
             .unwrap();
         assert_eq!(rename_ids.len(), 2, "rename emits create + delete");
         backend
-            .record_fork(&from, &cid, Some("topic"), Some(&cid), Some("s"))
+            .record_fork(&from, &cid, Some("topic"), Some(&cid), Some(&scope("s")))
             .unwrap();
         backend
-            .record_collapse(&[from, cid], &cid, Some("trunk"), Some("s"))
+            .record_collapse(&[from, cid], &cid, Some("trunk"), Some(&scope("s")))
             .unwrap();
         backend
-            .record_remote_thread_update("origin", "rt", &cid, Some("s"))
+            .record_remote_thread_update("origin", "rt", &cid, Some(&scope("s")))
             .unwrap();
         backend
-            .record_remote_thread_delete("origin", "rt", &cid, Some("s"))
+            .record_remote_thread_delete("origin", "rt", &cid, Some(&scope("s")))
             .unwrap();
         backend
-            .record_undo_recovery_update(&cid, Some("s"))
+            .record_undo_recovery_update(&cid, Some(&scope("s")))
             .unwrap();
         backend
             .record_marker_create(&MarkerName::new("v1"), &cid)
@@ -1073,16 +1142,18 @@ mod default_backend {
             .record_marker_delete(&MarkerName::new("v1"), &cid)
             .unwrap();
         backend
-            .record_redact(&redaction, &blob, &cid, "secret.txt", Some("s"))
+            .record_redact(&redaction, &blob, &cid, "secret.txt", Some(&scope("s")))
             .unwrap();
-        backend.record_purge(&redaction, &blob, Some("s")).unwrap();
+        backend
+            .record_purge(&redaction, &blob, Some(&scope("s")))
+            .unwrap();
         backend
             .record_fast_forward(
                 &ThreadName::new("topic"),
                 &ThreadName::new("main"),
                 &from,
                 &cid,
-                Some("s"),
+                Some(&scope("s")),
             )
             .unwrap();
 

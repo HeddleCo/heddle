@@ -48,7 +48,7 @@
 //!   is a non-issue for the call site that motivated this builder.
 //! - **No path-grouped reordering.** Entries land in the order added.
 //! - **Output is a pack file at a path** rather than `(Vec<u8>, Vec<u8>)`.
-//!   Callers pair this with [`crate::store::ObjectStore::install_pack_from_path`]
+//!   Callers pair this with [`crate::store::BlockingObjectStore::install_pack_from_path`]
 //!   which moves/installs the pack without copying it through RAM.
 //! - **Re-reads the pack at finalize** to compute the BLAKE3 trailer
 //!   checksum (the pack format hashes header+body, and the count goes

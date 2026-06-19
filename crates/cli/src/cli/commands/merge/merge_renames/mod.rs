@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use objects::{object::Tree, store::ObjectStore};
+use objects::{object::Tree, store::BlockingObjectStore};
 
 use super::rename_matcher::{
     DEFAULT_THRESHOLD, RenameMatch, RenameMatcherConfig, detect_renames, flatten_tree,
@@ -25,7 +25,7 @@ pub(super) struct MergeRenameMap {
 }
 
 pub(super) fn detect_merge_renames(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,

@@ -6,10 +6,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::ObjectStore};
-use wire::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};
+use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::BlockingObjectStore};
 use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
+use wire::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};
 
 use super::{
     CommitGraphIndex, Repository, Result,

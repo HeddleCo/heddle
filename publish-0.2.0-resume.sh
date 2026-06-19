@@ -18,7 +18,6 @@ cd "$CRATES_DIR" || { echo "FATAL: cannot cd to $CRATES_DIR"; exit 1; }
 
 PUBLISHES=(
   "new:heddle-grpc"
-  "new:heddle-review"
   "new:heddle-state-review"
   "upgrade:heddle-repo"
   "new:heddle-mount"

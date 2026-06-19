@@ -5,16 +5,16 @@ use std::{cell::RefCell, collections::HashMap, path::Path};
 
 use objects::{
     object::{Blob, ContentHash, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
-pub(super) struct TreeBlobContentLoader<'a, S: ObjectStore + ?Sized> {
+pub(super) struct TreeBlobContentLoader<'a, S: BlockingObjectStore + ?Sized> {
     store: &'a S,
     root_hash: ContentHash,
     trees: RefCell<HashMap<ContentHash, Option<Tree>>>,
 }
 
-impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
+impl<'a, S: BlockingObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
     pub(super) fn new(store: &'a S, root_hash: ContentHash) -> Self {
         Self {
             store,
@@ -86,7 +86,7 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
 mod tests {
     use objects::{
         object::{Blob, EntryType, FileMode, TreeEntry},
-        store::{InMemoryStore, ObjectStore},
+        store::{BlockingObjectStore, InMemoryStore},
     };
 
     use super::*;

@@ -77,8 +77,6 @@ env:
     heddle-devtools
     heddle-grpc
     heddle-merge
-    heddle-review
-    heddle-runtime-bridge
     heddle-objects
     heddle-crypto
     heddle-oplog

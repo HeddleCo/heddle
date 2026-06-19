@@ -498,7 +498,9 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "operation-ids" | "idempotency" => OPERATION_IDS_TOPIC,
         "remotes" => REMOTES_TOPIC,
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
+        #[cfg(feature = "local-services")]
         "review" => REVIEW_TOPIC,
+        #[cfg(feature = "local-services")]
         "discuss" | "discussions" => DISCUSS_TOPIC,
         "bridge" | "footer" | "notes" => BRIDGE_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
@@ -614,6 +616,7 @@ env var, harness probe, active session, user config, repo config. See
 `crates/cli/src/cli/commands/snapshot.rs` for the full cascade.
 "#;
 
+#[cfg(feature = "local-services")]
 const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
@@ -626,6 +629,12 @@ const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are 
                          query, hook) so agents avoid per-command\n\
                          process startup latency. Mode: same-user only;\n\
                          peer-credential checks are enforced.\n";
+
+#[cfg(not(feature = "local-services"))]
+const DAEMON_TOPIC: &str = "Mount daemon — FUSE mount-daemon control plane.\n\
+\n\
+`heddle daemon` owns FUSE sessions for `--workspace virtualized --daemon`\n\
+threads. Linux only. Subcommands: serve | status | stop.\n";
 
 const MODEL_TOPIC: &str = r#"Heddle mental model — the everyday loop in one screen.
 
@@ -873,6 +882,7 @@ Run `heddle help --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
 bridge-state problems.\n";
 
+#[cfg(feature = "local-services")]
 const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
 \n\
 `show <state>`    — render the review payload (summary, agent narrative,\n\
@@ -890,6 +900,7 @@ Tick budget: at most 3 signals per state by default. Priority:\n\
 invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
 novelty > test_reachability.\n";
 
+#[cfg(feature = "local-services")]
 const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | list | show`\n\
 \n\
 Discussions anchor at the symbol level (file + symbol name, no line range)\n\
@@ -1050,8 +1061,11 @@ mod tests {
             "idempotency",
             "remotes",
             "git-dependencies",
+            #[cfg(feature = "local-services")]
             "review",
+            #[cfg(feature = "local-services")]
             "discuss",
+            #[cfg(feature = "local-services")]
             "discussions",
             "bridge",
             "footer",

@@ -40,6 +40,7 @@ fn first_short_id(repo: &std::path::Path) -> String {
 /// `heddle review show <SHORT>` was the headline regression: hosted
 /// review demanded full IDs. This pins the fix.
 #[test]
+#[cfg(feature = "local-services")]
 fn review_show_accepts_short_id() {
     let temp = setup_repo();
     let short = first_short_id(temp.path());
@@ -59,6 +60,7 @@ fn review_show_accepts_short_id() {
 }
 
 #[test]
+#[cfg(feature = "local-services")]
 fn review_show_respects_global_repo_argument() {
     let temp = setup_repo();
     let repo_arg = format!("--repo={}", temp.path().display());
@@ -120,6 +122,7 @@ fn compare_accepts_short_id() {
 }
 
 #[test]
+#[cfg(feature = "local-services")]
 fn discuss_list_accepts_short_id() {
     let temp = setup_repo();
     let short = first_short_id(temp.path());

@@ -47,8 +47,8 @@
 //!   no `MarkerUpdate` variant. We emit `MarkerDelete` + `MarkerCreate` in
 //!   that case to keep the log faithful.
 
-use objects::object::{MarkerName, ThreadName};
-use oplog::oplog::{OpLogBackend, OpLogRecorder};
+use objects::object::{MarkerName, Scope, ThreadName};
+use oplog::oplog::{BlockingOpLogBackend, BlockingOpLogRecorder};
 use tracing::warn;
 
 use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};
@@ -73,18 +73,18 @@ pub struct OplogEmitStats {
 
 /// Emits oplog records from a list of reflog entries.
 ///
-/// Generic over the [`OpLogBackend`] so the same emitter drives the local
+/// Generic over the [`BlockingOpLogBackend`] so the same emitter drives the local
 /// `OpLog` on disk and the server's Postgres-backed backend. Only the
 /// synchronous `record_*` methods are used here, so `emit` stays sync even
 /// though the trait now has `async` read methods — the type parameter is
 /// required because the trait is no longer `&dyn`-dispatchable.
-pub struct OplogEmitter<'a, O: OpLogBackend> {
+pub struct OplogEmitter<'a, O: BlockingOpLogBackend> {
     oplog: &'a O,
     map: &'a ShaMap,
-    scope: Option<String>,
+    scope: Option<Scope>,
 }
 
-impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
+impl<'a, O: BlockingOpLogBackend> OplogEmitter<'a, O> {
     pub fn new(oplog: &'a O, map: &'a ShaMap) -> Self {
         Self {
             oplog,
@@ -96,7 +96,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
     /// Tag emitted ops with a scope (checkout/lane id) so undo filters pick
     /// them up the same way runtime ops are picked up.
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
-        self.scope = Some(scope.into());
+        self.scope = Some(Scope::new(scope.into()));
         self
     }
 
@@ -106,7 +106,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
     /// semantics.
     pub fn emit(&self, entries: &[ReflogEntry]) -> crate::Result<OplogEmitStats> {
         let mut stats = OplogEmitStats::default();
-        let scope = self.scope.as_deref();
+        let scope = self.scope.as_ref();
 
         for entry in entries {
             match classify(&entry.ref_name) {
@@ -124,7 +124,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
     fn emit_head(
         &self,
         entry: &ReflogEntry,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
         stats: &mut OplogEmitStats,
     ) -> crate::Result<()> {
         // Only `checkout:` is a pure navigation event — everything else
@@ -162,7 +162,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         &self,
         entry: &ReflogEntry,
         short_name: &str,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
         stats: &mut OplogEmitStats,
     ) -> crate::Result<()> {
         match (&entry.previous_sha, &entry.new_sha) {
@@ -280,7 +280,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                                 state: new_cid,
                             },
                         ],
-                        self.scope.as_deref(),
+                        self.scope.as_ref(),
                     )
                     .map_err(IngestError::from)?;
                 stats.marker_deletes += 1;
@@ -555,6 +555,6 @@ mod tests {
             .unwrap();
 
         let last = log.last().unwrap().unwrap();
-        assert_eq!(last.scope.as_deref(), Some("import"));
+        assert_eq!(last.scope.as_ref().map(Scope::as_str), Some("import"));
     }
 }

@@ -49,7 +49,7 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result as HeddleResult},
-    object::{ChangeId, ThreadName},
+    object::{ChangeId, ThreadName, TransactionId},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
@@ -641,7 +641,7 @@ pub(crate) struct StartThread {
     /// genuinely-new start after a prior committed-then-dropped one whose ref
     /// still points at the same base (cid 3335052848). See
     /// `start_thread::start_transaction_id` / `resolve_start_epoch`.
-    pub transaction_id: String,
+    pub transaction_id: TransactionId,
     /// The thread name (ref name + record key).
     pub name: String,
     /// The base state the checkout materializes / the ref points at.
@@ -1047,7 +1047,7 @@ impl StartThread {
 impl AtomicMutation for StartThread {
     type Output = StartThreadOutput;
 
-    fn transaction_id(&self) -> String {
+    fn transaction_id(&self) -> TransactionId {
         self.transaction_id.clone()
     }
 

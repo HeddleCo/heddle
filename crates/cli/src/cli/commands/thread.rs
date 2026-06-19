@@ -10,10 +10,10 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
-    object::{ChangeId, State, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
+    object::{ChangeId, State, ThreadName, TransactionId, Tree},
+    store::{AgentEntry, AgentRegistry, AgentStatus, BlockingObjectStore, current_boot_id},
 };
-use oplog::OpLogRecorder;
+use oplog::BlockingOpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
@@ -1671,12 +1671,12 @@ pub(crate) fn start_transaction_id(
     name: &str,
     base_state: &ChangeId,
     start_epoch: DateTime<Utc>,
-) -> String {
-    format!(
+) -> TransactionId {
+    TransactionId::new(format!(
         "thread-start:{scope}:{name}:{}:{}",
         base_state.to_string_full(),
         start_epoch.timestamp_nanos_opt().unwrap_or_default(),
-    )
+    ))
 }
 
 /// The per-start epoch folded into the idempotency key ([`start_transaction_id`]).
@@ -2499,7 +2499,7 @@ pub(crate) fn cmd_thread_create(
         &ThreadName::new(&name),
         &current,
         manager_snapshot,
-        Some(&repo.op_scope()),
+        Some(&repo.op_scope_key()),
     )?;
 
     let output = thread_op_output(
@@ -3295,7 +3295,7 @@ pub(crate) fn cmd_thread_delete(cli: &Cli, repo: &Repository, name: String) -> R
         .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "delete thread")))?;
 
     repo.oplog()
-        .record_thread_delete(&thread_name, &state, Some(&repo.op_scope()))?;
+        .record_thread_delete(&thread_name, &state, Some(&repo.op_scope_key()))?;
 
     let output = thread_op_output(
         "thread_drop",
@@ -3356,7 +3356,7 @@ pub(crate) fn cmd_thread_rename(
 
     repo.refs().update_refs(&updates)?;
     repo.oplog()
-        .record_thread_rename(&old_tn, &new_tn, &state, Some(&repo.op_scope()))?;
+        .record_thread_rename(&old_tn, &new_tn, &state, Some(&repo.op_scope_key()))?;
 
     let output = thread_op_output(
         "thread_rename",

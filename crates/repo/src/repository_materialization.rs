@@ -14,7 +14,7 @@ use std::{
 use objects::{
     fs_atomic::enrich_fs_error,
     object::{ChangeId, ContentHash, EntryType, Tree},
-    store::ObjectStore,
+    store::{BlockingObjectStore, LocalObjectStoreExt},
 };
 use tracing::{debug, instrument};
 
@@ -934,7 +934,11 @@ fn requested_materialization_threads() -> Option<NonZeroUsize> {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
-    use objects::{fs_clone::filesystem_supports_reflink, object::Blob, store::ObjectStore};
+    use objects::{
+        fs_clone::filesystem_supports_reflink,
+        object::Blob,
+        store::{BlockingObjectStore, LocalObjectStoreExt, PackMaintenanceStoreExt},
+    };
     use tempfile::TempDir;
 
     use super::{

@@ -22,10 +22,10 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use objects::object::{ChangeId, Principal};
+use objects::object::{ChangeId, Principal, TransactionId};
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpEntry, OpLog, OpLogBackend,
-    OpLogRecorder, OpRecord,
+    BlockingOpLogBackend, BlockingOpLogRecorder, ConditionalCommitOutcome, IsolationKey,
+    IsolationPrecondition, OpEntry, OpLog, OpRecord,
 };
 use tempfile::TempDir;
 
@@ -98,7 +98,7 @@ fn update_record(i: usize) -> OpRecord {
     }
 }
 
-fn commit_record(transaction_id: impl Into<String>, op_count: u32) -> OpRecord {
+fn commit_record(transaction_id: impl Into<TransactionId>, op_count: u32) -> OpRecord {
     OpRecord::TransactionCommit {
         transaction_id: transaction_id.into(),
         op_count,
@@ -223,6 +223,7 @@ fn bench_indexed_reads(c: &mut Criterion) {
 fn bench_exactly_once(c: &mut Criterion) {
     let fixture = transaction_fixture();
     let committed_tx = format!("tx-{:06}", LARGE_LOG_SIZE / 2);
+    let committed_tx_id = TransactionId::new(committed_tx.clone());
 
     let mut group = c.benchmark_group("oplog_exactly_once");
     group.sample_size(10);
@@ -235,7 +236,7 @@ fn bench_exactly_once(c: &mut Criterion) {
                 .record_batch_exactly_once(
                     exact_once_operations(&committed_tx, LARGE_LOG_SIZE + 1),
                     None,
-                    &committed_tx,
+                    &committed_tx_id,
                 )
                 .unwrap();
             black_box(result);
@@ -250,11 +251,12 @@ fn bench_exactly_once(c: &mut Criterion) {
                 || fixture.clone_to_temp(),
                 |layout| {
                     let log = layout.log();
+                    let transaction_id = TransactionId::new("tx-new-exact-once");
                     let result = log
                         .record_batch_exactly_once(
                             exact_once_operations("tx-new-exact-once", LARGE_LOG_SIZE + 2),
                             None,
-                            "tx-new-exact-once",
+                            &transaction_id,
                         )
                         .unwrap();
                     black_box(result);

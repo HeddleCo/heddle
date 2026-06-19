@@ -3,7 +3,7 @@ use std::path::Path;
 
 use objects::{
     object::{Blob, ContentHash, FileProvenance},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use super::{HeddleError, Repository, Result, helpers::split_path};

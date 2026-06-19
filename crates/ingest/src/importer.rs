@@ -24,12 +24,12 @@ use std::{
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
-        CompressionConfig, ObjectStore,
+        BlockingObjectStore, CompressionConfig, PackMaintenanceStoreExt,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
     util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
-use oplog::oplog::{OpLog, OpLogBackend};
+use oplog::oplog::{BlockingOpLogBackend, OpLog};
 use refs::refs::RefBackend;
 use tracing::info;
 
@@ -178,7 +178,12 @@ fn ref_stats_from_heads(heads: &[RefHead]) -> RefDiscoveryStats {
 /// so [`Importer::new`] (which starts without an oplog backend) has a
 /// concrete type; [`Importer::with_oplog`] rebinds `O` to whatever backend
 /// the caller attaches.
-pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> {
+pub struct Importer<
+    'a,
+    R: RefBackend,
+    S: BlockingObjectStore + PackMaintenanceStoreExt,
+    O: BlockingOpLogBackend = OpLog,
+> {
     git: &'a GitSource,
     store: &'a S,
     refs: &'a R,
@@ -208,7 +213,9 @@ pub struct ImportProgressEvent {
     pub states_created: usize,
 }
 
-impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
+impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt>
+    Importer<'a, R, S, OpLog>
+{
     pub fn new(git: &'a GitSource, store: &'a S, refs: &'a R, map: &'a mut ShaMap) -> Self {
         Self {
             git,
@@ -224,14 +231,16 @@ impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
     }
 }
 
-impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
+impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt, O: BlockingOpLogBackend>
+    Importer<'a, R, S, O>
+{
     /// Attach an oplog backend so the importer also translates reflog
     /// entries into `OpRecord`s. Without one the import still produces a
     /// valid Heddle repo — you just don't get `heddle undo` reach past the
     /// import boundary.
     ///
     /// Rebinds the oplog type parameter to the attached backend's type.
-    pub fn with_oplog<O2: OpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, S, O2> {
+    pub fn with_oplog<O2: BlockingOpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, S, O2> {
         Importer {
             git: self.git,
             store: self.store,

@@ -1,29 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Backend-agnostic compliance test suite for [`ObjectStore`] implementations.
+//! Backend-agnostic compliance test suite for [`BlockingObjectStore`] implementations.
 //!
 //! Call [`run_compliance_tests`] from any `#[test]` or `#[tokio::test]` that
-//! has a concrete [`ObjectStore`] to verify it satisfies the full contract.
-//! Both [`InMemoryStore`] and [`S3Store`] are validated this way.
+//! has a concrete [`BlockingObjectStore`] to verify it satisfies the full contract.
 
 use crate::{
+    error::StorageErrorKind,
     object::{Attribution, Blob, ContentHash, Principal, State, Tree},
-    store::ObjectStore,
+    store::{
+        BlockingObjectStore, ByteStream, ObjectBytes, ObjectCollection, ObjectKey, ObjectStore,
+        PageRequest, PageToken,
+    },
 };
+
+use bytes::Bytes;
+use futures::{StreamExt, executor::block_on, stream};
 
 fn attribution() -> Attribution {
     Attribution::human(Principal::new("Compliance Test", "test@example.com"))
 }
 
-/// Run the full ObjectStore compliance suite against `store`.
+/// Run the full BlockingObjectStore compliance suite against `store`.
 ///
 /// Panics on the first assertion failure. Designed to be called from unit or
-/// integration tests — including from `spawn_blocking` when testing async
-/// backends like [`S3Store`].
-pub fn run_compliance_tests<S: ObjectStore>(store: &S) {
+/// integration tests.
+pub fn run_compliance_tests<S: BlockingObjectStore>(store: &S) {
     blob_round_trip(store);
     blob_missing_returns_none(store);
     blob_has(store);
     blob_list(store);
+    blob_list_paginates(store);
+    async_object_adapter_batches_and_streams(store);
+    storage_error_kinds_are_machine_readable(store);
     tree_round_trip(store);
     tree_missing_returns_none(store);
     state_round_trip(store);
@@ -33,7 +41,7 @@ pub fn run_compliance_tests<S: ObjectStore>(store: &S) {
 
 // ── Blob ─────────────────────────────────────────────────────────────────────
 
-fn blob_round_trip<S: ObjectStore>(store: &S) {
+fn blob_round_trip<S: BlockingObjectStore>(store: &S) {
     let blob = Blob::from("compliance: blob round-trip");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let got = store
@@ -47,7 +55,7 @@ fn blob_round_trip<S: ObjectStore>(store: &S) {
     );
 }
 
-fn blob_missing_returns_none<S: ObjectStore>(store: &S) {
+fn blob_missing_returns_none<S: BlockingObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-blob");
     let result = store
         .get_blob(&hash)
@@ -58,7 +66,7 @@ fn blob_missing_returns_none<S: ObjectStore>(store: &S) {
     );
 }
 
-fn blob_has<S: ObjectStore>(store: &S) {
+fn blob_has<S: BlockingObjectStore>(store: &S) {
     let blob = Blob::from("compliance: has_blob");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     assert!(
@@ -67,7 +75,7 @@ fn blob_has<S: ObjectStore>(store: &S) {
     );
 }
 
-fn blob_list<S: ObjectStore>(store: &S) {
+fn blob_list<S: BlockingObjectStore>(store: &S) {
     let blob = Blob::from("compliance: list_blobs");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let list = store.list_blobs().expect("list_blobs failed");
@@ -77,9 +85,130 @@ fn blob_list<S: ObjectStore>(store: &S) {
     );
 }
 
+fn blob_list_paginates<S: BlockingObjectStore>(store: &S) {
+    let expected: Vec<_> = (0..3)
+        .map(|i| {
+            let blob = Blob::from(format!("compliance: paginated blob {i}"));
+            store.put_blob(&blob).expect("put_blob failed")
+        })
+        .collect();
+
+    let mut seen = Vec::new();
+    let mut token = None;
+    for _ in 0..64 {
+        let page = store
+            .list_blobs_page(PageRequest {
+                limit: Some(2),
+                token,
+            })
+            .expect("list_blobs_page failed");
+        assert!(
+            page.items.len() <= 2,
+            "list_blobs_page returned more items than requested"
+        );
+        seen.extend(page.items);
+        token = page.next_token;
+        if token.is_none() {
+            break;
+        }
+    }
+    assert!(token.is_none(), "paginated listing did not terminate");
+
+    for hash in expected {
+        assert!(
+            seen.contains(&hash),
+            "paginated list_blobs did not include hash after put"
+        );
+    }
+
+    let err = store
+        .list_blobs_page(PageRequest {
+            limit: Some(1),
+            token: Some(PageToken::new("not-a-local-offset")),
+        })
+        .expect_err("invalid local page token must fail");
+    assert_eq!(err.storage_kind(), StorageErrorKind::Invalid);
+}
+
+fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
+    let first = Bytes::from_static(b"compliance: async put_many blob");
+    let first_hash = Blob::from_slice(&first).hash();
+    let outcomes = block_on(ObjectStore::put_many(
+        store,
+        vec![ObjectBytes::new(ObjectKey::Blob(first_hash), first.clone())],
+    ))
+    .expect("async put_many failed");
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].written);
+
+    let missing_hash = Blob::from("compliance: async missing blob").hash();
+    let presence = block_on(ObjectStore::has_many(
+        store,
+        &[ObjectKey::Blob(first_hash), ObjectKey::Blob(missing_hash)],
+    ))
+    .expect("async has_many failed");
+    assert_eq!(
+        presence.iter().map(|p| p.present).collect::<Vec<_>>(),
+        vec![true, false]
+    );
+
+    let stream_key = {
+        let bytes = b"compliance: async streamed blob";
+        ObjectKey::Blob(Blob::from_slice(bytes).hash())
+    };
+    let source: ByteStream = Box::pin(stream::iter([
+        Ok(Bytes::from_static(b"compliance: async ")),
+        Ok(Bytes::from_static(b"streamed blob")),
+    ]));
+    let outcome = block_on(ObjectStore::put_object_stream(
+        store,
+        stream_key.clone(),
+        source,
+    ))
+    .expect("async put_object_stream failed");
+    assert!(outcome.written);
+
+    let streamed = block_on(async {
+        let mut source = ObjectStore::get_object_stream(store, &stream_key)
+            .await
+            .expect("async get_object_stream failed")
+            .expect("streamed blob missing");
+        let mut out = Vec::new();
+        while let Some(chunk) = source.next().await {
+            out.extend_from_slice(&chunk.expect("stream chunk failed"));
+        }
+        out
+    });
+    assert_eq!(streamed, b"compliance: async streamed blob");
+
+    let page = block_on(ObjectStore::list_page(
+        store,
+        ObjectCollection::Blobs,
+        PageRequest::first(1),
+    ))
+    .expect("async list_page failed");
+    assert!(page.items.len() <= 1);
+    assert!(
+        page.items
+            .iter()
+            .all(|key| matches!(key, ObjectKey::Blob(_))),
+        "async blob listing returned a non-blob key"
+    );
+}
+
+fn storage_error_kinds_are_machine_readable<S: BlockingObjectStore>(store: &S) {
+    let blob = Blob::from("compliance: cas mismatch");
+    let wrong_hash = Blob::from("compliance: wrong hash").hash();
+    let err = store
+        .put_blob_with_hash(&blob, wrong_hash)
+        .expect_err("hash mismatch must fail");
+    assert_eq!(err.storage_kind(), StorageErrorKind::CasMismatch);
+    assert!(!err.is_retryable_storage_error());
+}
+
 // ── Tree ──────────────────────────────────────────────────────────────────────
 
-fn tree_round_trip<S: ObjectStore>(store: &S) {
+fn tree_round_trip<S: BlockingObjectStore>(store: &S) {
     let tree = Tree::new();
     let hash = store.put_tree(&tree).expect("put_tree failed");
     let got = store
@@ -89,7 +218,7 @@ fn tree_round_trip<S: ObjectStore>(store: &S) {
     assert_eq!(got.hash(), hash, "tree hash changed after round-trip");
 }
 
-fn tree_missing_returns_none<S: ObjectStore>(store: &S) {
+fn tree_missing_returns_none<S: BlockingObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-tree");
     let result = store
         .get_tree(&hash)
@@ -102,7 +231,7 @@ fn tree_missing_returns_none<S: ObjectStore>(store: &S) {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-fn state_round_trip<S: ObjectStore>(store: &S) {
+fn state_round_trip<S: BlockingObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -121,7 +250,7 @@ fn state_round_trip<S: ObjectStore>(store: &S) {
     assert_eq!(got.tree, tree_hash, "tree hash changed after round-trip");
 }
 
-fn state_has<S: ObjectStore>(store: &S) {
+fn state_has<S: BlockingObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -135,7 +264,7 @@ fn state_has<S: ObjectStore>(store: &S) {
     );
 }
 
-fn state_list<S: ObjectStore>(store: &S) {
+fn state_list<S: BlockingObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)

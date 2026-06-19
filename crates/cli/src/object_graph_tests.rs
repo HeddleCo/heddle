@@ -2,9 +2,9 @@
 use std::fs;
 
 use objects::object::ChangeId;
-use wire::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
 use repo::Repository;
 use tempfile::TempDir;
+use wire::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
 
 fn create_repo_with_two_states() -> (TempDir, Repository, ChangeId, ChangeId) {
     let temp_dir = TempDir::new().expect("temp dir");

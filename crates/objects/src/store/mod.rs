@@ -6,32 +6,36 @@ use std::path::PathBuf;
 use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
 pub mod agent_registry;
+pub mod async_store;
 pub mod atomic;
 pub mod compression;
 pub mod fs;
 pub mod liveness;
+pub mod local_ext;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
 pub mod pack;
 pub mod shallow;
 pub mod store_compliance;
-
-#[cfg(feature = "s3")]
-mod s3;
+pub mod types;
 
 pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
     ReserveOutcome, generate_agent_id,
 };
+pub use async_store::{ByteStream, ObjectStore};
 pub use compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use fs::FsStore;
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
+pub use local_ext::{LocalObjectStoreExt, PackMaintenanceStoreExt};
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};
-#[cfg(feature = "s3")]
-pub use s3::{S3Store, S3StoreBuilder};
 pub use shallow::ShallowInfo;
+pub use types::{
+    ObjectBytes, ObjectCollection, ObjectKey, ObjectPresence, ObjectPutOutcome, Page, PageRequest,
+    PageToken,
+};
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
@@ -43,23 +47,20 @@ impl From<CompressionError> for HeddleError {
 
 /// Static-dispatch enum over the concrete object stores Heddle ships.
 ///
-/// This is the default `S` for [`Repository`](crate) so the store backend
-/// can be chosen at *runtime* (from `[storage.s3]` config in
-/// `Repository::build_store`) while remaining a compile-time-monomorphized
-/// type — no vtable. Each [`ObjectStore`] method `match`-dispatches to the
-/// inner variant, so the compiler inlines through the enum to the concrete
-/// backend's implementation (including its overridden default methods).
+/// This is the default `S` for [`Repository`](crate) so the store remains a
+/// compile-time-monomorphized type — no vtable. Each [`BlockingObjectStore`] method
+/// `match`-dispatches to the inner variant, so the compiler inlines through the
+/// enum to the concrete backend's implementation (including its overridden
+/// default methods).
 ///
 /// Sealed by construction: only the variants enumerated here are valid
 /// stores. Heddle is the sole implementer (heddle#259 / #283) — `AnyStore`
 /// is not a public extension point.
 pub enum AnyStore {
     Fs(FsStore),
-    #[cfg(feature = "s3")]
-    S3(S3Store),
 }
 
-/// Forward an [`ObjectStore`] call to the active [`AnyStore`] variant.
+/// Forward an [`BlockingObjectStore`] call to the active [`AnyStore`] variant.
 ///
 /// Every arm calls the *same* method on the inner concrete store, so a
 /// backend's override of a defaulted trait method (e.g. `FsStore::blob_size`)
@@ -68,13 +69,11 @@ macro_rules! any_store_dispatch {
     ($self:ident, $method:ident ( $($arg:expr),* )) => {
         match $self {
             AnyStore::Fs(inner) => inner.$method($($arg),*),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => inner.$method($($arg),*),
         }
     };
 }
 
-impl ObjectStore for AnyStore {
+impl BlockingObjectStore for AnyStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         any_store_dispatch!(self, get_blob(hash))
     }
@@ -82,25 +81,20 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, put_blob(blob))
     }
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
-        any_store_dispatch!(self, get_blob_bytes(hash))
+        match self {
+            AnyStore::Fs(inner) => BlockingObjectStore::get_blob_bytes(inner, hash),
+        }
     }
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         any_store_dispatch!(self, blob_size(hash))
-    }
-    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
-        any_store_dispatch!(self, loose_blob_path(hash))
-    }
-    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
-        any_store_dispatch!(self, promote_to_loose_uncompressed(hash))
-    }
-    fn clear_recent_caches(&self) {
-        any_store_dispatch!(self, clear_recent_caches())
     }
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         any_store_dispatch!(self, put_blob_with_hash(blob, hash))
     }
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
-        any_store_dispatch!(self, has_blob(hash))
+        match self {
+            AnyStore::Fs(inner) => BlockingObjectStore::has_blob(inner, hash),
+        }
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         any_store_dispatch!(self, get_tree(hash))
@@ -139,7 +133,9 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, list_trees())
     }
     fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        any_store_dispatch!(self, put_blob_bytes_with_hash(data, hash))
+        match self {
+            AnyStore::Fs(inner) => BlockingObjectStore::put_blob_bytes_with_hash(inner, data, hash),
+        }
     }
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
         any_store_dispatch!(self, put_tree_serialized(data, hash))
@@ -161,28 +157,6 @@ impl ObjectStore for AnyStore {
     }
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
-    }
-    fn install_pack_streaming(
-        &self,
-        pack_path: &std::path::Path,
-        index_path: &std::path::Path,
-    ) -> Result<Vec<pack::PackObjectId>> {
-        any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
-    }
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        any_store_dispatch!(self, pack_objects(aggressive))
-    }
-    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
-        any_store_dispatch!(self, prune_loose_objects())
-    }
-    fn begin_snapshot_write_batch(&self) -> Result<()> {
-        any_store_dispatch!(self, begin_snapshot_write_batch())
-    }
-    fn flush_snapshot_write_batch(&self) -> Result<()> {
-        any_store_dispatch!(self, flush_snapshot_write_batch())
-    }
-    fn abort_snapshot_write_batch(&self) {
-        any_store_dispatch!(self, abort_snapshot_write_batch())
     }
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_redactions_for_blob(blob))
@@ -210,8 +184,45 @@ impl ObjectStore for AnyStore {
     }
 }
 
+impl LocalObjectStoreExt for AnyStore {
+    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
+        any_store_dispatch!(self, loose_blob_path(hash))
+    }
+    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, promote_to_loose_uncompressed(hash))
+    }
+    fn clear_recent_caches(&self) {
+        any_store_dispatch!(self, clear_recent_caches())
+    }
+}
+
+impl PackMaintenanceStoreExt for AnyStore {
+    fn install_pack_streaming(
+        &self,
+        pack_path: &std::path::Path,
+        index_path: &std::path::Path,
+    ) -> Result<Vec<pack::PackObjectId>> {
+        any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
+    }
+    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
+        any_store_dispatch!(self, pack_objects(aggressive))
+    }
+    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
+        any_store_dispatch!(self, prune_loose_objects())
+    }
+    fn begin_snapshot_write_batch(&self) -> Result<()> {
+        any_store_dispatch!(self, begin_snapshot_write_batch())
+    }
+    fn flush_snapshot_write_batch(&self) -> Result<()> {
+        any_store_dispatch!(self, flush_snapshot_write_batch())
+    }
+    fn abort_snapshot_write_batch(&self) {
+        any_store_dispatch!(self, abort_snapshot_write_batch())
+    }
+}
+
 /// Trait for object storage backends.
-pub trait ObjectStore: Send + Sync {
+pub trait BlockingObjectStore: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash>;
 
@@ -248,75 +259,12 @@ pub trait ObjectStore: Send + Sync {
         Ok(self.get_blob(hash)?.map(|blob| blob.content().len() as u64))
     }
 
-    /// Filesystem path of the loose blob whose on-disk bytes are
-    /// byte-identical to the blob's *uncompressed* content, suitable
-    /// for `hard_link`/`clonefile` materialization without going
-    /// through `get_blob`.
-    ///
-    /// Returns `None` when the blob is missing, is only available via
-    /// a packfile, is stored compressed (the on-disk bytes wouldn't
-    /// match what a worktree consumer needs to read), or the backend
-    /// doesn't expose stable filesystem paths (e.g. `InMemoryStore`,
-    /// `S3Store`). The default impl returns `None` so non-`FsStore`
-    /// backends silently fall through to the bytes path.
-    fn loose_blob_path(&self, _hash: &ContentHash) -> Option<PathBuf> {
-        None
-    }
-
-    /// Ensure the blob identified by `hash` is materialized as an
-    /// uncompressed loose file at the canonical loose path so that
-    /// `loose_blob_path` returns `Some(path)` on a subsequent call.
-    ///
-    /// This is the "warm canonical store" path that lets the
-    /// hardlink-first materializer keep its 5–10× wall-clock and
-    /// storage-allocation wins after `pack_objects + prune_loose_objects`
-    /// has moved everything into a packfile. Without this, the lazy
-    /// hardlink path silently degrades to `fs::write(decompressed)` on
-    /// every materialize, because `loose_blob_path` returns `None` for
-    /// pack-only and compressed-loose blobs.
-    ///
-    /// Cost-amortization: the first promotion of a blob pays
-    /// `decompress + atomic write`. Every subsequent materialize of
-    /// the same blob — into the same worktree on `goto`, or into a
-    /// sibling worktree on `delegate` — is a single `link(2)`. Net
-    /// win for any N > 1 materializations; break-even at N == 1.
-    ///
-    /// Pack invariants are preserved: this method does not remove the
-    /// pack-resident copy. The blob lives in both pack and loose-
-    /// uncompressed until the next `prune_loose_objects` cycle, at
-    /// which point the loose mirror is discarded and a future
-    /// materialize re-promotes on demand.
-    ///
-    /// Idempotent: a blob that's already loose-and-uncompressed is a
-    /// no-op fast path. A blob that's loose-but-compressed is
-    /// rewritten in place (atomically) with the uncompressed bytes.
-    /// A blob that's pack-resident is decompressed out of the pack
-    /// and written loose without touching the pack.
-    ///
-    /// Returns `Ok(true)` when the call did real work (a write
-    /// happened), `Ok(false)` when it was a no-op (blob was already
-    /// loose+uncompressed), and `Err` when the blob isn't in the
-    /// store at all. The default impl returns `Ok(false)` for
-    /// backends that don't expose loose paths (`InMemoryStore`,
-    /// `S3Store`), since the hardlink path is fundamentally
-    /// inapplicable there.
-    fn promote_to_loose_uncompressed(&self, _hash: &ContentHash) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Drop any in-memory caches of decompressed blobs / trees /
-    /// states. The next access to any object pays full I/O +
-    /// decompression cost. No-op for stores that don't cache
-    /// (`InMemoryStore` is already the source of truth).
-    ///
-    /// Exposed primarily for benchmarks that want to measure the
-    /// true cold-cache path without rebuilding the store from
-    /// scratch. Production callers don't need to invoke this.
-    fn clear_recent_caches(&self) {}
-
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         if blob.hash() != hash {
-            return Err(HeddleError::InvalidObject("blob hash mismatch".to_string()));
+            return Err(HeddleError::storage(
+                crate::error::StorageErrorKind::CasMismatch,
+                "blob hash mismatch",
+            ));
         }
         self.put_blob(blob)
     }
@@ -329,11 +277,23 @@ pub trait ObjectStore: Send + Sync {
     fn put_state(&self, state: &State) -> Result<()>;
     fn has_state(&self, id: &ChangeId) -> Result<bool>;
     fn list_states(&self) -> Result<Vec<ChangeId>>;
+    fn list_states_page(&self, page: PageRequest) -> Result<Page<ChangeId>> {
+        Page::from_local_items(self.list_states()?, page)
+    }
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>>;
     fn put_action(&self, action: &mut Action) -> Result<ActionId>;
     fn list_actions(&self) -> Result<Vec<ActionId>>;
+    fn list_actions_page(&self, page: PageRequest) -> Result<Page<ActionId>> {
+        Page::from_local_items(self.list_actions()?, page)
+    }
     fn list_blobs(&self) -> Result<Vec<ContentHash>>;
+    fn list_blobs_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
+        Page::from_local_items(self.list_blobs()?, page)
+    }
     fn list_trees(&self) -> Result<Vec<ContentHash>>;
+    fn list_trees_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
+        Page::from_local_items(self.list_trees()?, page)
+    }
 
     fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
         self.put_blob_with_hash(&Blob::from_slice(data), hash)
@@ -466,57 +426,6 @@ pub trait ObjectStore: Send + Sync {
         Ok(ids)
     }
 
-    /// Install a pack and its index from on-disk files
-    /// (typically produced by `StreamingPackBuilder`). The default
-    /// impl reads both files fully and delegates to `install_pack`,
-    /// so any backend that doesn't override this still works (at the
-    /// cost of giving back the bounded-memory promise). Real fs-
-    /// backed stores override this to `rename(2)` both files into the
-    /// pack directory without ever loading them.
-    ///
-    /// On success, the source files at `pack_path`/`index_path` may
-    /// have been moved or removed depending on the backend; callers
-    /// shouldn't continue to rely on them.
-    ///
-    /// Returns the ids of the installed objects — the same set
-    /// `install_pack` reports for the equivalent byte-buffer install,
-    /// so callers (e.g. native sync) read the installed ids off the
-    /// install result instead of tracking them out-of-band.
-    fn install_pack_streaming(
-        &self,
-        pack_path: &std::path::Path,
-        index_path: &std::path::Path,
-    ) -> Result<Vec<pack::PackObjectId>> {
-        let pack_data = std::fs::read(pack_path).map_err(StoreError::from)?;
-        let index_data = std::fs::read(index_path).map_err(StoreError::from)?;
-        let ids = self.install_pack(&pack_data, &index_data)?;
-        // Default impl: clean up the staged files. Override
-        // implementations that move/rename should not call super and
-        // should manage the file lifecycle themselves.
-        let _ = std::fs::remove_file(pack_path);
-        let _ = std::fs::remove_file(index_path);
-        Ok(ids)
-    }
-
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        let _ = aggressive;
-        Ok((0, 0))
-    }
-
-    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
-        Ok((0, 0))
-    }
-
-    fn begin_snapshot_write_batch(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn flush_snapshot_write_batch(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn abort_snapshot_write_batch(&self) {}
-
     /// Whether the store holds any redaction record for the given blob.
     ///
     /// Redactions live in a sidecar (`<heddle_dir>/redactions/`) that is
@@ -552,8 +461,9 @@ pub trait ObjectStore: Send + Sync {
     /// model redactions (e.g. read-only shims) refuse rather than
     /// silently dropping the record.
     fn put_redactions_bytes_for_blob(&self, _blob: &ContentHash, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::InvalidObject(
-            "this object store does not support persisting redactions".to_string(),
+        Err(HeddleError::storage(
+            crate::error::StorageErrorKind::Unsupported,
+            "this object store does not support persisting redactions",
         ))
     }
 
@@ -565,6 +475,10 @@ pub trait ObjectStore: Send + Sync {
     /// Default impl returns `Ok(vec![])`.
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         Ok(Vec::new())
+    }
+
+    fn list_blobs_with_redactions_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
+        Page::from_local_items(self.list_blobs_with_redactions()?, page)
     }
 
     /// Whether the store holds any state-visibility record for `state`.
@@ -594,8 +508,9 @@ pub trait ObjectStore: Send + Sync {
     /// Default impl returns an "unsupported" error so stores that do not
     /// model the sidecar refuse instead of dropping it.
     fn put_state_visibility_bytes_for_state(&self, _state: &ChangeId, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::InvalidObject(
-            "this object store does not support persisting state visibility".to_string(),
+        Err(HeddleError::storage(
+            crate::error::StorageErrorKind::Unsupported,
+            "this object store does not support persisting state visibility",
         ))
     }
 
@@ -604,6 +519,10 @@ pub trait ObjectStore: Send + Sync {
     /// Default impl returns `Ok(vec![])`.
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
         Ok(Vec::new())
+    }
+
+    fn list_states_with_visibility_page(&self, page: PageRequest) -> Result<Page<ChangeId>> {
+        Page::from_local_items(self.list_states_with_visibility()?, page)
     }
 }
 
@@ -621,7 +540,7 @@ mod any_store_tests {
         (temp, AnyStore::Fs(store))
     }
 
-    /// Drive every `ObjectStore` method through the `AnyStore::Fs` dispatch arm
+    /// Drive every `BlockingObjectStore` method through the `AnyStore::Fs` dispatch arm
     /// so the enum's match-dispatch is exercised end-to-end. This is the
     /// coverage seam for heddle#283: each arm forwards to the inner concrete
     /// store, and a missing arm would fail to compile or silently fall back to
@@ -637,9 +556,12 @@ mod any_store_tests {
             store.get_blob(&blob_hash).unwrap().unwrap().content(),
             blob.content()
         );
-        assert!(store.has_blob(&blob_hash).unwrap());
+        assert!(BlockingObjectStore::has_blob(&store, &blob_hash).unwrap());
         assert_eq!(
-            store.get_blob_bytes(&blob_hash).unwrap().unwrap().as_ref(),
+            BlockingObjectStore::get_blob_bytes(&store, &blob_hash)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
             blob.content()
         );
         assert_eq!(
@@ -659,8 +581,7 @@ mod any_store_tests {
         let raw_blob = Blob::from("raw bytes blob");
         let raw_hash = raw_blob.hash();
         assert_eq!(
-            store
-                .put_blob_bytes_with_hash(raw_blob.content(), raw_hash)
+            BlockingObjectStore::put_blob_bytes_with_hash(&store, raw_blob.content(), raw_hash)
                 .unwrap(),
             raw_hash
         );

@@ -3,7 +3,7 @@ use std::{sync::mpsc, time::Duration};
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{ChangeId, MarkerName, RemoteName, ThreadName},
 };
 use tempfile::TempDir;
 
@@ -380,7 +380,10 @@ fn test_ref_summary_index_rebuild_reports_repo_ref_shape() {
         refs.list_markers().unwrap(),
         vec![MarkerName::new("v1.0.0")]
     );
-    assert_eq!(refs.list_remotes().unwrap(), vec!["origin".to_string()]);
+    assert_eq!(
+        refs.list_remotes().unwrap(),
+        vec![RemoteName::new("origin")]
+    );
     assert_eq!(
         refs.list_remote_threads("origin").unwrap(),
         vec![ThreadName::new("feature/api"), ThreadName::new("main")]
@@ -413,7 +416,10 @@ fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
         refs.list_markers().unwrap(),
         vec![MarkerName::new("stable")]
     );
-    assert_eq!(refs.list_remotes().unwrap(), vec!["origin".to_string()]);
+    assert_eq!(
+        refs.list_remotes().unwrap(),
+        vec![RemoteName::new("origin")]
+    );
     assert_eq!(
         refs.list_remote_threads("origin").unwrap(),
         vec![ThreadName::new("main")]
@@ -541,7 +547,7 @@ mod chokepoint {
 
     use objects::{
         error::Result,
-        object::{ChangeId, MarkerName, ThreadName},
+        object::{ChangeId, MarkerName, RemoteName, Scope, ThreadName},
     };
     use tempfile::TempDir;
 
@@ -565,7 +571,7 @@ mod chokepoint {
     struct FakeReconciler {
         generation: AtomicU64,
         republish: Vec<RefUpdate>,
-        remote_updates: Vec<(String, ThreadName, Option<ChangeId>)>,
+        remote_updates: Vec<(RemoteName, ThreadName, Option<ChangeId>)>,
         undo_recovery: Option<ChangeId>,
         calls: Arc<AtomicU64>,
     }
@@ -628,11 +634,11 @@ mod chokepoint {
     }
 
     impl RefCommitter for FakeCommitter {
-        fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((encoded_records.to_vec(), scope.map(str::to_string)));
+        fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&Scope>) -> Result<()> {
+            self.seen.lock().unwrap().push((
+                encoded_records.to_vec(),
+                scope.map(|scope| scope.as_str().to_string()),
+            ));
             Ok(())
         }
     }
@@ -725,20 +731,24 @@ mod chokepoint {
             ],
             remote_updates: vec![
                 (
-                    "origin".to_string(),
+                    RemoteName::new("origin"),
                     ThreadName::new("rt"),
                     Some(remote_state),
                 ),
                 // `None` value, canonical absent — skipped.
-                ("origin".to_string(), ThreadName::new("gone"), None),
+                (RemoteName::new("origin"), ThreadName::new("gone"), None),
                 // Present-but-stale remote thread ⇒ overwritten with committed value.
                 (
-                    "origin".to_string(),
+                    RemoteName::new("origin"),
                     ThreadName::new("rt_stale"),
                     Some(remote_stale_new),
                 ),
                 // Present remote thread the fold deleted ⇒ removed.
-                ("origin".to_string(), ThreadName::new("rt_doomed"), None),
+                (
+                    RemoteName::new("origin"),
+                    ThreadName::new("rt_doomed"),
+                    None,
+                ),
             ],
             undo_recovery: Some(undo_state),
             calls: Arc::clone(&calls),
@@ -830,7 +840,7 @@ mod chokepoint {
             expected: RefExpectation::Missing,
             new: Some(state),
         }];
-        refs.commit_and_publish(&records, &updates, Some("lane"))
+        refs.commit_and_publish(&records, &updates, Some(&Scope::new("lane")))
             .unwrap();
 
         // The committer saw the records (phase 4) and the ref published (phase 5).
@@ -948,6 +958,7 @@ mod chokepoint {
     #[test]
     fn remote_threads_pack_and_trait_delegations() {
         use super::super::{CoreRefBackend, RefBackend};
+        use objects::object::RemoteName;
 
         let (_t, dir) = manager();
         let refs = RefManager::new(&dir);
@@ -955,24 +966,21 @@ mod chokepoint {
 
         let s1 = ChangeId::generate();
         let s2 = ChangeId::generate();
+        let origin = RemoteName::new("origin");
         // RefBackend trait surface for remotes.
-        RefBackend::set_remote_thread(&refs, "origin", &ThreadName::new("rt1"), &s1).unwrap();
+        RefBackend::set_remote_thread(&refs, &origin, &ThreadName::new("rt1"), &s1).unwrap();
         refs.set_remote_thread("origin", &ThreadName::new("rt2"), &s2)
             .unwrap();
         assert_eq!(
-            RefBackend::get_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap(),
+            RefBackend::get_remote_thread(&refs, &origin, &ThreadName::new("rt1")).unwrap(),
             Some(s1)
         );
-        assert!(
-            RefBackend::list_remotes(&refs)
-                .unwrap()
-                .contains(&"origin".to_string())
-        );
-        let mut rts = RefBackend::list_remote_threads(&refs, "origin").unwrap();
+        assert!(RefBackend::list_remotes(&refs).unwrap().contains(&origin));
+        let mut rts = RefBackend::list_remote_threads(&refs, &origin).unwrap();
         rts.sort();
         assert_eq!(rts.len(), 2);
         let removed =
-            RefBackend::delete_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap();
+            RefBackend::delete_remote_thread(&refs, &origin, &ThreadName::new("rt1")).unwrap();
         assert_eq!(removed, Some(s1));
         // Deleting an absent remote thread returns None.
         assert_eq!(

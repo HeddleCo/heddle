@@ -22,10 +22,10 @@ use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
 use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
-    store::ObjectStore,
+    store::BlockingObjectStore,
     worktree::should_ignore,
 };
-use oplog::OpLogRecorder;
+use oplog::BlockingOpLogRecorder;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
@@ -123,7 +123,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         primary.signature = Some(sign_redaction(signer.as_ref(), &primary)?);
     }
     let primary_id = repo.put_redaction(primary)?;
-    let scope = repo.op_scope();
+    let scope = repo.op_scope_key();
     repo.oplog()
         .record_redact(&primary_id, &blob, &state, &args.path, Some(&scope))?;
 

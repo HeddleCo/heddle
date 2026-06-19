@@ -11,7 +11,7 @@ use objects::{
         Annotation, AnnotationScope, Blob, ContentHash, ContextBlob, ContextTarget, EntryType,
         State, Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use super::{HeddleError, Repository, Result};

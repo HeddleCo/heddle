@@ -69,8 +69,10 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
-    store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
+    object::{
+        Attribution, ChangeId, ContentHash, MarkerName, Principal, Scope, State, ThreadName, Tree,
+    },
+    store::{AnyStore, BlockingObjectStore, FsStore, ObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
@@ -279,13 +281,11 @@ pub trait BlobHydrator: Send + Sync {
 /// Generic over its reference, operation-log, and object-store backends.
 /// The CLI uses the defaults — `Repository<RefManager, OpLog, AnyStore>`
 /// (the on-disk local backends) — so the bare name `Repository` resolves to
-/// the local flavor everywhere. The hosted server instantiates
-/// `Repository<PgRefBackend, PgOpLogBackend, …>` via [`Repository::from_parts`].
+/// the local flavor everywhere.
 ///
 /// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
-/// selects `FsStore` vs `S3Store` at *runtime* from config (`build_store`),
-/// but the choice is a concrete enum variant rather than a `Box<dyn>`, so
-/// every object access is static-dispatched through the enum to the inner
+/// currently selects the local [`FsStore`] variant. The concrete enum keeps
+/// every object access statically dispatched through the enum to the inner
 /// store — no vtable (heddle#283). `S` goes last so existing
 /// `Repository<R, O>` references keep resolving with `S = AnyStore`.
 pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
@@ -414,7 +414,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         // `commit_and_publish` appends a ref-carrying record before publishing.
         let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
             &heddle_dir,
-            compute_op_scope(&root),
+            Scope::new(compute_op_scope(&root)),
         ));
         let committer =
             std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(&heddle_dir, actor));
@@ -432,7 +432,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     /// Open an existing Heddle repository using a custom object store backend.
     ///
     /// Expert/test injection point: takes the store by value (any
-    /// [`ObjectStore`]) and skips the local-only open hooks (declarative
+    /// [`BlockingObjectStore`]) and skips the local-only open hooks (declarative
     /// migrations, lazy-clone hydrator reconstruction) that [`Repository::open`]
     /// runs for the default `AnyStore` flavor.
     pub fn open_with_store(heddle_dir: impl AsRef<Path>, store: S) -> Result<Self> {
@@ -491,62 +491,9 @@ impl Repository {
     }
 
     /// Build an object store from the repository configuration.
-    ///
-    /// Returns an [`S3Store`] when `[storage.s3]` is configured and the `s3`
-    /// feature is enabled, otherwise falls back to [`FsStore`] — wrapped in
-    /// the [`AnyStore`] enum so the runtime choice stays statically dispatched.
     fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<AnyStore> {
-        #[cfg(feature = "s3")]
-        {
-            if let Some(s3) = &config.storage.s3 {
-                return Self::build_s3_store(s3);
-            }
-        }
-        let _ = config; // suppress unused warning when s3 feature is off
+        let _ = config;
         Ok(AnyStore::Fs(FsStore::new(heddle_dir)))
-    }
-
-    /// Construct an [`S3Store`] from the repository's S3 storage configuration.
-    #[cfg(feature = "s3")]
-    fn build_s3_store(s3: &repo_config::S3StorageConfig) -> Result<AnyStore> {
-        use objects::store::S3StoreBuilder;
-
-        let mut builder = S3StoreBuilder::new().bucket(&s3.bucket);
-        if let Some(ref region) = s3.region {
-            builder = builder.region(region);
-        }
-        if let Some(ref prefix) = s3.prefix {
-            builder = builder.prefix(prefix);
-        }
-        if let Some(ref url) = s3.endpoint_url {
-            builder = builder.endpoint_url(url);
-        }
-        if let Some(ref key) = s3.access_key_id {
-            builder = builder.access_key_id(key);
-        }
-        if let Some(ref secret) = s3.secret_access_key {
-            builder = builder.secret_access_key(secret);
-        }
-        if let Some(ref token) = s3.session_token {
-            builder = builder.session_token(token);
-        }
-        if s3.force_path_style {
-            builder = builder.force_path_style(true);
-        }
-
-        // `S3StoreBuilder::build` is async. The previous design here was
-        // `Handle::try_current().or_else(Runtime::new()).block_on(builder.build())`
-        // — that nested `block_on` panicked with "Cannot start a runtime
-        // from within a runtime" whenever `Repository::open` was called
-        // from inside a Tokio runtime (`#[tokio::main]`, `#[tokio::test]`,
-        // a daemon worker). `build_blocking` routes the async `build()`
-        // through a short-lived worker-thread runtime, so the caller's
-        // runtime is never re-entered — mirrors the heddle#60 fix for the
-        // `ObjectStore` impl on `S3Store`.
-        let store = builder
-            .build_blocking()
-            .map_err(|e| HeddleError::Config(format!("S3 store initialization failed: {e}")))?;
-        Ok(AnyStore::S3(store))
     }
 
     /// Initialize a new bare repository at the given path.
@@ -592,7 +539,7 @@ impl Repository {
         // record-commits too.
         let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
             &heddle_dir,
-            compute_op_scope(&root),
+            Scope::new(compute_op_scope(&root)),
         ));
         let committer = std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(
             &heddle_dir,
@@ -1081,7 +1028,7 @@ impl Repository {
         local_oid: &str,
         upstream_oid: &str,
     ) -> Result<bool> {
-        let scope = self.op_scope();
+        let scope = Scope::new(self.op_scope());
         let batches = match self.oplog().redo_batches_scoped(64, Some(&scope)) {
             Ok(batches) => batches,
             Err(error) => {
@@ -2011,6 +1958,10 @@ impl Repository {
         compute_op_scope(&self.root)
     }
 
+    pub fn op_scope_key(&self) -> Scope {
+        Scope::new(self.op_scope())
+    }
+
     /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying
     /// `OpRecord` batch (phase 4) **before** publishing the atomic `ref_updates`
     /// batch (phase 5), record-before-publish. Encodes the records opaquely and
@@ -2030,7 +1981,7 @@ impl Repository {
                 rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
             })
             .collect::<Result<Vec<_>>>()?;
-        let scope = self.op_scope();
+        let scope = self.op_scope_key();
         let result = self
             .refs
             .commit_and_publish(&encoded, ref_updates, Some(&scope));

@@ -7,17 +7,12 @@ use objects::object::{ChangeId, MarkerName, ThreadName};
 
 use super::{Head, RefExpectation, RefUpdate};
 
-/// Shared refs backend operations usable by both local and hosted backends.
+/// Shared refs backend operations usable by local and external hosted backends.
 ///
-/// The database-hitting reads (`get_thread`, `get_marker`, `create_marker`,
-/// `resolve`) are `async` so the Postgres backend can `.await` `sqlx`
-/// directly instead of bridging through a worker-thread runtime. They're
-/// spelled as `-> impl Future + Send` rather than `async fn` so the
-/// returned future carries an explicit `Send` bound (required by the
-/// hosted server's Tower/tonic stack) and the trait stays clean under
-/// `-D warnings` (the `async_fn_in_trait` lint). This is a sealed
-/// interface — heddle is the sole implementer — so the lint's
-/// downstream-bound concern does not apply.
+/// Methods that may be async in external backends are spelled as
+/// `-> impl Future + Send` rather than `async fn` so the returned future
+/// carries an explicit `Send` bound and the trait stays clean under
+/// `-D warnings` (the `async_fn_in_trait` lint).
 pub trait CoreRefBackend: Send + Sync {
     type Error;
 
@@ -109,7 +104,7 @@ mod tests {
 
     use objects::{
         error::HeddleError,
-        object::{ChangeId, MarkerName, ThreadName},
+        object::{ChangeId, MarkerName, RemoteName, ThreadName},
     };
 
     use super::CoreRefBackend;
@@ -241,14 +236,14 @@ mod tests {
     impl RefBackend for MemRefBackend {
         fn get_remote_thread(
             &self,
-            _remote: &str,
+            _remote: &RemoteName,
             _thread: &ThreadName,
         ) -> Result<Option<ChangeId>, HeddleError> {
             Ok(None)
         }
         fn set_remote_thread(
             &self,
-            _remote: &str,
+            _remote: &RemoteName,
             _thread: &ThreadName,
             _state: &ChangeId,
         ) -> Result<(), HeddleError> {
@@ -256,15 +251,18 @@ mod tests {
         }
         fn delete_remote_thread(
             &self,
-            _remote: &str,
+            _remote: &RemoteName,
             _thread: &ThreadName,
         ) -> Result<Option<ChangeId>, HeddleError> {
             Ok(None)
         }
-        fn list_remotes(&self) -> Result<Vec<String>, HeddleError> {
+        fn list_remotes(&self) -> Result<Vec<RemoteName>, HeddleError> {
             Ok(Vec::new())
         }
-        fn list_remote_threads(&self, _remote: &str) -> Result<Vec<ThreadName>, HeddleError> {
+        fn list_remote_threads(
+            &self,
+            _remote: &RemoteName,
+        ) -> Result<Vec<ThreadName>, HeddleError> {
             Ok(Vec::new())
         }
     }

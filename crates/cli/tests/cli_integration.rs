@@ -13,7 +13,7 @@ use std::{
     str,
 };
 
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 use repo::Repository;
 use serde_json::Value;
 use sley::{

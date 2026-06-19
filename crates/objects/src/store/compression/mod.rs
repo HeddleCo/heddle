@@ -321,7 +321,7 @@ pub fn is_compressed(data: &[u8]) -> bool {
 /// without decompressing the payload. Returns `None` for short or
 /// unprefixed inputs (the caller can then fall back to the file length).
 ///
-/// Used by header-only size queries (e.g. [`ObjectStore::blob_size`])
+/// Used by header-only size queries (e.g. [`BlockingObjectStore::blob_size`])
 /// where reading the full blob would dominate. Only the first 9 bytes
 /// of the input are consulted.
 pub fn header_uncompressed_size(data: &[u8]) -> Option<u64> {

@@ -4,7 +4,9 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use objects::object::{ChangeId, ContentHash, OperationId, Principal, VisibilityTier};
+use objects::object::{
+    ChangeId, ContentHash, OperationId, Principal, RemoteName, Scope, TransactionId, VisibilityTier,
+};
 use serde::{Deserialize, Serialize};
 
 /// Logical key used by conditional transaction commits to detect intervening
@@ -13,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub enum IsolationKey {
     Thread(String),
     LocalHead {
-        scope: String,
+        scope: Scope,
     },
     /// Per-state visibility key (heddle#317). Every `StateVisibilitySet` /
     /// `StateVisibilityPromote` record on a state contributes this key, so a
@@ -150,7 +152,7 @@ pub enum OpRecord {
     /// transaction would have applied are listed for forensic replay; no
     /// state was actually committed.
     TransactionAbort {
-        transaction_id: String,
+        transaction_id: TransactionId,
         reason: String,
     },
     /// Recorded when an ephemeral thread's TTL elapses and it auto-collapses.
@@ -173,7 +175,7 @@ pub enum OpRecord {
     /// shows how much work was folded in (real per-op replay is the
     /// next follow-on; today it is the count, not the records).
     TransactionCommit {
-        transaction_id: String,
+        transaction_id: TransactionId,
         op_count: u32,
     },
     /// A redaction was declared on a blob in a specific state. The blob
@@ -260,7 +262,7 @@ pub enum OpRecord {
     /// reconciliation non-vacuous and lets crash-replay re-materialize
     /// the ref from its newest in-scope record.
     RemoteThreadUpdate {
-        remote: String,
+        remote: RemoteName,
         thread: String,
         state: ChangeId,
     },
@@ -268,7 +270,7 @@ pub enum OpRecord {
     /// `MarkerDelete`: drops the name from the reconciled remote-thread
     /// set. `state` is the value at delete time (forensic context).
     RemoteThreadDelete {
-        remote: String,
+        remote: RemoteName,
         thread: String,
         state: ChangeId,
     },
@@ -340,7 +342,7 @@ pub fn is_transaction_commit(record: &OpRecord) -> bool {
 
 /// True when `record` is the atomic transaction commit marker for
 /// `transaction_id`.
-pub fn is_transaction_commit_for(record: &OpRecord, transaction_id: &str) -> bool {
+pub fn is_transaction_commit_for(record: &OpRecord, transaction_id: &TransactionId) -> bool {
     matches!(
         record,
         OpRecord::TransactionCommit {
@@ -423,7 +425,10 @@ fn is_false(value: &bool) -> bool {
 ///
 /// This is intentionally explicit and shared by the backends and tests. Records
 /// that do not publish or read a thread/head key return an empty set.
-pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTreeSet<IsolationKey> {
+pub fn isolation_keys_for_record(
+    record: &OpRecord,
+    scope: Option<&Scope>,
+) -> BTreeSet<IsolationKey> {
     let mut keys = BTreeSet::new();
     match record {
         OpRecord::Snapshot {
@@ -449,7 +454,7 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
         | OpRecord::UndoRecoveryUpdate { .. } => {
             if let Some(scope) = scope {
                 keys.insert(IsolationKey::LocalHead {
-                    scope: scope.to_string(),
+                    scope: scope.clone(),
                 });
             }
         }
@@ -478,14 +483,14 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
                 && let Some(scope) = scope
             {
                 keys.insert(IsolationKey::LocalHead {
-                    scope: scope.to_string(),
+                    scope: scope.clone(),
                 });
             }
         }
         OpRecord::Collapse { thread: None, .. } => {
             if let Some(scope) = scope {
                 keys.insert(IsolationKey::LocalHead {
-                    scope: scope.to_string(),
+                    scope: scope.clone(),
                 });
             }
         }
@@ -953,7 +958,7 @@ pub struct OpEntry {
     pub batch_index: u32,
     /// Checkout/lane scope that recorded this operation.
     #[serde(default)]
-    pub scope: Option<String>,
+    pub scope: Option<Scope>,
     /// Principal that performed this operation. Required; every callsite
     /// that records an `OpEntry` must supply a real actor (typically the
     /// repository's configured principal).

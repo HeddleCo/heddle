@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use objects::{
     object::{ChangeId, ContentHash},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use oplog::{OpBatch, RedactionUndoClass};
 use refs::UNDO_RECOVERY_HANDLE;
@@ -108,7 +108,7 @@ pub fn cmd_undo(
     }
 
     if list {
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         // Count only user-facing batches toward `depth`, dropping the record-less
         // commit sentinels (an `undo`/`redo`'s marker-only batch) BEFORE the
         // limit applies. Filtering after a fixed-count fetch made `--depth 1`
@@ -144,7 +144,7 @@ pub fn cmd_undo(
     // command returns, covering the `--preview` short-circuit and the commit.
     let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
-    let scope = repo.op_scope();
+    let scope = repo.op_scope_key();
     let batches = repo.oplog().undo_batches_scoped(steps, Some(&scope))?;
 
     if batches.is_empty() {
@@ -280,7 +280,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     // cid 3330867776).
     let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
-    let scope = repo.op_scope();
+    let scope = repo.op_scope_key();
     let batches = repo.oplog().redo_batches_scoped(steps, Some(&scope))?;
 
     if batches.is_empty() {
@@ -936,7 +936,7 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
 #[cfg(test)]
 mod tests {
-    use oplog::{OpLogBackend, OpRecord};
+    use oplog::{BlockingOpLogBackend, OpRecord};
     use tempfile::TempDir;
 
     use super::*;
@@ -1026,7 +1026,7 @@ mod tests {
             .snapshot(Some("s".to_string()), None)
             .unwrap()
             .change_id;
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         repo.oplog()
             .record_batch_scoped(
                 vec![OpRecord::ThreadCreate {

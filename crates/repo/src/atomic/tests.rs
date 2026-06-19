@@ -10,11 +10,14 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
+    object::{
+        ChangeId, ContentHash, MarkerName, RemoteName, Scope, ThreadName, TransactionId,
+        VisibilityTier,
+    },
 };
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpLogRecorder,
-    OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
+    BlockingOpLogBackend, BlockingOpLogRecorder, ConditionalCommitOutcome, IsolationKey,
+    IsolationPrecondition, OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
@@ -67,7 +70,7 @@ fn snapshot_on(thread: &str) -> OpRecord {
 
 fn commit_marker(transaction_id: &str, op_count: u32) -> OpRecord {
     OpRecord::TransactionCommit {
-        transaction_id: transaction_id.to_string(),
+        transaction_id: transaction_id.into(),
         op_count,
     }
 }
@@ -102,8 +105,8 @@ struct Leg {
 impl AtomicMutation for Leg {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        format!("leg-{}", self.id)
+    fn transaction_id(&self) -> TransactionId {
+        format!("leg-{}", self.id).into()
     }
 
     empty_isolation_keys!();
@@ -132,8 +135,8 @@ struct FailingComposite {
 impl AtomicMutation for FailingComposite {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "failing-composite".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "failing-composite".into()
     }
 
     empty_isolation_keys!();
@@ -195,7 +198,7 @@ fn reverse_order_rewind_on_failure() {
 #[test]
 fn step_registers_no_inverse_when_forward_fails() {
     let (_t, repo) = test_repo();
-    let mut tx = Tx::root(&repo, "step-forward-fails".to_string(), test_precondition());
+    let mut tx = Tx::root(&repo, "step-forward-fails".into(), test_precondition());
     let inverse_ran = Rc::new(RefCell::new(false));
     let flag = Rc::clone(&inverse_ran);
 
@@ -221,7 +224,7 @@ fn step_registers_no_inverse_when_forward_fails() {
 #[test]
 fn step_registers_one_inverse_after_forward_succeeds() {
     let (_t, repo) = test_repo();
-    let mut tx = Tx::root(&repo, "step-forward-ok".to_string(), test_precondition());
+    let mut tx = Tx::root(&repo, "step-forward-ok".into(), test_precondition());
     let unwound = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&unwound);
     let forward_ran = Rc::new(RefCell::new(false));
@@ -263,8 +266,8 @@ struct Panicker {
 impl AtomicMutation for Panicker {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "panicker".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "panicker".into()
     }
 
     empty_isolation_keys!();
@@ -290,8 +293,8 @@ struct WholeOpPanicker {
 impl AtomicMutation for WholeOpPanicker {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "whole-op-panicker".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "whole-op-panicker".into()
     }
 
     empty_isolation_keys!();
@@ -371,8 +374,8 @@ struct CommitFailsRewindFails;
 impl AtomicMutation for CommitFailsRewindFails {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "commit-fails-rewind-fails".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "commit-fails-rewind-fails".into()
     }
 
     empty_isolation_keys!();
@@ -425,8 +428,8 @@ struct Recorder {
 impl AtomicMutation for Recorder {
     type Output = u32;
 
-    fn transaction_id(&self) -> String {
-        format!("recorder-{}", self.state.to_string_full())
+    fn transaction_id(&self) -> TransactionId {
+        format!("recorder-{}", self.state.to_string_full()).into()
     }
 
     empty_isolation_keys!();
@@ -480,8 +483,8 @@ struct Reserve {
 impl AtomicMutation for Reserve {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "reserve".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "reserve".into()
     }
 
     empty_isolation_keys!();
@@ -513,8 +516,8 @@ struct EagerThenFail {
 impl AtomicMutation for EagerThenFail {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "eager-then-fail".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "eager-then-fail".into()
     }
 
     empty_isolation_keys!();
@@ -637,7 +640,7 @@ fn crash_replay_reconciles_a_concurrent_commit() {
 #[test]
 fn all_ten_readers_reconcile() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
 
     // Shared classes — committed records, canonical refs unpublished.
     let thread_state = ChangeId::generate();
@@ -695,7 +698,11 @@ fn all_ten_readers_reconcile() {
             .unwrap()
             .contains(&MarkerName::new("mk"))
     );
-    assert!(refs.list_remotes().unwrap().contains(&"origin".to_string()));
+    assert!(
+        refs.list_remotes()
+            .unwrap()
+            .contains(&RemoteName::new("origin"))
+    );
     assert!(
         refs.list_remote_threads("origin")
             .unwrap()
@@ -759,9 +766,9 @@ fn tx_accessors_and_rewind_error_paths() {
     let (_t, repo) = test_repo();
 
     // Accessors.
-    let mut tx = Tx::root(&repo, "accessor-tx".to_string(), test_precondition());
+    let mut tx = Tx::root(&repo, "accessor-tx".into(), test_precondition());
     assert_eq!(tx.depth(), 0);
-    assert_eq!(tx.scope(), repo.op_scope());
+    assert_eq!(tx.scope().as_str(), repo.op_scope());
     assert_eq!(tx.transaction_id(), "accessor-tx");
     let _ = tx.repo();
     let ledger = tx.ledger_view();
@@ -779,7 +786,7 @@ fn tx_accessors_and_rewind_error_paths() {
     );
 
     // A second commit after a successful one is a no-op (committed guard).
-    let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string(), test_precondition());
+    let mut tx2 = Tx::root(&repo, "double-commit-tx".into(), test_precondition());
     let first_state = ChangeId::generate();
     tx2.commit(vec![OpRecord::Snapshot {
         new_state: first_state,
@@ -811,7 +818,7 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
-        let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string(), test_precondition());
+        let mut tx3 = Tx::root(&repo, "drop-backstop-tx".into(), test_precondition());
         tx3.on_rewind("drop-time", || {
             Err(HeddleError::Config("drop-time".to_string()))
         });
@@ -830,8 +837,8 @@ struct ConflictOnce {
 impl AtomicMutation for ConflictOnce {
     type Output = u32;
 
-    fn transaction_id(&self) -> String {
-        self.transaction_id.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.transaction_id.clone().into()
     }
 
     fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -916,8 +923,8 @@ fn conditional_commit_allows_different_thread_tail() {
         .oplog()
         .record_batch_exactly_once_if_unchanged(
             vec![snapshot_on("main"), commit_marker("main-after-feature", 1)],
-            Some(&repo.op_scope()),
-            "main-after-feature",
+            Some(&Scope::new(repo.op_scope())),
+            &TransactionId::new("main-after-feature"),
             &precondition,
         )
         .unwrap();
@@ -931,8 +938,9 @@ fn visibility_records_contribute_per_state_isolation_key() {
     // mutations on distinct states never spuriously conflict.
     let s = ChangeId::generate();
     let other = ChangeId::generate();
+    let scope = Scope::new("scope");
 
-    let set_keys = isolation_keys_for_record(&visibility_set_on(s), Some("scope"));
+    let set_keys = isolation_keys_for_record(&visibility_set_on(s), Some(&scope));
     assert!(set_keys.contains(&IsolationKey::StateVisibility(s)));
     assert!(!set_keys.contains(&IsolationKey::StateVisibility(other)));
 
@@ -944,7 +952,7 @@ fn visibility_records_contribute_per_state_isolation_key() {
         prior_sidecar: Some(vec![9]),
         new_sidecar: None,
     };
-    let promote_keys = isolation_keys_for_record(&promote, Some("scope"));
+    let promote_keys = isolation_keys_for_record(&promote, Some(&scope));
     assert!(promote_keys.contains(&IsolationKey::StateVisibility(s)));
 }
 
@@ -979,8 +987,8 @@ fn undo_cannot_discard_concurrent_visibility_change() {
         .oplog()
         .record_batch_exactly_once_if_unchanged(
             vec![commit_marker("undo:batch:1", 1)],
-            Some(&repo.op_scope()),
-            "undo:batch:1",
+            Some(&Scope::new(repo.op_scope())),
+            &TransactionId::new("undo:batch:1"),
             &precondition,
         )
         .unwrap();
@@ -1007,8 +1015,8 @@ fn undo_cannot_discard_concurrent_visibility_change() {
         .oplog()
         .record_batch_exactly_once_if_unchanged(
             vec![commit_marker("undo:batch:ctrl", 1)],
-            Some(&repo.op_scope()),
-            "undo:batch:ctrl",
+            Some(&Scope::new(repo.op_scope())),
+            &TransactionId::new("undo:batch:ctrl"),
             &precondition_ctrl,
         )
         .unwrap();
@@ -1026,8 +1034,8 @@ fn conditional_commit_dedups_before_isolation_scan() {
         .oplog()
         .record_batch_exactly_once_if_unchanged(
             vec![snapshot_on("main"), commit_marker("dedup-main", 1)],
-            Some(&repo.op_scope()),
-            "dedup-main",
+            Some(&Scope::new(repo.op_scope())),
+            &TransactionId::new("dedup-main"),
             &precondition,
         )
         .unwrap();
@@ -1041,8 +1049,8 @@ fn conditional_commit_dedups_before_isolation_scan() {
         .oplog()
         .record_batch_exactly_once_if_unchanged(
             vec![snapshot_on("main"), commit_marker("dedup-main", 1)],
-            Some(&repo.op_scope()),
-            "dedup-main",
+            Some(&Scope::new(repo.op_scope())),
+            &TransactionId::new("dedup-main"),
             &precondition,
         )
         .unwrap();
@@ -1060,8 +1068,8 @@ struct SavepointConflict {
 impl AtomicMutation for SavepointConflict {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "savepoint-conflict".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "savepoint-conflict".into()
     }
 
     fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -1114,8 +1122,8 @@ struct AlwaysConflict {
 impl AtomicMutation for AlwaysConflict {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "always-conflict".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "always-conflict".into()
     }
 
     fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -1163,6 +1171,7 @@ fn retry_cap_returns_structured_conflict() {
 #[test]
 fn staged_record_keys_are_covered_by_declared_root_keys() {
     let scope = "lane-a";
+    let scope_key = Scope::new(scope);
     let cases = staged_record_coverage_cases(scope);
     let declared = cases
         .iter()
@@ -1171,7 +1180,7 @@ fn staged_record_keys_are_covered_by_declared_root_keys() {
 
     for (record, expected) in cases {
         let variant = op_record_variant_name(&record);
-        let touched = isolation_keys_for_record(&record, Some(scope));
+        let touched = isolation_keys_for_record(&record, Some(&scope_key));
         assert_eq!(
             touched, expected,
             "coverage fixture for {variant} drifted: staged record {record:?}"
@@ -1185,7 +1194,7 @@ fn staged_record_keys_are_covered_by_declared_root_keys() {
 
 fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<IsolationKey>)> {
     let local_head = IsolationKey::LocalHead {
-        scope: scope.to_string(),
+        scope: Scope::new(scope),
     };
     let main = IsolationKey::Thread("main".to_string());
     let feature = IsolationKey::Thread("feature".to_string());
@@ -1312,7 +1321,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         ),
         (
             OpRecord::TransactionAbort {
-                transaction_id: "tx-abort".to_string(),
+                transaction_id: "tx-abort".into(),
                 reason: "test".to_string(),
             },
             BTreeSet::new(),
@@ -1368,7 +1377,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         ),
         (
             OpRecord::RemoteThreadUpdate {
-                remote: "origin".to_string(),
+                remote: "origin".into(),
                 thread: "main".to_string(),
                 state: ChangeId::generate(),
             },
@@ -1376,7 +1385,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         ),
         (
             OpRecord::RemoteThreadDelete {
-                remote: "origin".to_string(),
+                remote: "origin".into(),
                 thread: "main".to_string(),
                 state: ChangeId::generate(),
             },
@@ -1445,7 +1454,7 @@ fn op_record_variant_name(record: &OpRecord) -> &'static str {
 #[test]
 fn reconcile_folds_every_record_shape() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let op = repo.oplog();
 
     let v1 = ChangeId::generate();
@@ -1579,7 +1588,7 @@ fn reconcile_folds_every_record_shape() {
             .contains(&MarkerName::new("mk2"))
     );
     let remotes = refs.list_remotes().unwrap();
-    assert!(remotes.contains(&"origin".to_string()));
+    assert!(remotes.contains(&RemoteName::new("origin")));
     let remote_threads = refs.list_remote_threads("origin").unwrap();
     assert!(remote_threads.contains(&ThreadName::new("rt2")));
     // The deleted remote thread is absent from the projection.
@@ -1599,8 +1608,8 @@ struct StageThenFail {
 impl AtomicMutation for StageThenFail {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "stage-then-fail".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "stage-then-fail".into()
     }
 
     empty_isolation_keys!();
@@ -1660,8 +1669,8 @@ struct EnrollStageThenFail {
 impl AtomicMutation for EnrollStageThenFail {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "enroll-stage-then-fail".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "enroll-stage-then-fail".into()
     }
 
     empty_isolation_keys!();
@@ -1712,8 +1721,8 @@ struct StableKeyed {
 impl AtomicMutation for StableKeyed {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        self.key.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.key.clone().into()
     }
 
     empty_isolation_keys!();
@@ -1798,8 +1807,8 @@ struct ReplayStages {
 impl AtomicMutation for ReplayStages {
     type Output = u32;
 
-    fn transaction_id(&self) -> String {
-        self.key.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.key.clone().into()
     }
 
     empty_isolation_keys!();
@@ -2085,11 +2094,11 @@ fn crash_replay_reconciles_remote_thread_create_and_delete_in_lists() {
 
     let remotes = repo.refs().list_remotes().unwrap();
     assert!(
-        !remotes.contains(&"origin".to_string()),
+        !remotes.contains(&RemoteName::new("origin")),
         "a remote with only a committed-but-unpublished deleted thread must be absent"
     );
     assert!(
-        remotes.contains(&"upstream".to_string()),
+        remotes.contains(&RemoteName::new("upstream")),
         "a remote with a committed-but-unpublished created thread must be present"
     );
 
@@ -2138,7 +2147,7 @@ fn crash_replay_reconstructs_committed_head_update() {
                 thread: None,
                 head: Some(detached),
             }],
-            Some(&repo.op_scope()),
+            Some(&Scope::new(repo.op_scope())),
         )
         .unwrap();
 
@@ -2165,7 +2174,7 @@ fn crash_replay_reconstructs_committed_head_update() {
 #[test]
 fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2223,7 +2232,7 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
 #[test]
 fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2284,7 +2293,7 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
 #[test]
 fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2354,7 +2363,7 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
 #[test]
 fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2382,7 +2391,7 @@ fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
 #[test]
 fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     let main = ThreadName::new("main");
     repo.refs().set_thread(&main, &base).unwrap();
@@ -2420,7 +2429,7 @@ fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
 #[test]
 fn goto_record_first_crash_recovery_reconstructs_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .write_head(&Head::Detached { state: base })
@@ -2460,7 +2469,7 @@ fn goto_record_first_crash_recovery_reconstructs_head() {
 #[test]
 fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
     let (temp, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let s0 = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("feature"), &s0)
@@ -2505,7 +2514,7 @@ fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
 #[test]
 fn snapshot_does_not_clobber_newer_committed_write_detached() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .write_head(&Head::Detached { state: base })
@@ -2604,7 +2613,7 @@ fn commit_snapshot_atomic_detached_records_and_publishes() {
 #[test]
 fn named_fork_recovery_materializes_head_and_paired_thread() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2652,7 +2661,7 @@ fn named_fork_recovery_materializes_head_and_paired_thread() {
 #[test]
 fn attached_collapse_advances_thread_without_moving_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -2693,7 +2702,7 @@ fn attached_collapse_advances_thread_without_moving_head() {
 #[test]
 fn detached_collapse_republishes_detached_head() {
     let (_t, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     repo.refs()
         .write_head(&Head::Detached { state: base })
@@ -2726,8 +2735,8 @@ struct EagerOverrideRewind {
 impl AtomicMutation for EagerOverrideRewind {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "eager-override-rewind".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "eager-override-rewind".into()
     }
 
     empty_isolation_keys!();
@@ -2761,8 +2770,8 @@ struct EagerOverrideThenFail {
 impl AtomicMutation for EagerOverrideThenFail {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
-        "eager-override-then-fail".to_string()
+    fn transaction_id(&self) -> TransactionId {
+        "eager-override-then-fail".into()
     }
 
     empty_isolation_keys!();
@@ -3091,7 +3100,7 @@ fn non_atomic_delete_is_not_clobbered_by_a_committed_record() {
 fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
     // Detached fork, scoped → HEAD reconciles.
     let (_t1, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     let forked = ChangeId::generate();
     repo.oplog()
@@ -3106,7 +3115,7 @@ fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
     // Attached fork, scoped → HEAD reconciles to the new thread AND the thread
     // ref reconciles.
     let (_t2, repo) = test_repo();
-    let scope = repo.op_scope();
+    let scope = Scope::new(repo.op_scope());
     let base = ChangeId::generate();
     let forked = ChangeId::generate();
     repo.oplog()
@@ -3290,8 +3299,8 @@ struct RegeneratesChangeId {
 impl AtomicMutation for RegeneratesChangeId {
     type Output = ChangeId;
 
-    fn transaction_id(&self) -> String {
-        self.key.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.key.clone().into()
     }
 
     empty_isolation_keys!();

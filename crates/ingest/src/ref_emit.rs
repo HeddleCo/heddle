@@ -29,7 +29,7 @@
 
 use objects::{
     object::{ChangeId, MarkerName, ThreadName, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use refs::refs::{RefBackend, RefExpectation};
 use tracing::warn;
@@ -56,13 +56,13 @@ pub struct RefEmitStats {
 /// local `RefManager` (CLI / tests) and the server's Postgres-backed
 /// backend — the trait's `async fn` reads forbid `&dyn` dispatch, so the
 /// backend is a type parameter.
-pub struct RefEmitter<'a, R: RefBackend, S: ObjectStore> {
+pub struct RefEmitter<'a, R: RefBackend, S: BlockingObjectStore> {
     refs: &'a R,
     store: &'a S,
     map: &'a ShaMap,
 }
 
-impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
+impl<'a, R: RefBackend, S: BlockingObjectStore> RefEmitter<'a, R, S> {
     pub fn new(refs: &'a R, store: &'a S, map: &'a ShaMap) -> Self {
         Self { refs, store, map }
     }
@@ -184,7 +184,7 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
     }
 }
 
-fn change_is_ancestor<S: ObjectStore>(
+fn change_is_ancestor<S: BlockingObjectStore>(
     store: &S,
     ancestor: &ChangeId,
     descendant: &ChangeId,
@@ -217,7 +217,7 @@ fn change_is_ancestor<S: ObjectStore>(
 mod tests {
     use objects::{
         object::{Attribution, ChangeId, Principal, State},
-        store::{InMemoryStore, ObjectStore},
+        store::{BlockingObjectStore, InMemoryStore},
     };
     use refs::refs::RefManager;
     use tempfile::TempDir;

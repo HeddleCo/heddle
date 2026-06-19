@@ -52,7 +52,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 
 ### Foundation in place
 
-- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
+- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` provides the shared trait boundary)
 - Verification and verification metadata across the wire protocol
 - Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; the bridge export/checkout gate that withholds non-served commits from a Git mirror is landing; hosted serve-side enforcement is in progress
 
@@ -218,18 +218,16 @@ crates/refs/                # threads, markers, HEAD, packed refs
 crates/oplog/               # undo/redo oplog model
 crates/semantic/            # semantic diff and code-aware analysis
 crates/merge/               # merge core
-crates/review/              # review primitives
 crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
 crates/grpc/                # gRPC client and server transport
 crates/client/              # local-side hosted client
-crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
+crates/weft-client-shim/    # shared trait boundary for the `client` feature
 crates/crypto/              # crypto primitives
 crates/daemon/              # background daemon
 crates/devtools/            # developer tooling
 crates/mount/               # filesystem mount support
-crates/runtime-bridge/      # runtime bridge between cli and async server stacks
 
 docs/                       # architecture, principles, stability, design notes
 specs/                      # Quint formal specifications

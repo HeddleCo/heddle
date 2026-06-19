@@ -17,13 +17,9 @@ use objects::{
         TimelineStepId, TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1,
         ToolCallStartedV1, Tree,
     },
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
+    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, BlockingObjectStore},
 };
-use oplog::OpLogRecorder;
-use wire::{
-    HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
-    TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
-};
+use oplog::BlockingOpLogRecorder;
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -31,6 +27,10 @@ use repo::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use wire::{
+    HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
+    TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
+};
 
 mod claude_hook;
 mod probe;
@@ -532,11 +532,8 @@ trait HarnessTimelineExtractor {
     fn native_tool_call(&self, payload: &Value) -> Option<NativeToolCallRefV1>;
     fn tool_name(&self, payload: &Value) -> String;
     fn tool_status(&self, payload: &Value) -> TimelineToolCallStatus;
-    fn payload_metadata(
-        &self,
-        event: &str,
-        payload: &Value,
-    ) -> Result<TimelineToolPayloadMetadata>;
+    fn payload_metadata(&self, event: &str, payload: &Value)
+    -> Result<TimelineToolPayloadMetadata>;
     fn touched_paths(&self, payload: &Value) -> Vec<String>;
     fn capture_intent(&self, native: &NativeToolCallRefV1, payload: &Value) -> String;
 
@@ -716,8 +713,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         .step(&thread, &step_id)
         .and_then(|step| step.before_state)
         .unwrap_or(fallback_state);
-    let has_worktree_changes_before_capture =
-        !collect_worktree_changes(&runtime.repo)?.is_empty();
+    let has_worktree_changes_before_capture = !collect_worktree_changes(&runtime.repo)?.is_empty();
     let mut capture_failed = false;
     let capture_state = if !has_worktree_changes_before_capture {
         None
@@ -1487,7 +1483,7 @@ impl HarnessBridgeRuntime {
                 &tn,
                 &base_state,
                 None,
-                Some(&self.repo.op_scope()),
+                Some(&self.repo.op_scope_key()),
             )?;
         }
 

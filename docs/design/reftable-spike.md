@@ -267,9 +267,9 @@ worst-case-of-packed; the production reftable design is much better.
   point bundling reftable amortizes the migration cost.
 - A downstream Heddle deployment (Weft hosted product) needs to
   serve thousands of refs per repo per request and is bottlenecked
-  on packed-refs parse cost. The server already has `PgRefBackend`
-  as an alternative, but if Postgres isn't desirable for some
-  deployments, reftable is the next escape hatch.
+  on packed-refs parse cost. Weft owns hosted ref storage, but if a
+  local or non-Postgres deployment needs a compact file-backed format,
+  reftable is the next escape hatch.
 
 ## Prototype limitations
 

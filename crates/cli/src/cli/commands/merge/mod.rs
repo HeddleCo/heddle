@@ -6,9 +6,9 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow};
 use objects::{
     object::{Attribution, ChangeId, ThreadName, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
-use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
+use oplog::{BlockingOpLogBackend, BlockingOpLogRecorder, OpBatch, OpRecord};
 use refs::Head;
 use repo::{
     AgentRegistry, AgentStatus, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy,
@@ -644,7 +644,7 @@ pub(crate) fn merge_thread_into_current(
                         target_thread,
                         &current_state.change_id,
                         &merge_target_id,
-                        Some(&repo.op_scope()),
+                        Some(&repo.op_scope_key()),
                     )?;
                 }
                 Head::Detached { state } => {
@@ -654,7 +654,7 @@ pub(crate) fn merge_thread_into_current(
                     repo.oplog().record_goto(
                         &merge_target_id,
                         Some(state),
-                        Some(&repo.op_scope()),
+                        Some(&repo.op_scope_key()),
                     )?;
                 }
             }
@@ -1405,7 +1405,7 @@ fn finalize_merge_git_checkpoint(
                 previous_git_oid,
                 new_git_oid: git_commit.to_string(),
             }],
-            Some(&repo.op_scope()),
+            Some(&repo.op_scope_key()),
         )
         .with_context(|| {
             format!(
@@ -1432,7 +1432,7 @@ fn finalize_merge_git_checkpoint(
 
 fn find_recent_merge_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .recent_batches_scoped(12, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch
@@ -1712,7 +1712,7 @@ pub(crate) fn bench_three_way_merge(
 }
 
 pub(crate) fn bench_detect_renames(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> Result<(usize, rename_matcher::RenameMatcherStats)> {

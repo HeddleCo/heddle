@@ -12,7 +12,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use objects::error::{HeddleError, Result};
+use objects::{
+    error::{HeddleError, Result},
+    object::TransactionId,
+};
 use oplog::IsolationPrecondition;
 
 use super::{
@@ -46,7 +49,7 @@ where
 fn execute_attempts<'a, M>(
     repo: &'a Repository,
     mut m: M,
-    transaction_id: String,
+    transaction_id: TransactionId,
 ) -> Result<M::Output>
 where
     M: AtomicMutation + 'a,

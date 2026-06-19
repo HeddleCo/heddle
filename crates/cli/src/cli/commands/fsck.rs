@@ -2,7 +2,7 @@
 //! Fsck command - verify repository integrity.
 
 use anyhow::{Result, anyhow};
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 use repo::Repository;
 use serde::Serialize;
 use sley::Repository as SleyRepository;

@@ -9,7 +9,7 @@ use std::{
 
 use objects::{
     object::{Blob, MarkerName, ThreadName},
-    store::{FsStore, ObjectStore},
+    store::{BlockingObjectStore, FsStore},
 };
 use repo::Repository;
 use tempfile::TempDir;

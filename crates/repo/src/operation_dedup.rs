@@ -30,7 +30,7 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, WriteLockGuard},
-    object::OperationId,
+    object::{OperationId, TransactionId},
 };
 use oplog::IsolationKey;
 use serde::{Deserialize, Serialize};
@@ -186,7 +186,7 @@ impl ReserveOpId {
 impl AtomicMutation for ReserveOpId {
     type Output = ReserveOpIdClaim;
 
-    fn transaction_id(&self) -> String {
+    fn transaction_id(&self) -> TransactionId {
         reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
     }
 
@@ -235,7 +235,7 @@ impl ReserveOpIdTransaction {
 impl AtomicMutation for ReserveOpIdTransaction {
     type Output = DedupOutcome;
 
-    fn transaction_id(&self) -> String {
+    fn transaction_id(&self) -> TransactionId {
         reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
     }
 
@@ -267,14 +267,18 @@ pub fn reserve_operation_id_eager(
     )
 }
 
-fn reserve_transaction_id(operation_id: OperationId, verb: &str, request_hash: [u8; 32]) -> String {
+fn reserve_transaction_id(
+    operation_id: OperationId,
+    verb: &str,
+    request_hash: [u8; 32],
+) -> TransactionId {
     use std::fmt::Write as _;
 
     let mut hash = String::with_capacity(64);
     for byte in request_hash {
         let _ = write!(&mut hash, "{byte:02x}");
     }
-    format!("op-id-reserve/{verb}/{operation_id}/{hash}")
+    TransactionId::new(format!("op-id-reserve/{verb}/{operation_id}/{hash}"))
 }
 
 /// File-backed dedup store.
@@ -588,8 +592,8 @@ mod tests {
     impl AtomicMutation for ReserveThenAbort {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            format!("reserve-then-abort/{}", self.op)
+        fn transaction_id(&self) -> TransactionId {
+            TransactionId::new(format!("reserve-then-abort/{}", self.op))
         }
 
         fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -897,8 +901,8 @@ mod tests {
     impl AtomicMutation for ReserveThenConflictOnce {
         type Output = DedupOutcome;
 
-        fn transaction_id(&self) -> String {
-            format!("reserve-conflict-once/{}", self.op)
+        fn transaction_id(&self) -> TransactionId {
+            TransactionId::new(format!("reserve-conflict-once/{}", self.op))
         }
 
         fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -925,7 +929,7 @@ mod tests {
                         thread: Some("main".to_string()),
                     },
                     oplog::OpRecord::TransactionCommit {
-                        transaction_id: "reserve-conflict-racer".to_string(),
+                        transaction_id: "reserve-conflict-racer".into(),
                         op_count: 1,
                     },
                 ])?;

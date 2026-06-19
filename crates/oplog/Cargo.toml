@@ -14,11 +14,6 @@ chrono.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 rmp-serde.workspace = true
 serde.workspace = true
-
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
-serde_json = { workspace = true, optional = true }
-sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
@@ -28,7 +23,6 @@ tempfile.workspace = true
 
 [features]
 bench = []
-postgres = ["dep:serde_json", "dep:sqlx", "dep:tokio", "dep:runtime-bridge"]
 
 [lib]
 path = "src/lib.rs"

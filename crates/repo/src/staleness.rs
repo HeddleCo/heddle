@@ -8,7 +8,7 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{Annotation, AnnotationScope, Blob, ContentHash, ContextTarget, State, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use crate::Repository;
@@ -213,7 +213,7 @@ fn resolve_current_symbol(
 
 /// Resolve a blob at a file path within a tree by walking the tree hierarchy.
 fn get_blob_at_path(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     tree: &Tree,
     path: &str,
 ) -> Result<Option<Blob>, anyhow::Error> {
@@ -222,7 +222,7 @@ fn get_blob_at_path(
 }
 
 fn get_blob_recursive(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     tree: &Tree,
     parts: &[&str],
 ) -> Result<Option<Blob>, anyhow::Error> {

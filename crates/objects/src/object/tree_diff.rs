@@ -6,10 +6,13 @@
 
 use std::ops::ControlFlow;
 
+use futures::StreamExt;
+
 use super::FileChangeSet;
 use crate::{
-    object::{DiffKind, EntryType, FileChange, Tree, TreeEntry},
-    store::ObjectStore,
+    error::HeddleError,
+    object::{ContentHash, DiffKind, EntryType, FileChange, Tree, TreeEntry},
+    store::{BlockingObjectStore, ObjectKey, ObjectStore},
 };
 
 /// Collect all file changes between two trees.
@@ -18,10 +21,10 @@ use crate::{
 /// [`diff_trees_visit`] and collects every [`FileChange`] into a
 /// [`FileChangeSet`]. Streaming or early-exit consumers should prefer
 /// [`diff_trees_visit`], which avoids allocating the full change list.
-pub fn diff_trees<S: ObjectStore + ?Sized>(
+pub fn diff_trees<S: BlockingObjectStore + ?Sized>(
     store: &S,
-    from: &crate::object::ContentHash,
-    to: &crate::object::ContentHash,
+    from: &ContentHash,
+    to: &ContentHash,
 ) -> Result<FileChangeSet, anyhow::Error> {
     let mut changes = FileChangeSet::new();
     // The visitor never short-circuits here, so the `ControlFlow` result is
@@ -49,8 +52,49 @@ pub fn diff_trees<S: ObjectStore + ?Sized>(
 /// two paths are behavior-identical.
 pub fn diff_trees_visit<S, V, B>(
     store: &S,
-    from: &crate::object::ContentHash,
-    to: &crate::object::ContentHash,
+    from: &ContentHash,
+    to: &ContentHash,
+    mut visitor: V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: BlockingObjectStore + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B>,
+{
+    if from == to {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let from_tree = store.get_tree(from)?;
+    let to_tree = store.get_tree(to)?;
+    diff_trees_recursive(store, &from_tree, &to_tree, "", &mut visitor)
+}
+
+/// Async/cloud-native tree diff variant over [`ObjectStore`].
+///
+/// This mirrors [`diff_trees`] but reads tree objects through the async object
+/// stream surface, so hosted stores can diff without implementing the local
+/// blocking filesystem contract.
+pub async fn diff_trees_async<S: ObjectStore + ?Sized>(
+    store: &S,
+    from: &ContentHash,
+    to: &ContentHash,
+) -> Result<FileChangeSet, anyhow::Error> {
+    let mut changes = FileChangeSet::new();
+    let _: ControlFlow<()> = diff_trees_visit_async(store, from, to, |change| {
+        changes.push(change);
+        ControlFlow::Continue(())
+    })
+    .await?;
+    Ok(changes)
+}
+
+/// Async visitor variant of [`diff_trees_visit`].
+///
+/// The visitor remains synchronous and can still short-circuit with
+/// [`ControlFlow::Break`]. Tree reads are awaited between visitor calls.
+pub async fn diff_trees_visit_async<S, V, B>(
+    store: &S,
+    from: &ContentHash,
+    to: &ContentHash,
     mut visitor: V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
@@ -60,9 +104,174 @@ where
     if from == to {
         return Ok(ControlFlow::Continue(()));
     }
-    let from_tree = store.get_tree(from)?;
-    let to_tree = store.get_tree(to)?;
-    diff_trees_recursive(store, &from_tree, &to_tree, "", &mut visitor)
+
+    let from_tree = get_tree_async(store, from).await?;
+    let to_tree = get_tree_async(store, to).await?;
+    let mut stack = vec![DiffAction::Compare {
+        from: from_tree,
+        to: to_tree,
+        prefix: String::new(),
+    }];
+
+    while let Some(action) = stack.pop() {
+        match action {
+            DiffAction::Emit(change) => {
+                if let ControlFlow::Break(b) = visitor(change) {
+                    return Ok(ControlFlow::Break(b));
+                }
+            }
+            DiffAction::Compare { from, to, prefix } => {
+                queue_diff_actions(store, from, to, prefix, &mut stack).await?;
+            }
+        }
+    }
+
+    Ok(ControlFlow::Continue(()))
+}
+
+enum DiffAction {
+    Compare {
+        from: Option<Tree>,
+        to: Option<Tree>,
+        prefix: String,
+    },
+    Emit(FileChange),
+}
+
+async fn queue_diff_actions<S>(
+    store: &S,
+    from: Option<Tree>,
+    to: Option<Tree>,
+    prefix: String,
+    stack: &mut Vec<DiffAction>,
+) -> Result<(), anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+{
+    let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
+    let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
+
+    let mut actions = Vec::new();
+    let mut from_index = 0;
+    let mut to_index = 0;
+
+    while let (Some(from_entry), Some(to_entry)) =
+        (from_entries.get(from_index), to_entries.get(to_index))
+    {
+        match from_entry.name.cmp(&to_entry.name) {
+            std::cmp::Ordering::Less => {
+                actions.push(deleted_action_async(store, &prefix, from_entry).await?);
+                from_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                actions.push(added_action_async(store, &prefix, to_entry).await?);
+                to_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if from_entry.hash != to_entry.hash {
+                    if from_entry.entry_type == EntryType::Tree
+                        && to_entry.entry_type == EntryType::Tree
+                    {
+                        let path = child_path(&prefix, &to_entry.name);
+                        let from_subtree = get_tree_async(store, &from_entry.hash).await?;
+                        let to_subtree = get_tree_async(store, &to_entry.hash).await?;
+                        actions.push(DiffAction::Compare {
+                            from: from_subtree,
+                            to: to_subtree,
+                            prefix: path,
+                        });
+                    } else {
+                        actions.push(DiffAction::Emit(FileChange::new(
+                            child_path(&prefix, &to_entry.name),
+                            DiffKind::Modified,
+                        )));
+                    }
+                }
+                from_index += 1;
+                to_index += 1;
+            }
+        }
+    }
+
+    for from_entry in &from_entries[from_index..] {
+        actions.push(deleted_action_async(store, &prefix, from_entry).await?);
+    }
+
+    for to_entry in &to_entries[to_index..] {
+        actions.push(added_action_async(store, &prefix, to_entry).await?);
+    }
+
+    stack.extend(actions.into_iter().rev());
+    Ok(())
+}
+
+async fn added_action_async<S>(
+    store: &S,
+    prefix: &str,
+    to_entry: &TreeEntry,
+) -> Result<DiffAction, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+{
+    let path = child_path(prefix, &to_entry.name);
+    if to_entry.entry_type == EntryType::Tree {
+        let to_subtree = get_tree_async(store, &to_entry.hash).await?;
+        Ok(DiffAction::Compare {
+            from: None,
+            to: to_subtree,
+            prefix: path,
+        })
+    } else {
+        Ok(DiffAction::Emit(FileChange::new(path, DiffKind::Added)))
+    }
+}
+
+async fn deleted_action_async<S>(
+    store: &S,
+    prefix: &str,
+    from_entry: &TreeEntry,
+) -> Result<DiffAction, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+{
+    let path = child_path(prefix, &from_entry.name);
+    if from_entry.entry_type == EntryType::Tree {
+        let from_subtree = get_tree_async(store, &from_entry.hash).await?;
+        Ok(DiffAction::Compare {
+            from: from_subtree,
+            to: None,
+            prefix: path,
+        })
+    } else {
+        Ok(DiffAction::Emit(FileChange::new(path, DiffKind::Deleted)))
+    }
+}
+
+async fn get_tree_async<S>(store: &S, hash: &ContentHash) -> Result<Option<Tree>, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+{
+    let Some(mut stream) = store.get_object_stream(&ObjectKey::Tree(*hash)).await? else {
+        return Ok(None);
+    };
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        bytes.extend_from_slice(&chunk);
+    }
+
+    let tree: Tree = rmp_serde::from_slice(&bytes)?;
+    tree.validate()?;
+    let found = tree.hash();
+    if found != *hash {
+        return Err(HeddleError::Corruption {
+            expected: *hash,
+            found,
+        }
+        .into());
+    }
+    Ok(Some(tree))
 }
 
 /// Recursively diff two trees, invoking `visitor` for each change.
@@ -78,7 +287,7 @@ fn diff_trees_recursive<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: BlockingObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
@@ -156,7 +365,7 @@ fn visit_added_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: BlockingObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     // Symmetric with the delete branch below: if the added entry is itself a
@@ -177,7 +386,7 @@ fn visit_deleted_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: BlockingObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let path = child_path(prefix, &from_entry.name);
@@ -582,6 +791,101 @@ mod tests {
         assert_eq!(flow, ControlFlow::Break(()));
         // Broke on the very first leaf inside `dir`; `dir/y.txt` and `z.txt`
         // were never visited.
+        assert_eq!(seen, vec!["dir/x.txt"]);
+    }
+
+    #[test]
+    fn test_async_diff_matches_blocking_order() {
+        let store = InMemoryStore::new();
+        let from_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "c.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: create_blob(&store, "old nested"),
+            entry_type: EntryType::Blob,
+        }]);
+        let from_sub_hash = store.put_tree(&from_sub_tree).unwrap();
+        let to_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "b.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: create_blob(&store, "new nested"),
+            entry_type: EntryType::Blob,
+        }]);
+        let to_sub_hash = store.put_tree(&to_sub_tree).unwrap();
+
+        let from_hash = create_tree(
+            &store,
+            vec![
+                ("z.txt", create_blob(&store, "old z"), EntryType::Blob),
+                ("dir", from_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("a.txt", create_blob(&store, "old a"), EntryType::Blob),
+            ],
+        );
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("b.txt", create_blob(&store, "new b"), EntryType::Blob),
+                ("dir", to_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("z.txt", create_blob(&store, "new z"), EntryType::Blob),
+            ],
+        );
+
+        let blocking: Vec<_> = diff_trees(&store, &from_hash, &to_hash)
+            .unwrap()
+            .into_iter()
+            .map(FileChange::into_tuple)
+            .collect();
+        let async_changes: Vec<_> =
+            futures::executor::block_on(diff_trees_async(&store, &from_hash, &to_hash))
+                .unwrap()
+                .into_iter()
+                .map(FileChange::into_tuple)
+                .collect();
+
+        assert_eq!(async_changes, blocking);
+    }
+
+    #[test]
+    fn test_async_visit_early_exit_inside_subtree() {
+        let store = InMemoryStore::new();
+        let sub_tree = Tree::from_entries(vec![
+            TreeEntry {
+                name: "x.txt".to_string(),
+                mode: FileMode::Normal,
+                hash: create_blob(&store, "x"),
+                entry_type: EntryType::Blob,
+            },
+            TreeEntry {
+                name: "y.txt".to_string(),
+                mode: FileMode::Normal,
+                hash: create_blob(&store, "y"),
+                entry_type: EntryType::Blob,
+            },
+        ]);
+        let sub_hash = store.put_tree(&sub_tree).unwrap();
+        let from_hash = create_tree(&store, vec![]);
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("dir", sub_hash, EntryType::Tree),
+                ("z.txt", create_blob(&store, "z"), EntryType::Blob),
+            ],
+        );
+
+        let mut seen = Vec::new();
+        let flow = futures::executor::block_on(diff_trees_visit_async(
+            &store,
+            &from_hash,
+            &to_hash,
+            |change| {
+                seen.push(change.path.clone());
+                ControlFlow::Break(())
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(flow, ControlFlow::Break(()));
         assert_eq!(seen, vec!["dir/x.txt"]);
     }
 }

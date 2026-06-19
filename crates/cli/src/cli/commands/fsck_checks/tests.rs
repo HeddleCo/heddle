@@ -4,7 +4,7 @@ use objects::{
     object::{
         Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State, Tree,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;

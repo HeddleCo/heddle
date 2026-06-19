@@ -12,7 +12,7 @@ use objects::{
         AnnotationStatus, Blob, ChangeId, ContextTarget, DiffKind, EntryType, FileChangeSet,
         FileMode, State, Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
     worktree::diff_blobs,
 };
 use repo::Repository;

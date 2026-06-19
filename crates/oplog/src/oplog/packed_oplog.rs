@@ -17,6 +17,7 @@ use chrono::{TimeZone, Utc};
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::{sync_directory, temp_path, write_file_atomic},
+    object::{Scope, TransactionId},
 };
 
 use super::{
@@ -375,7 +376,7 @@ impl PackedOpLog {
         &self,
         count: usize,
         predicate: impl Fn(&OpBatch) -> bool,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Vec<OpBatch> {
         collect_batches_from_entries(self.entries.iter().rev().cloned(), count, predicate, scope)
     }
@@ -502,7 +503,7 @@ impl PackedOpLogIndex {
         &self,
         count: usize,
         predicate: impl Fn(&OpBatch) -> bool,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>> {
         self.collect_batches_after_scoped(0, count, predicate, scope)
     }
@@ -512,7 +513,7 @@ impl PackedOpLogIndex {
         since_head_id: u64,
         count: usize,
         predicate: impl Fn(&OpBatch) -> bool,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>> {
         if count == 0 || self.header.entry_count == 0 {
             return Ok(Vec::new());
@@ -529,7 +530,7 @@ impl PackedOpLogIndex {
             }
             if let Some(scope) = scope
                 && record.scope_state == ScopeState::None as u8
-                && !scope.is_empty()
+                && !scope.as_str().is_empty()
             {
                 continue;
             }
@@ -567,7 +568,7 @@ impl PackedOpLogIndex {
                 && !batch
                     .entries
                     .iter()
-                    .all(|entry| entry.scope.as_deref() == Some(scope))
+                    .all(|entry| entry.scope.as_ref() == Some(scope))
             {
                 continue;
             }
@@ -582,10 +583,13 @@ impl PackedOpLogIndex {
         Ok(batches)
     }
 
-    pub(crate) fn transaction_commit(&self, transaction_id: &str) -> Result<Option<(u64, u64)>> {
+    pub(crate) fn transaction_commit(
+        &self,
+        transaction_id: &TransactionId,
+    ) -> Result<Option<(u64, u64)>> {
         let key_bytes = self.read_tx_key_bytes()?;
         let records = self.read_tx_dir()?;
-        let needle = transaction_id.as_bytes();
+        let needle = transaction_id.as_str().as_bytes();
 
         let mut left = 0;
         let mut right = records.len();
@@ -604,7 +608,10 @@ impl PackedOpLogIndex {
         Ok(None)
     }
 
-    pub(crate) fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
+    pub(crate) fn committed_batch_records(
+        &self,
+        transaction_id: &TransactionId,
+    ) -> Result<Vec<OpRecord>> {
         let Some((_commit_entry_id, batch_id)) = self.transaction_commit(transaction_id)? else {
             return Ok(Vec::new());
         };
@@ -1766,7 +1773,7 @@ fn build_index_sections(
                 .map(|(entry, _)| entry.id)
                 .max()
                 .unwrap_or_default();
-            let scope_state = scope_state(entries.iter().map(|(entry, _)| entry.scope.as_deref()));
+            let scope_state = scope_state(entries.iter().map(|(entry, _)| entry.scope.as_ref()));
             (batch_id, newest_entry_id, scope_state, entries)
         })
         .collect::<Vec<_>>();
@@ -1841,7 +1848,7 @@ fn build_index_sections_from_existing(
             newest_entry_id,
             first_offset_index,
             entry_count: entries.len() as u32,
-            scope_state: scope_state(entries.iter().map(|(entry, _)| entry.scope.as_deref())),
+            scope_state: scope_state(entries.iter().map(|(entry, _)| entry.scope.as_ref())),
         });
     }
     batch_dir.sort_by_key(|record| Reverse(record.newest_entry_id));
@@ -1880,10 +1887,10 @@ fn build_index_sections_from_existing(
     })
 }
 
-fn scope_state<'a>(scopes: impl Iterator<Item = Option<&'a str>>) -> u8 {
+fn scope_state<'a>(scopes: impl Iterator<Item = Option<&'a Scope>>) -> u8 {
     let mut first = None;
     for scope in scopes {
-        match (first, scope) {
+        match (first, scope.map(Scope::as_str)) {
             (None, None) => first = Some(None),
             (None, Some(value)) => first = Some(Some(value)),
             (Some(prev), current) if prev == current => {}
@@ -1901,7 +1908,7 @@ fn collect_batches_from_entries(
     entries: impl Iterator<Item = OpEntry>,
     count: usize,
     predicate: impl Fn(&OpBatch) -> bool,
-    scope: Option<&str>,
+    scope: Option<&Scope>,
 ) -> Vec<OpBatch> {
     if count == 0 {
         return Vec::new();
@@ -1925,7 +1932,7 @@ fn collect_batches_from_entries(
             }
         });
         if let Some(scope) = scope
-            && entry.scope.as_deref() != Some(scope)
+            && entry.scope.as_ref() != Some(scope)
         {
             batch.scope_matches = false;
         }
@@ -2160,10 +2167,9 @@ fn parse_entry_with_schema(
     let scope = if scope_bytes.is_empty() {
         None
     } else {
-        Some(
-            String::from_utf8(scope_bytes)
-                .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in scope".to_string()))?,
-        )
+        Some(Scope::new(String::from_utf8(scope_bytes).map_err(
+            |_| HeddleError::InvalidObject("invalid UTF-8 in scope".to_string()),
+        )?))
     };
 
     let op_data_len = cursor.read_u32()? as usize;
@@ -2237,10 +2243,9 @@ fn read_entry_at(file: &mut File, offset: u64, schema: OpRecordSchemaVersion) ->
     let scope = if scope_bytes.is_empty() {
         None
     } else {
-        Some(
-            String::from_utf8(scope_bytes)
-                .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in scope".to_string()))?,
-        )
+        Some(Scope::new(String::from_utf8(scope_bytes).map_err(
+            |_| HeddleError::InvalidObject("invalid UTF-8 in scope".to_string()),
+        )?))
     };
 
     let op_data_len = read_u32_from_file(file)? as usize;
@@ -2313,7 +2318,12 @@ fn encode_entry_with(
     out.extend_from_slice(&entry.timestamp.timestamp_subsec_nanos().to_le_bytes());
     out.push(if entry.undone { 1 } else { 0 });
 
-    let scope_bytes = entry.scope.as_deref().unwrap_or("").as_bytes();
+    let scope_bytes = entry
+        .scope
+        .as_ref()
+        .map(Scope::as_str)
+        .unwrap_or("")
+        .as_bytes();
     out.extend_from_slice(&(scope_bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(scope_bytes);
 
@@ -2529,7 +2539,7 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
+    use objects::object::{ChangeId, Scope, TransactionId};
     use tempfile::TempDir;
 
     use super::{
@@ -2551,7 +2561,7 @@ mod tests {
             undone: false,
             batch_id: id,
             batch_index: 0,
-            scope: scope.map(str::to_string),
+            scope: scope.map(Scope::new),
             actor: std::sync::Arc::new(objects::object::Principal::new("Test", "test@example.com")),
             operation_id: None,
         }
@@ -2762,7 +2772,10 @@ mod tests {
         assert_eq!(loaded.head_id, 2);
         assert_eq!(loaded.entries[0].id, 1);
         assert_eq!(loaded.entries[1].id, 2);
-        assert_eq!(loaded.entries[0].scope.as_deref(), Some("lane-a"));
+        assert_eq!(
+            loaded.entries[0].scope.as_ref().map(Scope::as_str),
+            Some("lane-a")
+        );
 
         let index = PackedOpLogIndex::open(&path).unwrap();
         assert_eq!(index.head_id(), 2);
@@ -2913,7 +2926,7 @@ mod tests {
 
         let mut tx_commit = make_batch_entry(8, 7, 1, Some("lane"));
         tx_commit.operation = OpRecord::TransactionCommit {
-            transaction_id: "tx-pre-atomic".to_string(),
+            transaction_id: "tx-pre-atomic".into(),
             op_count: 1,
         };
         entries.push(tx_commit);
@@ -2956,7 +2969,9 @@ mod tests {
         );
         let index = PackedOpLogIndex::open(&path).unwrap();
         assert_eq!(
-            index.transaction_commit("tx-pre-atomic").unwrap(),
+            index
+                .transaction_commit(&TransactionId::new("tx-pre-atomic"))
+                .unwrap(),
             Some((8, 7))
         );
         assert_eq!(
@@ -3001,7 +3016,7 @@ mod tests {
 
         let mut remote_update = make_batch_entry(3, 3, 0, Some("lane"));
         remote_update.operation = OpRecord::RemoteThreadUpdate {
-            remote: "origin".to_string(),
+            remote: "origin".into(),
             thread: "main".to_string(),
             state: remote_state,
         };
@@ -3009,7 +3024,7 @@ mod tests {
 
         let mut remote_delete = make_batch_entry(4, 4, 0, Some("lane"));
         remote_delete.operation = OpRecord::RemoteThreadDelete {
-            remote: "origin".to_string(),
+            remote: "origin".into(),
             thread: "old".to_string(),
             state: remote_state,
         };
@@ -3021,7 +3036,7 @@ mod tests {
 
         let mut tx_commit = make_batch_entry(6, 3, 1, Some("lane"));
         tx_commit.operation = OpRecord::TransactionCommit {
-            transaction_id: "tx-atomic".to_string(),
+            transaction_id: "tx-atomic".into(),
             op_count: 1,
         };
         entries.push(tx_commit);
@@ -3055,7 +3070,12 @@ mod tests {
 
         PackedOpLog::ensure_latest(&path).unwrap();
         let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(index.transaction_commit("tx-atomic").unwrap(), Some((6, 3)));
+        assert_eq!(
+            index
+                .transaction_commit(&TransactionId::new("tx-atomic"))
+                .unwrap(),
+            Some((6, 3))
+        );
     }
 
     #[test]
@@ -3283,7 +3303,7 @@ mod tests {
 
         let mut remote_update = make_batch_entry(7, 7, 0, Some("lane"));
         remote_update.operation = OpRecord::RemoteThreadUpdate {
-            remote: "origin".to_string(),
+            remote: "origin".into(),
             thread: "main".to_string(),
             state: state_7,
         };
@@ -3291,7 +3311,7 @@ mod tests {
 
         let mut remote_delete = make_batch_entry(8, 8, 0, Some("lane"));
         remote_delete.operation = OpRecord::RemoteThreadDelete {
-            remote: "origin".to_string(),
+            remote: "origin".into(),
             thread: "old".to_string(),
             state: state_7,
         };
@@ -3373,7 +3393,9 @@ mod tests {
         );
         let index = PackedOpLogIndex::open(&path).unwrap();
         assert_eq!(
-            index.transaction_commit("fixture-tx").unwrap(),
+            index
+                .transaction_commit(&TransactionId::new("fixture-tx"))
+                .unwrap(),
             Some((6, 5))
         );
         assert_eq!(index.recent_entries(1).unwrap()[0].id, 6);
@@ -3452,7 +3474,8 @@ mod tests {
             make_batch_entry(6, 40, 0, Some("lane-a")),
         ]);
 
-        let batches = log.collect_batches_scoped(3, |_| true, Some("lane-a"));
+        let lane_a = Scope::new("lane-a");
+        let batches = log.collect_batches_scoped(3, |_| true, Some(&lane_a));
 
         assert_eq!(
             batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
@@ -3486,8 +3509,9 @@ mod tests {
         log.save().unwrap();
 
         let index = PackedOpLogIndex::open(&path).unwrap();
+        let lane_a = Scope::new("lane-a");
         let batches = index
-            .collect_batches_scoped(2, |_| true, Some("lane-a"))
+            .collect_batches_scoped(2, |_| true, Some(&lane_a))
             .unwrap();
 
         assert_eq!(
@@ -3535,9 +3559,25 @@ mod tests {
         log.save().unwrap();
 
         let index = PackedOpLogIndex::open(&path).unwrap();
-        assert_eq!(index.transaction_commit("tx-1").unwrap(), Some((2, 1)));
-        assert_eq!(index.committed_batch_records("tx-1").unwrap().len(), 1);
-        assert!(index.committed_batch_records("missing").unwrap().is_empty());
+        assert_eq!(
+            index
+                .transaction_commit(&TransactionId::new("tx-1"))
+                .unwrap(),
+            Some((2, 1))
+        );
+        assert_eq!(
+            index
+                .committed_batch_records(&TransactionId::new("tx-1"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            index
+                .committed_batch_records(&TransactionId::new("missing"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

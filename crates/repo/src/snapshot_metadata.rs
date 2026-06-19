@@ -19,7 +19,7 @@ use chrono::Utc;
 use objects::{
     error::HeddleError,
     object::{ChangeId, State, ThreadName, Tree, Verification},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use crate::{

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow};
 use objects::object::{Agent, ChangeId, State};
-use oplog::{OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpRecord};
 use repo::{Repository, format_confidence};
 use serde::Serialize;
 

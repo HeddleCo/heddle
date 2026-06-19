@@ -13,10 +13,10 @@ use objects::{
         Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
         TreeEntry,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
     worktree::should_ignore as should_ignore_path,
 };
-use oplog::{OpBatch, OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpBatch, OpRecord};
 use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
 use serde::Serialize;
 use sley::{
@@ -1252,7 +1252,7 @@ fn shell_double_quoted(value: &str) -> String {
 
 fn find_recent_snapshot_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(8, Some(&repo.op_scope()))?
+        .recent_batches_scoped(8, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch.entries.iter().any(|entry| {
@@ -1267,7 +1267,7 @@ fn find_recent_snapshot_batch(repo: &Repository, state: &ChangeId) -> Result<OpB
 
 fn find_recent_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Result<OpBatch> {
     repo.oplog()
-        .recent_batches_scoped(8, Some(&repo.op_scope()))?
+        .recent_batches_scoped(8, Some(&repo.op_scope_key()))?
         .into_iter()
         .find(|batch| {
             batch.entries.iter().any(|entry| {

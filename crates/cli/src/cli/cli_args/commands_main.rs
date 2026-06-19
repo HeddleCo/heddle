@@ -8,10 +8,9 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, DiscussCommands,
-    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
-    ReviewCommands, ShellCommands, StashCommands, ThreadCommands, TransactionCommands,
-    VisibilityCommands,
+    AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, HookCommands,
+    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ShellCommands,
+    StashCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
@@ -23,6 +22,8 @@ use super::{
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
+#[cfg(feature = "local-services")]
+use super::{DiscussCommands, ReviewCommands, TransactionCommands};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -263,6 +264,7 @@ Examples:
   heddle discuss append <id> 'switched to argon2'          # add a turn
   heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content 'Kept for compatibility'
 ")]
+    #[cfg(feature = "local-services")]
     Discuss {
         #[command(subcommand)]
         command: DiscussCommands,
@@ -280,6 +282,7 @@ Examples:
     /// are still follow-on work; the verb stays available for testing
     /// but is not advertised in `heddle help advanced`.
     #[command(hide = true)]
+    #[cfg(feature = "local-services")]
     Transaction {
         #[command(subcommand)]
         command: TransactionCommands,
@@ -299,6 +302,7 @@ Examples:
   heddle review sign HEAD --kind read --public-key <hex> --signature <hex> --signed-at-unix <ts>
   heddle review health --window 7                       # signal fire-rates over recent states
 ")]
+    #[cfg(feature = "local-services")]
     Review {
         #[command(subcommand)]
         command: ReviewCommands,

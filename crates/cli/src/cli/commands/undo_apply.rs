@@ -12,9 +12,11 @@ use anyhow::{Result, anyhow};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
-    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName, TransactionId},
 };
-use oplog::{IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, isolation_keys_for_record};
+use oplog::{
+    BlockingOpLogBackend, IsolationKey, OpBatch, OpEntry, OpRecord, isolation_keys_for_record,
+};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -1700,9 +1702,7 @@ fn mark_source_thread_integrated(
         status: Some("auto_integrated".to_string()),
         reason: Some("redo restored integrated target state".to_string()),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
-        conflicts_resolved_manually: thread
-            .integration_policy_result
-            .conflicts_resolved_manually,
+        conflicts_resolved_manually: thread.integration_policy_result.conflicts_resolved_manually,
     };
     thread.freshness = ThreadFreshness::Current;
     thread.updated_at = chrono::Utc::now();
@@ -1906,16 +1906,16 @@ struct StageUndoRecovery {
 impl AtomicMutation for StageUndoRecovery {
     type Output = ();
 
-    fn transaction_id(&self) -> String {
+    fn transaction_id(&self) -> TransactionId {
         // Enrolled children never reach the commit point; only the root's id is
         // used. A constant is sufficient and never minted fresh.
-        "undo:stage-recovery".to_string()
+        "undo:stage-recovery".into()
     }
 
     fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
         let mut keys = BTreeSet::new();
         keys.insert(IsolationKey::LocalHead {
-            scope: repo.op_scope(),
+            scope: repo.op_scope_key(),
         });
         Ok(keys)
     }
@@ -1977,8 +1977,8 @@ impl ApplyUndoBatch {
 impl AtomicMutation for ApplyUndoBatch {
     type Output = OpBatch;
 
-    fn transaction_id(&self) -> String {
-        format!("undo:batch:{}", self.batch.id)
+    fn transaction_id(&self) -> TransactionId {
+        TransactionId::new(format!("undo:batch:{}", self.batch.id))
     }
 
     fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2043,8 +2043,8 @@ impl ApplyRedoBatch {
 impl AtomicMutation for ApplyRedoBatch {
     type Output = OpBatch;
 
-    fn transaction_id(&self) -> String {
-        format!("redo:batch:{}", self.batch.id)
+    fn transaction_id(&self) -> TransactionId {
+        TransactionId::new(format!("redo:batch:{}", self.batch.id))
     }
 
     fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2081,12 +2081,12 @@ fn isolation_keys_for_batches(batches: &[OpBatch], scope: &str) -> BTreeSet<Isol
         for entry in &batch.entries {
             keys.extend(isolation_keys_for_record(
                 &entry.operation,
-                entry.scope.as_deref(),
+                entry.scope.as_ref(),
             ));
         }
     }
     keys.insert(IsolationKey::LocalHead {
-        scope: scope.to_string(),
+        scope: objects::object::Scope::new(scope),
     });
     keys
 }
@@ -2118,8 +2118,8 @@ impl UndoOp {
 impl AtomicMutation for UndoOp {
     type Output = Vec<OpBatch>;
 
-    fn transaction_id(&self) -> String {
-        self.transaction_id.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.transaction_id.clone().into()
     }
 
     fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2159,8 +2159,8 @@ impl RedoOp {
 impl AtomicMutation for RedoOp {
     type Output = Vec<OpBatch>;
 
-    fn transaction_id(&self) -> String {
-        self.transaction_id.clone()
+    fn transaction_id(&self) -> TransactionId {
+        self.transaction_id.clone().into()
     }
 
     fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2247,8 +2247,8 @@ mod atomic_tests {
     impl AtomicMutation for FaultyUndo {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            "test-undo-fault".to_string()
+        fn transaction_id(&self) -> TransactionId {
+            "test-undo-fault".into()
         }
 
         fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2284,8 +2284,8 @@ mod atomic_tests {
     impl AtomicMutation for FaultyRedo {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            "test-redo-fault".to_string()
+        fn transaction_id(&self) -> TransactionId {
+            "test-redo-fault".into()
         }
 
         fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -2315,7 +2315,7 @@ mod atomic_tests {
     #[test]
     fn atomic_undo_success_reverts_and_records_recovery() {
         let (temp, repo, s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         let recovery_head = repo.head().unwrap();
         let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
@@ -2349,7 +2349,7 @@ mod atomic_tests {
     #[test]
     fn fault_mid_undo_rewinds_to_pre_operation_state() {
         let (temp, repo, _s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         let pre_head = repo.head().unwrap();
         assert_eq!(pre_head, Some(s2));
@@ -2406,7 +2406,7 @@ mod atomic_tests {
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         let _s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         // Cleanly undo the single snapshot through the real atomic UndoOp.
         let recovery_head = repo.head().unwrap();
@@ -2472,7 +2472,7 @@ mod atomic_tests {
     #[test]
     fn per_effect_rollback_threaded_snapshot_undo() {
         let (temp, repo, _s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         let pre_head = repo.head().unwrap();
         assert_eq!(pre_head, Some(s2));
@@ -2534,7 +2534,7 @@ mod atomic_tests {
     #[test]
     fn per_effect_rollback_threaded_snapshot_redo() {
         let (temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         // Cleanly undo s2 so it becomes redoable; pre-redo state is the s1 tip.
         let recovery_head = repo.head().unwrap();
@@ -2593,7 +2593,7 @@ mod atomic_tests {
     #[test]
     fn per_effect_rollback_restores_marker_writes() {
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         // `mc` exists (its MarkerCreate undo = delete_marker, inverse recreate);
         // `md` does not (its MarkerDelete undo = create_marker, inverse delete).
         repo.refs()
@@ -2653,7 +2653,7 @@ mod atomic_tests {
     #[test]
     fn per_effect_rollback_restores_thread_ref_writes() {
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         // `old` exists (its ThreadCreate undo = delete_thread, inverse re-set);
         // `new` does not (its ThreadDelete undo = set_thread, inverse delete).
         repo.refs()
@@ -2714,7 +2714,7 @@ mod atomic_tests {
     #[test]
     fn atomic_undo_redo_round_trip_ignores_commit_markers() {
         let (temp, repo, s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         // Undo s2.
         let recovery_head = repo.head().unwrap();
@@ -2776,7 +2776,7 @@ mod atomic_tests {
     #[test]
     fn serialized_second_undo_selects_a_different_batch() {
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         // Invocation 1, under the lock: undo the newest batch (s2).
         let first_ids: Vec<u64> = {
@@ -2811,7 +2811,7 @@ mod atomic_tests {
     #[test]
     fn list_depth_one_returns_preceding_user_op_past_commit_marker() {
         let (_temp, repo, _s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         // Undo s2 — this appends a marker-only `TransactionCommit` batch that is
         // now the newest batch in the log.
@@ -2862,7 +2862,7 @@ mod atomic_tests {
     #[test]
     fn undo_marker_delete_forward_failure_keeps_preexisting_marker() {
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let marker = MarkerName::new("keep");
 
         // A `MarkerDelete` batch becomes the newest undoable op; undoing it will
@@ -2911,7 +2911,7 @@ mod atomic_tests {
     #[test]
     fn redo_marker_create_forward_failure_keeps_preexisting_marker() {
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let marker = MarkerName::new("keep");
 
         // Record a `MarkerCreate`, then mark it undone so it is REDOABLE; redoing
@@ -2964,7 +2964,7 @@ mod atomic_tests {
     #[test]
     fn step_nonatomic_rolls_back_partially_applied_goto() {
         let (temp, repo, _s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
 
         let pre_head = repo.head().unwrap();
         assert_eq!(pre_head, Some(s2));
@@ -3047,7 +3047,11 @@ mod atomic_tests {
     }
 
     fn apply_undo_once(repo: &Repository, scope: &str) {
-        let batches = repo.oplog().undo_batches_scoped(1, Some(scope)).unwrap();
+        let scope_key = objects::object::Scope::new(scope);
+        let batches = repo
+            .oplog()
+            .undo_batches_scoped(1, Some(&scope_key))
+            .unwrap();
         let recovery_head = repo.head().unwrap();
         let generation = repo.oplog().head_id().unwrap();
         let txid = undo_redo_transaction_id("undo", scope, generation, &batches);
@@ -3055,7 +3059,11 @@ mod atomic_tests {
     }
 
     fn apply_redo_once(repo: &Repository, scope: &str) {
-        let batches = repo.oplog().redo_batches_scoped(1, Some(scope)).unwrap();
+        let scope_key = objects::object::Scope::new(scope);
+        let batches = repo
+            .oplog()
+            .redo_batches_scoped(1, Some(&scope_key))
+            .unwrap();
         let generation = repo.oplog().head_id().unwrap();
         let txid = undo_redo_transaction_id("redo", scope, generation, &batches);
         repo::atomic::execute(repo, RedoOp::new(batches, txid)).unwrap();
@@ -3064,7 +3072,7 @@ mod atomic_tests {
     #[test]
     fn thread_update_undo_preserves_missing_ref_fallback_absence() {
         let (_temp, repo, s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let manager = ThreadManager::new(repo.heddle_dir());
         let mut old_record = sample_main_thread(&s1.short(), "/work/missing-ref");
         old_record.id = "missing-ref".to_string();
@@ -3139,7 +3147,7 @@ mod atomic_tests {
     #[test]
     fn thread_update_undo_redo_restores_duplicate_same_name_record_sets() {
         let (_temp, repo, s1, s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let manager = ThreadManager::new(repo.heddle_dir());
         let mut winner_old = sample_main_thread(&s1.short(), "/work/winner-old");
         winner_old.id = "rec-winner".to_string();
@@ -3246,8 +3254,8 @@ mod atomic_tests {
     impl AtomicMutation for SaveOnly {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            "test-save-only".to_string()
+        fn transaction_id(&self) -> TransactionId {
+            "test-save-only".into()
         }
 
         fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -3392,8 +3400,8 @@ mod atomic_tests {
     impl AtomicMutation for RestoreSnapshotOnly {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            "test-restore-snapshot-only".to_string()
+        fn transaction_id(&self) -> TransactionId {
+            "test-restore-snapshot-only".into()
         }
 
         fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -3561,8 +3569,8 @@ mod atomic_tests {
     impl AtomicMutation for RemoveRecordOnly {
         type Output = ();
 
-        fn transaction_id(&self) -> String {
-            "test-remove-record-only".to_string()
+        fn transaction_id(&self) -> TransactionId {
+            "test-remove-record-only".into()
         }
 
         fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
@@ -3693,7 +3701,7 @@ mod atomic_tests {
         use objects::object::{Principal, Redaction};
 
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let main_state = main_thread(&repo).unwrap();
 
         // A real redaction on disk.
@@ -3818,7 +3826,7 @@ mod atomic_tests {
         use objects::object::VisibilityTier;
 
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let state = s1;
 
         // Commit visibility A on the state — the op the undo will target.
@@ -3891,7 +3899,7 @@ mod atomic_tests {
         use objects::object::VisibilityTier;
 
         let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
-        let scope = repo.op_scope();
+        let scope = repo.op_scope_key();
         let state = s1;
         assert!(
             !repo.has_visibility_for_state(&state).unwrap(),

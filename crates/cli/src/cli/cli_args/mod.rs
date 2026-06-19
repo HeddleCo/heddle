@@ -8,6 +8,7 @@ mod commands_args;
 #[cfg(feature = "git-overlay")]
 mod commands_bridge;
 mod commands_context;
+#[cfg(feature = "local-services")]
 mod commands_discuss;
 mod commands_hook;
 mod commands_integration;
@@ -16,6 +17,7 @@ mod commands_oplog;
 mod commands_query;
 mod commands_redact;
 mod commands_remote;
+#[cfg(feature = "local-services")]
 mod commands_review;
 #[cfg(feature = "semantic")]
 mod commands_semantic;
@@ -25,11 +27,14 @@ mod commands_thread;
 mod commands_visibility;
 
 pub use cli_base::{Cli, OutputMode};
+pub use commands_advanced::CheckpointArgs;
+#[cfg(feature = "local-services")]
 pub use commands_advanced::{
-    CheckpointArgs, TransactionAbortArgs, TransactionBeginArgs, TransactionCommands,
-    TransactionIdArgs,
+    TransactionAbortArgs, TransactionBeginArgs, TransactionCommands, TransactionIdArgs,
 };
-pub use commands_agent::{AgentCommands, AgentServeArgs};
+pub use commands_agent::AgentCommands;
+#[cfg(feature = "local-services")]
+pub use commands_agent::AgentServeArgs;
 pub use commands_args::{
     ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
     AgentApiListArgs, AgentCaptureArgs, AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs,
@@ -47,6 +52,7 @@ pub use commands_args::{
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};
 pub use commands_context::ContextCommands;
+#[cfg(feature = "local-services")]
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
     DiscussShowArgs, ResolveModeArg,
@@ -68,6 +74,7 @@ pub use commands_redact::{
     RedactTrustRemoveArgs,
 };
 pub use commands_remote::RemoteCommands;
+#[cfg(feature = "local-services")]
 pub use commands_review::{
     ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,
 };

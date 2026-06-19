@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! ObjectStore implementation for FsStore.
+//! BlockingObjectStore implementation for FsStore.
 
 use std::{
     fs,
@@ -19,7 +19,7 @@ use super::{
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{
-        HeddleError, ObjectStore, Result,
+        BlockingObjectStore, HeddleError, LocalObjectStoreExt, PackMaintenanceStoreExt, Result,
         compression::{compress, decompress, header_uncompressed_size, is_compressed},
         pack::{ObjectType, PackManager, PackObjectId},
     },
@@ -138,7 +138,7 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
 }
 
 impl FsStore {
-    /// Single-pass blob lookup. The wrapper in `ObjectStore::get_blob`
+    /// Single-pass blob lookup. The wrapper in `BlockingObjectStore::get_blob`
     /// retries this once after a stale-reload on miss.
     fn try_get_blob_once(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         let path = hash_path(&blobs_dir(&self.root), hash);
@@ -386,11 +386,71 @@ impl FsStore {
     }
 }
 
-impl ObjectStore for FsStore {
+impl LocalObjectStoreExt for FsStore {
     fn clear_recent_caches(&self) {
         self.clear_recent_object_caches();
     }
 
+    /// Loose blob path safe for clonefile/copy materialization.
+    ///
+    /// Returns `Some(path)` only when the loose file exists, is
+    /// stored uncompressed, *and* its bytes hash to the expected
+    /// content hash.
+    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
+        let path = hash_path(&blobs_dir(&self.root), hash);
+        if let Ok(verified) = self.verified_loose_blobs.read()
+            && verified.get(hash).is_some()
+            && path.exists()
+        {
+            return Some(path);
+        }
+
+        let (header, _) = read_file_header(&path, BLOB_HEADER_PEEK).ok().flatten()?;
+        if is_compressed(&header) {
+            return None;
+        }
+        let bytes = read_file_bytes(&path).ok().flatten()?;
+        let actual = ContentHash::compute_typed("blob", bytes.as_slice());
+        if actual != *hash {
+            return None;
+        }
+        if let Ok(mut verified) = self.verified_loose_blobs.write() {
+            verified.insert(*hash, ());
+        }
+        Some(path)
+    }
+
+    #[instrument(skip(self), fields(hash = %hash.short()))]
+    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
+        let path = hash_path(&blobs_dir(&self.root), hash);
+
+        if let Some((header, _)) = read_file_header(&path, 9)?
+            && !is_compressed(&header)
+        {
+            trace!("Blob already loose+uncompressed; skipping promotion");
+            return Ok(false);
+        }
+
+        let blob = self.get_blob(hash)?.ok_or_else(|| {
+            HeddleError::NotFound(format!(
+                "blob {} not found in store; cannot promote to loose-uncompressed",
+                hash
+            ))
+        })?;
+
+        debug!(
+            size = blob.content().len(),
+            "Promoting blob to loose-uncompressed canonical store"
+        );
+        self.write_loose_object_cache(&path, blob.content())?;
+        if let Ok(mut verified) = self.verified_loose_blobs.write() {
+            verified.insert(*hash, ());
+        }
+        Ok(true)
+    }
+}
+
+impl BlockingObjectStore for FsStore {
     /// Zero-copy pack fast path. When the blob lives in a packfile
     /// and is non-delta + uncompressed, returns a `Bytes::slice`
     /// view of the pack's mmap — no decompression, no allocation,
@@ -502,122 +562,6 @@ impl ObjectStore for FsStore {
             return self.try_has_blob_once(hash);
         }
         Ok(false)
-    }
-
-    /// Loose blob path safe for clonefile/copy materialization.
-    ///
-    /// Returns `Some(path)` only when the loose file exists, is
-    /// stored uncompressed, *and* its bytes hash to the expected
-    /// content hash. Compressed blobs and pack-only blobs fall
-    /// through to `None`; so do *torn* cache-mirror files (the
-    /// `AtomicWriteMode::NoSync` write side may leave one if the
-    /// host crashed during a previous promote). On the torn case
-    /// the caller re-promotes from the authoritative pack copy.
-    ///
-    /// Verification is amortised: a hash that passes the check once
-    /// in this process is recorded in `verified_loose_blobs` and
-    /// subsequent calls skip the read+hash. So the cost on the
-    /// materialize hot path is at most one BLAKE3 over each unique
-    /// blob per process lifetime — negligible for tiny blobs,
-    /// bounded by working-set size for huge ones.
-    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
-        let path = hash_path(&blobs_dir(&self.root), hash);
-        // Fast path: this process already verified (or wrote) this
-        // hash's loose mirror in `promote_to_loose_uncompressed`.
-        // Trust without re-hashing — `path.exists()` is the only
-        // I/O we need.
-        if let Ok(verified) = self.verified_loose_blobs.read()
-            && verified.get(hash).is_some()
-            && path.exists()
-        {
-            return Some(path);
-        }
-
-        // First-time-this-process check: peek the header to filter
-        // out compressed-loose files cheaply, then verify the
-        // body's hash matches what the caller expects. A torn-write
-        // (post-crash) cache mirror fails this and the caller
-        // re-promotes from the pack.
-        //
-        // Header peek must cover the 9-byte modern header **plus**
-        // the 4-byte ZSTD magic that `is_compressed` checks —
-        // peeking only 9 bytes makes `is_compressed` falsely
-        // return `false` on a properly-compressed blob, and we'd
-        // hand the caller the compressed file path. Same off-by-4
-        // we fixed in `BLOB_HEADER_PEEK`.
-        let (header, _) = read_file_header(&path, BLOB_HEADER_PEEK).ok().flatten()?;
-        if is_compressed(&header) {
-            return None;
-        }
-        let bytes = read_file_bytes(&path).ok().flatten()?;
-        let actual = ContentHash::compute_typed("blob", bytes.as_slice());
-        if actual != *hash {
-            // Torn write or unrelated corruption. Leave the file on
-            // disk; the caller's `promote_to_loose_uncompressed`
-            // will overwrite it via the standard temp+rename path.
-            return None;
-        }
-        if let Ok(mut verified) = self.verified_loose_blobs.write() {
-            verified.insert(*hash, ());
-        }
-        Some(path)
-    }
-
-    /// Promote a blob to its uncompressed-loose canonical path so
-    /// `loose_blob_path` returns `Some(path)` and hardlink-first
-    /// materialization fires.
-    ///
-    /// Three cases:
-    /// 1. Already loose+uncompressed: peek the header, no-op.
-    /// 2. Loose but compressed: read+decompress, atomically rewrite
-    ///    the canonical path with raw bytes.
-    /// 3. Pack-only: read out of the pack via `get_blob`, atomically
-    ///    write to the canonical loose path. Pack copy is left in
-    ///    place — the next prune cycle will discard the loose mirror
-    ///    and a future materialize will re-promote.
-    #[instrument(skip(self), fields(hash = %hash.short()))]
-    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
-        let path = hash_path(&blobs_dir(&self.root), hash);
-
-        // Idempotent fast path: already loose AND uncompressed.
-        if let Some((header, _)) = read_file_header(&path, 9)?
-            && !is_compressed(&header)
-        {
-            trace!("Blob already loose+uncompressed; skipping promotion");
-            return Ok(false);
-        }
-
-        // Either compressed-loose or pack-only. Reading via
-        // `get_blob` covers both: compressed-loose decompresses on
-        // the way out, pack-only reads from the loaded pack manager.
-        let blob = self.get_blob(hash)?.ok_or_else(|| {
-            HeddleError::NotFound(format!(
-                "blob {} not found in store; cannot promote to loose-uncompressed",
-                hash
-            ))
-        })?;
-
-        // Install the uncompressed bytes at the canonical loose path
-        // via the cache-mirror atomic-write variant: no fsync, just
-        // temp+rename. The fsync skip is what makes promotion fast
-        // (measured: ~5 ms/blob with `sync_data` vs ~0.2 ms without
-        // on macOS APFS); the safety comes from the read-side hash
-        // check in `loose_blob_path`. A torn write after a crash
-        // produces a file whose content hash doesn't match, so the
-        // next reader rejects it and re-promotes from the pack.
-        //
-        // Record the hash in this process's verified-blobs cache:
-        // we just wrote the bytes ourselves, so the subsequent read
-        // path can trust them without re-hashing.
-        debug!(
-            size = blob.content().len(),
-            "Promoting blob to loose-uncompressed canonical store"
-        );
-        self.write_loose_object_cache(&path, blob.content())?;
-        if let Ok(mut verified) = self.verified_loose_blobs.write() {
-            verified.insert(*hash, ());
-        }
-        Ok(true)
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -892,11 +836,6 @@ impl ObjectStore for FsStore {
         Ok(trees)
     }
 
-    #[instrument(skip(self))]
-    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
-        self.pack_objects_impl(aggressive)
-    }
-
     #[instrument(skip(self), fields(id = ?id))]
     fn get_pack_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
         if let Ok(manager) = self.pack_manager().read()
@@ -943,45 +882,6 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self, blobs), fields(count = blobs.len()))]
     fn put_blobs_packed(&self, blobs: Vec<(crate::object::ContentHash, Vec<u8>)>) -> Result<()> {
         self.put_blobs_packed_impl(blobs)
-    }
-
-    #[instrument(skip(self))]
-    fn install_pack_streaming(
-        &self,
-        pack_path: &std::path::Path,
-        index_path: &std::path::Path,
-    ) -> Result<Vec<PackObjectId>> {
-        // Validate + list ids through the same core as the byte-buffer
-        // seam, but via an mmap-backed reader so the pack is never
-        // copied into the heap — the memory-bounded promise survives.
-        // Drop the reader (releasing the mmap) before the rename so
-        // the file move isn't racing an open mapping.
-        let ids = {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            validate_and_list_pack(&reader)?
-        };
-        self.install_pack_files_streaming(pack_path, index_path)?;
-        Ok(ids)
-    }
-
-    #[instrument(skip(self))]
-    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
-        self.prune_loose_objects_impl()
-    }
-
-    #[instrument(skip(self))]
-    fn begin_snapshot_write_batch(&self) -> Result<()> {
-        self.begin_snapshot_write_batch_impl()
-    }
-
-    #[instrument(skip(self))]
-    fn flush_snapshot_write_batch(&self) -> Result<()> {
-        self.flush_snapshot_write_batch_impl()
-    }
-
-    #[instrument(skip(self))]
-    fn abort_snapshot_write_batch(&self) {
-        self.abort_snapshot_write_batch_impl();
     }
 
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
@@ -1072,5 +972,46 @@ impl ObjectStore for FsStore {
             }
         }
         Ok(out)
+    }
+}
+
+impl PackMaintenanceStoreExt for FsStore {
+    #[instrument(skip(self))]
+    fn install_pack_streaming(
+        &self,
+        pack_path: &std::path::Path,
+        index_path: &std::path::Path,
+    ) -> Result<Vec<PackObjectId>> {
+        let ids = {
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
+            validate_and_list_pack(&reader)?
+        };
+        self.install_pack_files_streaming(pack_path, index_path)?;
+        Ok(ids)
+    }
+
+    #[instrument(skip(self))]
+    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
+        self.pack_objects_impl(aggressive)
+    }
+
+    #[instrument(skip(self))]
+    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
+        self.prune_loose_objects_impl()
+    }
+
+    #[instrument(skip(self))]
+    fn begin_snapshot_write_batch(&self) -> Result<()> {
+        self.begin_snapshot_write_batch_impl()
+    }
+
+    #[instrument(skip(self))]
+    fn flush_snapshot_write_batch(&self) -> Result<()> {
+        self.flush_snapshot_write_batch_impl()
+    }
+
+    #[instrument(skip(self))]
+    fn abort_snapshot_write_batch(&self) {
+        self.abort_snapshot_write_batch_impl();
     }
 }

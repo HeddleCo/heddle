@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
+        #[repr(transparent)]
         #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct $name(pub String);
@@ -109,6 +110,16 @@ string_newtype!(
 string_newtype!(
     /// Checkout/lane scope identifier for scoped operations.
     Scope
+);
+
+string_newtype!(
+    /// Configured remote name.
+    RemoteName
+);
+
+string_newtype!(
+    /// Stable idempotency key for an atomic transaction.
+    TransactionId
 );
 
 #[cfg(test)]

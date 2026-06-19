@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 use repo::{MergeState, Repository};
 use serde::Serialize;
 

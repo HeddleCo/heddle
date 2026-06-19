@@ -121,6 +121,7 @@ impl HeddleExitCode {
                     _ => Self::IoErr,
                 };
             }
+            #[cfg(any(feature = "client", feature = "local-services"))]
             if let Some(status) = cause.downcast_ref::<tonic::Status>() {
                 use tonic::Code;
                 return match status.code() {

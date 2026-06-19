@@ -368,7 +368,7 @@ impl StrictCurrentOpRecord {
                 transaction_id,
                 reason,
             } => OpRecord::TransactionAbort {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 reason,
             },
             Self::EphemeralThreadCollapse {
@@ -389,7 +389,7 @@ impl StrictCurrentOpRecord {
                 transaction_id,
                 op_count,
             } => OpRecord::TransactionCommit {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 op_count,
             },
             Self::Redact {
@@ -431,7 +431,7 @@ impl StrictCurrentOpRecord {
                 thread,
                 state,
             } => OpRecord::RemoteThreadUpdate {
-                remote,
+                remote: remote.into(),
                 thread,
                 state,
             },
@@ -440,7 +440,7 @@ impl StrictCurrentOpRecord {
                 thread,
                 state,
             } => OpRecord::RemoteThreadDelete {
-                remote,
+                remote: remote.into(),
                 thread,
                 state,
             },
@@ -634,7 +634,7 @@ impl PreAtomicOpRecord {
                 transaction_id,
                 reason,
             } => OpRecord::TransactionAbort {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 reason,
             },
             Self::EphemeralThreadCollapse {
@@ -655,7 +655,7 @@ impl PreAtomicOpRecord {
                 transaction_id,
                 op_count,
             } => OpRecord::TransactionCommit {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 op_count,
             },
             Self::Redact {
@@ -875,7 +875,7 @@ impl AtomicNoHeadOpRecord {
                 transaction_id,
                 reason,
             } => OpRecord::TransactionAbort {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 reason,
             },
             Self::EphemeralThreadCollapse {
@@ -896,7 +896,7 @@ impl AtomicNoHeadOpRecord {
                 transaction_id,
                 op_count,
             } => OpRecord::TransactionCommit {
-                transaction_id,
+                transaction_id: transaction_id.into(),
                 op_count,
             },
             Self::Redact {
@@ -938,7 +938,7 @@ impl AtomicNoHeadOpRecord {
                 thread,
                 state,
             } => OpRecord::RemoteThreadUpdate {
-                remote,
+                remote: remote.into(),
                 thread,
                 state,
             },
@@ -947,7 +947,7 @@ impl AtomicNoHeadOpRecord {
                 thread,
                 state,
             } => OpRecord::RemoteThreadDelete {
-                remote,
+                remote: remote.into(),
                 thread,
                 state,
             },
@@ -1558,7 +1558,7 @@ pub(crate) mod tests_support {
                     transaction_id,
                     reason,
                 } => Self::TransactionAbort {
-                    transaction_id: transaction_id.clone(),
+                    transaction_id: transaction_id.as_str().to_string(),
                     reason: reason.clone(),
                 },
                 OpRecord::EphemeralThreadCollapse {
@@ -1579,7 +1579,7 @@ pub(crate) mod tests_support {
                     transaction_id,
                     op_count,
                 } => Self::TransactionCommit {
-                    transaction_id: transaction_id.clone(),
+                    transaction_id: transaction_id.as_str().to_string(),
                     op_count: *op_count,
                 },
                 OpRecord::Redact {
@@ -1714,7 +1714,7 @@ pub(crate) mod tests_support {
                     transaction_id,
                     reason,
                 } => Self::TransactionAbort {
-                    transaction_id: transaction_id.clone(),
+                    transaction_id: transaction_id.as_str().to_string(),
                     reason: reason.clone(),
                 },
                 OpRecord::EphemeralThreadCollapse {
@@ -1735,7 +1735,7 @@ pub(crate) mod tests_support {
                     transaction_id,
                     op_count,
                 } => Self::TransactionCommit {
-                    transaction_id: transaction_id.clone(),
+                    transaction_id: transaction_id.as_str().to_string(),
                     op_count: *op_count,
                 },
                 OpRecord::Redact {
@@ -1780,7 +1780,7 @@ pub(crate) mod tests_support {
                     thread,
                     state,
                 } => Self::RemoteThreadUpdate {
-                    remote: remote.clone(),
+                    remote: remote.as_str().to_string(),
                     thread: thread.clone(),
                     state: *state,
                 },
@@ -1789,7 +1789,7 @@ pub(crate) mod tests_support {
                     thread,
                     state,
                 } => Self::RemoteThreadDelete {
-                    remote: remote.clone(),
+                    remote: remote.as_str().to_string(),
                     thread: thread.clone(),
                     state: *state,
                 },

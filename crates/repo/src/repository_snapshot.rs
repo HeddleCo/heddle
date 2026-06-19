@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use objects::{
     lock::RepositoryLockExt,
-    object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
-    store::ObjectStore,
+    object::{Attribution, Blob, ChangeId, ContentHash, State, TransactionId, Tree, TreeEntry},
+    store::{BlockingObjectStore, PackMaintenanceStoreExt},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;
@@ -103,8 +103,8 @@ impl<'a> SnapshotMutation<'a> {
 impl AtomicMutation for SnapshotMutation<'_> {
     type Output = SnapshotExecution;
 
-    fn transaction_id(&self) -> String {
-        self.transaction_id.clone()
+    fn transaction_id(&self) -> TransactionId {
+        TransactionId::new(self.transaction_id.clone())
     }
 
     fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
@@ -115,7 +115,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
             }
             Head::Detached { .. } => {
                 keys.insert(IsolationKey::LocalHead {
-                    scope: self.repo.op_scope(),
+                    scope: self.repo.op_scope_key(),
                 });
             }
         }

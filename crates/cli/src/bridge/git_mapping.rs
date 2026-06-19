@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::ChangeId, store::BlockingObjectStore};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 

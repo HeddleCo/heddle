@@ -18,9 +18,8 @@ import "heddle/v1/common.proto";
 // pre-existing fields below it.
 // =====================================================================
 
-// State review surface. Distinct from the GitHub-PR-focused ReviewService
-// above. Ships the review payload that powers both the CLI's
-// `heddle review show` and the web's state-review route.
+// State review surface for immutable Heddle states. Ships the review payload
+// that powers the CLI's `heddle review show` flow.
 service StateReviewService {
   rpc GetReviewPayload(GetReviewPayloadRequest) returns (ReviewPayload);
   rpc SignState(SignStateRequest) returns (SignStateResponse);

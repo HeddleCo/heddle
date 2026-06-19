@@ -8,7 +8,7 @@ use anyhow::Result;
 use crypto::StateSigningExt;
 use objects::{
     object::{ContentHash, State, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 

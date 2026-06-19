@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Domain event constructors for operation-log records.
 //!
-//! `OpLogBackend` is the storage contract. This trait is the explicit domain
+//! `BlockingOpLogBackend` is the storage contract. This trait is the explicit domain
 //! recording surface for callers that intentionally build canonical `OpRecord`
 //! variants from model values.
 
 use objects::{
     error::Result,
-    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
+    object::{ChangeId, ContentHash, MarkerName, Scope, ThreadName, VisibilityTier},
 };
 
 use super::{
-    oplog_backend::OpLogBackend,
+    oplog_backend::{BlockingOpLogBackend, OpLogBackend},
     oplog_types::{OpRecord, ThreadUpdateSnapshots},
 };
 
@@ -26,13 +26,366 @@ pub struct VisibilitySidecarSnapshots {
     pub new: Option<Vec<u8>>,
 }
 
+#[allow(async_fn_in_trait)]
 pub trait OpLogRecorder: OpLogBackend {
+    async fn record_snapshot(
+        &self,
+        new_state: &ChangeId,
+        prev_head: Option<&ChangeId>,
+        thread: Option<&str>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Snapshot {
+                    new_state: *new_state,
+                    prev_head: prev_head.copied(),
+                    head: thread.is_none().then_some(*new_state),
+                    thread: thread.map(str::to_string),
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_goto(
+        &self,
+        target: &ChangeId,
+        prev_head: Option<&ChangeId>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Goto {
+                    target: *target,
+                    prev_head: prev_head.copied(),
+                    head: *target,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_thread_create(
+        &self,
+        name: &ThreadName,
+        state: &ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::ThreadCreate {
+                    name: name.to_string(),
+                    state: *state,
+                    manager_snapshot,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_thread_delete(
+        &self,
+        name: &ThreadName,
+        state: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::ThreadDelete {
+                    name: name.to_string(),
+                    state: *state,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_thread_update(
+        &self,
+        name: &ThreadName,
+        old_state: &ChangeId,
+        new_state: &ChangeId,
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::ThreadUpdate {
+                    name: name.to_string(),
+                    old_state: *old_state,
+                    new_state: *new_state,
+                    manager_snapshots,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_thread_rename(
+        &self,
+        old_name: &ThreadName,
+        new_name: &ThreadName,
+        state: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<u64>> {
+        self.record_batch_scoped(
+            vec![
+                OpRecord::ThreadCreate {
+                    name: new_name.to_string(),
+                    state: *state,
+                    manager_snapshot: None,
+                },
+                OpRecord::ThreadDelete {
+                    name: old_name.to_string(),
+                    state: *state,
+                },
+            ],
+            scope,
+        )
+        .await
+    }
+
+    async fn record_fork(
+        &self,
+        from: &ChangeId,
+        new_state: &ChangeId,
+        thread: Option<&str>,
+        head: Option<&ChangeId>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Fork {
+                    from: *from,
+                    new_state: *new_state,
+                    thread: thread.map(str::to_string),
+                    head: head.copied(),
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_collapse(
+        &self,
+        sources: &[ChangeId],
+        result: &ChangeId,
+        thread: Option<&str>,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Collapse {
+                    sources: sources.to_vec(),
+                    result: *result,
+                    thread: thread.map(str::to_string),
+                    pre_thread_state: None,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_remote_thread_update(
+        &self,
+        remote: &str,
+        thread: &str,
+        state: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::RemoteThreadUpdate {
+                    remote: objects::object::RemoteName::new(remote),
+                    thread: thread.to_string(),
+                    state: *state,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_remote_thread_delete(
+        &self,
+        remote: &str,
+        thread: &str,
+        state: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::RemoteThreadDelete {
+                    remote: objects::object::RemoteName::new(remote),
+                    thread: thread.to_string(),
+                    state: *state,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_undo_recovery_update(
+        &self,
+        state: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_marker_create(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+        let ids = self
+            .record_batch(vec![OpRecord::MarkerCreate {
+                name: name.to_string(),
+                state: *state,
+            }])
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_marker_delete(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+        let ids = self
+            .record_batch(vec![OpRecord::MarkerDelete {
+                name: name.to_string(),
+                state: *state,
+            }])
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_redact(
+        &self,
+        redaction_id: &ContentHash,
+        blob: &ContentHash,
+        state: &ChangeId,
+        path: &str,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Redact {
+                    redaction_id: *redaction_id,
+                    blob: *blob,
+                    state: *state,
+                    path: path.to_string(),
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_purge(
+        &self,
+        redaction_id: &ContentHash,
+        blob: &ContentHash,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::Purge {
+                    redaction_id: *redaction_id,
+                    blob: *blob,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_state_visibility_set(
+        &self,
+        state: &ChangeId,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        sidecar: VisibilitySidecarSnapshots,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::StateVisibilitySet {
+                    state: *state,
+                    record_id: *record_id,
+                    tier: tier.clone(),
+                    prior_sidecar: sidecar.prior,
+                    new_sidecar: sidecar.new,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_state_visibility_promote(
+        &self,
+        state: &ChangeId,
+        superseded: &ContentHash,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        sidecar: VisibilitySidecarSnapshots,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::StateVisibilityPromote {
+                    state: *state,
+                    superseded: *superseded,
+                    record_id: *record_id,
+                    tier: tier.clone(),
+                    prior_sidecar: sidecar.prior,
+                    new_sidecar: sidecar.new,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+
+    async fn record_fast_forward(
+        &self,
+        source_thread: &ThreadName,
+        target_thread: &ThreadName,
+        pre_target_id: &ChangeId,
+        post_target_id: &ChangeId,
+        scope: Option<&Scope>,
+    ) -> Result<u64> {
+        let ids = self
+            .record_batch_scoped(
+                vec![OpRecord::FastForward {
+                    source_thread: source_thread.to_string(),
+                    target_thread: target_thread.to_string(),
+                    pre_target_id: *pre_target_id,
+                    post_target_id: *post_target_id,
+                }],
+                scope,
+            )
+            .await?;
+        Ok(ids[0])
+    }
+}
+
+impl<T: OpLogBackend + ?Sized> OpLogRecorder for T {}
+
+pub trait BlockingOpLogRecorder: BlockingOpLogBackend {
     fn record_snapshot(
         &self,
         new_state: &ChangeId,
         prev_head: Option<&ChangeId>,
         thread: Option<&str>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Snapshot {
@@ -50,7 +403,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         target: &ChangeId,
         prev_head: Option<&ChangeId>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Goto {
@@ -80,7 +433,7 @@ pub trait OpLogRecorder: OpLogBackend {
         name: &ThreadName,
         state: &ChangeId,
         manager_snapshot: Option<Vec<u8>>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::ThreadCreate {
@@ -97,7 +450,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         name: &ThreadName,
         state: &ChangeId,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::ThreadDelete {
@@ -115,7 +468,7 @@ pub trait OpLogRecorder: OpLogBackend {
         old_state: &ChangeId,
         new_state: &ChangeId,
         manager_snapshots: Option<ThreadUpdateSnapshots>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::ThreadUpdate {
@@ -134,7 +487,7 @@ pub trait OpLogRecorder: OpLogBackend {
         old_name: &ThreadName,
         new_name: &ThreadName,
         state: &ChangeId,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<u64>> {
         self.record_batch_scoped(
             vec![
@@ -161,7 +514,7 @@ pub trait OpLogRecorder: OpLogBackend {
         new_state: &ChangeId,
         thread: Option<&str>,
         head: Option<&ChangeId>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Fork {
@@ -182,7 +535,7 @@ pub trait OpLogRecorder: OpLogBackend {
         sources: &[ChangeId],
         result: &ChangeId,
         thread: Option<&str>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Collapse {
@@ -201,11 +554,11 @@ pub trait OpLogRecorder: OpLogBackend {
         remote: &str,
         thread: &str,
         state: &ChangeId,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::RemoteThreadUpdate {
-                remote: remote.to_string(),
+                remote: objects::object::RemoteName::new(remote),
                 thread: thread.to_string(),
                 state: *state,
             }],
@@ -219,11 +572,11 @@ pub trait OpLogRecorder: OpLogBackend {
         remote: &str,
         thread: &str,
         state: &ChangeId,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::RemoteThreadDelete {
-                remote: remote.to_string(),
+                remote: objects::object::RemoteName::new(remote),
                 thread: thread.to_string(),
                 state: *state,
             }],
@@ -233,7 +586,7 @@ pub trait OpLogRecorder: OpLogBackend {
     }
 
     /// Record an undo-recovery pointer publish. Local refs pass `op_scope()`.
-    fn record_undo_recovery_update(&self, state: &ChangeId, scope: Option<&str>) -> Result<u64> {
+    fn record_undo_recovery_update(&self, state: &ChangeId, scope: Option<&Scope>) -> Result<u64> {
         let ids =
             self.record_batch_scoped(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)?;
         Ok(ids[0])
@@ -263,7 +616,7 @@ pub trait OpLogRecorder: OpLogBackend {
         blob: &ContentHash,
         state: &ChangeId,
         path: &str,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Redact {
@@ -283,7 +636,7 @@ pub trait OpLogRecorder: OpLogBackend {
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::Purge {
@@ -303,7 +656,7 @@ pub trait OpLogRecorder: OpLogBackend {
         record_id: &ContentHash,
         tier: &VisibilityTier,
         sidecar: VisibilitySidecarSnapshots,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::StateVisibilitySet {
@@ -327,7 +680,7 @@ pub trait OpLogRecorder: OpLogBackend {
         record_id: &ContentHash,
         tier: &VisibilityTier,
         sidecar: VisibilitySidecarSnapshots,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::StateVisibilityPromote {
@@ -351,7 +704,7 @@ pub trait OpLogRecorder: OpLogBackend {
         target_thread: &ThreadName,
         pre_target_id: &ChangeId,
         post_target_id: &ChangeId,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
             vec![OpRecord::FastForward {
@@ -366,4 +719,4 @@ pub trait OpLogRecorder: OpLogBackend {
     }
 }
 
-impl<T: OpLogBackend + ?Sized> OpLogRecorder for T {}
+impl<T: BlockingOpLogBackend + ?Sized> BlockingOpLogRecorder for T {}

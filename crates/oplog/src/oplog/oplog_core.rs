@@ -10,11 +10,11 @@ use chrono::Utc;
 use objects::{
     error::{HeddleError, Result},
     lock::{RepoLock, WriteLockGuard},
-    object::Principal,
+    object::{Principal, Scope, TransactionId},
 };
 
 use super::{
-    oplog_backend::OpLogBackend,
+    oplog_backend::BlockingOpLogBackend,
     oplog_types::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
@@ -78,7 +78,7 @@ impl OpLog {
         operations: Vec<OpRecord>,
         start_id: u64,
         timestamp: chrono::DateTime<Utc>,
-        scope: &Option<String>,
+        scope: Option<&Scope>,
     ) -> Vec<OpEntry> {
         operations
             .into_iter()
@@ -90,7 +90,7 @@ impl OpLog {
                 undone: false,
                 batch_id: start_id,
                 batch_index: index as u32,
-                scope: scope.clone(),
+                scope: scope.cloned(),
                 actor: Arc::clone(actor),
                 operation_id: None,
             })
@@ -213,7 +213,11 @@ impl OpLog {
         self.recent_batches_scoped(count, None)
     }
 
-    pub fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    pub fn recent_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(count, |_| true, scope)
     }
 
@@ -221,7 +225,7 @@ impl OpLog {
         &self,
         since_head_id: u64,
         count: usize,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>> {
         let guard = self.refresh_cached()?;
         guard
@@ -240,7 +244,7 @@ impl OpLog {
     pub fn recent_user_batches_scoped(
         &self,
         count: usize,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(count, |batch| !batch.is_transaction_marker_only(), scope)
     }
@@ -249,7 +253,7 @@ impl OpLog {
         self.undo_batches_scoped(count, None)
     }
 
-    pub fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    pub fn undo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(
             count,
             |batch| {
@@ -266,7 +270,7 @@ impl OpLog {
         self.redo_batches_scoped(count, None)
     }
 
-    pub fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    pub fn redo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(
             count,
             |batch| {
@@ -305,8 +309,8 @@ impl OpLog {
     pub fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
-        scope: Option<&str>,
-        transaction_id: &str,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
         recent_window: usize,
     ) -> Result<Option<Vec<u64>>> {
         if operations.is_empty() {
@@ -328,9 +332,7 @@ impl OpLog {
 
         let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let new_entries = Self::build_entries(&self.actor, operations, start_id, timestamp, scope);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
@@ -360,8 +362,8 @@ impl OpLog {
     pub fn record_batch_exactly_once(
         &self,
         operations: Vec<OpRecord>,
-        scope: Option<&str>,
-        transaction_id: &str,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
     ) -> Result<Option<Vec<u64>>> {
         if operations.is_empty() {
             return Ok(Some(Vec::new()));
@@ -376,9 +378,7 @@ impl OpLog {
 
         let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let new_entries = Self::build_entries(&self.actor, operations, start_id, timestamp, scope);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
@@ -445,7 +445,7 @@ impl OpLog {
     /// [`record_batch_exactly_once`](Self::record_batch_exactly_once). Returns an
     /// empty vec if no batch committed that id, or if the batch held only its
     /// marker.
-    pub fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
+    pub fn committed_batch_records(&self, transaction_id: &TransactionId) -> Result<Vec<OpRecord>> {
         // Refresh, don't trust the cache: this is only ever reached on a dedup
         // hit, which may be CROSS-PROCESS — another process committed the batch
         // while this long-lived handle's cache stayed stale. A cached read would
@@ -482,7 +482,7 @@ impl OpLog {
         &self,
         count: usize,
         predicate: F,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>>
     where
         F: Fn(&OpBatch) -> bool,
@@ -495,11 +495,11 @@ impl OpLog {
     }
 }
 
-impl OpLogBackend for OpLog {
+impl BlockingOpLogBackend for OpLog {
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<u64>> {
         if operations.is_empty() {
             return Ok(Vec::new());
@@ -511,9 +511,7 @@ impl OpLogBackend for OpLog {
 
         let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let new_entries = Self::build_entries(&self.actor, operations, start_id, timestamp, scope);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
@@ -525,8 +523,8 @@ impl OpLogBackend for OpLog {
     async fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
-        scope: Option<&str>,
-        transaction_id: &str,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
         recent_window: usize,
     ) -> Result<Option<Vec<u64>>> {
         OpLog::record_batch_scoped_if_no_transaction(
@@ -541,8 +539,8 @@ impl OpLogBackend for OpLog {
     fn record_batch_exactly_once_if_unchanged(
         &self,
         operations: Vec<OpRecord>,
-        scope: Option<&str>,
-        transaction_id: &str,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
         precondition: &IsolationPrecondition,
     ) -> Result<ConditionalCommitOutcome> {
         if operations.is_empty() {
@@ -559,7 +557,7 @@ impl OpLogBackend for OpLog {
 
         if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
             for entry in index.entries_after(precondition.since_head_id)? {
-                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_ref());
                 if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
                     return Ok(ConditionalCommitOutcome::IsolationConflict {
                         key,
@@ -572,9 +570,7 @@ impl OpLogBackend for OpLog {
 
         let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let new_entries = Self::build_entries(&self.actor, operations, start_id, timestamp, scope);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
@@ -596,16 +592,24 @@ impl OpLogBackend for OpLog {
     async fn recent_batches_scoped(
         &self,
         count: usize,
-        scope: Option<&str>,
+        scope: Option<&Scope>,
     ) -> Result<Vec<OpBatch>> {
         OpLog::recent_batches_scoped(self, count, scope)
     }
 
-    async fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn undo_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
         OpLog::undo_batches_scoped(self, count, scope)
     }
 
-    async fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn redo_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
         OpLog::redo_batches_scoped(self, count, scope)
     }
 

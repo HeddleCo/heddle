@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use objects::{
     error::{HeddleError, Result},
-    object::Principal,
+    object::{Principal, Scope},
 };
-use oplog::{OpLog, OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpLog, OpRecord};
 use refs::RefCommitter;
 
 /// Appends ref-carrying records to the file oplog as the phase-4 commit point.
@@ -32,7 +32,7 @@ impl OplogRefCommitter {
 }
 
 impl RefCommitter for OplogRefCommitter {
-    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()> {
+    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&Scope>) -> Result<()> {
         if encoded_records.is_empty() {
             return Ok(());
         }

@@ -46,7 +46,7 @@ jobs:
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   release_only — every changed path is release/publish workflow plumbing.
-  #   rust      — !docs_only && !release_only; gates check-and-test / postgres / CLI fault-injection.
+  #   rust      — !docs_only && !release_only; gates check-and-test / CLI fault-injection.
   #   coverage  — weekly/manual instrumented coverage gate; skipped on PR/push.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   #   cargo_package_args — selected Cargo package arguments for the main Rust lane.
@@ -66,7 +66,6 @@ jobs:
       bench_all: ${{ steps.affected.outputs.bench_all }}
       package_names_csv: ${{ steps.affected.outputs.package_names_csv }}
       cargo_package_args: ${{ steps.affected.outputs.cargo_package_args }}
-      postgres: ${{ steps.affected_scopes.outputs.postgres }}
       cli_checks: ${{ steps.affected_scopes.outputs.cli_checks }}
       cli_fault: ${{ steps.affected_scopes.outputs.cli_fault }}
       repo_fault: ${{ steps.affected_scopes.outputs.repo_fault }}
@@ -181,12 +180,11 @@ jobs:
           echo "coverage=false" >> "$GITHUB_OUTPUT"
 
           # mount: use the transitive mount-relevant path set (mount → repo →
-          # {crypto, oplog, wire, objects, refs} → optional runtime-bridge,
-          # plus the compare script, the workflow, and shared workspace
-          # inputs) so mount adapters and their read-path dependencies trigger
-          # the kernel adapter checks.
+          # {crypto, oplog, wire, objects, refs}, plus the compare script, the
+          # workflow, and shared workspace inputs) so mount adapters and their
+          # read-path dependencies trigger the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|objects|repo|refs|oplog|crypto|wire)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else
@@ -226,12 +224,10 @@ jobs:
             fi
           }
 
-          postgres_needed() { has_package heddle-refs || has_package heddle-oplog; }
           cli_needed() { has_package heddle-cli; }
           repo_needed() { has_package heddle-repo; }
           fault_needed() { cli_needed || repo_needed; }
 
-          write_bool postgres postgres_needed
           write_bool cli_checks cli_needed
           write_bool cli_fault cli_needed
           write_bool repo_fault repo_needed
@@ -348,43 +344,6 @@ jobs:
             echo "No non-FUSE benchmark targets selected."
           fi
 
-      # 3c. Compile gate for the `postgres` storage backends used by hosted /
-      #     weft code. This is the silent-rot guard: these backends are not
-      #     exercised by the default-feature build above, so a server-path
-      #     regression (e.g. a backend that wasn't updated after a newtype
-      #     migration) compiles fine on the OSS build and lands undetected.
-      #     heddle#259 hit exactly this — `PgRefBackend` rotted after the
-      #     `ThreadName`/`MarkerName` migration. Build + clippy need no DB;
-      #     the integration tests live in the separate `postgres-tests` job.
-      - name: Build and clippy postgres storage backends
-        if: needs.changes.outputs.postgres == 'true'
-        env:
-          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
-          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
-        run: |
-          set -euo pipefail
-          selected=",$AFFECTED_PACKAGES,"
-          packages=()
-          features=()
-
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
-            packages+=(-p heddle-refs)
-            features+=(heddle-refs/postgres)
-          fi
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
-            packages+=(-p heddle-oplog)
-            features+=(heddle-oplog/postgres)
-          fi
-
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "Skipping postgres backend compile checks; refs/oplog not affected."
-            exit 0
-          fi
-
-          feature_arg=$(IFS=,; echo "${features[*]}")
-          cargo build --locked "${packages[@]}" --tests --features "$feature_arg"
-          cargo clippy --locked "${packages[@]}" --all-targets --features "$feature_arg" -- -D warnings
-
       # 4. Verify the OSS build flavors compile. `cargo check` is fast on
       #    a warm cache; the feature-delta from defaults is small.
       #    Keep these scoped to `heddle-cli`; other package changes are covered
@@ -401,90 +360,6 @@ jobs:
           # install; otherwise Linux mounts silently fall back to NFS
           # (heddle#190 r5 / Codex PR #225 P2).
           bash scripts/check-default-install-ships-worker.sh
-
-      - name: sccache stats
-        run: sccache --show-stats
-
-  # Postgres integration tests. The `postgres` feature is the server /
-  # weft code path (`PgRefBackend`, `PgOpLogBackend`); its `#[ignore]`-gated
-  # tests (`crates/refs/.../pg_refs.rs`, `crates/oplog/.../pg_oplog.rs`) need
-  # a reachable database. A `postgres:16` service container provides one and
-  # `DATABASE_URL` points the test setup at it — without that env var the
-  # tests fall back to an unreachable placeholder (port 1), so a plain
-  # `cargo test` stays hermetic and DB-free. The compile-rot class is
-  # already caught by the build+clippy steps in `check-and-test`; this job
-  # additionally exercises the runtime bridge against a live server.
-  postgres-tests:
-    name: Postgres integration tests
-    needs: changes
-    if: needs.changes.outputs.postgres == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: heddle_test
-          POSTGRES_PASSWORD: heddle_test
-          POSTGRES_DB: heddle_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: postgres-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      # Scope to the two crates that own the postgres backends: a
-      # workspace-wide `--ignored` run would also pull in unrelated
-      # `#[ignore]`-gated suites (FUSE/NFS smoke, perf, real-git) that need
-      # environments this runner doesn't have. `-p heddle-refs -p
-      # heddle-oplog` compiles only the pg backends, and `--ignored` then
-      # selects exactly their two integration tests (they're `#[ignore]`-gated
-      # so a default `cargo test --features postgres` skips them).
-      # `--test-threads=1` keeps the shared service DB deterministic;
-      # `--nocapture` surfaces the live round-trip in the log so it's clear
-      # the tests actually ran against the container and were not no-op'd by
-      # the unreachable-placeholder fallback.
-      - name: Postgres integration tests
-        env:
-          DATABASE_URL: postgres://heddle_test:heddle_test@localhost:5432/heddle_test
-          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
-          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
-        run: |
-          set -euo pipefail
-          selected=",$AFFECTED_PACKAGES,"
-          packages=()
-          features=()
-
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
-            packages+=(-p heddle-refs)
-            features+=(heddle-refs/postgres)
-          fi
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
-            packages+=(-p heddle-oplog)
-            features+=(heddle-oplog/postgres)
-          fi
-
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "Skipping postgres integration tests; refs/oplog not affected."
-            exit 0
-          fi
-
-          feature_arg=$(IFS=,; echo "${features[*]}")
-          cargo test --locked "${packages[@]}" --features "$feature_arg" \
-            -- --ignored --test-threads=1 --nocapture
 
       - name: sccache stats
         run: sccache --show-stats

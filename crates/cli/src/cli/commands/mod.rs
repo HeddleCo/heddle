@@ -22,6 +22,7 @@ mod context;
 mod daemon;
 mod diagnose;
 mod diff;
+#[cfg(feature = "local-services")]
 mod discuss;
 mod doctor_docs;
 mod doctor_schemas;
@@ -62,6 +63,7 @@ mod remote;
 mod resolve;
 mod retro;
 mod revert;
+#[cfg(feature = "local-services")]
 mod review;
 mod run_cmd;
 mod schemas;
@@ -83,6 +85,7 @@ mod thread_cmd;
 mod thread_landing;
 mod thread_shaping;
 mod timeline_cmd;
+#[cfg(feature = "local-services")]
 mod transaction;
 mod try_cmd;
 mod undo;
@@ -139,6 +142,7 @@ pub(crate) use daemon::client as daemon_client;
 pub use daemon::{cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop};
 pub use diagnose::cmd_diagnose;
 pub use diff::cmd_diff;
+#[cfg(feature = "local-services")]
 pub use discuss::run as cmd_discuss;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
@@ -183,6 +187,7 @@ pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
 pub use retro::{RetroCommandOptions, cmd_retro};
 pub use revert::cmd_revert;
+#[cfg(feature = "local-services")]
 pub use review::run as cmd_review;
 pub use run_cmd::cmd_run;
 pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
@@ -202,6 +207,7 @@ pub use thread_shaping::{
     cmd_capture_split, cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve,
 };
 pub use timeline_cmd::cmd_timeline;
+#[cfg(feature = "local-services")]
 pub use transaction::run as cmd_transaction;
 pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo};

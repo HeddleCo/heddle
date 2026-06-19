@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -16,6 +17,7 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 fs2.workspace = true
+futures.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc = "0.2"
@@ -33,25 +35,15 @@ uuid.workspace = true
 # (its signature takes a *const SECURITY_ATTRIBUTES from Win32::Security).
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 zstd = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-
-aws-sdk-s3 = { workspace = true, optional = true }
-aws-smithy-async = { workspace = true, optional = true }
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
 
 [features]
 bench = []
-s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
 criterion = "0.8"
 tempfile.workspace = true
-tokio.workspace = true
-s3s.workspace = true
-s3s-fs.workspace = true
-hyper-util.workspace = true
 proptest.workspace = true
 
 [lib]

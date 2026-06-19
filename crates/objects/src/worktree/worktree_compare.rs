@@ -7,11 +7,11 @@ use super::{worktree_ignore::should_ignore, worktree_types::WorktreeStatus};
 use crate::{
     error::Result,
     object::{Blob, EntryType, Tree, TreeEntry},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 /// Compare worktree against a tree.
-pub fn compare_worktree<S: ObjectStore + ?Sized>(
+pub fn compare_worktree<S: BlockingObjectStore + ?Sized>(
     store: &S,
     root: &Path,
     tree: &Tree,
@@ -27,7 +27,7 @@ pub fn compare_worktree<S: ObjectStore + ?Sized>(
     Ok(status)
 }
 
-fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
+fn compare_worktree_recursive<S: BlockingObjectStore + ?Sized>(
     store: &S,
     base: &Path,
     dir: &Path,
@@ -131,7 +131,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn mark_all_deleted<S: ObjectStore + ?Sized>(
+fn mark_all_deleted<S: BlockingObjectStore + ?Sized>(
     store: &S,
     prefix: &Path,
     tree: &Tree,

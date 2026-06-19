@@ -5,8 +5,8 @@ use std::fs;
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{Blob, ChangeId, ContentHash, FileMode, State, TreeEntry},
-    store::ObjectStore,
+    object::{Blob, ChangeId, ContentHash, FileMode, State, TransactionId, TreeEntry},
+    store::BlockingObjectStore,
 };
 use oplog::OpRecord;
 use refs::Head;
@@ -182,9 +182,10 @@ pub(super) fn flush_rebase_batch(
     if advances.is_empty() {
         return Ok(());
     }
+    let transaction_id = TransactionId::new(transaction_id);
     let mut batch: Vec<OpRecord> = advances.to_vec();
     batch.push(OpRecord::TransactionCommit {
-        transaction_id: transaction_id.to_string(),
+        transaction_id: transaction_id.clone(),
         op_count: advances.len() as u32,
     });
     // heddle#198 r4 (Codex PR #218 P2): the dedup check and the append
@@ -203,12 +204,9 @@ pub(super) fn flush_rebase_batch(
     // heddle#382 boundary: rebase still uses the older exact-once-windowed
     // append and is explicitly outside same-thread AtomicMutation isolation
     // until this flow is migrated to an AtomicMutation root.
-    repo.oplog().record_batch_scoped_if_no_transaction(
-        batch,
-        Some(&repo.op_scope()),
-        transaction_id,
-        64,
-    )?;
+    let scope = repo.op_scope_key();
+    repo.oplog()
+        .record_batch_scoped_if_no_transaction(batch, Some(&scope), &transaction_id, 64)?;
     Ok(())
 }
 
@@ -778,7 +776,7 @@ mod tests {
 
         let before = repo
             .oplog()
-            .recent_batches_scoped(10, Some(&repo.op_scope()))
+            .recent_batches_scoped(10, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
 
@@ -786,7 +784,7 @@ mod tests {
 
         let after = repo
             .oplog()
-            .recent_batches_scoped(10, Some(&repo.op_scope()))
+            .recent_batches_scoped(10, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
         assert_eq!(before, after, "empty flush must not record a batch");
@@ -913,14 +911,14 @@ mod tests {
 
         let before = repo
             .oplog()
-            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .recent_batches_scoped(20, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
 
         flush_rebase_batch(&repo, std::slice::from_ref(&advance), txn_id).unwrap();
         let after_first = repo
             .oplog()
-            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .recent_batches_scoped(20, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
         assert_eq!(
@@ -932,7 +930,7 @@ mod tests {
         flush_rebase_batch(&repo, std::slice::from_ref(&advance), txn_id).unwrap();
         let after_second = repo
             .oplog()
-            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .recent_batches_scoped(20, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
         assert_eq!(
@@ -1053,7 +1051,7 @@ mod tests {
 
         let before = repo
             .oplog()
-            .recent_batches_scoped(64, Some(&repo.op_scope()))
+            .recent_batches_scoped(64, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
 
@@ -1076,7 +1074,7 @@ mod tests {
 
         let after = repo
             .oplog()
-            .recent_batches_scoped(64, Some(&repo.op_scope()))
+            .recent_batches_scoped(64, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
         let added = after - before;
@@ -1098,7 +1096,7 @@ mod tests {
 
         let before = repo
             .oplog()
-            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .recent_batches_scoped(20, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
 
@@ -1107,7 +1105,7 @@ mod tests {
 
         let after = repo
             .oplog()
-            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .recent_batches_scoped(20, Some(&repo.op_scope_key()))
             .unwrap()
             .len();
         assert_eq!(

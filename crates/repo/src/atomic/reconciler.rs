@@ -14,7 +14,7 @@ use std::{
 
 use objects::{
     error::Result,
-    object::{ChangeId, MarkerName, ThreadName},
+    object::{ChangeId, MarkerName, RemoteName, Scope, ThreadName},
 };
 use oplog::{OpLog, OpRecord};
 use refs::{
@@ -30,11 +30,11 @@ use refs::{
 /// `OpLog` handle (the repository's), so a cached reader would miss them.
 pub struct OplogRefReconciler {
     heddle_dir: PathBuf,
-    op_scope: String,
+    op_scope: Scope,
 }
 
 impl OplogRefReconciler {
-    pub fn new(heddle_dir: &Path, op_scope: String) -> Self {
+    pub fn new(heddle_dir: &Path, op_scope: Scope) -> Self {
         Self {
             heddle_dir: heddle_dir.to_path_buf(),
             op_scope,
@@ -97,7 +97,7 @@ struct Fold {
     head: HeadFold,
     threads: BTreeMap<String, Option<ChangeId>>,
     markers: BTreeMap<String, Option<ChangeId>>,
-    remotes: BTreeMap<(String, String), Option<ChangeId>>,
+    remotes: BTreeMap<(RemoteName, String), Option<ChangeId>>,
     undo_recovery: Option<ChangeId>,
 }
 
@@ -247,7 +247,7 @@ impl Fold {
 /// (`republish` thread/marker/HEAD updates, `remote_updates`, `undo_recovery`).
 type ClassMaterialization = (
     Vec<RefUpdate>,
-    Vec<(String, ThreadName, Option<ChangeId>)>,
+    Vec<(RemoteName, ThreadName, Option<ChangeId>)>,
     Option<ChangeId>,
 );
 
@@ -349,7 +349,7 @@ impl RefReconciler for OplogRefReconciler {
     fn reconcile(&self, req: &LoadRequest, raw: Loaded, since: u64) -> Result<ReconcileOutcome> {
         let class = req.ref_class();
         let scope = match class {
-            RefClass::Local => Some(self.op_scope.as_str()),
+            RefClass::Local => Some(&self.op_scope),
             RefClass::Shared => None,
         };
 
@@ -478,8 +478,8 @@ fn merge_list(base: Vec<String>, changes: &BTreeMap<String, Option<ChangeId>>) -
 }
 
 fn remote_list_value(raw: &Loaded, fold: &Fold, heddle_dir: &Path) -> Result<Loaded> {
-    let mut remotes: BTreeMap<String, ()> = match raw {
-        Loaded::RemoteList(names) => names.iter().cloned().map(|n| (n, ())).collect(),
+    let mut remotes: BTreeMap<RemoteName, ()> = match raw {
+        Loaded::RemoteList(names) => names.iter().cloned().map(|name| (name, ())).collect(),
         _ => BTreeMap::new(),
     };
     for ((remote, _thread), value) in &fold.remotes {
@@ -494,7 +494,7 @@ fn remote_list_value(raw: &Loaded, fold: &Fold, heddle_dir: &Path) -> Result<Loa
     let mut present = Vec::new();
     for remote in remotes.into_keys() {
         let mut threads: BTreeMap<String, ()> = raw_refs
-            .list_remote_threads(&remote)?
+            .list_remote_threads(remote.as_str())?
             .into_iter()
             .map(|name| (name.to_string(), ()))
             .collect();

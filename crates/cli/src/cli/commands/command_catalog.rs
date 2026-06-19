@@ -9,12 +9,13 @@ use serde::Serialize;
 
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
+#[cfg(feature = "local-services")]
+use crate::cli::cli_args::{DiscussCommands, ReviewCommands, TransactionCommands};
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
     StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
-    cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
 #[cfg(feature = "client")]
@@ -1137,6 +1138,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(&["agent"], surface(GROUP, "automation")),
+    #[cfg(feature = "local-services")]
     entry(
         &["agent", "serve"],
         surface(
@@ -1151,6 +1153,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["agent", "status"],
         surface(
@@ -1165,6 +1168,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["agent", "stop"],
         surface(
@@ -1691,7 +1695,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(&["discuss"], category(GROUP, "collab")),
+    #[cfg(feature = "local-services")]
     entry(
         &["discuss", "open"],
         json_discriminators(
@@ -1703,6 +1709,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["discuss", "append"],
         json_discriminators(
@@ -1714,6 +1721,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["discuss", "resolve"],
         json_discriminators(
@@ -1725,6 +1733,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["discuss", "list"],
         json_discriminators(
@@ -1736,6 +1745,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["discuss", "show"],
         json_discriminators(
@@ -1878,7 +1888,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
-        surface(documented_schemas(READ_JSON, &["integration list"]), "admin"),
+        surface(
+            documented_schemas(READ_JSON, &["integration list"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "install"],
@@ -1886,7 +1899,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "doctor"],
-        surface(documented_schemas(READ_JSON, &["integration doctor"]), "admin"),
+        surface(
+            documented_schemas(READ_JSON, &["integration doctor"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "uninstall"],
@@ -2282,7 +2298,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "states",
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(&["review"], category(GROUP, "collab")),
+    #[cfg(feature = "local-services")]
     entry(
         &["review", "show"],
         json_discriminators(
@@ -2294,6 +2312,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["review", "sign"],
         json_discriminators(
@@ -2305,6 +2324,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["review", "next"],
         json_discriminators(
@@ -2316,6 +2336,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["review", "health"],
         json_discriminators(
@@ -2805,19 +2826,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
+    #[cfg(feature = "local-services")]
     entry(&["transaction"], hidden(GROUP)),
+    #[cfg(feature = "local-services")]
     entry(
         &["transaction", "begin"],
         hidden(opaque_schemas(MUTATING, &["transaction begin"])),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["transaction", "commit"],
         documented_schemas(MUTATING, &["transaction commit"]),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["transaction", "abort"],
         hidden(opaque_schemas(MUTATING, &["transaction abort"])),
     ),
+    #[cfg(feature = "local-services")]
     entry(
         &["transaction", "status"],
         hidden(opaque_schemas(READ_JSON, &["transaction status"])),
@@ -4337,6 +4363,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
         Commands::Switch(_) => vec!["switch"],
+        #[cfg(feature = "local-services")]
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
             DiscussCommands::Append(_) => vec!["discuss", "append"],
@@ -4345,12 +4372,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DiscussCommands::Show(_) => vec!["discuss", "show"],
         },
         Commands::Query(_) => vec!["query"],
+        #[cfg(feature = "local-services")]
         Commands::Transaction { command } => match command {
             TransactionCommands::Begin(_) => vec!["transaction", "begin"],
             TransactionCommands::Commit(_) => vec!["transaction", "commit"],
             TransactionCommands::Abort(_) => vec!["transaction", "abort"],
             TransactionCommands::Status(_) => vec!["transaction", "status"],
         },
+        #[cfg(feature = "local-services")]
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
@@ -4506,8 +4535,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DaemonCommands::Stop => vec!["daemon", "stop"],
         },
         Commands::Agent { command } => match command {
+            #[cfg(feature = "local-services")]
             AgentCommands::Serve(_) => vec!["agent", "serve"],
+            #[cfg(feature = "local-services")]
             AgentCommands::Status => vec!["agent", "status"],
+            #[cfg(feature = "local-services")]
             AgentCommands::Stop => vec!["agent", "stop"],
             AgentCommands::Reserve(_) => vec!["agent", "reserve"],
             AgentCommands::Heartbeat(_) => vec!["agent", "heartbeat"],
@@ -4578,8 +4610,11 @@ mod tests {
         sample(&["actor", "show"], &["actor", "show"]),
         sample(&["actor", "explain"], &["actor", "explain"]),
         sample(&["actor", "done"], &["actor", "done"]),
+        #[cfg(feature = "local-services")]
         sample(&["agent", "serve"], &["agent", "serve"]),
+        #[cfg(feature = "local-services")]
         sample(&["agent", "status"], &["agent", "status"]),
+        #[cfg(feature = "local-services")]
         sample(&["agent", "stop"], &["agent", "stop"]),
         sample(
             &["agent", "reserve"],
@@ -4672,19 +4707,24 @@ mod tests {
         sample(&["daemon", "status"], &["daemon", "status"]),
         sample(&["daemon", "stop"], &["daemon", "stop"]),
         sample(&["diff"], &["diff"]),
+        #[cfg(feature = "local-services")]
         sample(
             &["discuss", "open"],
             &["discuss", "open", "src/lib.rs", "symbol", "body"],
         ),
+        #[cfg(feature = "local-services")]
         sample(
             &["discuss", "append"],
             &["discuss", "append", "discussion-1", "body"],
         ),
+        #[cfg(feature = "local-services")]
         sample(
             &["discuss", "resolve"],
             &["discuss", "resolve", "discussion-1", "--mode", "dismiss"],
         ),
+        #[cfg(feature = "local-services")]
         sample(&["discuss", "list"], &["discuss", "list"]),
+        #[cfg(feature = "local-services")]
         sample(&["discuss", "show"], &["discuss", "show", "discussion-1"]),
         sample(&["doctor"], &["doctor"]),
         sample(&["doctor", "docs"], &["doctor", "docs"]),
@@ -4782,7 +4822,9 @@ mod tests {
         sample(&["resolve"], &["resolve"]),
         sample(&["retro"], &["retro"]),
         sample(&["revert"], &["revert", "HEAD"]),
+        #[cfg(feature = "local-services")]
         sample(&["review", "show"], &["review", "show"]),
+        #[cfg(feature = "local-services")]
         sample(
             &["review", "sign"],
             &[
@@ -4799,7 +4841,9 @@ mod tests {
                 "1",
             ],
         ),
+        #[cfg(feature = "local-services")]
         sample(&["review", "next"], &["review", "next"]),
+        #[cfg(feature = "local-services")]
         sample(&["review", "health"], &["review", "health"]),
         sample(&["run"], &["run", "true"]),
         sample(&["schemas"], &["schemas"]),
@@ -4910,12 +4954,16 @@ mod tests {
             &["timeline", "reset", "--step", "tls-abc"],
         ),
         sample(&["timeline", "recover"], &["timeline", "recover"]),
+        #[cfg(feature = "local-services")]
         sample(&["transaction", "begin"], &["transaction", "begin"]),
+        #[cfg(feature = "local-services")]
         sample(
             &["transaction", "commit"],
             &["transaction", "commit", "tx-1"],
         ),
+        #[cfg(feature = "local-services")]
         sample(&["transaction", "abort"], &["transaction", "abort", "tx-1"]),
+        #[cfg(feature = "local-services")]
         sample(
             &["transaction", "status"],
             &["transaction", "status", "tx-1"],
@@ -5810,8 +5858,11 @@ mod tests {
                 "actor show",
                 "actor explain",
                 "actor done",
+                #[cfg(feature = "local-services")]
                 "agent serve",
+                #[cfg(feature = "local-services")]
                 "agent status",
+                #[cfg(feature = "local-services")]
                 "agent stop",
                 "agent capture",
                 "agent ready",
@@ -5842,10 +5893,15 @@ mod tests {
                 "context audit",
                 "daemon stop",
                 "diff",
+                #[cfg(feature = "local-services")]
                 "discuss open",
+                #[cfg(feature = "local-services")]
                 "discuss append",
+                #[cfg(feature = "local-services")]
                 "discuss resolve",
+                #[cfg(feature = "local-services")]
                 "discuss list",
+                #[cfg(feature = "local-services")]
                 "discuss show",
                 "doctor",
                 "doctor docs",
@@ -5884,9 +5940,13 @@ mod tests {
                 "remote show",
                 "resolve",
                 "revert",
+                #[cfg(feature = "local-services")]
                 "review show",
+                #[cfg(feature = "local-services")]
                 "review sign",
+                #[cfg(feature = "local-services")]
                 "review next",
+                #[cfg(feature = "local-services")]
                 "review health",
                 "schemas",
                 "land",
@@ -6362,6 +6422,7 @@ mod tests {
             );
             assert!(!action.note.is_empty());
         }
+        #[cfg(feature = "local-services")]
         assert_eq!(command_help_tier("transaction"), "hidden");
 
         let thread_list = catalog
@@ -6451,6 +6512,7 @@ mod tests {
         let catalog = build_command_catalog();
         for (display, persists, store_scope) in [
             ("capture", false, "repository"),
+            #[cfg(feature = "local-services")]
             ("review sign", false, "repository"),
             ("commit", false, "repository"),
             ("status", false, "none"),

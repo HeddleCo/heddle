@@ -11,7 +11,7 @@ use objects::{
         Action, ActionId, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
         diff_trees,
     },
-    store::{ObjectStore, Result},
+    store::{BlockingObjectStore, Result},
 };
 
 const SIZES: &[usize] = &[1_000, 10_000, 100_000];
@@ -39,7 +39,7 @@ struct BenchStore {
     trees: RwLock<HashMap<ContentHash, Tree>>,
 }
 
-impl ObjectStore for BenchStore {
+impl BlockingObjectStore for BenchStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         Ok(self.blobs.read().unwrap().get(hash).cloned())
     }

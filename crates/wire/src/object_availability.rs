@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
+use objects::store::BlockingObjectStore;
 
 use crate::{ObjectId, ObjectInfo, ObjectType, Result};
 
@@ -14,7 +14,7 @@ pub struct ObjectAvailabilityPlan {
     pub partial_fetch_allowed: bool,
 }
 
-pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
+pub fn has_object(store: &impl BlockingObjectStore, info: &ObjectInfo) -> Result<bool> {
     match (&info.id, info.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
@@ -35,7 +35,7 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
 }
 
 pub fn plan_object_availability(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<ObjectAvailabilityPlan> {
     let mut plan = ObjectAvailabilityPlan::default();
@@ -75,7 +75,7 @@ impl ObjectAvailabilityPlan {
 mod tests {
     use objects::{
         object::{Blob, ChangeId, ContentHash, Tree},
-        store::{ObjectStore, Result as StoreResult},
+        store::{BlockingObjectStore, Result as StoreResult},
     };
 
     use super::*;
@@ -85,7 +85,7 @@ mod tests {
         blob: Option<ContentHash>,
     }
 
-    impl ObjectStore for DummyStore {
+    impl BlockingObjectStore for DummyStore {
         fn get_blob(&self, _hash: &ContentHash) -> StoreResult<Option<Blob>> {
             Ok(None)
         }

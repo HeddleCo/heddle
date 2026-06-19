@@ -11,7 +11,7 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     object::{ContentHash, Tree, TreeEntry},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use crate::{

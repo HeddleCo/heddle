@@ -346,8 +346,6 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/wire/src",
         "crates/refs/src",
         "crates/repo/src",
-        "crates/review/src",
-        "crates/runtime-bridge/src",
         "crates/semantic/src",
         "crates/state_review/src",
         "crates/weft-client-shim/src",

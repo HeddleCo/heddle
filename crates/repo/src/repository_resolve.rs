@@ -3,7 +3,7 @@
 
 use objects::{
     object::{Agent, ChangeId},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use super::{HeddleError, Repository, Result};
@@ -138,7 +138,7 @@ mod tests {
 
     use objects::{
         object::{ChangeId, MarkerName},
-        store::ObjectStore,
+        store::BlockingObjectStore,
     };
     use tempfile::TempDir;
 

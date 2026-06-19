@@ -10,15 +10,17 @@ use grpc::heddle::v1::{
     ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
     pull_message, push_message,
 };
+#[cfg(test)]
+use objects::store::LocalObjectStoreExt;
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
-    store::{ObjectStore, PackObjectId},
+    store::{BlockingObjectStore, PackObjectId},
 };
-use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
+use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 
 use super::{
     HostedGrpcClient, PullMaterialization,
@@ -1458,11 +1460,11 @@ mod tests {
             Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State, StateVisibility,
             StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
         },
-        store::ObjectStore,
+        store::BlockingObjectStore,
     };
-    use wire::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
     use tonic::{Response, Status, transport::Server};
+    use wire::{ObjectId, ObjectInfo};
 
     use super::*;
 

@@ -11,9 +11,9 @@ use chrono::Utc;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
-    store::{AgentRegistry, ObjectStore},
+    store::{AgentRegistry, BlockingObjectStore},
 };
-use oplog::{OpLogRecorder, ThreadUpdateSnapshots};
+use oplog::{BlockingOpLogRecorder, ThreadUpdateSnapshots};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -139,7 +139,7 @@ pub(crate) fn save_thread_update_with_oplog(
             new_manager_records,
             before.ref_absent,
         ),
-        Some(&repo.op_scope()),
+        Some(&repo.op_scope_key()),
     )?;
     Ok(())
 }

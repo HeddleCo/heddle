@@ -7,7 +7,7 @@
 
 use objects::{
     object::{ChangeId, ThreadName},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::{MergeState, MergeStateManager, Repository};
 use tempfile::TempDir;

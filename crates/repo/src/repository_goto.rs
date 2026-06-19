@@ -3,8 +3,12 @@
 
 use std::time::Instant;
 
-use objects::{lock::RepositoryLockExt, object::ChangeId, store::ObjectStore};
-use oplog::OpLogRecorder;
+use objects::{
+    lock::RepositoryLockExt,
+    object::{ChangeId, Scope},
+    store::BlockingObjectStore,
+};
+use oplog::BlockingOpLogRecorder;
 use refs::Head;
 use tracing::debug;
 
@@ -302,8 +306,9 @@ impl Repository {
         };
 
         if record {
+            let scope = Scope::new(self.op_scope());
             self.oplog
-                .record_goto(target, prev_head.as_ref(), Some(&self.op_scope()))?;
+                .record_goto(target, prev_head.as_ref(), Some(&scope))?;
             objects::fault_inject::maybe_panic_at("goto_after_oplog_commit_before_ref_publish");
         }
         self.refs.write_head(&Head::Detached { state: *target })?;

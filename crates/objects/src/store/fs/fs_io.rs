@@ -161,7 +161,7 @@ pub(super) fn write_atomic(
 /// total on-disk size, without loading the body. Returns `Ok(None)`
 /// when the file is missing.
 ///
-/// Used by [`crate::store::ObjectStore::blob_size`] on `FsStore` to
+/// Used by [`crate::store::BlockingObjectStore::blob_size`] on `FsStore` to
 /// avoid pulling whole blobs through `get_blob` just to learn their
 /// uncompressed size — the size is recorded in the compression header
 /// for compressed blobs, and equals the file length for raw blobs.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
     object::{ChangeId, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 
@@ -25,7 +25,7 @@ pub fn three_way_merge_for_bench(
 }
 
 pub fn detect_renames_for_bench(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> anyhow::Result<(usize, usize, usize)> {

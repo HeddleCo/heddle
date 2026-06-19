@@ -19,7 +19,7 @@
 //! - **Cheap opt-out.** Repos without transcript history still get a
 //!   clean Heddle repo — they just skip this pass.
 //! - **Scoped to what's here.** `Importer` takes raw backends and works
-//!   against any `ObjectStore`; the pipeline takes a full `Repository`
+//!   against any `BlockingObjectStore`; the pipeline takes a full `Repository`
 //!   because writing annotations needs the context-tree helpers.
 //!
 //! # Commit selection
@@ -37,7 +37,7 @@ use std::{
 
 use objects::{
     object::{ContentHash, EntryType},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 use tracing::{debug, info, warn};
@@ -806,7 +806,7 @@ fn has_durable_language(lower: &str) -> bool {
 /// hash. Directory entries expand; the returned map is keyed on the
 /// slash-joined repo-relative path. Missing tree objects (shouldn't
 /// happen if `Importer` succeeded) propagate as store errors.
-fn collect_tree_files<S: ObjectStore + ?Sized>(
+fn collect_tree_files<S: BlockingObjectStore + ?Sized>(
     store: &S,
     root: &ContentHash,
 ) -> Result<BTreeMap<String, ContentHash>, anyhow::Error> {
@@ -815,7 +815,7 @@ fn collect_tree_files<S: ObjectStore + ?Sized>(
     Ok(out)
 }
 
-fn walk_tree<S: ObjectStore + ?Sized>(
+fn walk_tree<S: BlockingObjectStore + ?Sized>(
     store: &S,
     hash: &ContentHash,
     prefix: &str,
@@ -865,20 +865,6 @@ pub fn pipeline_default_commits(map: &ShaMap) -> Vec<String> {
     v.sort();
     v
 }
-
-/// Silence `unused` lint until the CLI starts using Provider here. The
-/// module re-exports it (through lib.rs) so the import stays local for
-/// diagnostic log lines and tests that construct fake transcripts.
-#[cfg(test)]
-fn _keep_provider_in_scope(_: Provider) {}
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn _keep_provider_in_scope(_: Provider) {}
-
-// Re-export path helper for downstream docs: Path is in the signature
-// of ReasoningPipeline::new via impl Into<PathBuf>.
-#[allow(dead_code)]
-fn _keep_path_in_scope(_: &Path) {}
 
 #[cfg(test)]
 mod tests {

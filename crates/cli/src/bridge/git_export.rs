@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use sley::{

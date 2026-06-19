@@ -12,7 +12,7 @@ use objects::{
         Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
         State,
     },
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use refs::Head;
 use repo::Repository;

@@ -2,7 +2,7 @@
 //! Shared merge planning seam for preview and apply flows.
 
 use anyhow::{Result, anyhow};
-use objects::{object::ChangeId, store::ObjectStore};
+use objects::{object::ChangeId, store::BlockingObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{

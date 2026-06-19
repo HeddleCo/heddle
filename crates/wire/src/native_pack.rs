@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::store::{
-    CompressionConfig, ObjectStore,
+    BlockingObjectStore, CompressionConfig,
     pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
 };
 
@@ -56,7 +56,7 @@ pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
 }
 
 pub fn build_native_pack(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<NativePackBundle> {
     let mut builder = PackBuilder::new(sync_pack_compression());
@@ -92,7 +92,7 @@ fn sync_pack_compression() -> CompressionConfig {
 }
 
 pub fn install_received_pack(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     pack_data: &[u8],
     index_data: &[u8],
 ) -> Result<Vec<PackObjectId>> {
@@ -224,7 +224,7 @@ fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
 mod tests {
     use objects::{
         object::Blob,
-        store::{FsStore, ObjectStore, pack::PackObjectId},
+        store::{BlockingObjectStore, FsStore, pack::PackObjectId},
     };
     use tempfile::TempDir;
 

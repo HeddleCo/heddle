@@ -9,13 +9,13 @@ use std::{collections::HashMap, pin::Pin};
 use futures::Stream;
 use grpc::heddle::v1::{
     ComputeStateSignalsRequest, ComputeStateSignalsResponse, GetRepoSignalHealthRequest,
-    PathSymbolRef, RepoSignalHealthReport, RiskSignal as ProtoRiskSignal,
-    SignalAnchor as ProtoSignalAnchor, SignalHealthEntry, SignalUpdate,
-    SubscribeSignalUpdatesRequest, signal_service_server::SignalService,
+    RepoSignalHealthReport, RiskSignal as ProtoRiskSignal, SignalAnchor as ProtoSignalAnchor,
+    SignalHealthEntry, SignalUpdate, SubscribeSignalUpdatesRequest,
+    signal_service_server::SignalService,
 };
 use objects::{
     object::{ChangeId, RiskSignal, RiskSignalBlob, State},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 use tokio_stream::wrappers::ReceiverStream;
@@ -199,15 +199,6 @@ fn signal_to_proto(sig: &RiskSignal, visibility: &str) -> ProtoRiskSignal {
             nanos: 0,
         }),
         visibility: visibility.to_string(),
-    }
-}
-
-// Small helper kept private; exported via PathSymbolRef wherever needed.
-#[allow(dead_code)]
-fn make_path_symbol(file: &str, symbol: &str) -> PathSymbolRef {
-    PathSymbolRef {
-        file: file.to_string(),
-        symbol: symbol.to_string(),
     }
 }
 

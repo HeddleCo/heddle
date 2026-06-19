@@ -21,7 +21,7 @@
 use std::fs;
 
 use chrono::{Duration, Utc};
-use objects::{object::ThreadName, store::ObjectStore};
+use objects::{object::ThreadName, store::BlockingObjectStore};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,

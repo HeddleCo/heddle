@@ -15,7 +15,7 @@
 
 use std::process::Command;
 
-use oplog::{OpLogBackend, OpRecord};
+use oplog::{BlockingOpLogBackend, OpRecord};
 
 use super::*;
 
@@ -188,7 +188,7 @@ fn thread_update_count(repo: &std::path::Path) -> usize {
 
 fn scoped_undo_redo_thread_update_count(repo: &std::path::Path) -> usize {
     let repo = Repository::open(repo).expect("open repo");
-    let scope = repo.op_scope();
+    let scope = repo.op_scope_key();
     let undo = repo
         .oplog()
         .undo_batches_scoped(16, Some(&scope))

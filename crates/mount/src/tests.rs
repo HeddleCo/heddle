@@ -19,7 +19,7 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, ThreadName, Tree},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;
@@ -546,7 +546,7 @@ fn invalidate_drops_the_mapping() {
 // Part 1: blob_size doesn't load full blobs
 // ---------------------------------------------------------------------------
 
-/// Wrapping ObjectStore that counts calls to `get_blob`. Used to
+/// Wrapping BlockingObjectStore that counts calls to `get_blob`. Used to
 /// prove `enumerate`/`attrs` don't pull blob contents through
 /// `get_blob` when only the size is needed.
 struct CountingStore {
@@ -555,7 +555,7 @@ struct CountingStore {
     blob_size_calls: Arc<AtomicUsize>,
 }
 
-impl ObjectStore for CountingStore {
+impl BlockingObjectStore for CountingStore {
     fn get_blob(&self, hash: &ContentHash) -> objects::store::Result<Option<Blob>> {
         self.get_blob_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.get_blob(hash)
@@ -1220,7 +1220,7 @@ fn capture_unlink_drops_only_named_path() {
 fn capture_records_oplog_entry() {
     // After a mount-side capture, the oplog should hold a `Snapshot`
     // entry pointing at the new state. Mirrors the CLI capture path.
-    use oplog::{OpLogBackend, OpRecord};
+    use oplog::{BlockingOpLogBackend, OpRecord};
     let (_temp, mount) = fresh_mount();
     let prior_count = mount
         .repo_handle()
@@ -4259,7 +4259,7 @@ mod capture_write_ops {
 
     use super::*;
 
-    fn dump_tree(store: &impl ObjectStore, hash: &ContentHash) -> Tree {
+    fn dump_tree(store: &impl BlockingObjectStore, hash: &ContentHash) -> Tree {
         store.get_tree(hash).unwrap().unwrap()
     }
 

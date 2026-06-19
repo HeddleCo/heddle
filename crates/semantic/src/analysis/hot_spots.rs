@@ -18,7 +18,7 @@
 //!
 //! # Where this sits
 //!
-//! Pure function over `&impl ObjectStore`. Both the CLI (against the FS
+//! Pure function over `&impl BlockingObjectStore`. Both the CLI (against the FS
 //! store) and the gRPC service (against any server-side store) call the
 //! same entry point — no host-specific glue required. The walker
 //! follows `state.first_parent()` through the imported ancestry,
@@ -42,7 +42,7 @@ use std::{
 
 use objects::{
     object::{ChangeId, SemanticChange, State},
-    store::ObjectStore,
+    store::BlockingObjectStore,
 };
 
 use crate::{
@@ -216,7 +216,7 @@ pub struct HotSpotsReport {
 /// `(walk_from, walk_from.first_parent())`. If `walk_from` has no
 /// parent, the report is empty.
 pub fn analyze_hot_spots(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     walk_from: ChangeId,
     params: &HotSpotParams,
 ) -> Result<HotSpotsReport, anyhow::Error> {
@@ -432,7 +432,7 @@ fn path_passes_filter(path: &Path, includes: &[String], excludes: &[String]) -> 
 /// `attribution`. Useful for the "who's been working here" panel
 /// that doesn't need file-granularity output.
 pub fn analyze_actor_histogram(
-    store: &impl ObjectStore,
+    store: &impl BlockingObjectStore,
     walk_from: ChangeId,
     limit_states: Option<usize>,
 ) -> Result<BTreeMap<String, usize>, anyhow::Error> {
@@ -465,7 +465,7 @@ pub fn analyze_actor_histogram(
 }
 
 /// State accessor used by the walker; isolated so future tests can
-/// mock the store layer without going through the whole `ObjectStore`
+/// mock the store layer without going through the whole `BlockingObjectStore`
 /// trait. (Currently unused — the walker calls `store.get_state`
 /// directly — but `State` needs to remain reachable for the test
 /// module's helper to compile.)
