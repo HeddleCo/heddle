@@ -112,7 +112,7 @@ jobs:
       # job entirely on no-op merges.
       has_publishes: ${{ steps.classify.outputs.has_publishes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history isn't needed (we don't walk it), but we DO
           # need the commit to be a real commit object so we can
@@ -295,7 +295,7 @@ jobs:
       # side would silently break authentication.
       CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Pin to the SHA validate-publish verified, NOT
           # refs/heads/main. main is mutable; a force-push between

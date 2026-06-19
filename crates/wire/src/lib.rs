@@ -180,3 +180,98 @@ impl ProtocolError {
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{ErrorCode, ProtocolError};
+
+    #[test]
+    fn protocol_error_public_mapping_is_stable() {
+        let cases = vec![
+            (
+                ProtocolError::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout")),
+                "network error",
+                ErrorCode::Network,
+            ),
+            (
+                ProtocolError::Serialization("bad msgpack".to_string()),
+                "protocol error",
+                ErrorCode::Protocol,
+            ),
+            (
+                ProtocolError::MessageTooLarge { size: 65, max: 64 },
+                "message too large",
+                ErrorCode::Protocol,
+            ),
+            (
+                ProtocolError::InvalidMessageType(42),
+                "protocol error",
+                ErrorCode::Protocol,
+            ),
+            (
+                ProtocolError::VersionMismatch {
+                    server: 2,
+                    client: 1,
+                },
+                "protocol version mismatch",
+                ErrorCode::Protocol,
+            ),
+            (
+                ProtocolError::CapabilityNotSupported("pack-v2".to_string()),
+                "capability not supported",
+                ErrorCode::Protocol,
+            ),
+            (
+                ProtocolError::AuthenticationFailed("bad token".to_string()),
+                "permission denied",
+                ErrorCode::PermissionDenied,
+            ),
+            (
+                ProtocolError::AuthorizationFailed("missing grant".to_string()),
+                "permission denied",
+                ErrorCode::PermissionDenied,
+            ),
+            (
+                ProtocolError::ObjectNotFound("abc123".to_string()),
+                "object not found",
+                ErrorCode::NotFound,
+            ),
+            (
+                ProtocolError::InvalidState("bad resume".to_string()),
+                "invalid request state",
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                ProtocolError::Remote("database unavailable".to_string()),
+                "internal server error",
+                ErrorCode::Server,
+            ),
+            (
+                ProtocolError::RemoteFailure {
+                    code: ErrorCode::InvalidArgument,
+                    message: "server supplied message".to_string(),
+                    details: Some("remote details".to_string()),
+                },
+                "server supplied message",
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                ProtocolError::LockError("ref locked".to_string()),
+                "internal server error",
+                ErrorCode::Server,
+            ),
+        ];
+
+        for (error, expected_message, expected_code) in cases {
+            assert_eq!(error.client_message(), expected_message);
+            assert_eq!(error.error_code(), expected_code);
+
+            let wire_error = error.to_wire_error(Some("trace id".to_string()));
+            assert_eq!(wire_error.code, expected_code);
+            assert_eq!(wire_error.message, expected_message);
+            assert_eq!(wire_error.details.as_deref(), Some("trace id"));
+        }
+    }
+}

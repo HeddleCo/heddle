@@ -1379,6 +1379,46 @@ mod tests {
 
     use super::*;
 
+    fn sample_file_entry(label: &str) -> IndexEntry {
+        IndexEntry {
+            hash: ContentHash::compute(label.as_bytes()),
+            size: label.len() as u64,
+            modified_sec: 1_700_000_000,
+            modified_nsec: 123,
+            executable: false,
+            kind: IndexEntryKind::File,
+        }
+    }
+
+    fn sample_untracked_directory_entry() -> UntrackedDirectoryCacheEntry {
+        UntrackedDirectoryCacheEntry {
+            mtime_sec: 1_700_000_010,
+            mtime_nsec: 456,
+            child_count: 2,
+            child_digest: ContentHash::compute_typed("dirnames", b"children"),
+            ignore_fingerprint: ContentHash::compute_typed("heddle.ignore", b"*.log\n"),
+            added_paths: vec!["nested/one.txt".to_string(), "nested/two.txt".to_string()],
+        }
+    }
+
+    fn write_raw_v5_snapshot(
+        path: &Path,
+        file_count: u32,
+        dir_count: u32,
+        untracked_dir_count: u32,
+        entry_data: &[u8],
+    ) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(INDEX_MAGIC);
+        bytes.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&file_count.to_be_bytes());
+        bytes.extend_from_slice(&dir_count.to_be_bytes());
+        bytes.extend_from_slice(&untracked_dir_count.to_be_bytes());
+        bytes.extend_from_slice(entry_data);
+        bytes.extend_from_slice(&crc32(entry_data).to_be_bytes());
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn load_profiled_rejects_truncated_index_header() {
         let temp = TempDir::new().unwrap();
@@ -1402,5 +1442,110 @@ mod tests {
         assert!(
             matches!(err, IndexError::InvalidFormat(message) if message.contains("truncated journal header"))
         );
+    }
+
+    #[test]
+    fn load_profiled_rejects_invalid_magic_and_version() {
+        let temp = TempDir::new().unwrap();
+        let bad_magic_path = temp.path().join("bad-magic.bin");
+        let mut bad_magic = Vec::new();
+        bad_magic.extend_from_slice(b"NOPEIDX\0");
+        bad_magic.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+        fs::write(&bad_magic_path, bad_magic).unwrap();
+
+        let err = load_profiled(&bad_magic_path).unwrap_err();
+        assert!(
+            matches!(err, IndexError::InvalidFormat(message) if message.contains("missing magic"))
+        );
+
+        let bad_version_path = temp.path().join("bad-version.bin");
+        let mut bad_version = Vec::new();
+        bad_version.extend_from_slice(INDEX_MAGIC);
+        bad_version.extend_from_slice(&(INDEX_VERSION + 1).to_be_bytes());
+        fs::write(&bad_version_path, bad_version).unwrap();
+
+        let err = load_profiled(&bad_version_path).unwrap_err();
+        assert!(matches!(err, IndexError::VersionMismatch { expected, got }
+                if expected == INDEX_VERSION && got == INDEX_VERSION + 1));
+    }
+
+    #[test]
+    fn v5_snapshot_round_trips_untracked_directories() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.bin");
+
+        let mut index = WorktreeIndex::new();
+        index.insert_untracked_directory("scratch".to_string(), sample_untracked_directory_entry());
+
+        let save_stats = save_snapshot_profiled(&index, &path).unwrap();
+        let (loaded, load_stats) = load_profiled(&path).unwrap();
+
+        assert!(save_stats.compacted);
+        assert!(load_stats.snapshot_bytes > 0);
+        assert_eq!(load_stats.journal_ops, 0);
+        assert_eq!(loaded.len(), 0);
+        assert_eq!(loaded.directory_len(), 0);
+        assert_eq!(loaded.untracked_directory_len(), 1);
+        let entry = loaded
+            .get_untracked_directory("scratch")
+            .expect("untracked directory entry should survive v5 roundtrip");
+        assert_eq!(
+            entry.added_paths,
+            vec!["nested/one.txt".to_string(), "nested/two.txt".to_string()]
+        );
+        assert_eq!(
+            entry.ignore_fingerprint,
+            sample_untracked_directory_entry().ignore_fingerprint
+        );
+    }
+
+    #[test]
+    fn load_profiled_rejects_malformed_entry_type_for_declared_section() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.bin");
+
+        write_raw_v5_snapshot(&path, 1, 0, 0, &[IndexEntryType::Directory.to_u8()]);
+
+        let err = load_profiled(&path).unwrap_err();
+        assert!(
+            matches!(err, IndexError::InvalidFormat(message) if message.contains("expected file entry"))
+        );
+    }
+
+    #[test]
+    fn journal_replay_preserves_good_frames_before_corrupt_tail() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.bin");
+        let journal_path = journal_path(&path);
+
+        let mut index = WorktreeIndex::new();
+        index.insert("base.txt".to_string(), sample_file_entry("base"));
+        save_profiled(&index, &path).unwrap();
+        index.mark_clean();
+
+        index.insert("good.txt".to_string(), sample_file_entry("good"));
+        save_profiled(&index, &path).unwrap();
+        index.mark_clean();
+
+        index.insert("tail.txt".to_string(), sample_file_entry("tail"));
+        save_profiled(&index, &path).unwrap();
+        index.mark_clean();
+
+        let mut journal = fs::read(&journal_path).unwrap();
+        let first_frame_len = u32::from_be_bytes(journal[12..16].try_into().unwrap()) as usize;
+        let second_frame_start = 12 + 8 + first_frame_len;
+        assert!(
+            journal.len() >= second_frame_start + 8,
+            "test fixture must contain a second journal frame"
+        );
+        journal[second_frame_start + 4] ^= 0xFF;
+        fs::write(&journal_path, journal).unwrap();
+
+        let (loaded, stats) = load_profiled(&path).unwrap();
+
+        assert!(loaded.get("base.txt").is_some());
+        assert!(loaded.get("good.txt").is_some());
+        assert!(loaded.get("tail.txt").is_none());
+        assert_eq!(stats.journal_ops, 1);
     }
 }

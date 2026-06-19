@@ -19,14 +19,14 @@ cargo run -p heddle-devtools --quiet -- \
   audit-coverage lcov.info \
     --gate objects=80 \
     --gate refs=80 \
-    --gate repo=82 \
+    --gate repo=85 \
     --gate cli=75 \
     --gate mount=68 \
-    --gate semantic=78 \
+    --gate semantic=80 \
     --gate oplog=78 \
-    --gate wire=60 \
-    --gate state_review=76 \
-    --gate crypto=64 \
+    --gate wire=80 \
+    --gate state_review=80 \
+    --gate crypto=80 \
     --gate daemon=80 \
     --gate ingest=80
 ```
@@ -59,14 +59,14 @@ Two numbers per crate:
 |---|---|---|---|
 | `objects` | 80% | 80% | at goal |
 | `refs` | 80% | 80% | at goal |
-| `repo` | 82% | 85% | ratchet — current ≈ 82.5% |
+| `repo` | 85% | 85% | at goal |
 | `cli` | 75% | 75% | at goal |
 | `mount` | 68% | 70% | ratchet — platform-gated (FUSE/projfs) |
-| `semantic` | 78% | 80% | ratchet — current ≈ 78.4% |
+| `semantic` | 80% | 80% | at goal |
 | `oplog` | 78% | 80% | ratchet — current ≈ 78.3% |
-| `wire` | 60% | 80% | ratchet — current ≈ 60.3% |
-| `state_review` | 76% | 80% | ratchet — current ≈ 76.6% |
-| `crypto` | 64% | 80% | ratchet — current ≈ 64.4% |
+| `wire` | 80% | 80% | at goal |
+| `state_review` | 80% | 80% | at goal |
+| `crypto` | 80% | 80% | at goal |
 | `daemon` | 80% | 80% | at goal |
 | `ingest` | 80% | 80% | at goal |
 | `grpc` | not gated | 60% | see below |
@@ -88,7 +88,7 @@ cargo llvm-cov --locked --workspace \
   --lcov --output-path lcov.info
 
 cargo run -p heddle-devtools --quiet -- \
-  audit-coverage lcov.info --gate repo=82 --gate cli=75   # …etc
+  audit-coverage lcov.info --gate repo=85 --gate cli=75   # …etc
 ```
 
 A green local run means a green CI run, modulo lcov's normal sensitivity

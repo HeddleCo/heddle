@@ -53,9 +53,7 @@ coverage:
           - crates/refs/
 
       repo:
-        # Ratchet floor at 82% (current main 82.48%). Goal is 85% —
-        # raise this as the `repo` crate gains tests. See the coverage doc.
-        target: 82%
+        target: 85%
         threshold: 0%
         flags:
           - rust
@@ -81,8 +79,7 @@ coverage:
           - crates/mount/
 
       semantic:
-        # Ratchet floor at 78% (current main 78.38%). Goal is 80%.
-        target: 78%
+        target: 80%
         threshold: 0%
         flags:
           - rust
@@ -99,8 +96,7 @@ coverage:
           - crates/oplog/
 
       wire:
-        # Ratchet floor at 60% (current main 60.27%). Goal is 80%.
-        target: 60%
+        target: 80%
         threshold: 0%
         flags:
           - rust
@@ -108,8 +104,7 @@ coverage:
           - crates/wire/
 
       state_review:
-        # Ratchet floor at 76% (current main 76.59%). Goal is 80%.
-        target: 76%
+        target: 80%
         threshold: 0%
         flags:
           - rust
@@ -117,8 +112,7 @@ coverage:
           - crates/state_review/
 
       crypto:
-        # Ratchet floor at 64% (current main 64.36%). Goal is 80%.
-        target: 64%
+        target: 80%
         threshold: 0%
         flags:
           - rust

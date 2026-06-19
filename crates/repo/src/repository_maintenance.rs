@@ -184,6 +184,7 @@ impl Repository {
         let pull_planner_maintenance = maintain_pull_planner_cache(self)?;
 
         if let Some(state) = self.current_state()? {
+            remove_unreadable_worktree_index_sidecars(self.root())?;
             let tree = self.require_tree(&state.tree)?;
             self.compare_worktree_cached_detailed_with_options(&tree, options)?;
             rebuilt_worktree_index = true;
@@ -243,6 +244,19 @@ fn inspect_commit_graph(repo_root: &Path) -> CommitGraphInspection {
 fn inspect_worktree_index(repo_root: &Path) -> WorktreeIndexInspection {
     let index_path = repo_root.join(".heddle/state").join("index.bin");
     let journal_path = repo_root.join(".heddle/state").join("index.journal");
+    if !index_path.exists() {
+        return WorktreeIndexInspection {
+            present: false,
+            file_entries: 0,
+            directory_entries: 0,
+            untracked_directory_entries: 0,
+            snapshot_bytes: 0,
+            journal_bytes: file_len_or_zero(&journal_path),
+            journal_ops: 0,
+            journal_replay_ms: 0,
+            error: None,
+        };
+    }
     match WorktreeIndex::load_profiled(&index_path) {
         Ok((index, stats)) => WorktreeIndexInspection {
             present: true,
@@ -277,6 +291,26 @@ fn inspect_worktree_index(repo_root: &Path) -> WorktreeIndexInspection {
             journal_replay_ms: 0,
             error: Some(error.to_string()),
         },
+    }
+}
+
+fn remove_unreadable_worktree_index_sidecars(repo_root: &Path) -> Result<bool> {
+    let inspection = inspect_worktree_index(repo_root);
+    if inspection.error.is_none() {
+        return Ok(false);
+    }
+    let index_path = repo_root.join(".heddle/state").join("index.bin");
+    let journal_path = repo_root.join(".heddle/state").join("index.journal");
+    remove_file_if_exists(&index_path)?;
+    remove_file_if_exists(&journal_path)?;
+    Ok(true)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(HeddleError::Io(error)),
     }
 }
 
@@ -811,4 +845,182 @@ fn file_len_or_zero(path: &Path) -> u64 {
 
 fn anyhow_to_heddle(error: anyhow::Error) -> HeddleError {
     HeddleError::Io(std::io::Error::other(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::Repository;
+
+    fn create_test_repo() -> (TempDir, Repository) {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        (temp_dir, repo)
+    }
+
+    fn index_path(repo_root: &Path) -> PathBuf {
+        repo_root.join(".heddle/state/index.bin")
+    }
+
+    fn ref_summary_path(repo: &Repository) -> PathBuf {
+        repo.heddle_dir().join("refs/ref-summary-index")
+    }
+
+    #[test]
+    fn inspect_performance_reports_missing_derived_sidecars_without_errors() {
+        let (temp_dir, repo) = create_test_repo();
+        let graph_path = commit_graph_path(repo.root());
+        let index_path = index_path(repo.root());
+        let journal_path = index_path.with_extension("journal");
+        let pull_root = pull_planner_root(repo.root());
+
+        let _ = fs::remove_file(&graph_path);
+        let _ = fs::remove_file(&index_path);
+        let _ = fs::remove_file(&journal_path);
+        let _ = fs::remove_dir_all(&pull_root);
+
+        let report = repo.inspect_performance().unwrap();
+
+        assert!(!report.commit_graph.present);
+        assert_eq!(report.commit_graph.bytes, 0);
+        assert!(report.commit_graph.error.is_none());
+        assert!(!report.worktree_index.present);
+        assert_eq!(report.worktree_index.snapshot_bytes, 0);
+        assert_eq!(report.worktree_index.journal_bytes, 0);
+        assert!(report.worktree_index.error.is_none());
+        assert!(!report.pull_planner_cache.present);
+        assert_eq!(report.pull_planner_cache.status, "absent");
+        assert_eq!(report.pull_planner_cache.total_bytes, 0);
+        assert!(!commit_graph_path(temp_dir.path()).exists());
+        assert!(!index_path.exists());
+    }
+
+    #[test]
+    fn inspect_performance_flags_corrupt_derived_sidecars() {
+        let (_temp_dir, repo) = create_test_repo();
+        let graph_path = commit_graph_path(repo.root());
+        let index_path = index_path(repo.root());
+        let ref_summary_path = ref_summary_path(&repo);
+
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        fs::write(&graph_path, b"not a commit graph").unwrap();
+        fs::write(&index_path, b"not a worktree index").unwrap();
+        fs::write(&ref_summary_path, b"not a ref summary index\n").unwrap();
+
+        let report = repo.inspect_performance().unwrap();
+
+        assert!(report.commit_graph.present);
+        assert_eq!(report.commit_graph.node_count, 0);
+        assert!(
+            report
+                .commit_graph
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("commit graph"))
+        );
+        assert!(report.worktree_index.present);
+        assert_eq!(report.worktree_index.file_entries, 0);
+        assert!(
+            report
+                .worktree_index
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("missing magic"))
+        );
+        assert!(report.ref_summary_index.present);
+        assert!(!report.ref_summary_index.valid);
+        assert!(
+            report
+                .ref_summary_index
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("ref summary"))
+        );
+    }
+
+    #[test]
+    fn run_maintenance_rebuilds_corrupt_and_missing_derived_sidecars() {
+        let (temp_dir, repo) = create_test_repo();
+
+        fs::write(temp_dir.path().join("README.md"), "alpha").unwrap();
+        let first = repo.snapshot(Some("alpha".to_string()), None).unwrap();
+        fs::write(temp_dir.path().join("README.md"), "beta").unwrap();
+        repo.snapshot(Some("beta".to_string()), None).unwrap();
+
+        let graph_path = commit_graph_path(repo.root());
+        let index_path = index_path(repo.root());
+        let ref_summary_path = ref_summary_path(&repo);
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        fs::write(&graph_path, b"corrupt graph").unwrap();
+        fs::write(&index_path, b"corrupt index bytes").unwrap();
+        fs::write(&ref_summary_path, b"corrupt ref summary\n").unwrap();
+
+        let pull_root = pull_planner_root(repo.root());
+        let plans_dir = pull_planner_plans_dir(repo.root());
+        fs::create_dir_all(&plans_dir).unwrap();
+        fs::write(
+            pull_planner_manifest_path(repo.root()),
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "generated_at": "2026-01-01T00:00:00Z",
+                "repo_path": "org/acme/heddle",
+                "head": {
+                    "kind": "attached",
+                    "value": "main",
+                    "head_state": first.change_id.to_string_full(),
+                },
+                "markers": [],
+                "threads": [{
+                    "name": "main",
+                    "state_id": first.change_id.to_string_full(),
+                }],
+                "thread_entries": [{
+                    "thread": "main",
+                    "state_id": first.change_id.to_string_full(),
+                    "planner_key_full": "missing-full.json",
+                    "planner_key_lazy": "missing-lazy.json",
+                    "object_count": 0,
+                    "full_closure_available": true,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(plans_dir.join("corrupt-entry.json"), b"corrupt").unwrap();
+
+        let before = repo.inspect_performance().unwrap();
+        assert!(before.commit_graph.error.is_some());
+        assert!(before.worktree_index.error.is_some());
+        assert!(!before.ref_summary_index.valid);
+        assert!(before.pull_planner_cache.present);
+        assert_eq!(before.pull_planner_cache.manifest_count, 1);
+        assert_eq!(before.pull_planner_cache.planner_entry_count, 1);
+
+        let run = repo.run_maintenance().unwrap();
+
+        assert!(run.rebuilt_commit_graph);
+        assert!(run.rebuilt_ref_summary_index);
+        assert!(run.rebuilt_worktree_index);
+        assert!(run.refreshed_change_monitor);
+        assert!(run.rebuilt_pull_planner_cache);
+        assert_eq!(run.pruned_pull_planner_entries, 1);
+        assert!(run.report.commit_graph.present);
+        assert!(run.report.commit_graph.error.is_none());
+        assert!(run.report.commit_graph.node_count >= 2);
+        assert!(run.report.worktree_index.present);
+        assert!(run.report.worktree_index.error.is_none());
+        assert!(run.report.worktree_index.file_entries >= 1);
+        assert!(run.report.ref_summary_index.present);
+        assert!(run.report.ref_summary_index.valid);
+        assert_eq!(run.report.ref_summary_index.threads, 1);
+        assert!(run.report.pull_planner_cache.present);
+        assert_eq!(run.report.pull_planner_cache.manifest_count, 1);
+        assert_eq!(run.report.pull_planner_cache.planner_entry_count, 2);
+        assert!(pull_root.join("cold-clone-manifest.json").exists());
+    }
 }

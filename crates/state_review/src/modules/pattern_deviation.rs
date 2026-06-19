@@ -115,7 +115,9 @@ use crate::truncate_reason;
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ContentHash, Principal};
+    use std::path::PathBuf;
+
+    use objects::object::{Attribution, ChangeId, ContentHash, Principal, RiskSignalKind};
 
     use super::*;
 
@@ -125,6 +127,20 @@ mod tests {
             vec![],
             Attribution::human(Principal::new("Alice", "alice@example.com")),
         )
+    }
+
+    fn state_with_change_id(byte: u8) -> State {
+        empty_state().with_change_id(ChangeId::from_bytes([byte; 16]))
+    }
+
+    fn fdef(name: &str, content: &str) -> FunctionDef {
+        FunctionDef {
+            name: name.to_string(),
+            signature: format!("fn {name}()"),
+            start_line: 1,
+            end_line: 3,
+            content: content.to_string(),
+        }
     }
 
     #[test]
@@ -142,5 +158,78 @@ mod tests {
         let ctx = SemanticContext::new();
         let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
         assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn fires_when_function_diverges_from_prior_version() {
+        let path = PathBuf::from("src/scoring.rs");
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.pattern_deviation.threshold = 0.2;
+        let mut ctx = SemanticContext::new();
+        ctx.prior_functions.insert(
+            path.clone(),
+            vec![fdef(
+                "score",
+                "fn score(value: usize) -> usize { value + 1 }",
+            )],
+        );
+        ctx.new_functions.insert(
+            path,
+            vec![fdef(
+                "score",
+                "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
+            )],
+        );
+        let new = state_with_change_id(9);
+
+        let signals = run(&empty_state(), &new, &cfg, &ctx);
+
+        assert!(
+            signals.iter().any(|signal| {
+                signal.kind == RiskSignalKind::PatternDeviation
+                    && signal.anchor.file == "src/scoring.rs"
+                    && signal.anchor.symbol.as_deref() == Some("score")
+                    && signal.reason.contains("prior version")
+                    && signal.computed_against == Some(new.change_id)
+            }),
+            "expected prior-version pattern deviation, got: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn fires_when_new_function_diverges_from_sibling_exemplars() {
+        let path = PathBuf::from("src/workers.rs");
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.pattern_deviation.threshold = 0.5;
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            path,
+            vec![
+                fdef(
+                    "load_user",
+                    "fn load_user() { let record = fetch_user(); validate(record); save(record); }",
+                ),
+                fdef(
+                    "load_order",
+                    "fn load_order() { let record = fetch_order(); validate(record); save(record); }",
+                ),
+                fdef(
+                    "decode_wire",
+                    "fn decode_wire() { while socket.poll() { rotate_key(); decode_frame(); } }",
+                ),
+            ],
+        );
+
+        let signals = run(&empty_state(), &state_with_change_id(10), &cfg, &ctx);
+
+        assert!(
+            signals.iter().any(|signal| {
+                signal.kind == RiskSignalKind::PatternDeviation
+                    && signal.anchor.file == "src/workers.rs"
+                    && signal.anchor.symbol.as_deref() == Some("decode_wire")
+                    && signal.reason.contains("sibling exemplars")
+            }),
+            "expected sibling pattern deviation for decode_wire, got: {signals:?}"
+        );
     }
 }
