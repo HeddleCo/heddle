@@ -76,7 +76,7 @@ jobs:
       kind: ${{ steps.classify.outputs.kind }}
       publish_release: ${{ steps.classify.outputs.publish_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history is needed for both the tag→commit resolution and
           # the ancestor check against origin/main.
@@ -240,7 +240,7 @@ jobs:
           # absence. Re-add when cosign ships win-arm64 binaries — tracked in
           # the "re-enable aarch64-pc-windows-msvc" issue.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Pin to the SHA validate-tag verified, not the tag ref. If the
           # tag is force-moved between validate-tag and this step, we
@@ -334,7 +334,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Same SHA pin as the CLI build job — see comment there.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
@@ -497,9 +497,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          # Same SHA pin as the build job — see comment there.
+          # Keep the publication job anchored to the same validated commit as
+          # the artifact builders. The release action itself uses downloaded
+          # artifacts, but the contract checker requires every downstream job
+          # to avoid re-resolving a mutable tag ref.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download all build outputs
@@ -554,7 +557,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Publish the package from the exact commit that produced the
           # release assets. The package version itself tracks heddle-grpc,
@@ -648,7 +651,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Render manifests from the exact commit that produced the release.
           ref: ${{ needs.validate-tag.outputs.tag_sha }}

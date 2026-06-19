@@ -287,27 +287,33 @@ fn extend_modified_changes(
     options: &SemanticDiffOptions,
     manifest_content: Option<&str>,
 ) {
-    let old_parsed = parsed
+    let Some(old_parsed) = parsed
         .old
         .get(&change.path)
-        .and_then(|value| value.as_deref());
-    let new_parsed = parsed
+        .and_then(|value| value.as_deref())
+    else {
+        return;
+    };
+    let Some(new_parsed) = parsed
         .new
         .get(&change.path)
-        .and_then(|value| value.as_deref());
+        .and_then(|value| value.as_deref())
+    else {
+        return;
+    };
     changes.extend(detect_function_changes_with_parsed(
         &change.path,
         &change.path,
-        old_parsed,
-        new_parsed,
+        Some(old_parsed),
+        Some(new_parsed),
         options.similarity_method,
     ));
     if options.analyze_dependencies {
         changes.extend(detect_import_changes_with_parsed(
             &change.path,
             &change.path,
-            old_parsed,
-            new_parsed,
+            Some(old_parsed),
+            Some(new_parsed),
             manifest_content,
         ));
     }

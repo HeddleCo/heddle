@@ -319,3 +319,200 @@ impl HookManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_test_repo() -> (TempDir, Repository, HookManager) {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let manager = HookManager::new(&repo);
+        (temp_dir, repo, manager)
+    }
+
+    #[test]
+    fn hook_name_mapping_round_trips_known_hooks() {
+        for name in Hook::all() {
+            let hook = Hook::from_name(name).expect("known hook should map to enum");
+            assert_eq!(hook.filename(), *name);
+        }
+
+        assert!(Hook::from_name("pre-capture").is_none());
+        assert!(Hook::from_name("../pre-push").is_none());
+    }
+
+    #[test]
+    fn list_hooks_discovers_only_known_hook_names_sorted() {
+        let (_temp_dir, _repo, manager) = create_test_repo();
+        manager
+            .install(Hook::PreSnapshot, "#!/bin/sh\nexit 0\n")
+            .unwrap();
+        manager
+            .install(Hook::PostPush, "#!/bin/sh\nexit 0\n")
+            .unwrap();
+        fs::write(manager.hooks_dir.join("notes.txt"), "ignored").unwrap();
+
+        assert_eq!(
+            manager.list_hooks().unwrap(),
+            vec!["post-push".to_string(), "pre-snapshot".to_string()]
+        );
+    }
+
+    #[test]
+    fn install_and_uninstall_are_idempotent() {
+        let (_temp_dir, _repo, manager) = create_test_repo();
+
+        manager
+            .install(Hook::PrePull, "#!/bin/sh\necho first\n")
+            .unwrap();
+        manager
+            .install(Hook::PrePull, "#!/bin/sh\necho second\n")
+            .unwrap();
+
+        assert!(manager.has_hook(Hook::PrePull));
+        assert!(
+            fs::read_to_string(manager.hook_path(Hook::PrePull))
+                .unwrap()
+                .contains("second")
+        );
+        assert!(manager.uninstall(Hook::PrePull).unwrap());
+        assert!(!manager.has_hook(Hook::PrePull));
+        assert!(!manager.uninstall(Hook::PrePull).unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_payload_decodes_env_payload_stdin_and_stdout() {
+        let (_temp_dir, repo, manager) = create_test_repo();
+        manager
+            .install(
+                Hook::PreSnapshot,
+                r#"#!/bin/sh
+payload=$(cat)
+printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
+' "$HEDDLE_CUSTOM" "$HEDDLE_HOOK_PROTOCOL" "$HEDDLE_REPO" "$payload"
+"#,
+            )
+            .unwrap();
+        let ctx = HookContext::new(&repo).with_env("HEDDLE_CUSTOM", "present");
+
+        let response = manager
+            .run_with_payload(
+                Hook::PreSnapshot,
+                &ctx,
+                &json!({"answer": 42, "path": "src/lib.rs"}),
+                Duration::from_secs(1),
+            )
+            .unwrap()
+            .expect("installed hook should run");
+
+        assert_eq!(response.abort, "");
+        assert_eq!(response.extra["custom"], "present");
+        assert_eq!(response.extra["protocol"], "json");
+        assert_eq!(
+            response.extra["repo"],
+            repo.root().to_string_lossy().as_ref()
+        );
+        assert_eq!(response.extra["payload"]["answer"], 42);
+        assert_eq!(response.extra["payload"]["path"], "src/lib.rs");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_reports_nonzero_exit() {
+        let (_temp_dir, repo, manager) = create_test_repo();
+        manager
+            .install(Hook::PrePush, "#!/bin/sh\necho failed >&2\nexit 7\n")
+            .unwrap();
+
+        let err = manager
+            .run(Hook::PrePush, &HookContext::new(&repo))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Hook pre-push failed"));
+        assert!(err.to_string().contains("Some(7)"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_payload_turns_nonzero_exit_into_abort_response() {
+        let (_temp_dir, repo, manager) = create_test_repo();
+        manager
+            .install(Hook::PreMerge, "#!/bin/sh\necho veto >&2\nexit 9\n")
+            .unwrap();
+
+        let response = manager
+            .run_with_payload(
+                Hook::PreMerge,
+                &HookContext::new(&repo),
+                &json!({"operation": "merge"}),
+                Duration::from_secs(1),
+            )
+            .unwrap()
+            .expect("installed hook should return a response");
+
+        assert!(response.abort.contains("veto"));
+        assert!(response.extra.is_null());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_payload_defaults_on_invalid_or_empty_stdout() {
+        let (_temp_dir, repo, manager) = create_test_repo();
+        let ctx = HookContext::new(&repo);
+
+        manager
+            .install(Hook::PostPull, "#!/bin/sh\necho not-json\n")
+            .unwrap();
+        let invalid = manager
+            .run_with_payload(
+                Hook::PostPull,
+                &ctx,
+                &json!({"operation": "pull"}),
+                Duration::from_secs(1),
+            )
+            .unwrap()
+            .expect("installed hook should return default response");
+        assert_eq!(invalid.abort, "");
+        assert!(invalid.extra.is_null());
+
+        manager
+            .install(Hook::PostPull, "#!/bin/sh\nexit 0\n")
+            .unwrap();
+        let empty = manager
+            .run_with_payload(
+                Hook::PostPull,
+                &ctx,
+                &json!({"operation": "pull"}),
+                Duration::from_secs(1),
+            )
+            .unwrap()
+            .expect("installed hook should return default response");
+        assert_eq!(empty.abort, "");
+        assert!(empty.extra.is_null());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_payload_times_out() {
+        let (_temp_dir, repo, manager) = create_test_repo();
+        manager
+            .install(Hook::PreRebase, "#!/bin/sh\nsleep 5\n")
+            .unwrap();
+
+        let err = manager
+            .run_with_payload(
+                Hook::PreRebase,
+                &HookContext::new(&repo),
+                &json!({"operation": "rebase"}),
+                Duration::from_millis(30),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("pre-rebase timed out"));
+    }
+}

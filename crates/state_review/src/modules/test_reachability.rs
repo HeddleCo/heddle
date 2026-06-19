@@ -139,7 +139,9 @@ fn body_mentions(body: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ContentHash, Principal};
+    use std::{collections::BTreeSet, path::PathBuf};
+
+    use objects::object::{Attribution, ContentHash, Principal, RiskSignalKind};
 
     use super::*;
 
@@ -149,6 +151,22 @@ mod tests {
             vec![],
             Attribution::human(Principal::new("Alice", "alice@example.com")),
         )
+    }
+
+    fn cfg_with_one_required_test() -> ReviewSignalsConfig {
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.test_reachability.min_test_functions_in_repo = 1;
+        cfg
+    }
+
+    fn fdef(name: &str, content: &str) -> FunctionDef {
+        FunctionDef {
+            name: name.to_string(),
+            signature: format!("fn {name}()"),
+            start_line: 1,
+            end_line: 3,
+            content: content.to_string(),
+        }
     }
 
     #[test]
@@ -192,5 +210,105 @@ mod tests {
     fn go_test_naming_heuristic() {
         assert!(is_test_function("TestRouter", Language::Go));
         assert!(!is_test_function("Router", Language::Go));
+    }
+
+    #[test]
+    fn direct_test_reachability_stays_quiet() {
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("covered", "fn covered() { do_work(); }"),
+                fdef("test_covered", "fn test_covered() { covered(); }"),
+            ],
+        );
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert!(
+            signals.is_empty(),
+            "direct test caller should cover: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn transitive_test_reachability_stays_quiet() {
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("covered", "fn covered() { do_work(); }"),
+                fdef("helper", "fn helper() { covered(); }"),
+                fdef("test_covered", "fn test_covered() { helper(); }"),
+            ],
+        );
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert!(
+            signals.is_empty(),
+            "transitive test caller should cover all callees: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn unreachable_symbol_fires() {
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("orphan", "fn orphan() { do_work(); }"),
+                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
+            ],
+        );
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert_eq!(signal_symbols(&signals), BTreeSet::from(["orphan"]));
+        assert_eq!(signals[0].kind, RiskSignalKind::TestReachability);
+    }
+
+    #[test]
+    fn unreachable_cycle_fires_once_per_cycled_symbol() {
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("alpha", "fn alpha() { beta(); }"),
+                fdef("beta", "fn beta() { alpha(); }"),
+                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
+            ],
+        );
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert_eq!(signal_symbols(&signals), BTreeSet::from(["alpha", "beta"]));
+    }
+
+    fn signal_symbols(signals: &[RiskSignal]) -> BTreeSet<&str> {
+        signals
+            .iter()
+            .filter_map(|signal| signal.anchor.symbol.as_deref())
+            .collect()
     }
 }

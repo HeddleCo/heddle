@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{collections::BTreeMap, process::Command, time::Instant};
+use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
 use objects::{
     object::{Blob, ContentHash, EntryType, FileMode, SemanticChange, Tree, TreeEntry},
@@ -149,6 +149,112 @@ fn full_diff_uses_parse_budget_fallback_reasons() {
         "fallback reasons: {:?}",
         result.fallback_reasons
     );
+}
+
+#[test]
+fn full_diff_file_too_large_falls_back_to_file_level_only() {
+    let store = InMemoryStore::new();
+    let from_tree = create_tree(
+        &store,
+        vec![(
+            "large.rs",
+            create_blob(&store, "fn process() -> usize {\n    1\n}\n"),
+        )],
+    );
+    let to_tree = create_tree(
+        &store,
+        vec![(
+            "large.rs",
+            create_blob(
+                &store,
+                "fn process() -> usize {\n    let value = 2;\n    value\n}\n",
+            ),
+        )],
+    );
+    let options = SemanticDiffOptions {
+        budget: SemanticBudget {
+            max_file_bytes: 8,
+            ..SemanticBudget::default()
+        },
+        ..SemanticDiffOptions::default()
+    };
+
+    let result = semantic_diff(&store, &from_tree, &to_tree, &options)
+        .unwrap_or_else(|err| panic!("full diff should succeed: {err}"));
+
+    assert!(
+        result.fallback_reasons.iter().any(|reason| matches!(
+            reason,
+            SemanticFallbackReason::FileTooLarge { path, limit: 8, actual }
+                if path == Path::new("large.rs") && *actual > 8
+        )),
+        "expected FileTooLarge fallback, got: {:?}",
+        result.fallback_reasons
+    );
+    assert_file_level_only(&result.changes, "large.rs");
+}
+
+#[test]
+fn full_diff_unsupported_language_falls_back_to_file_level_only() {
+    let store = InMemoryStore::new();
+    let from_tree = create_tree(&store, vec![("notes.txt", create_blob(&store, "old\n"))]);
+    let to_tree = create_tree(&store, vec![("notes.txt", create_blob(&store, "new\n"))]);
+
+    let result = semantic_diff(
+        &store,
+        &from_tree,
+        &to_tree,
+        &SemanticDiffOptions::default(),
+    )
+    .unwrap_or_else(|err| panic!("full diff should succeed: {err}"));
+
+    assert!(
+        result.fallback_reasons.iter().any(|reason| matches!(
+            reason,
+            SemanticFallbackReason::UnsupportedLanguage { path }
+                if path == Path::new("notes.txt")
+        )),
+        "expected UnsupportedLanguage fallback, got: {:?}",
+        result.fallback_reasons
+    );
+    assert_file_level_only(&result.changes, "notes.txt");
+}
+
+#[test]
+fn full_diff_parse_failed_falls_back_to_file_level_only() {
+    let store = InMemoryStore::new();
+    let from_tree = create_tree(
+        &store,
+        vec![(
+            "broken.rs",
+            create_blob(&store, "fn process() -> usize {\n    1\n}\n"),
+        )],
+    );
+    let to_tree = create_tree(
+        &store,
+        vec![(
+            "broken.rs",
+            create_blob(&store, "fn process( -> usize {\n    2\n}\n"),
+        )],
+    );
+
+    let result = semantic_diff(
+        &store,
+        &from_tree,
+        &to_tree,
+        &SemanticDiffOptions::default(),
+    )
+    .unwrap_or_else(|err| panic!("full diff should succeed: {err}"));
+
+    assert!(
+        result.fallback_reasons.iter().any(|reason| matches!(
+            reason,
+            SemanticFallbackReason::ParseFailed { path } if path == Path::new("broken.rs")
+        )),
+        "expected ParseFailed fallback, got: {:?}",
+        result.fallback_reasons
+    );
+    assert_file_level_only(&result.changes, "broken.rs");
 }
 
 #[test]
@@ -420,6 +526,32 @@ fn assert_language_function_modified(path: &str, old: &str, new: &str, function_
         }),
         "{path} should report modified function {function_name}: {:?}",
         result.changes
+    );
+}
+
+fn assert_file_level_only(changes: &[SemanticChange], path: &str) {
+    let expected_path = Path::new(path);
+    assert!(
+        changes.iter().any(|change| matches!(
+            change,
+            SemanticChange::FileModified { path, .. } if path == expected_path
+        )),
+        "expected file-level modified entry for {path}, got: {changes:?}"
+    );
+    assert!(
+        !changes.iter().any(|change| matches!(
+            change,
+            SemanticChange::FunctionAdded { .. }
+                | SemanticChange::FunctionExtracted { .. }
+                | SemanticChange::FunctionDeleted { .. }
+                | SemanticChange::FunctionRenamed { .. }
+                | SemanticChange::FunctionModified { .. }
+                | SemanticChange::FunctionMoved { .. }
+                | SemanticChange::SignatureChanged { .. }
+                | SemanticChange::DependencyAdded { .. }
+                | SemanticChange::DependencyRemoved { .. }
+        )),
+        "fallback should not emit AST-specific changes: {changes:?}"
     );
 }
 

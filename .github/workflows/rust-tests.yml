@@ -7,6 +7,11 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Weekly coverage gate: Sundays 06:00 UTC. Offset from the full
+    # Criterion benchmark workflow so the heavy lanes don't stampede.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
 
 concurrency:
   group: rust-tests-${{ github.workflow }}-${{ github.ref }}
@@ -33,59 +38,96 @@ env:
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
-  # Path gate for the heavy Rust jobs. Pushes run everything; PRs fetch/diff
-  # against the base branch, and any uncertainty falls back to running the full
-  # matrix. Most of the CI bill on this repo is doc/spike PRs (often several
-  # Codex rounds) re-running the full matrix per round.
+  # Path gate for the heavy Rust jobs. PRs diff against the base branch and
+  # pushes diff against the pre-push SHA. Any uncertainty falls back to running
+  # the full matrix. Most of the CI bill on this repo is doc/spike PRs (often
+  # several Codex rounds) re-running the full matrix per round.
   #
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   release_only — every changed path is release/publish workflow plumbing.
   #   rust      — !docs_only && !release_only; gates check-and-test / postgres / CLI fault-injection.
-  #   coverage  — Rust source or coverage config changed; gates instrumented coverage.
+  #   coverage  — weekly/manual instrumented coverage gate; skipped on PR/push.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
+  #   cargo_package_args — selected Cargo package arguments for the main Rust lane.
+  #   package_names_csv — selected workspace packages, including reverse dependents.
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
       coverage: ${{ steps.decide.outputs.coverage }}
       mount: ${{ steps.decide.outputs.mount }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
       release_only: ${{ steps.decide.outputs.release_only }}
+      all_packages: ${{ steps.affected.outputs.all_packages }}
+      skip_cargo: ${{ steps.affected.outputs.skip_cargo }}
+      bench_all: ${{ steps.affected.outputs.bench_all }}
+      package_names_csv: ${{ steps.affected.outputs.package_names_csv }}
+      cargo_package_args: ${{ steps.affected.outputs.cargo_package_args }}
+      postgres: ${{ steps.affected_scopes.outputs.postgres }}
+      cli_checks: ${{ steps.affected_scopes.outputs.cli_checks }}
+      cli_fault: ${{ steps.affected_scopes.outputs.cli_fault }}
+      repo_fault: ${{ steps.affected_scopes.outputs.repo_fault }}
+      fault_tests: ${{ steps.affected_scopes.outputs.fault_tests }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          # Two commits is enough for a PR diff; pushes run everything
-          # unconditionally so depth doesn't matter there.
+          # Two commits handles common push diffs. Multi-commit pushes and PR
+          # bases are fetched explicitly below before diffing.
           fetch-depth: 2
       - id: decide
         run: |
-          # Fail-closed helper: on any uncertainty (push event, fetch or
-          # diff failure, empty diff) run the full matrix. The alternative
-          # — silently skipping because an errored/empty diff matched no
-          # path regex — is the "infrastructure failure removes coverage"
-          # pattern hardened in heddle#89.
+          # Fail-closed helper: on any uncertainty (fetch or diff failure,
+          # empty diff, missing push base) run the full matrix. The
+          # alternative — silently skipping because an errored/empty diff
+          # matched no path regex — is the "infrastructure failure removes
+          # coverage" pattern hardened in heddle#89.
           run_all() {
             echo "$1; running full matrix fail-closed" >&2
             echo "rust=true" >> "$GITHUB_OUTPUT"
-            echo "coverage=true" >> "$GITHUB_OUTPUT"
+            echo "coverage=false" >> "$GITHUB_OUTPUT"
             echo "mount=true" >> "$GITHUB_OUTPUT"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "release_only=false" >> "$GITHUB_OUTPUT"
+            echo "force_all=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            run_all "non-PR event (${{ github.event_name }})"
+
+          event="${{ github.event_name }}"
+          before="${{ github.event.before }}"
+          if [ "$event" = "schedule" ] || [ "$event" = "workflow_dispatch" ]; then
+            echo "$event event; running coverage only" >&2
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "coverage=true" >> "$GITHUB_OUTPUT"
+            echo "mount=false" >> "$GITHUB_OUTPUT"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "release_only=false" >> "$GITHUB_OUTPUT"
+            echo "force_all=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$event" = "pull_request" ]; then
+            if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
+              run_all "fetch failed"
+            fi
+            set +e
+            diff_output=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
+            diff_rc=$?
+            set -e
+          elif [ "$event" = "push" ]; then
+            if [ -z "$before" ] || [[ "$before" =~ ^0+$ ]]; then
+              run_all "push event has no usable before SHA"
+            fi
+            if ! git fetch --no-tags --depth=1 origin "$before"; then
+              run_all "before-SHA fetch failed"
+            fi
+            set +e
+            diff_output=$(git diff --name-only "$before" HEAD)
+            diff_rc=$?
+            set -e
+          else
+            run_all "unsupported event ($event)"
           fi
-          if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
-            run_all "fetch failed"
-          fi
-          set +e
-          diff_output=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
-          diff_rc=$?
-          set -e
           if [ "$diff_rc" -ne 0 ]; then
             run_all "git diff exited $diff_rc"
           fi
@@ -94,6 +136,7 @@ jobs:
           if [ -z "$(printf '%s' "$diff_output" | tr -d '[:space:]')" ]; then
             run_all "empty diff"
           fi
+          printf '%s\n' "$diff_output" > changed-paths.txt
 
           # docs_only: EVERY changed path is a non-build doc path that the
           # Rust suite does not validate. The catch: `check-and-test` runs
@@ -132,13 +175,10 @@ jobs:
           fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
 
-          if [ "$rust" = "true" ] && printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/|Cargo\.lock$|Cargo\.toml$|codecov\.yml$|docs/contributor-guide/coverage\.md$|\.github/workflows/rust-tests\.yml)' \
-              > /dev/null; then
-            echo "coverage=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "coverage=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Coverage uses an instrumented workspace build and is intentionally
+          # kept off the hot PR/push path. The weekly/manual branch above is
+          # the only automatic source of coverage=true.
+          echo "coverage=false" >> "$GITHUB_OUTPUT"
 
           # mount: use the transitive mount-relevant path set (mount → repo →
           # {crypto, oplog, wire, objects, refs} → optional runtime-bridge,
@@ -152,6 +192,50 @@ jobs:
           else
             echo "mount=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "force_all=false" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.decide.outputs.rust == 'true'
+
+      - id: affected
+        if: steps.decide.outputs.rust == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.decide.outputs.force_all }}" = "true" ]; then
+            bash scripts/ci-affected-rust-packages.sh --all --github-output "$GITHUB_OUTPUT"
+          else
+            bash scripts/ci-affected-rust-packages.sh --changed-paths changed-paths.txt --github-output "$GITHUB_OUTPUT"
+          fi
+
+      - id: affected_scopes
+        if: steps.decide.outputs.rust == 'true'
+        env:
+          AFFECTED_PACKAGES: ${{ steps.affected.outputs.package_names_csv }}
+          ALL_PACKAGES: ${{ steps.affected.outputs.all_packages }}
+        run: |
+          set -euo pipefail
+          selected=",$AFFECTED_PACKAGES,"
+          has_package() {
+            [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *",$1,"* ]]
+          }
+          write_bool() {
+            if "$2"; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
+          postgres_needed() { has_package heddle-refs || has_package heddle-oplog; }
+          cli_needed() { has_package heddle-cli; }
+          repo_needed() { has_package heddle-repo; }
+          fault_needed() { cli_needed || repo_needed; }
+
+          write_bool postgres postgres_needed
+          write_bool cli_checks cli_needed
+          write_bool cli_fault cli_needed
+          write_bool repo_fault repo_needed
+          write_bool fault_tests fault_needed
 
   # Single sequential job: build once, then clippy + test + feature-checks
   # all reuse the same `target/` directory. Avoids the 4-jobs-each-doing-a-
@@ -165,7 +249,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -178,21 +262,36 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      # 1. Warm target/ with the full default-feature workspace build.
-      #    Everything downstream reuses these artifacts.
-      - name: Build (default features)
-        run: cargo build --locked --workspace --tests
+      # 1. Warm target/ for the affected package set, then run clippy and
+      #    tests against the same selection so all three commands reuse the
+      #    same local build products. Selection is the changed crate(s) plus
+      #    reverse dependents, so lower-level changes still exercise the crates
+      #    that compile against them.
+      - name: Build, clippy, and test affected packages
+        if: needs.changes.outputs.skip_cargo != 'true'
+        env:
+          CARGO_PACKAGE_ARGS: ${{ needs.changes.outputs.cargo_package_args }}
+          PACKAGE_NAMES: ${{ needs.changes.outputs.package_names_csv }}
+        run: |
+          set -euo pipefail
+          read -r -a package_args <<< "$CARGO_PACKAGE_ARGS"
+          echo "Selected packages: ${PACKAGE_NAMES:-<none>}"
 
-      # 2. Lint the same artifacts — clippy reuses target/ from step 1.
-      - name: Clippy (OSS features)
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+          echo "::group::cargo build"
+          cargo build --locked "${package_args[@]}" --tests
+          echo "::endgroup::"
 
-      # 3. Run tests — test binaries already compiled in step 1. This covers
-      #    the round-trip fidelity and CLI release-gate integration tests; keep
-      #    targeted re-runs out of this job unless they add coverage rather than
-      #    just a friendlier step name.
-      - name: Tests
-        run: cargo test --locked --workspace
+          echo "::group::cargo clippy"
+          cargo clippy --locked "${package_args[@]}" --all-targets -- -D warnings
+          echo "::endgroup::"
+
+          echo "::group::cargo test"
+          cargo test --locked "${package_args[@]}"
+          echo "::endgroup::"
+
+      - name: No affected Rust packages
+        if: needs.changes.outputs.skip_cargo == 'true'
+        run: echo "No affected Rust packages selected; running script and benchmark checks only."
 
       # 3a. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
       #     is only as honest as the compare script; these tests pin the
@@ -213,13 +312,24 @@ jobs:
       #     mount-relevant paths change because that job already installs
       #     libfuse.
       - name: Compile benchmark targets
+        env:
+          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
+          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
+          BENCH_ALL: ${{ needs.changes.outputs.bench_all }}
         run: |
+          set -euo pipefail
           python3 scripts/discover-benches.py > benchmark-plan.tsv
           cat benchmark-plan.tsv
+          selected=",$AFFECTED_PACKAGES,"
+          ran=0
           while IFS=$'\t' read -r package bench features; do
             [ -n "$package" ] || continue
             if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
               echo "skipping $package/$bench: fuse benches are covered by the fuse-smoke job"
+              continue
+            fi
+            if [ "$ALL_PACKAGES" != "true" ] && [ "$BENCH_ALL" != "true" ] && [[ "$selected" != *",$package,"* ]]; then
+              echo "skipping $package/$bench: package not affected"
               continue
             fi
             echo "::group::$package/$bench"
@@ -231,8 +341,12 @@ jobs:
             printf ' %q' "${cmd[@]}"
             printf '\n'
             "${cmd[@]}"
+            ran=1
             echo "::endgroup::"
           done < benchmark-plan.tsv
+          if [ "$ran" -eq 0 ]; then
+            echo "No non-FUSE benchmark targets selected."
+          fi
 
       # 3c. Compile gate for the `postgres` storage backends used by hosted /
       #     weft code. This is the silent-rot guard: these backends are not
@@ -242,27 +356,51 @@ jobs:
       #     heddle#259 hit exactly this — `PgRefBackend` rotted after the
       #     `ThreadName`/`MarkerName` migration. Build + clippy need no DB;
       #     the integration tests live in the separate `postgres-tests` job.
-      - name: Build (postgres storage backends)
-        run: cargo build --locked -p heddle-refs -p heddle-oplog --tests --features heddle-refs/postgres,heddle-oplog/postgres
+      - name: Build and clippy postgres storage backends
+        if: needs.changes.outputs.postgres == 'true'
+        env:
+          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
+          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
+        run: |
+          set -euo pipefail
+          selected=",$AFFECTED_PACKAGES,"
+          packages=()
+          features=()
 
-      - name: Clippy (postgres storage backends)
-        run: cargo clippy --locked -p heddle-refs -p heddle-oplog --all-targets --features heddle-refs/postgres,heddle-oplog/postgres -- -D warnings
+          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
+            packages+=(-p heddle-refs)
+            features+=(heddle-refs/postgres)
+          fi
+          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
+            packages+=(-p heddle-oplog)
+            features+=(heddle-oplog/postgres)
+          fi
+
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "Skipping postgres backend compile checks; refs/oplog not affected."
+            exit 0
+          fi
+
+          feature_arg=$(IFS=,; echo "${features[*]}")
+          cargo build --locked "${packages[@]}" --tests --features "$feature_arg"
+          cargo clippy --locked "${packages[@]}" --all-targets --features "$feature_arg" -- -D warnings
 
       # 4. Verify the OSS build flavors compile. `cargo check` is fast on
       #    a warm cache; the feature-delta from defaults is small.
-      - name: Check git-overlay-only
-        run: cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
-
-      - name: Check native-only
-        run: cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
-
-      # Assert the default `cargo install -p heddle-cli` flow produces
-      # `heddle-fuse-worker` so the sibling-binary lookup in
-      # `mount::worker::default_worker_binary` resolves on a stock
-      # install; otherwise Linux mounts silently fall back to NFS
-      # (heddle#190 r5 / Codex PR #225 P2).
-      - name: Default install ships heddle-fuse-worker
-        run: bash scripts/check-default-install-ships-worker.sh
+      #    Keep these scoped to `heddle-cli`; other package changes are covered
+      #    by the selected build/clippy/test block above.
+      - name: CLI feature and install checks
+        if: needs.changes.outputs.cli_checks == 'true'
+        run: |
+          set -euo pipefail
+          cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
+          cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+          # Assert the default `cargo install -p heddle-cli` flow produces
+          # `heddle-fuse-worker` so the sibling-binary lookup in
+          # `mount::worker::default_worker_binary` resolves on a stock
+          # install; otherwise Linux mounts silently fall back to NFS
+          # (heddle#190 r5 / Codex PR #225 P2).
+          bash scripts/check-default-install-ships-worker.sh
 
       - name: sccache stats
         run: sccache --show-stats
@@ -279,7 +417,7 @@ jobs:
   postgres-tests:
     name: Postgres integration tests
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.postgres == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 30
     services:
@@ -297,7 +435,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -322,8 +460,30 @@ jobs:
       - name: Postgres integration tests
         env:
           DATABASE_URL: postgres://heddle_test:heddle_test@localhost:5432/heddle_test
+          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
+          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
         run: |
-          cargo test --locked -p heddle-refs -p heddle-oplog --features postgres \
+          set -euo pipefail
+          selected=",$AFFECTED_PACKAGES,"
+          packages=()
+          features=()
+
+          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
+            packages+=(-p heddle-refs)
+            features+=(heddle-refs/postgres)
+          fi
+          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
+            packages+=(-p heddle-oplog)
+            features+=(heddle-oplog/postgres)
+          fi
+
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "Skipping postgres integration tests; refs/oplog not affected."
+            exit 0
+          fi
+
+          feature_arg=$(IFS=,; echo "${features[*]}")
+          cargo test --locked "${packages[@]}" --features "$feature_arg" \
             -- --ignored --test-threads=1 --nocapture
 
       - name: sccache stats
@@ -338,11 +498,11 @@ jobs:
   cli-fault-injection-tests:
     name: CLI fault-injection tests
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.fault_tests == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -354,11 +514,13 @@ jobs:
           cache-on-failure: true
 
       - name: CLI fault-injection tests
+        if: needs.changes.outputs.cli_fault == 'true'
         run: |
           cargo test --locked -p heddle-cli --test cli_integration fault_injection:: \
             -- --ignored --test-threads=1 --nocapture
 
       - name: Timeline materialization crash tests
+        if: needs.changes.outputs.repo_fault == 'true'
         run: |
           cargo test --locked -p heddle-repo --test timeline_materialize_fault \
             -- --ignored --test-threads=1 --nocapture
@@ -389,7 +551,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -489,7 +651,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -572,7 +734,7 @@ jobs:
     if: github.event_name == 'push'
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -650,7 +812,8 @@ jobs:
         run: sccache --show-stats
 
   # Coverage requires an instrumented build that can't share `target/`
-  # with the regular profile, so it stays as its own job.
+  # with the regular profile, so it stays as a weekly/manual job instead of
+  # running on every PR or push.
   coverage:
     name: Coverage
     needs: changes
@@ -659,7 +822,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -710,14 +873,14 @@ jobs:
             audit-coverage lcov.info \
               --gate objects=80 \
               --gate refs=80 \
-              --gate repo=82 \
+              --gate repo=85 \
               --gate cli=75 \
               --gate mount=68 \
-              --gate semantic=78 \
+              --gate semantic=80 \
               --gate oplog=78 \
-              --gate wire=60 \
-              --gate state_review=76 \
-              --gate crypto=64 \
+              --gate wire=80 \
+              --gate state_review=80 \
+              --gate crypto=80 \
               --gate daemon=80 \
               --gate ingest=80
 
@@ -773,7 +936,7 @@ jobs:
       RUSTC_WRAPPER: ""
       SCCACHE_GHA_ENABLED: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

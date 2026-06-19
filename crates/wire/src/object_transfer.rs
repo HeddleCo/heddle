@@ -252,7 +252,208 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
 
 #[cfg(test)]
 mod tests {
+    use objects::{
+        object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
+        store::{FsStore, ObjectStore},
+    };
+    use tempfile::TempDir;
+
     use super::*;
+
+    fn create_test_store() -> (TempDir, FsStore) {
+        let temp = TempDir::new().unwrap();
+        let store = FsStore::new(temp.path().join(".heddle"));
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    fn test_attribution() -> Attribution {
+        Attribution::human(Principal::new("Wire Tester", "wire@example.com"))
+    }
+
+    #[test]
+    fn primary_objects_roundtrip_through_wire_data() {
+        let (_source_temp, source) = create_test_store();
+        let (_dest_temp, dest) = create_test_store();
+
+        let blob = Blob::from("wire transfer blob\n");
+        let blob_hash = source.put_blob(&blob).unwrap();
+        let tree = Tree::from_entries(vec![TreeEntry::file("lib.rs", blob_hash, false).unwrap()]);
+        let tree_hash = source.put_tree(&tree).unwrap();
+        let state = State::new(tree_hash, Vec::new(), test_attribution())
+            .with_intent("exercise wire transfer");
+        source.put_state(&state).unwrap();
+
+        let blob_data = load_requested_object(
+            &source,
+            &ObjectRequest {
+                id: ObjectId::Hash(blob_hash),
+                have_base: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(blob_data.obj_type, ObjectType::Blob);
+        assert_eq!(blob_data.data, blob.content());
+        store_received_object(&dest, &blob_data).unwrap();
+        assert_eq!(
+            dest.get_blob(&blob_hash).unwrap().unwrap().content(),
+            blob.content()
+        );
+
+        let tree_data = load_requested_object(
+            &source,
+            &ObjectRequest {
+                id: ObjectId::Hash(tree_hash),
+                have_base: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(tree_data.obj_type, ObjectType::Tree);
+        assert_eq!(
+            rmp_serde::from_slice::<Tree>(&tree_data.data).unwrap(),
+            tree
+        );
+        store_received_object(&dest, &tree_data).unwrap();
+        assert_eq!(dest.get_tree(&tree_hash).unwrap().unwrap(), tree);
+
+        let state_data = load_requested_object(
+            &source,
+            &ObjectRequest {
+                id: ObjectId::ChangeId(state.change_id),
+                have_base: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(state_data.obj_type, ObjectType::State);
+        assert_eq!(
+            rmp_serde::from_slice::<State>(&state_data.data).unwrap(),
+            state
+        );
+        store_received_object(&dest, &state_data).unwrap();
+        assert_eq!(
+            dest.get_state(&state.change_id).unwrap().unwrap().change_id,
+            state.change_id
+        );
+    }
+
+    #[test]
+    fn load_object_data_reports_missing_and_id_type_mismatch_errors() {
+        let (_temp, store) = create_test_store();
+        let missing_hash = ContentHash::from_bytes([7; 32]);
+        let missing_state = objects::object::ChangeId::from_bytes([9; 16]);
+
+        let missing = load_requested_object(
+            &store,
+            &ObjectRequest {
+                id: ObjectId::Hash(missing_hash),
+                have_base: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(missing, ProtocolError::ObjectNotFound(id) if id == missing_hash.to_hex())
+        );
+
+        let missing = load_requested_object(
+            &store,
+            &ObjectRequest {
+                id: ObjectId::ChangeId(missing_state),
+                have_base: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(missing, ProtocolError::ObjectNotFound(id) if id == missing_state.to_string())
+        );
+
+        let mismatch =
+            load_object_data(&store, &ObjectId::Hash(missing_hash), ObjectType::State).unwrap_err();
+        assert!(
+            matches!(mismatch, ProtocolError::InvalidState(message) if message == "object id/type mismatch")
+        );
+
+        let mismatch =
+            load_object_data(&store, &ObjectId::ChangeId(missing_state), ObjectType::Blob)
+                .unwrap_err();
+        assert!(
+            matches!(mismatch, ProtocolError::InvalidState(message) if message == "object id/type mismatch")
+        );
+    }
+
+    #[test]
+    fn store_received_object_rejects_mismatched_object_identity() {
+        let (_temp, store) = create_test_store();
+        let blob = Blob::from("tree leaf");
+        let blob_hash = store.put_blob(&blob).unwrap();
+        let tree = Tree::from_entries(vec![TreeEntry::file("leaf.txt", blob_hash, false).unwrap()]);
+        let tree_bytes = rmp_serde::to_vec_named(&tree).unwrap();
+        let wrong_hash = ContentHash::from_bytes([4; 32]);
+
+        let error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::Hash(wrong_hash),
+                obj_type: ObjectType::Tree,
+                data: tree_bytes,
+                is_delta: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ProtocolError::InvalidState(message) if message == "tree hash mismatch")
+        );
+
+        let state = State::new(tree.hash(), Vec::new(), test_attribution());
+        let wrong_state_id = objects::object::ChangeId::from_bytes([5; 16]);
+        let error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::ChangeId(wrong_state_id),
+                obj_type: ObjectType::State,
+                data: rmp_serde::to_vec_named(&state).unwrap(),
+                is_delta: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ProtocolError::InvalidState(message) if message.contains("ChangeId mismatch"))
+        );
+    }
+
+    #[test]
+    fn store_received_object_rejects_raw_sidecar_objects() {
+        let (_temp, store) = create_test_store();
+        let blob_hash = ContentHash::from_bytes([1; 32]);
+        let state_id = objects::object::ChangeId::from_bytes([2; 16]);
+
+        let redaction_error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::Hash(blob_hash),
+                obj_type: ObjectType::Redaction,
+                data: b"unsigned redaction bytes".to_vec(),
+                is_delta: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(redaction_error, ProtocolError::InvalidState(message) if message.contains("signature verification is required"))
+        );
+
+        let visibility_error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::ChangeId(state_id),
+                obj_type: ObjectType::StateVisibility,
+                data: b"raw visibility bytes".to_vec(),
+                is_delta: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(visibility_error, ProtocolError::InvalidState(message) if message.contains("sidecar validation is required"))
+        );
+    }
 
     #[test]
     fn test_chunk_count_rounds_up() {

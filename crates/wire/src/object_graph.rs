@@ -503,18 +503,57 @@ pub fn is_ancestor(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::Utc;
     use objects::{
-        object::{Principal, Redaction, StateVisibility, VisibilityTier},
+        object::{
+            Attribution, Blob, ChangeId, Principal, Redaction, State, StateVisibility, Tree,
+            TreeEntry, VisibilityTier,
+        },
         store::ObjectStore,
     };
     use repo::Repository;
     use tempfile::TempDir;
 
     use super::{
-        ObjectId, ObjectType, StateClosureOptions, enumerate_state_closure_plan_with_options,
-        enumerate_state_closure_with_options,
+        ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
+        enumerate_state_closure_plan_with_options, enumerate_state_closure_with_options,
     };
+
+    fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
+        objects
+            .iter()
+            .map(|info| (info.id.clone(), info.obj_type))
+            .collect()
+    }
+
+    fn pairs_from_plan(objects: &[PlannedObject]) -> HashSet<(ObjectId, ObjectType)> {
+        objects
+            .iter()
+            .map(|info| (info.id.clone(), info.obj_type))
+            .collect()
+    }
+
+    fn assert_plan_parity(
+        repo: &Repository,
+        state_id: ChangeId,
+        options: StateClosureOptions,
+    ) -> HashSet<(ObjectId, ObjectType)> {
+        let full =
+            enumerate_state_closure_with_options(repo.store(), state_id, options.clone()).unwrap();
+        let plan =
+            enumerate_state_closure_plan_with_options(repo.store(), state_id, options).unwrap();
+
+        let full_pairs = pairs_from_full(&full);
+        let plan_pairs = pairs_from_plan(&plan);
+        assert_eq!(full_pairs, plan_pairs);
+        full_pairs
+    }
+
+    fn test_attribution() -> Attribution {
+        Attribution::human(Principal::new("Graph Tester", "graph@example.com"))
+    }
 
     #[test]
     fn lean_closure_planner_matches_object_info_ids_and_types() {
@@ -552,6 +591,119 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::ChangeId(_)))
+        );
+    }
+
+    #[test]
+    fn depth_and_exclude_options_match_between_full_and_plan() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = temp.path().join("story.txt");
+
+        std::fs::write(&path, "base\n").unwrap();
+        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
+        std::fs::write(&path, "middle\n").unwrap();
+        let middle = repo.snapshot(Some("middle".to_string()), None).unwrap();
+        std::fs::write(&path, "tip\n").unwrap();
+        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+
+        let depth_zero = assert_plan_parity(
+            &repo,
+            tip.change_id,
+            StateClosureOptions {
+                depth: Some(0),
+                exclude_states: Vec::new(),
+            },
+        );
+        assert!(depth_zero.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
+        assert!(!depth_zero.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State)));
+        assert!(!depth_zero.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+
+        let depth_one = assert_plan_parity(
+            &repo,
+            tip.change_id,
+            StateClosureOptions {
+                depth: Some(1),
+                exclude_states: Vec::new(),
+            },
+        );
+        assert!(depth_one.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
+        assert!(depth_one.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State)));
+        assert!(!depth_one.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+
+        let exclude_middle = assert_plan_parity(
+            &repo,
+            tip.change_id,
+            StateClosureOptions {
+                depth: None,
+                exclude_states: vec![middle.change_id],
+            },
+        );
+        assert!(exclude_middle.contains(&(ObjectId::ChangeId(tip.change_id), ObjectType::State)));
+        assert!(
+            !exclude_middle.contains(&(ObjectId::ChangeId(middle.change_id), ObjectType::State))
+        );
+        assert!(!exclude_middle.contains(&(ObjectId::ChangeId(base.change_id), ObjectType::State)));
+    }
+
+    #[test]
+    fn shared_tree_and_blob_references_are_emitted_once() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let shared_blob = Blob::from("shared contents\n");
+        let shared_blob_hash = repo.store().put_blob(&shared_blob).unwrap();
+        let shared_tree = Tree::from_entries(vec![
+            TreeEntry::file("shared.txt", shared_blob_hash, false).unwrap(),
+        ]);
+        let shared_tree_hash = repo.store().put_tree(&shared_tree).unwrap();
+        let root = Tree::from_entries(vec![
+            TreeEntry::directory("left", shared_tree_hash).unwrap(),
+            TreeEntry::directory("right", shared_tree_hash).unwrap(),
+        ]);
+        let root_hash = repo.store().put_tree(&root).unwrap();
+        let state = State::new(root_hash, Vec::new(), test_attribution());
+        repo.store().put_state(&state).unwrap();
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pairs_from_full(&full),
+            pairs_from_plan(&plan),
+            "full and lean closure enumerators must dedup the same objects"
+        );
+
+        assert_eq!(
+            full.iter()
+                .filter(|info| info.id == ObjectId::Hash(root_hash)
+                    && info.obj_type == ObjectType::Tree)
+                .count(),
+            1
+        );
+        assert_eq!(
+            full.iter()
+                .filter(|info| info.id == ObjectId::Hash(shared_tree_hash)
+                    && info.obj_type == ObjectType::Tree)
+                .count(),
+            1
+        );
+        assert_eq!(
+            full.iter()
+                .filter(|info| info.id == ObjectId::Hash(shared_blob_hash)
+                    && info.obj_type == ObjectType::Blob)
+                .count(),
+            1
         );
     }
 

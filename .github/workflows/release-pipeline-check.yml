@@ -36,7 +36,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert release pipeline contract
         run: bash scripts/check-release-pipeline.sh
 
@@ -45,7 +45,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert publish pipeline contract
         run: bash scripts/check-publish-pipeline.sh
 
@@ -54,7 +54,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The asserters are Rust binaries (heddle-devtools subcommands) using
       # `syn` to walk the AST. Build once, then run every AST-backed invariant
@@ -93,7 +93,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pure-bash grep guard: a new authored-state writer under the CLI
       # command tree must route through Repository::put_authored_state
       # (auto-signs), never store().put_state directly. Closes the

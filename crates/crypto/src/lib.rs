@@ -9,6 +9,9 @@ mod rsa;
 mod state_signature;
 mod state_signing;
 
+#[cfg(test)]
+mod behavior_tests;
+
 use std::path::Path;
 
 pub use ed25519::Ed25519Signer;

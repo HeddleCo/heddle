@@ -287,6 +287,49 @@ mod tests {
     }
 
     #[test]
+    fn receive_pack_chunk_rejects_resume_offset_mismatch_before_buffering() {
+        let mut state = PackChunkState::default();
+
+        let error =
+            receive_pack_chunk(&mut state, false, 1, 0, false, b"late chunk", false).unwrap_err();
+
+        assert!(state.pack_data.is_empty());
+        assert!(
+            error
+                .to_string()
+                .contains("native pack chunk resume offset mismatch: expected 0, got 1")
+        );
+    }
+
+    #[test]
+    fn receive_pack_chunk_rejects_chunk_index_mismatch_before_buffering() {
+        let mut state = PackChunkState::default();
+
+        receive_pack_chunk(&mut state, false, 0, 0, false, b"abc", false).unwrap();
+        let error = receive_pack_chunk(&mut state, false, 3, 2, false, b"def", false).unwrap_err();
+
+        assert_eq!(state.pack_data, b"abc");
+        assert!(
+            error
+                .to_string()
+                .contains("native pack chunk index mismatch: expected 1, got 2")
+        );
+    }
+
+    #[test]
+    fn receive_pack_chunk_accepts_completion_flags_for_pack_and_index() {
+        let mut state = PackChunkState::default();
+
+        receive_pack_chunk(&mut state, false, 0, 0, true, b"pack-body", false).unwrap();
+        assert!(!state.is_complete());
+        receive_pack_chunk(&mut state, true, 0, 0, false, b"pack-index", true).unwrap();
+
+        assert!(state.is_complete());
+        assert_eq!(state.pack_data, b"pack-body");
+        assert_eq!(state.index_data, b"pack-index");
+    }
+
+    #[test]
     fn normal_size_native_pack_receives_and_installs() {
         let (_source_temp, source_store) = create_test_store();
         let (_dest_temp, dest_store) = create_test_store();

@@ -205,3 +205,60 @@ fn extract_dependency_from_import(import: &str) -> Option<String> {
 fn is_stdlib_dependency(name: &str) -> bool {
     matches!(name, "std" | "core" | "alloc" | "crate" | "super" | "self")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn cargo_manifest_versions_cover_plain_inline_dev_build_and_unknown_deps() {
+        let old = "fn main() {}\n";
+        let new = r#"
+use anyhow::Result;
+use serde::Deserialize;
+use pretty_assertions::assert_eq;
+use cc::Build;
+use missing_dep::Thing;
+
+fn main() {}
+"#;
+        let manifest = r#"
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0.203", features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[build-dependencies]
+cc = { version = "1.1", optional = true }
+"#;
+
+        let changes = detect_import_changes_with_manifest(
+            Path::new("src/lib.rs"),
+            Path::new("src/lib.rs"),
+            old,
+            new,
+            Some(manifest),
+        );
+
+        assert_dependency_added(&changes, "anyhow", "1.0");
+        assert_dependency_added(&changes, "serde", "1.0.203");
+        assert_dependency_added(&changes, "pretty_assertions", "1.4");
+        assert_dependency_added(&changes, "cc", "1.1");
+        assert_dependency_added(&changes, "missing_dep", "unknown");
+    }
+
+    fn assert_dependency_added(changes: &[SemanticChange], name: &str, version: &str) {
+        assert!(
+            changes.iter().any(|change| matches!(
+                change,
+                SemanticChange::DependencyAdded { name: actual_name, version: actual_version }
+                    if actual_name == name && actual_version == version
+            )),
+            "expected {name}@{version}, got: {changes:?}"
+        );
+    }
+}

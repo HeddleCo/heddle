@@ -108,6 +108,9 @@ pub fn extract_definitions(
     let tree = parser
         .parse(source, None)
         .ok_or(SymbolResolveError::ParseFailed)?;
+    if tree.root_node().has_error() {
+        return Err(SymbolResolveError::ParseFailed);
+    }
 
     let mut out = Vec::new();
     walk_definitions(&tree.root_node(), source, None, &mut out);
@@ -779,5 +782,129 @@ impl Bar {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].parent_name.as_deref(), Some("Foo"));
         assert_eq!(results[1].parent_name.as_deref(), Some("Bar"));
+    }
+
+    #[test]
+    fn extract_definitions_reports_rust_taxonomy_parent_scopes_and_ranges() {
+        let source = br#"const LIMIT: usize = 10;
+pub mod outer {
+    pub struct Widget {
+        pub id: u64,
+    }
+
+    pub enum Mode {
+        Fast,
+        Slow,
+    }
+
+    pub trait Runner {
+        fn run(&self);
+    }
+
+    pub type WidgetResult<T> = Result<T, Error>;
+
+    impl Widget {
+        pub fn build(id: u64) -> Self {
+            Self { id }
+        }
+    }
+}
+"#;
+
+        let defs = extract_definitions(source, Path::new("lib.rs")).unwrap();
+
+        assert_definition(&defs, "LIMIT", DefinitionKind::ConstDecl, 1, 1, None);
+        assert_definition(&defs, "outer", DefinitionKind::Module, 2, 23, None);
+        assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, None);
+        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, None);
+        assert_definition(&defs, "Runner", DefinitionKind::Trait, 12, 14, None);
+        assert_definition(
+            &defs,
+            "WidgetResult",
+            DefinitionKind::TypeAlias,
+            16,
+            16,
+            None,
+        );
+        assert_definition(
+            &defs,
+            "build",
+            DefinitionKind::Function,
+            19,
+            21,
+            Some("Widget"),
+        );
+    }
+
+    #[test]
+    fn extract_definitions_reports_typescript_taxonomy_parent_scopes_and_ranges() {
+        let source = br#"interface Service {
+    run(): void;
+}
+
+type Handler = (value: string) => void;
+
+enum Status {
+    Ready,
+    Done,
+}
+
+class Controller {
+    start(): void {
+        handle("start");
+    }
+}
+
+export const handle = (value: string): void => {
+    console.log(value);
+};
+
+export const settings = { retry: 2 };
+"#;
+
+        let defs = extract_definitions(source, Path::new("controller.ts")).unwrap();
+
+        assert_definition(&defs, "Service", DefinitionKind::Interface, 1, 3, None);
+        assert_definition(&defs, "Handler", DefinitionKind::TypeAlias, 5, 5, None);
+        assert_definition(&defs, "Status", DefinitionKind::EnumDef, 7, 10, None);
+        assert_definition(&defs, "Controller", DefinitionKind::Class, 12, 16, None);
+        assert_definition(
+            &defs,
+            "start",
+            DefinitionKind::Function,
+            13,
+            15,
+            Some("Controller"),
+        );
+        assert_definition(&defs, "handle", DefinitionKind::Function, 18, 20, None);
+        assert_definition(&defs, "settings", DefinitionKind::ConstDecl, 22, 22, None);
+    }
+
+    #[test]
+    fn extract_definitions_rejects_parse_error_trees() {
+        let err =
+            extract_definitions(b"fn broken( -> usize { 1 }", Path::new("broken.rs")).unwrap_err();
+
+        assert!(matches!(err, SymbolResolveError::ParseFailed));
+    }
+
+    fn assert_definition(
+        defs: &[Definition],
+        name: &str,
+        kind: DefinitionKind,
+        start_line: u32,
+        end_line: u32,
+        parent_name: Option<&str>,
+    ) {
+        assert!(
+            defs.iter().any(|def| {
+                def.name == name
+                    && def.kind == kind
+                    && def.start_line == start_line
+                    && def.end_line == end_line
+                    && def.parent_name.as_deref() == parent_name
+            }),
+            "expected {name:?} {kind:?} lines {start_line}-{end_line} parent {parent_name:?}, got: {defs:?}"
+        );
     }
 }

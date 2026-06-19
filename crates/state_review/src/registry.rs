@@ -74,7 +74,7 @@ pub fn run_all(
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ContentHash, Principal};
+    use objects::object::{Attribution, ChangeId, ContentHash, Principal};
 
     use super::*;
 
@@ -84,6 +84,20 @@ mod tests {
             vec![],
             Attribution::human(Principal::new("Alice", "alice@example.com")),
         )
+    }
+
+    fn state_with_change_id(byte: u8) -> State {
+        empty_state().with_change_id(ChangeId::from_bytes([byte; 16]))
+    }
+
+    fn fdef(name: &str, content: &str) -> FunctionDef {
+        FunctionDef {
+            name: name.to_string(),
+            signature: format!("fn {name}()"),
+            start_line: 1,
+            end_line: 3,
+            content: content.to_string(),
+        }
     }
 
     #[test]
@@ -100,5 +114,63 @@ mod tests {
         // Adding a sixth module must update budgeting's priority array
         // simultaneously; the const_assert in `budget.rs` enforces that.
         assert_eq!(ALL_MODULES.len(), 5);
+    }
+
+    #[test]
+    fn run_all_returns_deterministic_order_with_computed_against() {
+        let prior = state_with_change_id(1);
+        let new = state_with_change_id(2)
+            .with_intent("self-flag:[z.rs:zeta] late anchor\nself-flag:[a.rs:alpha] early anchor");
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.novelty.enabled = false;
+        cfg.test_reachability.enabled = false;
+        cfg.pattern_deviation.threshold = 0.2;
+
+        let mut ctx = SemanticContext::new();
+        ctx.prior_functions.insert(
+            PathBuf::from("src/scoring.rs"),
+            vec![fdef(
+                "score",
+                "fn score(value: usize) -> usize { value + 1 }",
+            )],
+        );
+        ctx.new_functions.insert(
+            PathBuf::from("src/scoring.rs"),
+            vec![fdef(
+                "score",
+                "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
+            )],
+        );
+
+        let signals = run_all(&prior, &new, &cfg, &ctx);
+        let ordering: Vec<(String, String)> = signals
+            .iter()
+            .map(|signal| (signal.producer.module.clone(), signal.anchor.canonical()))
+            .collect();
+
+        assert_eq!(
+            ordering,
+            vec![
+                (
+                    "pattern_deviation.tree_sitter".to_string(),
+                    "src/scoring.rs:score".to_string(),
+                ),
+                (
+                    "self_flagged_uncertainty".to_string(),
+                    "a.rs:alpha".to_string(),
+                ),
+                (
+                    "self_flagged_uncertainty".to_string(),
+                    "z.rs:zeta".to_string(),
+                ),
+            ],
+            "run_all should sort by producer module then canonical anchor"
+        );
+        assert!(
+            signals
+                .iter()
+                .all(|signal| signal.computed_against == Some(new.change_id)),
+            "all registered modules should stamp computed_against on emitted signals: {signals:?}"
+        );
     }
 }

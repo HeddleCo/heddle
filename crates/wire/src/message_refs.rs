@@ -108,3 +108,43 @@ pub struct RefUpdated {
     pub old_value: Option<ChangeId>,
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RefFilter;
+
+    #[test]
+    fn ref_filter_matches_union_of_names_and_patterns() {
+        let filter = RefFilter {
+            names: vec!["refs/heads/main".to_string()],
+            patterns: vec!["refs/tags/v*".to_string()],
+            ..RefFilter::default()
+        };
+
+        assert!(filter.matches("refs/heads/main"));
+        assert!(filter.matches("refs/tags/v1.0.0"));
+        assert!(!filter.matches("refs/heads/feature"));
+        assert!(!filter.matches("refs/tags/nightly"));
+    }
+
+    #[test]
+    fn ref_filter_without_names_or_patterns_matches_everything() {
+        let filter = RefFilter::default();
+
+        assert!(filter.matches("refs/heads/main"));
+        assert!(filter.matches("refs/tags/v1.0.0"));
+        assert!(filter.matches("threads/alice"));
+    }
+
+    #[test]
+    fn ref_filter_exact_names_do_not_expand_without_patterns() {
+        let filter = RefFilter {
+            names: vec!["refs/heads/main".to_string()],
+            patterns: Vec::new(),
+            ..RefFilter::default()
+        };
+
+        assert!(filter.matches("refs/heads/main"));
+        assert!(!filter.matches("refs/heads/mainline"));
+    }
+}
