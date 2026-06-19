@@ -7,6 +7,11 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Weekly coverage gate: Sundays 06:00 UTC. Offset from the full
+    # Criterion benchmark workflow so the heavy lanes don't stampede.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
 
 concurrency:
   group: rust-tests-${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +47,7 @@ jobs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   release_only — every changed path is release/publish workflow plumbing.
   #   rust      — !docs_only && !release_only; gates check-and-test / postgres / CLI fault-injection.
-  #   coverage  — Rust source or coverage config changed; gates instrumented coverage.
+  #   coverage  — weekly/manual instrumented coverage gate; skipped on PR/push.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   #   cargo_package_args — selected Cargo package arguments for the main Rust lane.
   #   package_names_csv — selected workspace packages, including reverse dependents.
@@ -82,7 +87,7 @@ jobs:
           run_all() {
             echo "$1; running full matrix fail-closed" >&2
             echo "rust=true" >> "$GITHUB_OUTPUT"
-            echo "coverage=true" >> "$GITHUB_OUTPUT"
+            echo "coverage=false" >> "$GITHUB_OUTPUT"
             echo "mount=true" >> "$GITHUB_OUTPUT"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "release_only=false" >> "$GITHUB_OUTPUT"
@@ -92,7 +97,16 @@ jobs:
 
           event="${{ github.event_name }}"
           before="${{ github.event.before }}"
-          if [ "$event" = "pull_request" ]; then
+          if [ "$event" = "schedule" ] || [ "$event" = "workflow_dispatch" ]; then
+            echo "$event event; running coverage only" >&2
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "coverage=true" >> "$GITHUB_OUTPUT"
+            echo "mount=false" >> "$GITHUB_OUTPUT"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "release_only=false" >> "$GITHUB_OUTPUT"
+            echo "force_all=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$event" = "pull_request" ]; then
             if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
               run_all "fetch failed"
             fi
@@ -161,13 +175,10 @@ jobs:
           fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
 
-          if [ "$rust" = "true" ] && printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/|Cargo\.lock$|Cargo\.toml$|codecov\.yml$|docs/contributor-guide/coverage\.md$|\.github/workflows/rust-tests\.yml)' \
-              > /dev/null; then
-            echo "coverage=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "coverage=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Coverage uses an instrumented workspace build and is intentionally
+          # kept off the hot PR/push path. The weekly/manual branch above is
+          # the only automatic source of coverage=true.
+          echo "coverage=false" >> "$GITHUB_OUTPUT"
 
           # mount: use the transitive mount-relevant path set (mount → repo →
           # {crypto, oplog, wire, objects, refs} → optional runtime-bridge,
@@ -801,7 +812,8 @@ jobs:
         run: sccache --show-stats
 
   # Coverage requires an instrumented build that can't share `target/`
-  # with the regular profile, so it stays as its own job.
+  # with the regular profile, so it stays as a weekly/manual job instead of
+  # running on every PR or push.
   coverage:
     name: Coverage
     needs: changes

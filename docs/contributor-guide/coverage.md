@@ -9,7 +9,7 @@ all point here.
 
 ## How the gate fails CI
 
-The `Coverage` job in
+The scheduled/manual `Coverage` job in
 [`.github/workflows/rust-tests.yml`](../../.github/workflows/rust-tests.yml)
 runs `cargo llvm-cov` over the OSS feature set
 (`git-overlay,native,semantic,zstd`) to produce `lcov.info`, then runs:
@@ -34,13 +34,15 @@ cargo run -p heddle-devtools --quiet -- \
 `audit-coverage` aggregates `LF:`/`LH:` lcov records by workspace crate
 (matched on `crates/<name>/`) and **exits non-zero** when any gated
 crate is below its threshold. The step runs *before* the Codecov
-upload, so the build goes red whether or not Codecov is reachable, and
-on both `main` pushes and pull requests. This is the **gate of record.**
+upload, so the scheduled/manual coverage run goes red whether or not
+Codecov is reachable. This is the **coverage gate of record**, but it is
+intentionally kept off the hot pull-request and push path.
 
 Codecov mirrors the same floors as per-crate `coverage.status.project`
 entries in [`codecov.yml`](../../codecov.yml) (`threshold: 0%`, so any
-drop fails the status). Codecov posts the per-crate delta in the PR
-comment, but it is not the gate of record — the in-CI step is.
+drop fails the status on runs that upload coverage). Codecov is useful
+for trend visibility, but it is not the gate of record — the in-CI step
+is.
 
 ## Floors vs. goals
 
