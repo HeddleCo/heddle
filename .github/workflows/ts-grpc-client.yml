@@ -24,12 +24,6 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/ts-grpc-client.yml'
   workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Publish @heddleco/grpc to GitHub Packages after validation. Only allowed from main.'
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -73,64 +67,3 @@ jobs:
       - name: Pack generated gRPC client package
         working-directory: clients/grpc
         run: npm pack --dry-run
-
-  publish:
-    name: Publish generated client
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    needs: validate
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: clients/grpc/package-lock.json
-
-      - name: Install TypeScript client dependencies
-        working-directory: clients/grpc
-        run: npm ci
-
-      - name: Check generated gRPC client
-        run: cargo run --locked -p heddle-devtools -- grpc-ts --check
-
-      - name: Typecheck generated gRPC client package
-        working-directory: clients/grpc
-        run: npm run typecheck
-
-      - name: Pack generated gRPC client package
-        working-directory: clients/grpc
-        run: npm pack --dry-run
-
-      - name: Publish generated gRPC client to GitHub Packages
-        working-directory: clients/grpc
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
-            echo "::error::refusing to publish @heddleco/grpc from ${GITHUB_REF}; dispatch the workflow from main"
-            exit 1
-          fi
-
-          package_name="$(node -p "require('./package.json').name")"
-          printf '%s\n' \
-            "${package_name%%/*}:registry=https://npm.pkg.github.com" \
-            "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" \
-            > .npmrc
-
-          version="$(node -p "require('./package.json').version")"
-          if npm view "${package_name}@${version}" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "::error::${package_name}@${version} is already published to GitHub Packages; bump crates/grpc/Cargo.toml before changing generated client output"
-            exit 1
-          fi
-
-          npm publish --registry=https://npm.pkg.github.com

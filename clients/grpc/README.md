@@ -40,3 +40,8 @@ npm run typecheck
 
 The generator reads the canonical proto tree from
 `crates/grpc/proto/heddle/v1` and writes `src/gen/`.
+
+## Publishing
+
+`@heddleco/grpc` publishes from the stable-tag release workflow. Its npm
+version must match `crates/grpc/Cargo.toml`.
