@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use memmap2::Mmap;
 use objects::store::{
     ByteStream, CompressionConfig, LocalObjectStore, ObjectStore, PackStats,
     async_store::single_chunk_stream,
@@ -49,6 +50,30 @@ pub struct NativePackFiles {
     pub pack_len: u64,
     pub index_len: u64,
     pub stats: PackStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativePackMappedFile {
+    data: Bytes,
+}
+
+impl NativePackMappedFile {
+    pub fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn bytes(&self) -> &Bytes {
+        &self.data
+    }
+
+    pub fn chunk(&self, chunk_size: usize, chunk_index: usize) -> Option<(u64, Bytes, bool)> {
+        next_pack_chunk_bytes(&self.data, chunk_size, chunk_index)
+            .map(|(start, data, is_final)| (start as u64, data, is_final))
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -320,6 +345,25 @@ where
         .map_err(ProtocolError::from)
 }
 
+pub fn map_pack_file(path: &Path) -> Result<NativePackMappedFile> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(NativePackMappedFile { data: Bytes::new() });
+    }
+    let len: usize = len.try_into().map_err(|_| {
+        ProtocolError::InvalidState("pack file length does not fit in usize".to_string())
+    })?;
+
+    // SAFETY: The mapping is read-only, and the returned Bytes owns the mmap.
+    // Callers must not mutate the pack file while streaming it, which is the
+    // same stability contract as reading chunks from a completed pack path.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let data = Bytes::from_owner(mmap);
+    debug_assert_eq!(data.len(), len);
+    Ok(NativePackMappedFile { data })
+}
+
 pub fn next_pack_chunk(
     data: &[u8],
     chunk_size: usize,
@@ -365,6 +409,14 @@ pub fn next_pack_file_chunk(
     file.read_exact(&mut data)?;
     let is_final = start + len as u64 == total_len;
     Ok(Some((start, Bytes::from(data), is_final)))
+}
+
+pub fn next_pack_mapped_file_chunk(
+    file: &NativePackMappedFile,
+    chunk_size: usize,
+    chunk_index: usize,
+) -> Option<(u64, Bytes, bool)> {
+    file.chunk(chunk_size, chunk_index)
 }
 
 pub fn receive_pack_chunk(
@@ -487,8 +539,8 @@ mod tests {
     use super::{
         MAX_RECEIVED_PACK_SIZE, ObjectId, ObjectInfo, ObjectType, PackChunkState,
         build_native_pack, build_native_pack_to_paths, install_received_pack,
-        install_received_pack_from_paths, next_pack_chunk, next_pack_file_chunk,
-        receive_pack_chunk, receive_pack_chunk_with_limit,
+        install_received_pack_from_paths, map_pack_file, next_pack_chunk,
+        next_pack_mapped_file_chunk, receive_pack_chunk, receive_pack_chunk_with_limit,
     };
 
     fn create_test_store() -> (TempDir, FsStore) {
@@ -677,10 +729,12 @@ mod tests {
         assert!(files.pack_len > 0);
         assert!(files.index_len > 0);
 
+        let pack_file = map_pack_file(&files.pack_path).unwrap();
+        let index_file = map_pack_file(&files.index_path).unwrap();
         let mut state = PackChunkState::default();
         let mut chunk_index = 0usize;
         while let Some((start, data, is_final)) =
-            next_pack_file_chunk(&files.pack_path, 7, chunk_index).unwrap()
+            next_pack_mapped_file_chunk(&pack_file, 7, chunk_index)
         {
             receive_pack_chunk(
                 &mut state,
@@ -697,7 +751,7 @@ mod tests {
 
         let mut index_chunk = 0usize;
         while let Some((start, data, is_final)) =
-            next_pack_file_chunk(&files.index_path, 5, index_chunk).unwrap()
+            next_pack_mapped_file_chunk(&index_file, 5, index_chunk)
         {
             receive_pack_chunk(
                 &mut state,

@@ -38,7 +38,8 @@ pub trait ObjectStore: Send + Sync {
         data: Bytes,
         hash: ContentHash,
     ) -> Result<ContentHash> {
-        self.put_object_stream(ObjectKey::Blob(hash), single_chunk_stream(data))
+        let size = data.len() as u64;
+        self.put_object_stream_sized(ObjectKey::Blob(hash), single_chunk_stream(data), Some(size))
             .await?;
         Ok(hash)
     }
@@ -60,6 +61,21 @@ pub trait ObjectStore: Send + Sync {
         &self,
         key: ObjectKey,
         stream: ByteStream,
+    ) -> Result<ObjectPutOutcome> {
+        self.put_object_stream_sized(key, stream, None).await
+    }
+
+    /// Store an object from a stream, preserving the exact byte length when the
+    /// caller already knows it.
+    ///
+    /// Cloud stores can override this to pass a content length to a single PUT
+    /// request or choose a multipart strategy without collecting the stream
+    /// first.
+    async fn put_object_stream_sized(
+        &self,
+        key: ObjectKey,
+        stream: ByteStream,
+        size: Option<u64>,
     ) -> Result<ObjectPutOutcome>;
 
     async fn has_object(&self, key: &ObjectKey) -> Result<bool> {
@@ -80,9 +96,14 @@ pub trait ObjectStore: Send + Sync {
     async fn put_many(&self, objects: Vec<ObjectBytes>) -> Result<Vec<ObjectPutOutcome>> {
         let mut out = Vec::with_capacity(objects.len());
         for object in objects {
+            let size = object.bytes.len() as u64;
             out.push(
-                self.put_object_stream(object.key, single_chunk_stream(object.bytes))
-                    .await?,
+                self.put_object_stream_sized(
+                    object.key,
+                    single_chunk_stream(object.bytes),
+                    Some(size),
+                )
+                .await?,
             );
         }
         Ok(out)
@@ -108,8 +129,13 @@ pub trait ObjectStore: Send + Sync {
         blob: &ContentHash,
         bytes: Bytes,
     ) -> Result<()> {
-        self.put_object_stream(ObjectKey::Redactions(*blob), single_chunk_stream(bytes))
-            .await?;
+        let size = bytes.len() as u64;
+        self.put_object_stream_sized(
+            ObjectKey::Redactions(*blob),
+            single_chunk_stream(bytes),
+            Some(size),
+        )
+        .await?;
         Ok(())
     }
 
@@ -133,9 +159,11 @@ pub trait ObjectStore: Send + Sync {
         state: &ChangeId,
         bytes: Bytes,
     ) -> Result<()> {
-        self.put_object_stream(
+        let size = bytes.len() as u64;
+        self.put_object_stream_sized(
             ObjectKey::StateVisibility(*state),
             single_chunk_stream(bytes),
+            Some(size),
         )
         .await?;
         Ok(())
@@ -502,10 +530,11 @@ impl<T: LocalObjectStore> ObjectStore for AsyncFromLocal<T> {
         local_get_object_stream(&self.inner, key).await
     }
 
-    async fn put_object_stream(
+    async fn put_object_stream_sized(
         &self,
         key: ObjectKey,
         stream: ByteStream,
+        _size: Option<u64>,
     ) -> Result<ObjectPutOutcome> {
         local_put_object_stream(&self.inner, key, stream).await
     }
@@ -627,10 +656,11 @@ impl<'a, T: LocalObjectStore + ?Sized> ObjectStore for AsyncFromLocalRef<'a, T> 
         local_get_object_stream(self.inner, key).await
     }
 
-    async fn put_object_stream(
+    async fn put_object_stream_sized(
         &self,
         key: ObjectKey,
         stream: ByteStream,
+        _size: Option<u64>,
     ) -> Result<ObjectPutOutcome> {
         local_put_object_stream(self.inner, key, stream).await
     }
@@ -747,10 +777,11 @@ where
         local_get_object_stream(self, key).await
     }
 
-    async fn put_object_stream(
+    async fn put_object_stream_sized(
         &self,
         key: ObjectKey,
         stream: ByteStream,
+        _size: Option<u64>,
     ) -> Result<ObjectPutOutcome> {
         local_put_object_stream(self, key, stream).await
     }
@@ -1136,10 +1167,11 @@ mod tests {
             Ok(None)
         }
 
-        async fn put_object_stream(
+        async fn put_object_stream_sized(
             &self,
             key: ObjectKey,
             _stream: ByteStream,
+            _size: Option<u64>,
         ) -> Result<ObjectPutOutcome> {
             Ok(ObjectPutOutcome {
                 key,

@@ -383,8 +383,13 @@ where
         }
     };
 
+    let size = data.data.len() as u64;
     store
-        .put_object_stream(key, single_chunk_stream(data.data.clone().into()))
+        .put_object_stream_sized(
+            key,
+            single_chunk_stream(data.data.clone().into()),
+            Some(size),
+        )
         .await?;
     Ok(())
 }

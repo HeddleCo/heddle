@@ -11,7 +11,9 @@ mod packed_oplog;
 #[cfg(test)]
 mod oplog_tests;
 
-pub use oplog_backend::{LocalOpLogBackend, OpLogBackend};
+pub use oplog_backend::{
+    AsyncFromLocalOpLog, AsyncFromLocalOpLogRef, LocalOpLogBackend, OpLogBackend,
+};
 pub use oplog_core::OpLog;
 pub use oplog_recorder::{LocalOpLogRecorder, OpLogRecorder, VisibilitySidecarSnapshots};
 pub use oplog_types::{

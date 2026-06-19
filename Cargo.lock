@@ -1743,6 +1743,7 @@ dependencies = [
  "futures",
  "heddle-objects",
  "heddle-repo",
+ "memmap2",
  "rmp-serde",
  "serde",
  "tempfile",

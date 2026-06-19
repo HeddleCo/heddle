@@ -42,12 +42,13 @@ pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, RefsList, UpdateRef};
 pub use message_status::{Error, ErrorCode, Status, StatusCode};
 pub use native_pack::{
-    NativePackBundle, NativePackFiles, PackChunkState, build_native_pack, build_native_pack_async,
-    build_native_pack_to_paths, build_native_pack_to_paths_async, install_received_pack,
-    install_received_pack_async, install_received_pack_from_paths,
+    NativePackBundle, NativePackFiles, NativePackMappedFile, PackChunkState, build_native_pack,
+    build_native_pack_async, build_native_pack_to_paths, build_native_pack_to_paths_async,
+    install_received_pack, install_received_pack_async, install_received_pack_from_paths,
     install_received_pack_from_paths_async, install_received_pack_stream,
-    is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
-    next_pack_chunk_bytes, next_pack_file_chunk, receive_pack_chunk,
+    is_native_packable_object_type, map_pack_file, native_pack_excluded_object_types,
+    next_pack_chunk, next_pack_chunk_bytes, next_pack_file_chunk, next_pack_mapped_file_chunk,
+    receive_pack_chunk,
 };
 pub use object_availability::{
     ObjectAvailabilityPlan, has_object, has_object_async, plan_object_availability,
