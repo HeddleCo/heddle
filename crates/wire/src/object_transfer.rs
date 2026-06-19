@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn test_attribution() -> Attribution {
-        Attribution::human(Principal::new("Proto Tester", "proto@example.com"))
+        Attribution::human(Principal::new("Wire Tester", "wire@example.com"))
     }
 
     #[test]
@@ -276,12 +276,12 @@ mod tests {
         let (_source_temp, source) = create_test_store();
         let (_dest_temp, dest) = create_test_store();
 
-        let blob = Blob::from("proto transfer blob\n");
+        let blob = Blob::from("wire transfer blob\n");
         let blob_hash = source.put_blob(&blob).unwrap();
         let tree = Tree::from_entries(vec![TreeEntry::file("lib.rs", blob_hash, false).unwrap()]);
         let tree_hash = source.put_tree(&tree).unwrap();
         let state = State::new(tree_hash, Vec::new(), test_attribution())
-            .with_intent("exercise proto transfer");
+            .with_intent("exercise wire transfer");
         source.put_state(&state).unwrap();
 
         let blob_data = load_requested_object(
