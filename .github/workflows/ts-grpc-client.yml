@@ -1,0 +1,69 @@
+name: TypeScript gRPC client
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'crates/grpc/proto/**/*.proto'
+      - 'crates/grpc/Cargo.toml'
+      - 'clients/grpc/**'
+      - 'crates/devtools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ts-grpc-client.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'crates/grpc/proto/**/*.proto'
+      - 'crates/grpc/Cargo.toml'
+      - 'clients/grpc/**'
+      - 'crates/devtools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ts-grpc-client.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ts-grpc-client-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate generated client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: clients/grpc/package-lock.json
+
+      - name: Install TypeScript client dependencies
+        working-directory: clients/grpc
+        run: npm ci
+
+      - name: Check generated gRPC client
+        run: cargo run --locked -p heddle-devtools -- grpc-ts --check
+
+      - name: Typecheck generated gRPC client package
+        working-directory: clients/grpc
+        run: npm run typecheck
+
+      - name: Pack generated gRPC client package
+        working-directory: clients/grpc
+        run: npm pack --dry-run

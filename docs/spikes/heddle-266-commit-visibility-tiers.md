@@ -63,7 +63,7 @@ ships one of them (redaction) but not the other:
 - **Cooperative render-hide (soft).** The bytes still travel to the peer; a
   sidecar record instructs the reader to render a stub instead of the content.
   This is exactly how `Redaction` works today (§3.3): the blob bytes sync over
-  the wire alongside the redaction record (`crates/proto/src/object_graph.rs:346`),
+  the wire alongside the redaction record (`crates/wire/src/object_graph.rs:346`),
   and each read chokepoint substitutes a stub. Soft-hiding is only as strong as
   the recipient's cooperation — anyone holding the bytes can ignore the record.
 
@@ -256,14 +256,14 @@ must enforce at all three:
    (`crates/grpc/proto/heddle/v1/service.proto:8-13`):
    `ListRefs` → `RefEntry { name, change_id, is_thread }` (`:208-222`),
    `UpdateRef` (`:224`), and the streaming `Push` / `Pull`. The object set sent
-   over the wire is computed by the planner in `crates/proto/src/object_graph.rs`,
+   over the wire is computed by the planner in `crates/wire/src/object_graph.rs`,
    which already has an *exclusion* pass (`collect_excluded`, `object_graph.rs:360`)
    for shallow/exclude negotiation, and propagates redaction records alongside
    blobs (`emit_redaction_plan`, `object_graph.rs:346`). **The authoritative
    server-side handlers live in the closed `weft` repo**, not in this OSS
    workspace — the workspace has the client stubs (`crates/client/src/grpc_hosted/`)
-   and the auth context (`Permission` at `crates/proto/src/message_auth.rs:10`,
-   `TokenScope` at `crates/proto/src/auth_token.rs:16`).
+   and the auth context (`Permission` at `crates/wire/src/message_auth.rs:10`,
+   `TokenScope` at `crates/wire/src/auth_token.rs:16`).
 
 ### 2.6 The grant model that supplies the caller's tier
 
@@ -396,7 +396,7 @@ is simply no sound *partial* embargoed-commit view to serve:
 
 1. **The wire serializes the whole `State`.** The sync planner emits an
    `ObjectType::State` object whose payload is `rmp_serde::to_vec_named(&state)`
-   over the *entire* `State` (`crates/proto/src/object_graph.rs:84-90`; the
+   over the *entire* `State` (`crates/wire/src/object_graph.rs:84-90`; the
    plan-only variant keys the same object by `ChangeId` at `:160-163`, and the
    wire object-id for a state is its `ChangeId`,
    `crates/client/src/grpc_hosted/helpers.rs:109`). `State` carries `intent`,
@@ -603,15 +603,15 @@ soundness hole.
 The ref-publishing / state-emitting surfaces are enumerated below **exhaustively
 as of this audit** — grepped across the bridge
 (`crates/cli/src/bridge/{git_export,git_sync,git_notes,git_core}.rs`) and the
-wire (`crates/proto/src/{message_refs,message_pushpull,object_graph}.rs`); the
+wire (`crates/wire/src/{message_refs,message_pushpull,object_graph}.rs`); the
 authoritative weft serve path is gated by this same categorical rule, not by
 this list. **Six** surfaces, each the same frontier projected:
 
 1. **Wire closure planner** — `enumerate_state_closure_with_options`
-   (`crates/proto/src/object_graph.rs:59`) roots its closure emission at the
+   (`crates/wire/src/object_graph.rs:59`) roots its closure emission at the
    frontier, never at the requested tip.
 2. **`ListRefs`** — (`RefEntry` / `RefsList`,
-   `crates/proto/src/message_refs.rs:82-91`) lags the advertised ref's
+   `crates/wire/src/message_refs.rs:82-91`) lags the advertised ref's
    `change_id` / `head_state` to the frontier, never dropping an already-public
    ref.
 3. **Git-bridge branch ref-sync** — the `export_scoped` thread loop
@@ -779,7 +779,7 @@ host below realizes the rule for its surface(s):
   any object is emitted, and `ListRefs` lags rather than drops.** The closure
   planner cannot be gated by "walk from the tip and halt when the walk *later*
   reaches an under-tier ancestor": that gate fires too late.
-  `enumerate_state_closure_with_options` (`crates/proto/src/object_graph.rs:59`)
+  `enumerate_state_closure_with_options` (`crates/wire/src/object_graph.rs:59`)
   seeds its queue with the *requested tip* (`:70`) and, on the very first pop,
   pushes that state's `ObjectType::State` object into `out` (`:85-90`) and then
   its whole tree closure (`:98-104`) **before** it enqueues the parents
@@ -800,7 +800,7 @@ host below realizes the rule for its surface(s):
   is enforced at planning time, structurally, not discovered mid-walk.
 
   **`ListRefs` lags the ref at that frontier; it never drops an already-public
-  ref.** A `RefEntry` (`crates/proto/src/message_refs.rs:89`) carries the ref's
+  ref.** A `RefEntry` (`crates/wire/src/message_refs.rs:89`) carries the ref's
   tip as `change_id` (`:91`) and `RefsList.refs` (`:82`, `:85`) is the served
   advertisement. When the real thread tip is a public commit descended from an
   embargoed ancestor, dropping the whole `RefEntry` would **temporarily remove an
@@ -932,7 +932,7 @@ antichain of size ≥2, so each surface gets an explicit multi-root path, and no
 requires widening the single-`ChangeId` request shape:
 
 1. **Wire advertisement — multi-root, no new wire field.** `RefsList.refs` is
-   already a `Vec<RefEntry>` (`crates/proto/src/message_refs.rs:85`), so `ListRefs`
+   already a `Vec<RefEntry>` (`crates/wire/src/message_refs.rs:85`), so `ListRefs`
    advertises **one `RefEntry` per maximal served state** in the antichain. The
    moving ref `<thread>` names the **maximal served descendant on its own line** —
    the unique maximal served descendant of its prior advertised tip — and **every
@@ -959,7 +959,7 @@ requires widening the single-`ChangeId` request shape:
    *as a thread* would be funneled into `ThreadName::new("heddle/frontier/…")`, which
    the §5.4 name-reservation now **rejects**, making the reserved root **non-fetchable
    by the very plumbing meant to fetch it**. The `RefEntry` discriminator — today the
-   boolean `is_thread` (`crates/proto/src/message_refs.rs:92`), expressing only *thread*
+   boolean `is_thread` (`crates/wire/src/message_refs.rs:92`), expressing only *thread*
    vs *marker* — therefore widens to a **typed three-way `RefKind`** {`Thread`, `Marker`,
    `SyntheticFrontierRoot`}: the server advertises each sibling-line root as
    `RefKind::SyntheticFrontierRoot` (**never** `is_thread: true`), and the client matches
@@ -984,7 +984,7 @@ requires widening the single-`ChangeId` request shape:
    thereby **discoverable**: the client reads every served root out of the one
    `Vec`, with `<thread>` advancing forward on its own line.
 2. **Wire request — single-root pull, issued per root.** Each `Pull` carries one
-   `PullRequest.target_state` (`crates/proto/src/message_pushpull.rs:91`) and each
+   `PullRequest.target_state` (`crates/wire/src/message_pushpull.rs:91`) and each
    `PullReady.remote_state` echoes one served root (`:118`), so the client issues
    **one pull per advertised root**, passing the states already received in
    `exclude_states` (`:95`) so blobs/states shared across the sides are not re-sent
@@ -1044,7 +1044,7 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
    `[u8; 16]`, `crates/objects/src/object/hash.rs:99`, deriving `Ord`/`PartialOrd` at
    `:98` — lexicographic over the 16 identity bytes; the anchor is `min` over the
    antichain members' `ChangeId`s, the same value `RefEntry.change_id` carries on the
-   wire, `crates/proto/src/message_refs.rs:91`). This tiebreak is:
+   wire, `crates/wire/src/message_refs.rs:91`). This tiebreak is:
    - **host-independent.** A `ChangeId` is the state's *persisted identity*, assigned
      once at change creation (`generate()`, `hash.rs:103`) and replicated **verbatim**
      to every host (it travels in `RefEntry.change_id` and in every synced record), so

@@ -36,7 +36,7 @@ name = "heddle-semantic"
 release = true
 
 [[package]]
-name = "heddle-proto"
+name = "heddle-wire"
 release = true
 
 [[package]]

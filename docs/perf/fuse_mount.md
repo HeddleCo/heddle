@@ -25,13 +25,13 @@ python3 scripts/fuse-bench-compare.py \
 
 The same compare runs in CI on every PR touching `crates/mount/`,
 `crates/objects/`, `crates/repo/`, `crates/refs/`, `crates/oplog/`,
-`crates/crypto/`, `crates/proto/`, `crates/runtime-bridge/`, the
+`crates/crypto/`, `crates/wire/`, `crates/runtime-bridge/`, the
 compare script and its tests, the workflow itself, or any
 workspace-shared build input (`Cargo.lock`, root `Cargo.toml`) —
 see the `fuse-bench-gate` + `fuse-bench` jobs in
 `.github/workflows/rust-tests.yml`. The crate list is the
 transitive closure under `crates/mount/Cargo.toml` (mount → repo →
-crypto/oplog/proto/objects/refs → optional runtime-bridge); update
+crypto/oplog/wire/objects/refs → optional runtime-bridge); update
 it when the mount adds or drops a transitive dep. The gate also
 runs fail-closed (i.e. runs the bench) if `git fetch` or `git
 diff` errors so a flaky base-branch fetch can't silently remove

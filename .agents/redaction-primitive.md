@@ -5,7 +5,7 @@
 > "for now" / "Single-repo only" / "verify" reflect the pre-implementation
 > plan and are *not* current. The shipped behaviour:
 >
-> - Cross-replica propagation works via `proto::ObjectType::Redaction`
+> - Cross-replica propagation works via `wire::ObjectType::Redaction`
 >   and the gRPC `RedactionTransfer` channel. Both `LocalSync` (peer-to-peer
 >   file sync) and `HostedGrpcClient` (network sync) route incoming
 >   redactions through `Repository::accept_wire_redactions`.
@@ -101,7 +101,7 @@ Match the pattern in `cli/src/cli/cli_args/commands_review.rs` for arg structs +
 
 ## Storage + replication
 
-- The shared object/proto model stays in this repo: `crates/proto/src/object_graph.rs` defines `ObjectType::Redaction` and `crates/proto/src/native_pack.rs` carries the redaction pack handling. The local object store gets a new content type for `Redaction` objects. Same loose+packed strategy as Blob/Tree/State.
+- The shared object/wire model stays in this repo: `crates/wire/src/object_graph.rs` defines `ObjectType::Redaction` and `crates/wire/src/native_pack.rs` carries the redaction pack handling. The local object store gets a new content type for `Redaction` objects. Same loose+packed strategy as Blob/Tree/State.
 - Sync protocol (only the replication/server wire format moved — it now lives in the sibling **weft** repo at `crates/weft-server/src/server/grpc_hosted_impl/sync.rs`) needs to handle `Redaction` propagation. Pulling a state pulls any redactions on its blobs.
 - `bridge git export` (in `crates/cli/src/bridge/git_export.rs`) must replace redacted-blob materialization with the stub when exporting to Git. The downstream Git commit then carries the stub, not the secret — even on push to GitHub.
 - `heddle maintenance gc --prune` should NEVER GC a `Redaction` even if its referenced blob has been purged. The tombstone is structurally permanent.

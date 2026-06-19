@@ -7,7 +7,7 @@ use grpc::heddle::v1::{
     TransferCheckpoint, TransportMode,
 };
 use objects::object::{ChangeId, ContentHash};
-use proto::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
+use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 use tonic::Status;
 
 #[derive(Debug, Clone)]
@@ -168,7 +168,7 @@ pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
     }
 }
 
-pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> proto::HostedNamespaceInfo {
+pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> wire::HostedNamespaceInfo {
     use grpc::heddle::v1::NamespaceKind;
     let kind = match NamespaceKind::try_from(namespace.kind).unwrap_or(NamespaceKind::Unspecified) {
         NamespaceKind::User => "user",
@@ -176,7 +176,7 @@ pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> proto::Hosted
         NamespaceKind::Team => "team",
         NamespaceKind::Unspecified => "",
     };
-    proto::HostedNamespaceInfo {
+    wire::HostedNamespaceInfo {
         namespace_id: namespace.namespace_id,
         kind: kind.to_string(),
         slug: namespace.slug,
@@ -186,8 +186,8 @@ pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> proto::Hosted
     }
 }
 
-pub(super) fn to_protocol_repository(repository: HostedRepository) -> proto::HostedRepositoryInfo {
-    proto::HostedRepositoryInfo {
+pub(super) fn to_protocol_repository(repository: HostedRepository) -> wire::HostedRepositoryInfo {
+    wire::HostedRepositoryInfo {
         repo_id: repository.repo_id,
         namespace_id: repository.namespace_id,
         slug: repository.slug,
@@ -196,14 +196,14 @@ pub(super) fn to_protocol_repository(repository: HostedRepository) -> proto::Hos
     }
 }
 
-pub(super) fn to_protocol_grant(grant: HostedGrant) -> proto::HostedGrantInfo {
+pub(super) fn to_protocol_grant(grant: HostedGrant) -> wire::HostedGrantInfo {
     use grpc::heddle::v1::grant_target_ref::Target;
     let (namespace_path, repo_path) = match grant.target.and_then(|t| t.target) {
         Some(Target::NamespacePath(p)) if !p.is_empty() => (Some(p), None),
         Some(Target::RepoPath(p)) if !p.is_empty() => (None, Some(p)),
         _ => (None, None),
     };
-    proto::HostedGrantInfo {
+    wire::HostedGrantInfo {
         subject: grant.subject,
         role: hosted_role_proto_to_string(grant.role),
         namespace_path,

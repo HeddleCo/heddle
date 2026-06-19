@@ -221,7 +221,7 @@ crates/merge/               # merge core
 crates/review/              # review primitives
 crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
-crates/proto/               # wire protocol types
+crates/wire/                # native Heddle wire protocol types
 crates/grpc/                # gRPC client and server transport
 crates/client/              # local-side hosted client
 crates/weft-client-shim/    # shim used by the `client` feature to talk to weft

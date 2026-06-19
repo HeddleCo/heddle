@@ -15,7 +15,7 @@ use objects::{
         pack::ObjectType as PackObjectType,
     },
 };
-use proto::{ObjectData, ObjectId, ObjectType};
+use wire::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;
 use tempfile::TempDir;
 

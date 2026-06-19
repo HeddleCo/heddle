@@ -75,7 +75,7 @@ pub(crate) fn is_ancestor_of(
     potential_ancestor: &ChangeId,
     descendant: &ChangeId,
 ) -> Result<bool> {
-    Ok(proto::is_ancestor(
+    Ok(wire::is_ancestor(
         repo.store(),
         *potential_ancestor,
         *descendant,

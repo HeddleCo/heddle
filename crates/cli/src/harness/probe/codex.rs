@@ -86,7 +86,7 @@ impl HarnessActorProbe for CodexProbe {
             native_actor_key: thread_id.map(|id| format!("codex:thread:{id}")),
             native_parent_actor_key: None,
             native_instance_key: client_name.map(|id| format!("codex:client:{id}")),
-            usage_totals: proto::UsageTotals {
+            usage_totals: wire::UsageTotals {
                 input_tokens: parse_u64(metadata.get("input_tokens")),
                 output_tokens: parse_u64(metadata.get("output_tokens")),
                 reasoning_tokens: parse_u64(metadata.get("reasoning_tokens")),

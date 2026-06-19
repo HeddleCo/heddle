@@ -18,7 +18,7 @@ mod fuse_dispatch_bench;
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
-        Some("web-proto") => run_web_proto(args.collect()),
+        Some("grpc-ts" | "web-proto") => run_grpc_ts(args.collect()),
         Some("audit-idempotency") => run_audit_idempotency(),
         Some("audit-coverage") => run_audit_coverage(args.collect()),
         Some("check-no-silent-default-tree-load") => {
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         Some("check-oprecord-exhaustiveness") => check_oprecord_exhaustiveness::run(args.collect()),
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
-        None => bail!("expected a command (for example: web-proto)"),
+        None => bail!("expected a command (for example: grpc-ts)"),
     }
 }
 
@@ -702,8 +702,14 @@ fn is_state_changing(name: &str) -> bool {
     PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-fn run_web_proto(args: Vec<String>) -> Result<()> {
-    let check = args.iter().any(|arg| arg == "--check");
+fn run_grpc_ts(args: Vec<String>) -> Result<()> {
+    let mut check = false;
+    for arg in args {
+        match arg.as_str() {
+            "--check" => check = true,
+            other => bail!("grpc-ts: unknown flag '{other}'"),
+        }
+    }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
@@ -715,34 +721,106 @@ fn run_web_proto(args: Vec<String>) -> Result<()> {
     // single source eliminates the drift class that landed stale
     // mirrors under `proto/` (see heddle#71).
     let proto_dir = workspace_root.join("crates/grpc/proto");
-    let proto_file = proto_dir.join("heddle/v1/service.proto");
-    let web_dir = workspace_root.join("web");
-    let output_root = web_dir.join("src/lib/gen/proto");
-    let relative_output = PathBuf::from("heddle/v1/service_pb.ts");
+    let proto_files = collect_grpc_proto_files(&proto_dir)?;
+    let client_dir = workspace_root.join("clients/grpc");
+    let output_root = client_dir.join("src/gen");
+    let package_json = client_dir.join("package.json");
+    let grpc_version = grpc_crate_version(workspace_root)?;
 
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
-    let plugin = resolve_plugin_path(&web_dir)?;
+    let es_plugin = resolve_plugin_path(&client_dir, "PROTOC_GEN_ES", "protoc-gen-es")?;
 
     if check {
         let temp = tempfile::tempdir().context("failed to create temp directory")?;
-        generate_service_descriptor(&protoc, &plugin, &proto_dir, &proto_file, temp.path())?;
-        let generated = temp.path().join(&relative_output);
-        let checked_in = output_root.join(&relative_output);
-        assert_file_matches(&generated, &checked_in)?;
-        println!("web proto output is up to date");
+        generate_grpc_ts_client(
+            &protoc,
+            &es_plugin,
+            &proto_dir,
+            &proto_files,
+            temp.path(),
+        )?;
+        assert_tree_matches(temp.path(), &output_root)?;
+        assert_package_json_version(&package_json, &grpc_version)?;
+        println!(
+            "gRPC TypeScript client is up to date at {}",
+            output_root.display()
+        );
         return Ok(());
     }
 
-    generate_service_descriptor(&protoc, &plugin, &proto_dir, &proto_file, &output_root)?;
-    println!("generated {}", output_root.join(relative_output).display());
+    if output_root.exists() {
+        fs::remove_dir_all(&output_root).with_context(|| {
+            format!(
+                "failed to remove stale generated tree '{}'",
+                output_root.display()
+            )
+        })?;
+    }
+    generate_grpc_ts_client(
+        &protoc,
+        &es_plugin,
+        &proto_dir,
+        &proto_files,
+        &output_root,
+    )?;
+    sync_package_json_version(&package_json, &grpc_version)?;
+    println!(
+        "generated {} from heddle-grpc {}",
+        output_root.display(),
+        grpc_version
+    );
     Ok(())
 }
 
-fn generate_service_descriptor(
+fn collect_grpc_proto_files(proto_dir: &Path) -> Result<Vec<PathBuf>> {
+    let source_dir = proto_dir.join("heddle/v1");
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&source_dir)
+        .with_context(|| format!("failed to read proto dir '{}'", source_dir.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("failed to read entry under '{}'", source_dir.display()))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "proto") {
+            files.push(
+                path.strip_prefix(proto_dir)
+                    .with_context(|| {
+                        format!(
+                            "proto file '{}' is not under '{}'",
+                            path.display(),
+                            proto_dir.display()
+                        )
+                    })?
+                    .to_path_buf(),
+            );
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        bail!("no .proto files found under '{}'", source_dir.display());
+    }
+    Ok(files)
+}
+
+fn grpc_crate_version(workspace_root: &Path) -> Result<String> {
+    let manifest_path = workspace_root.join("crates/grpc/Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read '{}'", manifest_path.display()))?;
+    let value: toml::Value = toml::from_str(&manifest)
+        .with_context(|| format!("failed to parse '{}'", manifest_path.display()))?;
+    value
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(|version| version.as_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("missing package.version in '{}'", manifest_path.display()))
+}
+
+fn generate_grpc_ts_client(
     protoc: &Path,
-    plugin: &Path,
+    es_plugin: &Path,
     proto_dir: &Path,
-    proto_file: &Path,
+    proto_files: &[PathBuf],
     output_root: &Path,
 ) -> Result<()> {
     fs::create_dir_all(output_root).with_context(|| {
@@ -752,11 +830,19 @@ fn generate_service_descriptor(
         )
     })?;
 
-    let status = Command::new(protoc)
-        .arg(format!("--plugin=protoc-gen-es={}", plugin.display()))
+    let mut command = Command::new(protoc);
+    command
+        .arg(format!("--plugin=protoc-gen-es={}", es_plugin.display()))
         .arg(format!("--proto_path={}", proto_dir.display()))
-        .arg(format!("--es_out=target=ts:{}", output_root.display()))
-        .arg(proto_file)
+        .arg(format!(
+            "--es_out=target=ts,import_extension=js:{}",
+            output_root.display()
+        ));
+    for proto_file in proto_files {
+        command.arg(proto_dir.join(proto_file));
+    }
+
+    let status = command
         .status()
         .with_context(|| format!("failed to run protoc at '{}'", protoc.display()))?;
 
@@ -767,21 +853,20 @@ fn generate_service_descriptor(
     Ok(())
 }
 
-fn resolve_plugin_path(web_dir: &Path) -> Result<PathBuf> {
-    if let Ok(value) = env::var("PROTOC_GEN_ES") {
+fn resolve_plugin_path(client_dir: &Path, env_var: &str, binary: &str) -> Result<PathBuf> {
+    if let Ok(value) = env::var(env_var) {
         let path = PathBuf::from(value);
         if path.exists() {
             return Ok(path);
         }
-        bail!(
-            "PROTOC_GEN_ES was set, but '{}' does not exist",
-            path.display()
-        );
+        bail!("{env_var} was set, but '{}' does not exist", path.display());
     }
 
     let candidates = [
-        web_dir.join("node_modules/.bin/protoc-gen-es"),
-        web_dir.join("node_modules/.bin/protoc-gen-es.cmd"),
+        client_dir.join("node_modules/.bin").join(binary),
+        client_dir
+            .join("node_modules/.bin")
+            .join(format!("{binary}.cmd")),
     ];
 
     for candidate in candidates {
@@ -791,24 +876,117 @@ fn resolve_plugin_path(web_dir: &Path) -> Result<PathBuf> {
     }
 
     bail!(
-        "could not find protoc-gen-es in web/node_modules/.bin.\n\
-Install web dependencies first (for example: `cd web && npm install`) or set PROTOC_GEN_ES."
+        "could not find {binary} in clients/grpc/node_modules/.bin.\n\
+Install client dependencies first (for example: `cd clients/grpc && npm install`) or set {env_var}."
     )
 }
 
-fn assert_file_matches(generated: &Path, checked_in: &Path) -> Result<()> {
-    let generated_contents = fs::read_to_string(generated)
-        .with_context(|| format!("failed to read generated file '{}'", generated.display()))?;
-    let checked_in_contents = fs::read_to_string(checked_in)
-        .with_context(|| format!("failed to read checked-in file '{}'", checked_in.display()))?;
+fn collect_relative_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    if !root.exists() {
+        bail!("generated tree '{}' does not exist", root.display());
+    }
+    let mut files = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry.with_context(|| format!("failed to walk '{}'", root.display()))?;
+        if entry.file_type().is_file() {
+            files.insert(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .with_context(|| {
+                        format!(
+                            "walked path '{}' was not under '{}'",
+                            entry.path().display(),
+                            root.display()
+                        )
+                    })?
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(files)
+}
 
-    if generated_contents != checked_in_contents {
+fn assert_tree_matches(generated_root: &Path, checked_in_root: &Path) -> Result<()> {
+    let generated_files = collect_relative_files(generated_root)?;
+    let checked_in_files = collect_relative_files(checked_in_root)?;
+
+    if generated_files != checked_in_files {
+        let missing: Vec<_> = generated_files.difference(&checked_in_files).collect();
+        let stale: Vec<_> = checked_in_files.difference(&generated_files).collect();
         bail!(
-            "generated proto output differs from '{}'. Run `npm run proto:gen` in web.",
-            checked_in.display()
+            "generated proto tree differs from '{}'. Missing checked-in files: {:?}; stale checked-in files: {:?}. Run `npm run --prefix clients/grpc generate`.",
+            checked_in_root.display(),
+            missing,
+            stale
         );
     }
 
+    for relative in generated_files {
+        let generated = generated_root.join(&relative);
+        let checked_in = checked_in_root.join(&relative);
+        let generated_contents = fs::read(&generated)
+            .with_context(|| format!("failed to read generated file '{}'", generated.display()))?;
+        let checked_in_contents = fs::read(&checked_in).with_context(|| {
+            format!("failed to read checked-in file '{}'", checked_in.display())
+        })?;
+        if generated_contents != checked_in_contents {
+            bail!(
+                "generated proto output differs from '{}'. Run `npm run --prefix clients/grpc generate`.",
+                checked_in.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn package_json_version(package_json: &Path) -> Result<String> {
+    let contents = fs::read_to_string(package_json)
+        .with_context(|| format!("failed to read '{}'", package_json.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse '{}'", package_json.display()))?;
+    value
+        .get("version")
+        .and_then(|version| version.as_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("missing version in '{}'", package_json.display()))
+}
+
+fn assert_package_json_version(package_json: &Path, expected: &str) -> Result<()> {
+    let actual = package_json_version(package_json)?;
+    if actual != expected {
+        bail!(
+            "{} version is {actual}, but crates/grpc/Cargo.toml is {expected}. Run `npm run --prefix clients/grpc generate`.",
+            package_json.display()
+        );
+    }
+    Ok(())
+}
+
+fn sync_package_json_version(package_json: &Path, expected: &str) -> Result<()> {
+    let contents = fs::read_to_string(package_json)
+        .with_context(|| format!("failed to read '{}'", package_json.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse '{}'", package_json.display()))?;
+    let actual = value
+        .get("version")
+        .and_then(|version| version.as_str())
+        .with_context(|| format!("missing version in '{}'", package_json.display()))?;
+    if actual == expected {
+        return Ok(());
+    }
+
+    let needle = format!("\"version\": \"{actual}\"");
+    let replacement = format!("\"version\": \"{expected}\"");
+    if !contents.contains(&needle) {
+        bail!(
+            "could not locate version field in '{}' for in-place update",
+            package_json.display()
+        );
+    }
+    fs::write(package_json, contents.replacen(&needle, &replacement, 1))
+        .with_context(|| format!("failed to write '{}'", package_json.display()))?;
     Ok(())
 }
 

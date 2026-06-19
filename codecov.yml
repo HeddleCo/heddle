@@ -98,14 +98,14 @@ coverage:
         paths:
           - crates/oplog/
 
-      proto:
+      wire:
         # Ratchet floor at 60% (current main 60.27%). Goal is 80%.
         target: 60%
         threshold: 0%
         flags:
           - rust
         paths:
-          - crates/proto/
+          - crates/wire/
 
       state_review:
         # Ratchet floor at 76% (current main 76.59%). Goal is 80%.
@@ -194,10 +194,10 @@ component_management:
       name: oplog
       paths:
         - crates/oplog/**
-    - component_id: proto
-      name: proto
+    - component_id: wire
+      name: wire
       paths:
-        - crates/proto/**
+        - crates/wire/**
     - component_id: state_review
       name: state_review
       paths:

@@ -80,7 +80,7 @@ impl HarnessActorProbe for OpenCodeProbe {
                 .map(|id| format!("opencode:session:{id}")),
             native_parent_actor_key: parent_id.map(|id| format!("opencode:session:{id}")),
             native_instance_key,
-            usage_totals: proto::UsageTotals {
+            usage_totals: wire::UsageTotals {
                 input_tokens: parse_u64(metadata.get("input_tokens")),
                 output_tokens: parse_u64(metadata.get("output_tokens")),
                 reasoning_tokens: parse_u64(metadata.get("reasoning_tokens")),

@@ -7,7 +7,7 @@ use std::{
 };
 
 use objects::fs_atomic::write_file_atomic_secret;
-use proto::AuthToken;
+use wire::AuthToken;
 use repo::{FsMonitorMode, FsMonitorSettings, OutputFormat, WorktreeStatusOptions};
 use serde::{Deserialize, Serialize};
 

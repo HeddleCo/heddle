@@ -11,6 +11,15 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## Unreleased
+
+### Changed
+
+- Renamed the native Heddle wire/protocol crate from `heddle-proto`
+  (`crates/proto`, Rust crate `proto`) to `heddle-wire`
+  (`crates/wire`, Rust crate `wire`). The protobuf/gRPC IDL remains in
+  `heddle-grpc` under `crates/grpc/proto/heddle/v1`.
+
 ## 0.3.0 - 2026-06-16
 
 Git operations move onto a native-Rust substrate, the command surface is
@@ -134,7 +143,7 @@ addition.
   object-transfer machinery and the receiver replays it: verifies the
   signature, checks the signer against the trust list, persists the
   sidecar, and replays any `purged_at` byte-removal locally.
-  - New `proto::ObjectType::Redaction` variant; `enumerate_state_closure`
+  - New `wire::ObjectType::Redaction` variant; `enumerate_state_closure`
     emits a Redaction entry for every blob in the closure that has a
     sidecar.
   - New `ObjectStore` trait methods for sidecar access:
@@ -181,10 +190,10 @@ addition.
   declaration order (was: sorted). Gitignore semantics are
   order-sensitive — `*.log` then `!keep.log` is not the same as the
   reverse. Cache keys reflect that now.
-- `proto::native_pack::build_native_pack` skips `Redaction` entries;
+- `wire::native_pack::build_native_pack` skips `Redaction` entries;
   sidecars live structurally outside `.heddle/objects/` so GC can't
   reach them and they don't enter the content-addressed pack.
-- `proto::object_transfer::store_received_object` refuses
+- `wire::object_transfer::store_received_object` refuses
   `ObjectType::Redaction` so callers route via
   `Repository::accept_wire_redactions` (forcing signature verification).
 
@@ -480,7 +489,7 @@ as five phases over a single development sprint.
 - Capability negotiation between client and server
 - Reference advertisement (`ListRefs` / `RefsList`)
 - Object-transfer message shape with state-closure computation
-- The `proto` and `grpc` crates publish as `heddle-proto` and `heddle-grpc`; consumers build their own client/server on top
+- The `wire` and `grpc` crates publish as `heddle-wire` and `heddle-grpc`; consumers build their own client/server on top
 
 ### Phase 5 — Git bridge
 

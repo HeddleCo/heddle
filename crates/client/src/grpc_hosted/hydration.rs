@@ -9,7 +9,7 @@ use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, ThreadName},
 };
-use proto::ProtocolError;
+use wire::ProtocolError;
 use repo::{BlobHydrator, Repository};
 
 use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
@@ -701,7 +701,7 @@ mod tests {
                             ..
                         } => {
                             recorded_for_worker.lock().unwrap().push(target_state);
-                            let _ = reply.send(Err(proto::ProtocolError::Io(
+                            let _ = reply.send(Err(wire::ProtocolError::Io(
                                 std::io::Error::other("simulated"),
                             )));
                         }
@@ -870,7 +870,7 @@ mod tests {
     fn hydration_message_carries_send_owned_repo_handle() {
         fn assert_send_static<T: Send + 'static>(_: &T) {}
         let (_temp, repo) = temp_repo();
-        let (reply, _recv) = mpsc::sync_channel::<Result<usize, proto::ProtocolError>>(1);
+        let (reply, _recv) = mpsc::sync_channel::<Result<usize, wire::ProtocolError>>(1);
         let message = super::HydrateMessage::Run {
             repo: Arc::new(repo),
             repo_path: "org/acme/repo".to_string(),

@@ -9,7 +9,7 @@ use grpc::heddle::v1::{
     UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
     grant_target_ref::Target as GrantTargetKind,
 };
-use proto::ProtocolError;
+use wire::ProtocolError;
 use tonic::Request;
 
 use super::{
@@ -65,7 +65,7 @@ impl HostedGrpcClient {
 
     pub async fn get_current_user_namespace(
         &mut self,
-    ) -> Result<proto::HostedNamespaceInfo, ProtocolError> {
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
         let namespace = authed_call!(
             self,
             get_current_user_namespace,
@@ -76,7 +76,7 @@ impl HostedGrpcClient {
 
     pub async fn list_namespaces(
         &mut self,
-    ) -> Result<Vec<proto::HostedNamespaceInfo>, ProtocolError> {
+    ) -> Result<Vec<wire::HostedNamespaceInfo>, ProtocolError> {
         let response = authed_call!(self, list_namespaces, ListNamespacesRequest {});
         Ok(response
             .namespaces
@@ -91,7 +91,7 @@ impl HostedGrpcClient {
         slug: &str,
         parent_path: Option<&str>,
         display_name: Option<String>,
-    ) -> Result<proto::HostedNamespaceInfo, ProtocolError> {
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
         let namespace = authed_call!(
             self,
             create_namespace,
@@ -110,7 +110,7 @@ impl HostedGrpcClient {
         &mut self,
         namespace_path: &str,
         slug: &str,
-    ) -> Result<proto::HostedRepositoryInfo, ProtocolError> {
+    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
         let repo = authed_call!(
             self,
             create_repository,
@@ -126,7 +126,7 @@ impl HostedGrpcClient {
     pub async fn list_repositories(
         &mut self,
         namespace_path: Option<&str>,
-    ) -> Result<Vec<proto::HostedRepositoryInfo>, ProtocolError> {
+    ) -> Result<Vec<wire::HostedRepositoryInfo>, ProtocolError> {
         let response = authed_call!(
             self,
             list_repositories,
@@ -146,7 +146,7 @@ impl HostedGrpcClient {
         full_path: &str,
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
-    ) -> Result<proto::HostedNamespaceInfo, ProtocolError> {
+    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
         let (display_name, clear_display_name) = match display_name {
             Some(Some(value)) => (value, false),
             Some(None) => (String::new(), true),
@@ -182,7 +182,7 @@ impl HostedGrpcClient {
         &mut self,
         full_path: &str,
         new_slug: &str,
-    ) -> Result<proto::HostedRepositoryInfo, ProtocolError> {
+    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
         let repo = authed_call!(
             self,
             update_repository,
@@ -213,7 +213,7 @@ impl HostedGrpcClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-    ) -> Result<proto::HostedGrantInfo, ProtocolError> {
+    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -231,7 +231,7 @@ impl HostedGrpcClient {
     pub async fn list_grants(
         &mut self,
         resource: Option<&str>,
-    ) -> Result<Vec<proto::HostedGrantInfo>, ProtocolError> {
+    ) -> Result<Vec<wire::HostedGrantInfo>, ProtocolError> {
         let response = authed_call!(
             self,
             list_grants,
@@ -248,7 +248,7 @@ impl HostedGrpcClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-    ) -> Result<proto::HostedGrantInfo, ProtocolError> {
+    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,

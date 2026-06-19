@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use proto::{TranscriptAttachmentRef, UsageTotals};
+use wire::{TranscriptAttachmentRef, UsageTotals};
 
 use crate::attribution::clean_attribution_value;
 

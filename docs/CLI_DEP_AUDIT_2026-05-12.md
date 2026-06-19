@@ -46,7 +46,7 @@ Imports inside those modules ([crates/server/src/server/grpc_local_impl/](crates
 
 ```
 tokio, tonic, prost, prost-types, chrono, async-stream, futures, tokio-stream
-+ workspace: repo, refs, oplog, objects, crypto, grpc, proto
++ workspace: repo, refs, oplog, objects, crypto, grpc, wire
 ```
 
 **Zero touches** of axum, biscuit-auth, sqlx, tower-http, webauthn, tokens, pg_*, hosted_access — the heavy stuff that's bloating the CLI.
@@ -242,4 +242,4 @@ cargo tree -p heddle-cli --edges normal --invert <dep>
 
 1. Should the new crate be named `daemon`, `agent-kernel`, `local-agent`, or `agent-runtime`? Naming affects greppability for future contributors.
 2. Should the `hosted-client` cargo feature on `cli` also be split — separating the *client* libraries (tonic-web, hyper-util client) from the *server* libraries that currently sneak in via `server`? This is post-Tier-1 question.
-3. Is there a path to making `proto` and `grpc` the same crate? Today they're split for proto-gen ordering reasons; that may have been resolvable upstream.
+3. Is there a path to making `wire` and `grpc` the same crate? Today they're split for transport/codegen ordering reasons; that may have been resolvable upstream.
