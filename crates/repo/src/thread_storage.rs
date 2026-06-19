@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use objects::{
     lock::RepoLock,
     object::ChangeId,
-    store::{BlockingObjectStore, HeddleError, Result},
+    store::{HeddleError, LocalObjectStore, Result},
 };
 
 use crate::{

@@ -48,7 +48,7 @@
 //!   that case to keep the log faithful.
 
 use objects::object::{MarkerName, Scope, ThreadName};
-use oplog::oplog::{BlockingOpLogBackend, BlockingOpLogRecorder};
+use oplog::oplog::{LocalOpLogBackend, LocalOpLogRecorder};
 use tracing::warn;
 
 use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};
@@ -73,18 +73,16 @@ pub struct OplogEmitStats {
 
 /// Emits oplog records from a list of reflog entries.
 ///
-/// Generic over the [`BlockingOpLogBackend`] so the same emitter drives the local
-/// `OpLog` on disk and the server's Postgres-backed backend. Only the
-/// synchronous `record_*` methods are used here, so `emit` stays sync even
-/// though the trait now has `async` read methods — the type parameter is
-/// required because the trait is no longer `&dyn`-dispatchable.
-pub struct OplogEmitter<'a, O: BlockingOpLogBackend> {
+/// Generic over [`LocalOpLogBackend`] so the same emitter can drive any local
+/// blocking oplog backend. Only the synchronous `record_*` methods are used
+/// here, so `emit` stays sync.
+pub struct OplogEmitter<'a, O: LocalOpLogBackend> {
     oplog: &'a O,
     map: &'a ShaMap,
     scope: Option<Scope>,
 }
 
-impl<'a, O: BlockingOpLogBackend> OplogEmitter<'a, O> {
+impl<'a, O: LocalOpLogBackend> OplogEmitter<'a, O> {
     pub fn new(oplog: &'a O, map: &'a ShaMap) -> Self {
         Self {
             oplog,

@@ -2,8 +2,8 @@
 //! Marker commands.
 
 use anyhow::{Result, anyhow};
-use objects::{object::MarkerName, store::BlockingObjectStore};
-use oplog::BlockingOpLogRecorder;
+use objects::{object::MarkerName, store::LocalObjectStore};
+use oplog::LocalOpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
 

@@ -23,7 +23,7 @@
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 use cli::{
-    BlockingObjectStore, Repository,
+    LocalObjectStore, Repository,
     bridge::{git_core::GitBridge, test_support},
 };
 use tempfile::TempDir;

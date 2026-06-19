@@ -15,7 +15,7 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName, TransactionId},
 };
 use oplog::{
-    BlockingOpLogBackend, IsolationKey, OpBatch, OpEntry, OpRecord, isolation_keys_for_record,
+    IsolationKey, LocalOpLogBackend, OpBatch, OpEntry, OpRecord, isolation_keys_for_record,
 };
 use refs::Head;
 use repo::{

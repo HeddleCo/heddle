@@ -49,7 +49,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use objects::{
     object::{Annotation, AnnotationScope, AnnotationStatus, ContextBlob, ContextTarget},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use tracing::debug;

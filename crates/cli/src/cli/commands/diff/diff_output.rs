@@ -2126,7 +2126,7 @@ mod tests {
     #[test]
     fn semantic_multiline_signature_change_preserves_removed_lines() {
         let item = format!(
-            "get_blob_recursive <S: BlockingObjectStore + ?Sized> (\n    store: &S,\n    tree: &Tree,\n    parts: &[&str],\n){SIGNATURE_CHANGE_SEPARATOR}get_blob_recursive (\n        &self,\n        tree: &Tree,\n        parts: &[&str],\n    )"
+            "get_blob_recursive <S: LocalObjectStore + ?Sized> (\n    store: &S,\n    tree: &Tree,\n    parts: &[&str],\n){SIGNATURE_CHANGE_SEPARATOR}get_blob_recursive (\n        &self,\n        tree: &Tree,\n        parts: &[&str],\n    )"
         );
 
         let rendered = paint_signature_change_item_lines(&item)
@@ -2137,7 +2137,7 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "- get_blob_recursive <S: BlockingObjectStore + ?Sized> (",
+                "- get_blob_recursive <S: LocalObjectStore + ?Sized> (",
                 "-     store: &S,",
                 "-     tree: &Tree,",
                 "-     parts: &[&str],",

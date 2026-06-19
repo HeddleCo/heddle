@@ -11,7 +11,7 @@ use anyhow::Result;
 use objects::object::ChangeId;
 use objects::object::{MarkerName, RemoteName, ThreadName};
 #[cfg(feature = "client")]
-use objects::store::BlockingObjectStore;
+use objects::store::LocalObjectStore;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

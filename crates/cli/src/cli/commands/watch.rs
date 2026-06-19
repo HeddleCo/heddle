@@ -45,8 +45,8 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use objects::{object::ChangeId, store::BlockingObjectStore};
-use oplog::{BlockingOpLogBackend, OpEntry, OpLog, OpRecord};
+use objects::{object::ChangeId, store::LocalObjectStore};
+use oplog::{LocalOpLogBackend, OpEntry, OpLog, OpRecord};
 use repo::Repository;
 use serde::Serialize;
 

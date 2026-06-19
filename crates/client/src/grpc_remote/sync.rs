@@ -14,7 +14,7 @@ use grpc::heddle::v1::{
 use objects::store::LocalObjectStoreExt;
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
-    store::{BlockingObjectStore, PackObjectId},
+    store::{LocalObjectStore, PackObjectId},
 };
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
@@ -321,7 +321,8 @@ impl RemoteGrpcClient {
                     .transfer
                     .as_ref()
                     .map(|transfer| transfer.checkpoint.clone())
-                    .unwrap_or_default(),
+                    .unwrap_or_default()
+                    .to_vec(),
                 is_complete: complete
                     .transfer
                     .as_ref()
@@ -863,7 +864,8 @@ impl RemoteGrpcClient {
                                     .transfer
                                     .as_ref()
                                     .map(|transfer| transfer.checkpoint.clone())
-                                    .unwrap_or_default(),
+                                    .unwrap_or_default()
+                                    .to_vec(),
                                 is_complete: complete
                                     .transfer
                                     .as_ref()
@@ -906,7 +908,8 @@ impl RemoteGrpcClient {
                                 .transfer
                                 .as_ref()
                                 .map(|transfer| transfer.checkpoint.clone())
-                                .unwrap_or_default(),
+                                .unwrap_or_default()
+                                .to_vec(),
                             is_complete: complete
                                 .transfer
                                 .as_ref()
@@ -956,7 +959,7 @@ fn redaction_push_message(
     Ok(PushMessage {
         body: Some(push_message::Body::Redaction(RedactionTransfer {
             blob_hash: hex,
-            redactions_blob: bytes,
+            redactions_blob: bytes.into(),
         })),
     })
 }
@@ -1034,7 +1037,7 @@ fn state_visibility_push_message(
         body: Some(push_message::Body::StateVisibility(
             StateVisibilityTransfer {
                 state_id,
-                state_visibility_blob: bytes,
+                state_visibility_blob: bytes.into(),
             },
         )),
     })
@@ -1389,48 +1392,50 @@ fn encode_native_pack_messages(
 
     let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
     for chunk_index in 0..pack_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
+        let Some((start, data, is_final)) =
+            wire::next_pack_chunk(&bundle.pack_data, chunk_size, chunk_index)
         else {
             break;
         };
+        let len = data.len();
         messages.push(PushMessage {
             body: Some(push_message::Body::Pack(PackChunk {
                 stream_kind: PackStreamKind::Pack as i32,
-                data: bundle.pack_data[start..start + len].to_vec(),
+                data,
                 transfer: Some(transport.transfer_checkpoint_with_mode(
                     transfer_id,
                     transport_mode,
                     chunk_index as u32,
                     start as u64,
-                    chunk_index + 1 == pack_total_chunks,
+                    is_final,
                 )),
                 chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == pack_total_chunks,
+                is_final_chunk: is_final,
             })),
         });
     }
 
     let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
     for chunk_index in 0..index_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
+        let Some((start, data, is_final)) =
+            wire::next_pack_chunk(&bundle.index_data, chunk_size, chunk_index)
         else {
             break;
         };
+        let len = data.len();
         messages.push(PushMessage {
             body: Some(push_message::Body::Pack(PackChunk {
                 stream_kind: PackStreamKind::Index as i32,
-                data: bundle.index_data[start..start + len].to_vec(),
+                data,
                 transfer: Some(transport.transfer_checkpoint_with_mode(
                     transfer_id,
                     transport_mode,
                     chunk_index as u32,
                     start as u64,
-                    chunk_index + 1 == index_total_chunks,
+                    is_final,
                 )),
                 chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == index_total_chunks,
+                is_final_chunk: is_final,
             })),
         });
     }
@@ -1460,7 +1465,7 @@ mod tests {
             Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State, StateVisibility,
             StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
         },
-        store::BlockingObjectStore,
+        store::LocalObjectStore,
     };
     use tempfile::TempDir;
     use tonic::{Response, Status, transport::Server};
@@ -1757,7 +1762,7 @@ mod tests {
                             transport_mode: TransportMode::NativePack as i32,
                             resume_offset: 0,
                             chunk_index: 0,
-                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            checkpoint: bytes::Bytes::from_static(b"heddle-markers-v1\n"),
                             is_complete: true,
                         }),
                     })),
@@ -2132,7 +2137,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
@@ -2150,7 +2155,7 @@ mod tests {
                             transport_mode: TransportMode::NativePack as i32,
                             resume_offset: 0,
                             chunk_index: 0,
-                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            checkpoint: bytes::Bytes::from_static(b"heddle-markers-v1\n"),
                             is_complete: true,
                         }),
                     })),
@@ -2174,50 +2179,52 @@ mod tests {
 
         let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
         for chunk_index in 0..pack_total_chunks.max(1) {
-            let Some((start, len)) =
-                wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
+            let Some((start, data, is_final)) =
+                wire::next_pack_chunk(&bundle.pack_data, chunk_size, chunk_index)
             else {
                 break;
             };
+            let len = data.len();
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Pack as i32,
-                    data: bundle.pack_data[start..start + len].to_vec(),
+                    data,
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
                         resume_offset: start as u64,
                         chunk_index: chunk_index as u32,
-                        checkpoint: Vec::new(),
-                        is_complete: chunk_index + 1 == pack_total_chunks,
+                        checkpoint: bytes::Bytes::new(),
+                        is_complete: is_final,
                     }),
                     chunk_length: len as u32,
-                    is_final_chunk: chunk_index + 1 == pack_total_chunks,
+                    is_final_chunk: is_final,
                 })),
             });
         }
 
         let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
         for chunk_index in 0..index_total_chunks.max(1) {
-            let Some((start, len)) =
-                wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
+            let Some((start, data, is_final)) =
+                wire::next_pack_chunk(&bundle.index_data, chunk_size, chunk_index)
             else {
                 break;
             };
+            let len = data.len();
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Index as i32,
-                    data: bundle.index_data[start..start + len].to_vec(),
+                    data,
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
                         resume_offset: start as u64,
                         chunk_index: chunk_index as u32,
-                        checkpoint: Vec::new(),
-                        is_complete: chunk_index + 1 == index_total_chunks,
+                        checkpoint: bytes::Bytes::new(),
+                        is_complete: is_final,
                     }),
                     chunk_length: len as u32,
-                    is_final_chunk: chunk_index + 1 == index_total_chunks,
+                    is_final_chunk: is_final,
                 })),
             });
         }

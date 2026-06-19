@@ -38,7 +38,7 @@ pub mod util;
 pub use cli_shared::{config, remote};
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 pub use repo::Repository;
 pub type StoreResult<T> = objects::error::Result<T>;

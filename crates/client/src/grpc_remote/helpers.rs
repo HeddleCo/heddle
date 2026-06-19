@@ -41,7 +41,7 @@ impl RemoteTransportPolicy {
             transport_mode: mode as i32,
             resume_offset,
             chunk_index,
-            checkpoint: Vec::new(),
+            checkpoint: Vec::new().into(),
             is_complete,
         }
     }

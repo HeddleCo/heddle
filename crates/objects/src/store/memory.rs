@@ -8,10 +8,10 @@ use std::{collections::HashMap, sync::RwLock};
 
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
-    store::{BlockingObjectStore, HeddleError, PackMaintenanceStoreExt, Result},
+    store::{HeddleError, LocalObjectStore, PackMaintenanceStoreExt, Result},
 };
 
-/// A non-persistent, in-memory implementation of [`BlockingObjectStore`].
+/// A non-persistent, in-memory implementation of [`LocalObjectStore`].
 ///
 /// Useful for testing and as a reference implementation for custom backends.
 /// All data is lost when the store is dropped.
@@ -20,7 +20,7 @@ use crate::{
 ///
 /// ```ignore
 /// use cli::store::InMemoryStore;
-/// use cli::{BlockingObjectStore, Blob};
+/// use cli::{Blob};
 ///
 /// let store = InMemoryStore::new();
 /// let blob = Blob::from("hello world");
@@ -45,7 +45,7 @@ impl InMemoryStore {
     }
 }
 
-impl BlockingObjectStore for InMemoryStore {
+impl LocalObjectStore for InMemoryStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         Ok(self
             .blobs
@@ -208,7 +208,7 @@ impl PackMaintenanceStoreExt for InMemoryStore {}
 mod tests {
     use super::*;
 
-    /// Verify InMemoryStore satisfies the full BlockingObjectStore compliance contract.
+    /// Verify InMemoryStore satisfies the full LocalObjectStore compliance contract.
     #[test]
     fn test_compliance() {
         let store = InMemoryStore::new();

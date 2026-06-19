@@ -8,7 +8,7 @@ use std::{
 
 use objects::{
     object::{ChangeId, State, Tree},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use tracing::{instrument, trace};
 

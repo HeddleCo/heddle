@@ -27,7 +27,7 @@ use anyhow::{Result, anyhow};
 use objects::{
     error::HeddleError,
     object::{ChangeId, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 

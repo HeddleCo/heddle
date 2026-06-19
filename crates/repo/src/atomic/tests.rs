@@ -16,8 +16,8 @@ use objects::{
     },
 };
 use oplog::{
-    BlockingOpLogBackend, BlockingOpLogRecorder, ConditionalCommitOutcome, IsolationKey,
-    IsolationPrecondition, OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, LocalOpLogBackend,
+    LocalOpLogRecorder, OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;

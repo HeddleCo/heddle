@@ -2,7 +2,7 @@
 //!
 //! These tests verify that semantic analysis actually works with real code changes.
 
-use objects::store::BlockingObjectStore;
+use objects::store::LocalObjectStore;
 use repo::Repository;
 use semantic::{
     analysis::{SimilarityMethod, detect_file_renames, detect_function_changes},

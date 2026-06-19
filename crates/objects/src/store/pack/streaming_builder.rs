@@ -48,7 +48,7 @@
 //!   is a non-issue for the call site that motivated this builder.
 //! - **No path-grouped reordering.** Entries land in the order added.
 //! - **Output is a pack file at a path** rather than `(Vec<u8>, Vec<u8>)`.
-//!   Callers pair this with [`crate::store::BlockingObjectStore::install_pack_from_path`]
+//!   Callers pair this with [`crate::store::PackMaintenanceStoreExt::install_pack_streaming`]
 //!   which moves/installs the pack without copying it through RAM.
 //! - **Re-reads the pack at finalize** to compute the BLAKE3 trailer
 //!   checksum (the pack format hashes header+body, and the count goes
@@ -63,6 +63,8 @@ use std::{
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
+
+use bytes::Bytes;
 
 use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
 
@@ -232,6 +234,29 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// continuation bits without enforcing minimum-byte form), so the
     /// padded write decodes back to the same value any reader expects.
     pub fn add_id(&mut self, id: PackObjectId, obj_type: ObjectType, data: Vec<u8>) -> Result<()> {
+        self.add_bytes(id, obj_type, Bytes::from(data))
+    }
+
+    /// Add an object from a `Bytes` buffer without requiring callers to
+    /// materialize a `Vec<u8>`.
+    pub fn add_bytes(&mut self, id: PackObjectId, obj_type: ObjectType, data: Bytes) -> Result<()> {
+        self.add_slice(id, obj_type, &data)
+    }
+
+    fn add_slice(&mut self, id: PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
+        self.add_reader(id, obj_type, data.len() as u64, data)
+    }
+
+    /// Add an object from a streaming reader. The caller supplies the
+    /// uncompressed length because the pack entry header records it
+    /// before the payload bytes.
+    pub fn add_reader<R: Read>(
+        &mut self,
+        id: PackObjectId,
+        obj_type: ObjectType,
+        uncompressed_len: u64,
+        mut reader: R,
+    ) -> Result<()> {
         // Compute the entry's offset relative to the header. Flush the
         // BufWriter first so `stream_position` reflects bytes actually
         // committed to the underlying writer.
@@ -245,13 +270,13 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             .checked_sub(self.header_offset)
             .expect("header_offset should never be past current position");
 
-        self.total_uncompressed += data.len() as u64;
+        self.total_uncompressed += uncompressed_len;
 
         // Phase 1: write the entry header up to (but not including) the
         // compressed-size varint. Always small, fits in `entry_header_buf`.
         let mut header_buf = Vec::with_capacity(40);
         id.encode_tagged(&mut header_buf);
-        super::varint::encode_type_and_size(obj_type, data.len() as u64, &mut header_buf);
+        super::varint::encode_type_and_size(obj_type, uncompressed_len, &mut header_buf);
         pw.write_all(&header_buf).map_err(StoreError::from)?;
         // Only consumed by the zstd-enabled streaming branch below, but
         // we compute it here while we already have `header_buf`'s length
@@ -274,7 +299,8 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         let want_compress: bool;
         #[cfg(feature = "zstd")]
         {
-            want_compress = self.compression.enabled && data.len() >= self.compression.min_size;
+            want_compress =
+                self.compression.enabled && uncompressed_len >= self.compression.min_size as u64;
         }
         #[cfg(not(feature = "zstd"))]
         {
@@ -284,10 +310,15 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             // Raw entry: known compressed_size = data.len(). One canonical
             // varint + the data itself. No seek-back needed.
             let mut csize_buf = Vec::with_capacity(10);
-            super::varint::encode_varint(data.len() as u64, &mut csize_buf);
+            super::varint::encode_varint(uncompressed_len, &mut csize_buf);
             pw.write_all(&csize_buf).map_err(StoreError::from)?;
-            pw.write_all(&data).map_err(StoreError::from)?;
-            self.total_compressed += data.len() as u64;
+            let written = std::io::copy(&mut reader, &mut *pw).map_err(StoreError::from)?;
+            if written != uncompressed_len {
+                return Err(StoreError::InvalidObject(format!(
+                    "streaming pack object length mismatch: expected {uncompressed_len}, wrote {written}"
+                )));
+            }
+            self.total_compressed += uncompressed_len;
         } else {
             #[cfg(feature = "zstd")]
             {
@@ -305,9 +336,14 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
                     // Frame Content Size field is set — lets decoders
                     // preallocate output buffers and validates that we
                     // wrote exactly what we promised at finish().
-                    enc.set_pledged_src_size(Some(data.len() as u64))
+                    enc.set_pledged_src_size(Some(uncompressed_len))
                         .map_err(StoreError::from)?;
-                    enc.write_all(&data).map_err(StoreError::from)?;
+                    let written = std::io::copy(&mut reader, &mut enc).map_err(StoreError::from)?;
+                    if written != uncompressed_len {
+                        return Err(StoreError::InvalidObject(format!(
+                            "streaming pack object length mismatch: expected {uncompressed_len}, wrote {written}"
+                        )));
+                    }
                     enc.finish().map_err(StoreError::from)?;
                 }
                 pw.flush().map_err(StoreError::from)?;
@@ -350,6 +386,18 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
 
         self.object_count += 1;
         Ok(())
+    }
+
+    /// Add an object from a streaming reader. Alias for [`Self::add_reader`]
+    /// using the hosted/native-pack vocabulary.
+    pub fn add_stream<R: Read>(
+        &mut self,
+        id: PackObjectId,
+        obj_type: ObjectType,
+        uncompressed_len: u64,
+        stream: R,
+    ) -> Result<()> {
+        self.add_reader(id, obj_type, uncompressed_len, stream)
     }
 
     fn get_or_open_bucket(&mut self, idx: usize) -> Result<&mut BufWriter<File>> {

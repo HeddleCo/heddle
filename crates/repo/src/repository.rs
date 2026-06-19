@@ -72,10 +72,10 @@ use objects::{
     object::{
         Attribution, ChangeId, ContentHash, MarkerName, Principal, Scope, State, ThreadName, Tree,
     },
-    store::{AnyStore, BlockingObjectStore, FsStore, ObjectStore, ShallowInfo},
+    store::{AnyStore, FsStore, LocalObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
-use oplog::{OpLog, OpLogBackend, OpRecord};
+use oplog::{LocalOpLogBackend, OpLog, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{OutputFormat, RedactConfig, RemoteLinkConfig, RepoConfig, TrustedKey};
@@ -291,8 +291,8 @@ pub trait BlobHydrator: Send + Sync {
 pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
 where
     R: RefBackend,
-    O: OpLogBackend,
-    S: ObjectStore,
+    O: LocalOpLogBackend,
+    S: LocalObjectStore,
 {
     root: PathBuf,
     heddle_dir: PathBuf,
@@ -306,7 +306,9 @@ where
     git_overlay_repo: RwLock<Option<SleyRepository>>,
 }
 
-impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
+impl<R: RefBackend, O: LocalOpLogBackend, S: LocalObjectStore> RepositoryLockExt
+    for Repository<R, O, S>
+{
     fn locker(&self) -> RepoLock {
         let lock_root = self.heddle_dir.parent().expect(
             "heddle_dir has no parent component; cannot determine lock root. This indicates a misconfigured repository.",
@@ -315,7 +317,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repos
     }
 }
 
-impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
+impl<R: RefBackend, O: LocalOpLogBackend, S: LocalObjectStore> Repository<R, O, S> {
     /// Expert-only constructor for callers that already own the repository's
     /// component backends and invariant state.
     ///
@@ -394,7 +396,7 @@ fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Resu
     Ok(())
 }
 
-impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
+impl<S: LocalObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
         heddle_dir: PathBuf,
@@ -432,7 +434,7 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     /// Open an existing Heddle repository using a custom object store backend.
     ///
     /// Expert/test injection point: takes the store by value (any
-    /// [`BlockingObjectStore`]) and skips the local-only open hooks (declarative
+    /// [`LocalObjectStore`]) and skips the local-only open hooks (declarative
     /// migrations, lazy-clone hydrator reconstruction) that [`Repository::open`]
     /// runs for the default `AnyStore` flavor.
     pub fn open_with_store(heddle_dir: impl AsRef<Path>, store: S) -> Result<Self> {

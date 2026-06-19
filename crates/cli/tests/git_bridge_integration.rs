@@ -34,7 +34,7 @@ use objects::{
     object::{
         Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use sley::{

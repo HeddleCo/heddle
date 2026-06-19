@@ -6,7 +6,7 @@ use objects::{
         Blob, ContentHash, FileProvenance, LineSpan, Origin, ProvenanceError, State, Tree,
         TreeEntry,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};

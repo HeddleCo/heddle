@@ -23,7 +23,7 @@ use objects::{
         Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
         Principal, State, SymbolAnchor, VisibilityTier,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use prost::Message;
 use repo::Repository;

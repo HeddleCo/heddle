@@ -5,7 +5,7 @@ use std::{path::Path, path::PathBuf};
 
 use crate::object::ContentHash;
 
-use super::{BlockingObjectStore, Result, pack};
+use super::{LocalObjectStore, Result, pack};
 
 /// Extension trait for hardlink/reflink-friendly local materialization.
 pub trait LocalObjectStoreExt: Send + Sync {
@@ -21,7 +21,7 @@ pub trait LocalObjectStoreExt: Send + Sync {
 }
 
 /// Extension trait for local pack maintenance and filesystem-path installs.
-pub trait PackMaintenanceStoreExt: BlockingObjectStore {
+pub trait PackMaintenanceStoreExt: LocalObjectStore {
     fn install_pack_streaming(
         &self,
         pack_path: &Path,

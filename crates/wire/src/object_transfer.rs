@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
-    object::{State, Tree},
-    store::BlockingObjectStore,
+    object::{ActionId, State, Tree},
+    store::{
+        ByteStream, LocalObjectStore, ObjectKey, ObjectStore,
+        async_store::{collect_stream, single_chunk_stream},
+    },
 };
 
 use crate::{ObjectData, ObjectId, ObjectRequest, ObjectType, ProtocolError, Result};
@@ -113,7 +116,7 @@ pub fn chunk_offset(chunk_index: usize, chunk_size: usize) -> Option<usize> {
 }
 
 pub fn load_requested_object(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     req: &ObjectRequest,
 ) -> Result<ObjectData> {
     // Note on sidecar objects: redactions and state visibility are keyed by
@@ -148,8 +151,42 @@ pub fn load_requested_object(
     })
 }
 
+pub async fn load_requested_object_async<S>(store: &S, req: &ObjectRequest) -> Result<ObjectData>
+where
+    S: ObjectStore + ?Sized,
+{
+    // As in the blocking variant, ObjectRequest only carries an id, so hash
+    // ids are resolved by probing primary object collections in order. Sidecar
+    // callers must use load_object_data_async with an explicit object type.
+    let (obj_type, data) = match &req.id {
+        ObjectId::Hash(hash) => {
+            if let Some(stream) = store.get_object_stream(&ObjectKey::Blob(*hash)).await? {
+                (ObjectType::Blob, collect_stream(stream).await?.to_vec())
+            } else if let Some(stream) = store.get_object_stream(&ObjectKey::Tree(*hash)).await? {
+                (ObjectType::Tree, collect_stream(stream).await?.to_vec())
+            } else {
+                return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
+            }
+        }
+        ObjectId::ChangeId(change_id) => {
+            let stream = store
+                .get_object_stream(&ObjectKey::State(*change_id))
+                .await?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string()))?;
+            (ObjectType::State, collect_stream(stream).await?.to_vec())
+        }
+    };
+
+    Ok(ObjectData {
+        id: req.id.clone(),
+        obj_type,
+        data,
+        is_delta: false,
+    })
+}
+
 pub fn load_object_data(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     id: &ObjectId,
     obj_type: ObjectType,
 ) -> Result<ObjectData> {
@@ -192,7 +229,54 @@ pub fn load_object_data(
     })
 }
 
-pub fn store_received_object(store: &impl BlockingObjectStore, data: &ObjectData) -> Result<()> {
+pub async fn load_object_stream_async<S>(
+    store: &S,
+    id: &ObjectId,
+    obj_type: ObjectType,
+) -> Result<ByteStream>
+where
+    S: ObjectStore + ?Sized,
+{
+    let key = object_key(id, obj_type)?;
+    store
+        .get_object_stream(&key)
+        .await?
+        .ok_or_else(|| ProtocolError::ObjectNotFound(object_id_display(id)))
+}
+
+pub async fn load_object_data_async<S>(
+    store: &S,
+    id: &ObjectId,
+    obj_type: ObjectType,
+) -> Result<ObjectData>
+where
+    S: ObjectStore + ?Sized,
+{
+    let data = match (id, obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Redaction) => store
+            .get_redactions_bytes_for_blob_async(hash)
+            .await?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
+            .to_vec(),
+        (ObjectId::ChangeId(change_id), ObjectType::StateVisibility) => store
+            .get_state_visibility_bytes_for_state_async(change_id)
+            .await?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string_full()))?
+            .to_vec(),
+        _ => collect_stream(load_object_stream_async(store, id, obj_type).await?)
+            .await?
+            .to_vec(),
+    };
+
+    Ok(ObjectData {
+        id: id.clone(),
+        obj_type,
+        data,
+        is_delta: false,
+    })
+}
+
+pub fn store_received_object(store: &impl LocalObjectStore, data: &ObjectData) -> Result<()> {
     match (&data.id, data.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => {
             store.put_blob_bytes_with_hash(&data.data, *hash)?;
@@ -250,11 +334,91 @@ pub fn store_received_object(store: &impl BlockingObjectStore, data: &ObjectData
     Ok(())
 }
 
+pub async fn store_received_object_async<S>(store: &S, data: &ObjectData) -> Result<()>
+where
+    S: ObjectStore + ?Sized,
+{
+    let key = match (&data.id, data.obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Blob) => ObjectKey::Blob(*hash),
+        (ObjectId::Hash(hash), ObjectType::Tree) => {
+            let tree: Tree = rmp_serde::from_slice(&data.data)?;
+            tree.validate().map_err(|error| {
+                ProtocolError::InvalidState(format!("invalid tree object: {error}"))
+            })?;
+            if &tree.hash() != hash {
+                return Err(ProtocolError::InvalidState(
+                    "tree hash mismatch".to_string(),
+                ));
+            }
+            ObjectKey::Tree(*hash)
+        }
+        (ObjectId::ChangeId(change_id), ObjectType::State) => {
+            let state: State = rmp_serde::from_slice(&data.data)?;
+            if state.change_id != *change_id {
+                return Err(ProtocolError::InvalidState(format!(
+                    "ChangeId mismatch: expected {}, got {}",
+                    change_id, state.change_id
+                )));
+            }
+            ObjectKey::State(*change_id)
+        }
+        (_, ObjectType::Redaction) => {
+            return Err(ProtocolError::InvalidState(
+                "Redaction objects must be persisted via Repository::accept_wire_redactions, \
+                 not store_received_object_async - signature verification is required"
+                    .to_string(),
+            ));
+        }
+        (_, ObjectType::StateVisibility) => {
+            return Err(ProtocolError::InvalidState(
+                "StateVisibility objects must be persisted via Repository::accept_wire_state_visibility, \
+                 not store_received_object_async - sidecar validation is required"
+                    .to_string(),
+            ));
+        }
+        _ => {
+            return Err(ProtocolError::InvalidState(
+                "object id/type mismatch".to_string(),
+            ));
+        }
+    };
+
+    store
+        .put_object_stream(key, single_chunk_stream(data.data.clone().into()))
+        .await?;
+    Ok(())
+}
+
+fn object_key(id: &ObjectId, obj_type: ObjectType) -> Result<ObjectKey> {
+    match (id, obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Blob) => Ok(ObjectKey::Blob(*hash)),
+        (ObjectId::Hash(hash), ObjectType::Tree) => Ok(ObjectKey::Tree(*hash)),
+        (ObjectId::Hash(hash), ObjectType::Action) => {
+            Ok(ObjectKey::Action(ActionId::from_hash(*hash)))
+        }
+        (ObjectId::ChangeId(change_id), ObjectType::State) => Ok(ObjectKey::State(*change_id)),
+        (ObjectId::Hash(hash), ObjectType::Redaction) => Ok(ObjectKey::Redactions(*hash)),
+        (ObjectId::ChangeId(change_id), ObjectType::StateVisibility) => {
+            Ok(ObjectKey::StateVisibility(*change_id))
+        }
+        _ => Err(ProtocolError::InvalidState(
+            "object id/type mismatch".to_string(),
+        )),
+    }
+}
+
+fn object_id_display(id: &ObjectId) -> String {
+    match id {
+        ObjectId::Hash(hash) => hash.to_hex(),
+        ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use objects::{
         object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
-        store::{BlockingObjectStore, FsStore},
+        store::{FsStore, LocalObjectStore},
     };
     use tempfile::TempDir;
 

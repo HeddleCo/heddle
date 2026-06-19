@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use anyhow::{Context, Result, anyhow};
 use objects::{
     object::{ChangeId, State, ThreadName},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
-use oplog::{BlockingOpLogBackend, OpBatch, OpRecord};
+use oplog::{LocalOpLogBackend, OpBatch, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 

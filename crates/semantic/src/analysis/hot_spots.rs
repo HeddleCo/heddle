@@ -18,9 +18,8 @@
 //!
 //! # Where this sits
 //!
-//! Pure function over `&impl BlockingObjectStore`. Both the CLI (against the FS
-//! store) and the gRPC service (against any server-side store) call the
-//! same entry point — no host-specific glue required. The walker
+//! Pure function over `&impl LocalObjectStore`. Both the CLI and local gRPC
+//! service call the same entry point. The walker
 //! follows `state.first_parent()` through the imported ancestry,
 //! matching `git log --first-parent` semantics. That's the right
 //! model for "what landed on this branch": a merge commit's diff
@@ -42,7 +41,7 @@ use std::{
 
 use objects::{
     object::{ChangeId, SemanticChange, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use crate::{
@@ -216,7 +215,7 @@ pub struct HotSpotsReport {
 /// `(walk_from, walk_from.first_parent())`. If `walk_from` has no
 /// parent, the report is empty.
 pub fn analyze_hot_spots(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     walk_from: ChangeId,
     params: &HotSpotParams,
 ) -> Result<HotSpotsReport, anyhow::Error> {
@@ -432,7 +431,7 @@ fn path_passes_filter(path: &Path, includes: &[String], excludes: &[String]) -> 
 /// `attribution`. Useful for the "who's been working here" panel
 /// that doesn't need file-granularity output.
 pub fn analyze_actor_histogram(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     walk_from: ChangeId,
     limit_states: Option<usize>,
 ) -> Result<BTreeMap<String, usize>, anyhow::Error> {
@@ -465,7 +464,7 @@ pub fn analyze_actor_histogram(
 }
 
 /// State accessor used by the walker; isolated so future tests can
-/// mock the store layer without going through the whole `BlockingObjectStore`
+/// mock the store layer without going through the whole `LocalObjectStore`
 /// trait. (Currently unused — the walker calls `store.get_state`
 /// directly — but `State` needs to remain reachable for the test
 /// module's helper to compile.)

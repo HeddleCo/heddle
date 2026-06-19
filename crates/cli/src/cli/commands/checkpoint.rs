@@ -13,8 +13,8 @@
 //! convention.
 
 use anyhow::{Result, anyhow};
-use objects::{object::ThreadName, store::BlockingObjectStore};
-use oplog::{BlockingOpLogBackend, OpRecord};
+use objects::{object::ThreadName, store::LocalObjectStore};
+use oplog::{LocalOpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::Repository as SleyRepository;

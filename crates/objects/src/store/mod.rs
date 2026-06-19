@@ -23,7 +23,9 @@ pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
     ReserveOutcome, generate_agent_id,
 };
-pub use async_store::{ByteStream, ObjectStore};
+pub use async_store::{
+    AsyncFromLocal, AsyncFromLocalRef, ByteStream, LocalObjectStore, ObjectStore, file_byte_stream,
+};
 pub use compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use fs::FsStore;
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
@@ -48,7 +50,7 @@ impl From<CompressionError> for HeddleError {
 /// Static-dispatch enum over the concrete object stores Heddle ships.
 ///
 /// This is the default `S` for [`Repository`](crate) so the store remains a
-/// compile-time-monomorphized type — no vtable. Each [`BlockingObjectStore`] method
+/// compile-time-monomorphized type — no vtable. Each [`LocalObjectStore`] method
 /// `match`-dispatches to the inner variant, so the compiler inlines through the
 /// enum to the concrete backend's implementation (including its overridden
 /// default methods).
@@ -60,7 +62,7 @@ pub enum AnyStore {
     Fs(FsStore),
 }
 
-/// Forward an [`BlockingObjectStore`] call to the active [`AnyStore`] variant.
+/// Forward an [`LocalObjectStore`] call to the active [`AnyStore`] variant.
 ///
 /// Every arm calls the *same* method on the inner concrete store, so a
 /// backend's override of a defaulted trait method (e.g. `FsStore::blob_size`)
@@ -73,7 +75,7 @@ macro_rules! any_store_dispatch {
     };
 }
 
-impl BlockingObjectStore for AnyStore {
+impl LocalObjectStore for AnyStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         any_store_dispatch!(self, get_blob(hash))
     }
@@ -82,18 +84,20 @@ impl BlockingObjectStore for AnyStore {
     }
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
         match self {
-            AnyStore::Fs(inner) => BlockingObjectStore::get_blob_bytes(inner, hash),
+            AnyStore::Fs(inner) => LocalObjectStore::get_blob_bytes(inner, hash),
         }
     }
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        any_store_dispatch!(self, blob_size(hash))
+        match self {
+            AnyStore::Fs(inner) => LocalObjectStore::blob_size(inner, hash),
+        }
     }
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         any_store_dispatch!(self, put_blob_with_hash(blob, hash))
     }
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
         match self {
-            AnyStore::Fs(inner) => BlockingObjectStore::has_blob(inner, hash),
+            AnyStore::Fs(inner) => LocalObjectStore::has_blob(inner, hash),
         }
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
@@ -134,7 +138,7 @@ impl BlockingObjectStore for AnyStore {
     }
     fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
         match self {
-            AnyStore::Fs(inner) => BlockingObjectStore::put_blob_bytes_with_hash(inner, data, hash),
+            AnyStore::Fs(inner) => LocalObjectStore::put_blob_bytes_with_hash(inner, data, hash),
         }
     }
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
@@ -159,25 +163,43 @@ impl BlockingObjectStore for AnyStore {
         any_store_dispatch!(self, install_pack(pack_data, index_data))
     }
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
-        any_store_dispatch!(self, has_redactions_for_blob(blob))
+        match self {
+            AnyStore::Fs(inner) => LocalObjectStore::has_redactions_for_blob(inner, blob),
+        }
     }
     fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
-        any_store_dispatch!(self, get_redactions_bytes_for_blob(blob))
+        match self {
+            AnyStore::Fs(inner) => LocalObjectStore::get_redactions_bytes_for_blob(inner, blob),
+        }
     }
     fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
-        any_store_dispatch!(self, put_redactions_bytes_for_blob(blob, bytes))
+        match self {
+            AnyStore::Fs(inner) => {
+                LocalObjectStore::put_redactions_bytes_for_blob(inner, blob, bytes)
+            }
+        }
     }
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         any_store_dispatch!(self, list_blobs_with_redactions())
     }
     fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
-        any_store_dispatch!(self, has_state_visibility_for_state(state))
+        match self {
+            AnyStore::Fs(inner) => LocalObjectStore::has_state_visibility_for_state(inner, state),
+        }
     }
     fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
-        any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
+        match self {
+            AnyStore::Fs(inner) => {
+                LocalObjectStore::get_state_visibility_bytes_for_state(inner, state)
+            }
+        }
     }
     fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
-        any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
+        match self {
+            AnyStore::Fs(inner) => {
+                LocalObjectStore::put_state_visibility_bytes_for_state(inner, state, bytes)
+            }
+        }
     }
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
         any_store_dispatch!(self, list_states_with_visibility())
@@ -221,311 +243,6 @@ impl PackMaintenanceStoreExt for AnyStore {
     }
 }
 
-/// Trait for object storage backends.
-pub trait BlockingObjectStore: Send + Sync {
-    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
-    fn put_blob(&self, blob: &Blob) -> Result<ContentHash>;
-
-    /// Zero-copy variant of `get_blob`. Returns a [`bytes::Bytes`]
-    /// view of the blob's content, which for `FsStore` reads is a
-    /// slice into the pack file's mmap when the entry is non-delta
-    /// and uncompressed — no allocation, no memcpy.
-    ///
-    /// Default impl wraps `get_blob`'s `Vec<u8>` in a `Bytes` (one
-    /// Arc allocation, no body copy) so backends without a native
-    /// fast path still satisfy the contract. The mount's hot read
-    /// path goes through this method instead of `get_blob` so the
-    /// pack-mmap fast path lights up automatically.
-    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
-        Ok(self
-            .get_blob(hash)?
-            .map(|blob| bytes::Bytes::from(blob.into_content())))
-    }
-
-    /// Return the *uncompressed* byte length of the blob identified by
-    /// `hash`, or `Ok(None)` when the blob is not in the store.
-    ///
-    /// The contract is "size without paying for content": backends are
-    /// expected to honour this with a header read or index lookup
-    /// rather than a full decompression. This is the hot path for
-    /// directory listings (`ls -l` over a thread mount) where loading
-    /// every blob just to learn its size would dominate.
-    ///
-    /// The default implementation falls back to `get_blob` so backends
-    /// without a cheap size accessor still satisfy the contract; native
-    /// stores (`FsStore`, `InMemoryStore`) override this with a
-    /// header- or hashmap-only path.
-    fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        Ok(self.get_blob(hash)?.map(|blob| blob.content().len() as u64))
-    }
-
-    fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
-        if blob.hash() != hash {
-            return Err(HeddleError::storage(
-                crate::error::StorageErrorKind::CasMismatch,
-                "blob hash mismatch",
-            ));
-        }
-        self.put_blob(blob)
-    }
-
-    fn has_blob(&self, hash: &ContentHash) -> Result<bool>;
-    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
-    fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
-    fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>>;
-    fn put_state(&self, state: &State) -> Result<()>;
-    fn has_state(&self, id: &ChangeId) -> Result<bool>;
-    fn list_states(&self) -> Result<Vec<ChangeId>>;
-    fn list_states_page(&self, page: PageRequest) -> Result<Page<ChangeId>> {
-        Page::from_local_items(self.list_states()?, page)
-    }
-    fn get_action(&self, id: &ActionId) -> Result<Option<Action>>;
-    fn put_action(&self, action: &mut Action) -> Result<ActionId>;
-    fn list_actions(&self) -> Result<Vec<ActionId>>;
-    fn list_actions_page(&self, page: PageRequest) -> Result<Page<ActionId>> {
-        Page::from_local_items(self.list_actions()?, page)
-    }
-    fn list_blobs(&self) -> Result<Vec<ContentHash>>;
-    fn list_blobs_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
-        Page::from_local_items(self.list_blobs()?, page)
-    }
-    fn list_trees(&self) -> Result<Vec<ContentHash>>;
-    fn list_trees_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
-        Page::from_local_items(self.list_trees()?, page)
-    }
-
-    fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        self.put_blob_with_hash(&Blob::from_slice(data), hash)
-    }
-
-    fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let tree: Tree = rmp_serde::from_slice(data)?;
-        tree.validate()?;
-        if tree.hash() != hash {
-            return Err(HeddleError::Corruption {
-                expected: hash,
-                found: tree.hash(),
-            });
-        }
-        self.put_tree(&tree)
-    }
-
-    fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
-        let state: State = rmp_serde::from_slice(data)?;
-        if state.change_id != id {
-            return Err(HeddleError::InvalidObject(format!(
-                "state change_id mismatch: expected {}, found {}",
-                id, state.change_id
-            )));
-        }
-        self.put_state(&state)
-    }
-
-    fn put_action_serialized(&self, data: &[u8], id: ActionId) -> Result<()> {
-        let mut action: Action = rmp_serde::from_slice(data)?;
-        let found_id = action.compute_id();
-        if found_id != id {
-            return Err(HeddleError::InvalidObject(format!(
-                "action id mismatch: expected {}, found {}",
-                id, found_id
-            )));
-        }
-        let stored_id = self.put_action(&mut action)?;
-        if stored_id != id {
-            return Err(HeddleError::InvalidObject(format!(
-                "action id mismatch after write: expected {}, found {}",
-                id, stored_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn get_pack_object(
-        &self,
-        id: &pack::PackObjectId,
-    ) -> Result<Option<(pack::ObjectType, Vec<u8>)>> {
-        match id {
-            pack::PackObjectId::Hash(hash) => {
-                if let Some(blob) = self.get_blob(hash)? {
-                    return Ok(Some((pack::ObjectType::Blob, blob.content().to_vec())));
-                }
-                if let Some(tree) = self.get_tree(hash)? {
-                    return Ok(Some((
-                        pack::ObjectType::Tree,
-                        rmp_serde::to_vec_named(&tree)?,
-                    )));
-                }
-                if let Some(action) = self.get_action(&ActionId::from_hash(*hash))? {
-                    return Ok(Some((
-                        pack::ObjectType::Action,
-                        rmp_serde::to_vec_named(&action)?,
-                    )));
-                }
-                Ok(None)
-            }
-            pack::PackObjectId::ChangeId(change_id) => {
-                if let Some(state) = self.get_state(change_id)? {
-                    Ok(Some((
-                        pack::ObjectType::State,
-                        rmp_serde::to_vec_named(&state)?,
-                    )))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    /// Bulk-write a batch of blobs as a single durable unit. The default
-    /// implementation falls back to per-blob writes; backends that
-    /// support packfiles (i.e. `FsStore`) override this to install one
-    /// packfile + index — two fsyncs total instead of N. Used by the
-    /// snapshot hot path so writing 1000 small files takes ~one fsync,
-    /// not 1000.
-    ///
-    /// Blobs already present in the store are skipped on the way in
-    /// (the caller would otherwise duplicate them in the pack).
-    fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
-        for (hash, data) in blobs {
-            if !self.has_blob(&hash)? {
-                self.put_blob_bytes_with_hash(&data, hash)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
-        let reader = pack::PackReader::from_slice(pack_data, index_data)?;
-        let ids = reader.list_ids();
-        for id in &ids {
-            let Some((obj_type, data)) = reader.get_object(id)? else {
-                continue;
-            };
-            match (id, obj_type) {
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Blob) => {
-                    self.put_blob_bytes_with_hash(&data, *hash)?;
-                }
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Tree) => {
-                    self.put_tree_serialized(&data, *hash)?;
-                }
-                (pack::PackObjectId::Hash(hash), pack::ObjectType::Action) => {
-                    self.put_action_serialized(&data, ActionId::from_hash(*hash))?;
-                }
-                (pack::PackObjectId::ChangeId(change_id), pack::ObjectType::State) => {
-                    self.put_state_serialized(&data, *change_id)?;
-                }
-                _ => {
-                    return Err(HeddleError::InvalidObject(format!(
-                        "unsupported native pack object: {:?} {:?}",
-                        id, obj_type
-                    )));
-                }
-            }
-        }
-        Ok(ids)
-    }
-
-    /// Whether the store holds any redaction record for the given blob.
-    ///
-    /// Redactions live in a sidecar (`<heddle_dir>/redactions/`) that is
-    /// structurally outside the content-addressed object graph so GC
-    /// can't reach them. The wire layer needs a cheap probe to decide
-    /// whether to ship a redaction for a blob in the closure, so this
-    /// is a separate method rather than a `get_*` + null check.
-    ///
-    /// Default impl returns `Ok(false)` — stores that don't model
-    /// redactions silently report "no redactions," which is the
-    /// correct behaviour for purely in-memory or remote-shim stores.
-    fn has_redactions_for_blob(&self, _blob: &ContentHash) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return the raw rmp-encoded `RedactionsBlob` bytes for the given
-    /// blob, or `Ok(None)` if no redaction record exists. The bytes
-    /// are byte-identical to what was written by `put_redactions_bytes_for_blob`
-    /// (or by `Repository::put_redaction`); this is the wire-transfer
-    /// payload, not a re-serialized view.
-    ///
-    /// Default impl returns `Ok(None)`.
-    fn get_redactions_bytes_for_blob(&self, _blob: &ContentHash) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Persist the rmp-encoded `RedactionsBlob` bytes for the given
-    /// blob. Receiver-side replay calls this after signature
-    /// verification so the bytes land in the same sidecar that the
-    /// sender's `Repository::put_redaction` writes to.
-    ///
-    /// Default impl returns an "unsupported" error — stores that don't
-    /// model redactions (e.g. read-only shims) refuse rather than
-    /// silently dropping the record.
-    fn put_redactions_bytes_for_blob(&self, _blob: &ContentHash, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::storage(
-            crate::error::StorageErrorKind::Unsupported,
-            "this object store does not support persisting redactions",
-        ))
-    }
-
-    /// List every blob that has at least one redaction record. Used by
-    /// the GC pin guard and by sync to enumerate redactions for the
-    /// state closure. Order is unspecified; callers that need stable
-    /// ordering should sort.
-    ///
-    /// Default impl returns `Ok(vec![])`.
-    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
-        Ok(Vec::new())
-    }
-
-    fn list_blobs_with_redactions_page(&self, page: PageRequest) -> Result<Page<ContentHash>> {
-        Page::from_local_items(self.list_blobs_with_redactions()?, page)
-    }
-
-    /// Whether the store holds any state-visibility record for `state`.
-    ///
-    /// Like redactions, state-visibility records live in a sidecar outside
-    /// the content-addressed object graph and cannot ride native packs.
-    /// Sync uses this probe while enumerating a state closure so a non-public
-    /// state can advertise the sidecar that must travel out-of-pack.
-    ///
-    /// Default impl returns `Ok(false)` for stores that do not model this
-    /// sidecar.
-    fn has_state_visibility_for_state(&self, _state: &ChangeId) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for `state`,
-    /// or `Ok(None)` if no sidecar exists. The bytes are the wire-transfer
-    /// payload for state visibility.
-    ///
-    /// Default impl returns `Ok(None)`.
-    fn get_state_visibility_bytes_for_state(&self, _state: &ChangeId) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Persist raw `StateVisibilityBlob` bytes for `state`.
-    ///
-    /// Default impl returns an "unsupported" error so stores that do not
-    /// model the sidecar refuse instead of dropping it.
-    fn put_state_visibility_bytes_for_state(&self, _state: &ChangeId, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::storage(
-            crate::error::StorageErrorKind::Unsupported,
-            "this object store does not support persisting state visibility",
-        ))
-    }
-
-    /// List every state with at least one state-visibility record.
-    ///
-    /// Default impl returns `Ok(vec![])`.
-    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
-        Ok(Vec::new())
-    }
-
-    fn list_states_with_visibility_page(&self, page: PageRequest) -> Result<Page<ChangeId>> {
-        Page::from_local_items(self.list_states_with_visibility()?, page)
-    }
-}
-
 #[cfg(test)]
 mod any_store_tests {
     use tempfile::TempDir;
@@ -540,7 +257,7 @@ mod any_store_tests {
         (temp, AnyStore::Fs(store))
     }
 
-    /// Drive every `BlockingObjectStore` method through the `AnyStore::Fs` dispatch arm
+    /// Drive every `LocalObjectStore` method through the `AnyStore::Fs` dispatch arm
     /// so the enum's match-dispatch is exercised end-to-end. This is the
     /// coverage seam for heddle#283: each arm forwards to the inner concrete
     /// store, and a missing arm would fail to compile or silently fall back to
@@ -556,16 +273,18 @@ mod any_store_tests {
             store.get_blob(&blob_hash).unwrap().unwrap().content(),
             blob.content()
         );
-        assert!(BlockingObjectStore::has_blob(&store, &blob_hash).unwrap());
+        assert!(LocalObjectStore::has_blob(&store, &blob_hash).unwrap());
         assert_eq!(
-            BlockingObjectStore::get_blob_bytes(&store, &blob_hash)
+            LocalObjectStore::get_blob_bytes(&store, &blob_hash)
                 .unwrap()
                 .unwrap()
                 .as_ref(),
             blob.content()
         );
         assert_eq!(
-            store.blob_size(&blob_hash).unwrap().unwrap(),
+            LocalObjectStore::blob_size(&store, &blob_hash)
+                .unwrap()
+                .unwrap(),
             blob.content().len() as u64
         );
         assert!(store.loose_blob_path(&blob_hash).is_some());
@@ -581,7 +300,7 @@ mod any_store_tests {
         let raw_blob = Blob::from("raw bytes blob");
         let raw_hash = raw_blob.hash();
         assert_eq!(
-            BlockingObjectStore::put_blob_bytes_with_hash(&store, raw_blob.content(), raw_hash)
+            LocalObjectStore::put_blob_bytes_with_hash(&store, raw_blob.content(), raw_hash)
                 .unwrap(),
             raw_hash
         );
@@ -663,13 +382,10 @@ mod any_store_tests {
 
         // ── Redactions ──
         let redaction = b"any-store redaction bytes";
-        store
-            .put_redactions_bytes_for_blob(&blob_hash, redaction)
-            .unwrap();
-        assert!(store.has_redactions_for_blob(&blob_hash).unwrap());
+        LocalObjectStore::put_redactions_bytes_for_blob(&store, &blob_hash, redaction).unwrap();
+        assert!(LocalObjectStore::has_redactions_for_blob(&store, &blob_hash).unwrap());
         assert_eq!(
-            store
-                .get_redactions_bytes_for_blob(&blob_hash)
+            LocalObjectStore::get_redactions_bytes_for_blob(&store, &blob_hash)
                 .unwrap()
                 .as_deref(),
             Some(redaction.as_slice())
@@ -683,13 +399,15 @@ mod any_store_tests {
 
         // ── State visibility ──
         let state_visibility = b"any-store state visibility bytes";
-        store
-            .put_state_visibility_bytes_for_state(&change_id, state_visibility)
-            .unwrap();
-        assert!(store.has_state_visibility_for_state(&change_id).unwrap());
+        LocalObjectStore::put_state_visibility_bytes_for_state(
+            &store,
+            &change_id,
+            state_visibility,
+        )
+        .unwrap();
+        assert!(LocalObjectStore::has_state_visibility_for_state(&store, &change_id).unwrap());
         assert_eq!(
-            store
-                .get_state_visibility_bytes_for_state(&change_id)
+            LocalObjectStore::get_state_visibility_bytes_for_state(&store, &change_id)
                 .unwrap()
                 .as_deref(),
             Some(state_visibility.as_slice())

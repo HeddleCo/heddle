@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, anyhow};
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 
@@ -82,7 +82,7 @@ pub(super) fn merge_without_renames(
 }
 
 fn apply_renames(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     active_renames: &HashMap<String, crate::cli::commands::merge::rename_matcher::RenameMatch>,
     opposing_renames: &HashMap<String, crate::cli::commands::merge::rename_matcher::RenameMatch>,
     opposing_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
@@ -141,7 +141,7 @@ fn apply_renames(
 }
 
 fn merge_remaining_paths(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
     our_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
     their_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
@@ -213,7 +213,7 @@ fn merge_remaining_paths(
 }
 
 fn three_way_content_merge(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base_hash: &ContentHash,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
@@ -237,7 +237,7 @@ fn three_way_content_merge(
 }
 
 fn text_hunk_merge_blobs(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base_hash: &ContentHash,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
@@ -315,7 +315,7 @@ fn text_hunk_merge_blobs(
 /// "wins" with no markers, committing a merge that loses data. Bail loudly
 /// so the user sees the corruption instead of inheriting a silent rewrite.
 fn load_blob_content(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     hash: &ContentHash,
     path: &str,
 ) -> Result<Vec<u8>> {
@@ -343,11 +343,7 @@ fn load_blob_content(
 /// `label` is folded into the error message so the operator can locate
 /// the corrupt entry — typically the recursive-merge path or the
 /// merge-side entry name.
-fn require_subtree(
-    store: &impl BlockingObjectStore,
-    hash: &ContentHash,
-    label: &str,
-) -> Result<Tree> {
+fn require_subtree(store: &impl LocalObjectStore, hash: &ContentHash, label: &str) -> Result<Tree> {
     store.get_tree(hash)?.ok_or_else(|| {
         anyhow!(RecoveryAdvice::merge_integrity_refusal(
             "merge input subtree {hash} for {label} is missing from the object store; \
@@ -360,7 +356,7 @@ fn require_subtree(
 }
 
 fn content_conflict_merge(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
     path: &str,
@@ -380,7 +376,7 @@ fn content_conflict_merge(
 }
 
 fn modify_delete_conflict_merge(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     kept_hash: &ContentHash,
     path: &str,
     conflicts: &mut Vec<String>,
@@ -423,7 +419,7 @@ fn format_conflict_content(
 }
 
 fn build_nested_tree(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     flat: &HashMap<String, ContentHash>,
 ) -> Result<Tree> {
     let mut top_files = Vec::new();

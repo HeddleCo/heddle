@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
-use objects::{object::ContentHash, store::BlockingObjectStore};
+use objects::{object::ContentHash, store::LocalObjectStore};
 use repo::Repository;
 
 use super::{FsckError, make_error};

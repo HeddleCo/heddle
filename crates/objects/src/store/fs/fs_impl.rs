@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! BlockingObjectStore implementation for FsStore.
+//! LocalObjectStore implementation for FsStore.
 
 use std::{
     fs,
@@ -19,7 +19,7 @@ use super::{
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{
-        BlockingObjectStore, HeddleError, LocalObjectStoreExt, PackMaintenanceStoreExt, Result,
+        HeddleError, LocalObjectStore, LocalObjectStoreExt, PackMaintenanceStoreExt, Result,
         compression::{compress, decompress, header_uncompressed_size, is_compressed},
         pack::{ObjectType, PackManager, PackObjectId},
     },
@@ -138,7 +138,7 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
 }
 
 impl FsStore {
-    /// Single-pass blob lookup. The wrapper in `BlockingObjectStore::get_blob`
+    /// Single-pass blob lookup. The wrapper in `LocalObjectStore::get_blob`
     /// retries this once after a stale-reload on miss.
     fn try_get_blob_once(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         let path = hash_path(&blobs_dir(&self.root), hash);
@@ -450,7 +450,7 @@ impl LocalObjectStoreExt for FsStore {
     }
 }
 
-impl BlockingObjectStore for FsStore {
+impl LocalObjectStore for FsStore {
     /// Zero-copy pack fast path. When the blob lives in a packfile
     /// and is non-delta + uncompressed, returns a `Bytes::slice`
     /// view of the pack's mmap — no decompression, no allocation,
@@ -877,6 +877,15 @@ impl BlockingObjectStore for FsStore {
         self.install_pack_files(pack_data, index_data)?;
         self.clear_recent_object_caches();
         Ok(ids)
+    }
+
+    #[instrument(skip(self))]
+    fn install_pack_from_paths(
+        &self,
+        pack_path: &Path,
+        index_path: &Path,
+    ) -> Result<Vec<PackObjectId>> {
+        PackMaintenanceStoreExt::install_pack_streaming(self, pack_path, index_path)
     }
 
     #[instrument(skip(self, blobs), fields(count = blobs.len()))]

@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Backend-agnostic compliance test suite for [`BlockingObjectStore`] implementations.
+//! Backend-agnostic compliance test suite for [`LocalObjectStore`] implementations.
 //!
 //! Call [`run_compliance_tests`] from any `#[test]` or `#[tokio::test]` that
-//! has a concrete [`BlockingObjectStore`] to verify it satisfies the full contract.
+//! has a concrete [`LocalObjectStore`] to verify it satisfies the full contract.
 
 use crate::{
     error::StorageErrorKind,
     object::{Attribution, Blob, ContentHash, Principal, State, Tree},
     store::{
-        BlockingObjectStore, ByteStream, ObjectBytes, ObjectCollection, ObjectKey, ObjectStore,
-        PageRequest, PageToken,
+        AsyncFromLocalRef, ByteStream, LocalObjectStore, ObjectBytes, ObjectCollection, ObjectKey,
+        ObjectStore, PageRequest, PageToken,
     },
 };
 
@@ -20,11 +20,11 @@ fn attribution() -> Attribution {
     Attribution::human(Principal::new("Compliance Test", "test@example.com"))
 }
 
-/// Run the full BlockingObjectStore compliance suite against `store`.
+/// Run the full LocalObjectStore compliance suite against `store`.
 ///
 /// Panics on the first assertion failure. Designed to be called from unit or
 /// integration tests.
-pub fn run_compliance_tests<S: BlockingObjectStore>(store: &S) {
+pub fn run_compliance_tests<S: LocalObjectStore>(store: &S) {
     blob_round_trip(store);
     blob_missing_returns_none(store);
     blob_has(store);
@@ -41,7 +41,7 @@ pub fn run_compliance_tests<S: BlockingObjectStore>(store: &S) {
 
 // ── Blob ─────────────────────────────────────────────────────────────────────
 
-fn blob_round_trip<S: BlockingObjectStore>(store: &S) {
+fn blob_round_trip<S: LocalObjectStore>(store: &S) {
     let blob = Blob::from("compliance: blob round-trip");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let got = store
@@ -55,7 +55,7 @@ fn blob_round_trip<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn blob_missing_returns_none<S: BlockingObjectStore>(store: &S) {
+fn blob_missing_returns_none<S: LocalObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-blob");
     let result = store
         .get_blob(&hash)
@@ -66,7 +66,7 @@ fn blob_missing_returns_none<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn blob_has<S: BlockingObjectStore>(store: &S) {
+fn blob_has<S: LocalObjectStore>(store: &S) {
     let blob = Blob::from("compliance: has_blob");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     assert!(
@@ -75,7 +75,7 @@ fn blob_has<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn blob_list<S: BlockingObjectStore>(store: &S) {
+fn blob_list<S: LocalObjectStore>(store: &S) {
     let blob = Blob::from("compliance: list_blobs");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let list = store.list_blobs().expect("list_blobs failed");
@@ -85,7 +85,7 @@ fn blob_list<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn blob_list_paginates<S: BlockingObjectStore>(store: &S) {
+fn blob_list_paginates<S: LocalObjectStore>(store: &S) {
     let expected: Vec<_> = (0..3)
         .map(|i| {
             let blob = Blob::from(format!("compliance: paginated blob {i}"));
@@ -130,11 +130,12 @@ fn blob_list_paginates<S: BlockingObjectStore>(store: &S) {
     assert_eq!(err.storage_kind(), StorageErrorKind::Invalid);
 }
 
-fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
+fn async_object_adapter_batches_and_streams<S: LocalObjectStore>(store: &S) {
+    let async_store = AsyncFromLocalRef::new(store);
     let first = Bytes::from_static(b"compliance: async put_many blob");
     let first_hash = Blob::from_slice(&first).hash();
     let outcomes = block_on(ObjectStore::put_many(
-        store,
+        &async_store,
         vec![ObjectBytes::new(ObjectKey::Blob(first_hash), first.clone())],
     ))
     .expect("async put_many failed");
@@ -143,7 +144,7 @@ fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
 
     let missing_hash = Blob::from("compliance: async missing blob").hash();
     let presence = block_on(ObjectStore::has_many(
-        store,
+        &async_store,
         &[ObjectKey::Blob(first_hash), ObjectKey::Blob(missing_hash)],
     ))
     .expect("async has_many failed");
@@ -152,16 +153,14 @@ fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
         vec![true, false]
     );
 
-    let stream_key = {
-        let bytes = b"compliance: async streamed blob";
-        ObjectKey::Blob(Blob::from_slice(bytes).hash())
-    };
+    let stream_hash = Blob::from_slice(b"compliance: async streamed blob").hash();
+    let stream_key = ObjectKey::Blob(stream_hash);
     let source: ByteStream = Box::pin(stream::iter([
         Ok(Bytes::from_static(b"compliance: async ")),
         Ok(Bytes::from_static(b"streamed blob")),
     ]));
     let outcome = block_on(ObjectStore::put_object_stream(
-        store,
+        &async_store,
         stream_key.clone(),
         source,
     ))
@@ -169,7 +168,7 @@ fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
     assert!(outcome.written);
 
     let streamed = block_on(async {
-        let mut source = ObjectStore::get_object_stream(store, &stream_key)
+        let mut source = ObjectStore::get_object_stream(&async_store, &stream_key)
             .await
             .expect("async get_object_stream failed")
             .expect("streamed blob missing");
@@ -181,8 +180,13 @@ fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
     });
     assert_eq!(streamed, b"compliance: async streamed blob");
 
+    let size = block_on(ObjectStore::blob_size_async(&async_store, &stream_hash))
+        .expect("async blob_size failed")
+        .expect("streamed blob missing for async blob_size");
+    assert_eq!(size, b"compliance: async streamed blob".len() as u64);
+
     let page = block_on(ObjectStore::list_page(
-        store,
+        &async_store,
         ObjectCollection::Blobs,
         PageRequest::first(1),
     ))
@@ -196,7 +200,7 @@ fn async_object_adapter_batches_and_streams<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn storage_error_kinds_are_machine_readable<S: BlockingObjectStore>(store: &S) {
+fn storage_error_kinds_are_machine_readable<S: LocalObjectStore>(store: &S) {
     let blob = Blob::from("compliance: cas mismatch");
     let wrong_hash = Blob::from("compliance: wrong hash").hash();
     let err = store
@@ -208,7 +212,7 @@ fn storage_error_kinds_are_machine_readable<S: BlockingObjectStore>(store: &S) {
 
 // ── Tree ──────────────────────────────────────────────────────────────────────
 
-fn tree_round_trip<S: BlockingObjectStore>(store: &S) {
+fn tree_round_trip<S: LocalObjectStore>(store: &S) {
     let tree = Tree::new();
     let hash = store.put_tree(&tree).expect("put_tree failed");
     let got = store
@@ -218,7 +222,7 @@ fn tree_round_trip<S: BlockingObjectStore>(store: &S) {
     assert_eq!(got.hash(), hash, "tree hash changed after round-trip");
 }
 
-fn tree_missing_returns_none<S: BlockingObjectStore>(store: &S) {
+fn tree_missing_returns_none<S: LocalObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-tree");
     let result = store
         .get_tree(&hash)
@@ -231,7 +235,7 @@ fn tree_missing_returns_none<S: BlockingObjectStore>(store: &S) {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-fn state_round_trip<S: BlockingObjectStore>(store: &S) {
+fn state_round_trip<S: LocalObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -250,7 +254,7 @@ fn state_round_trip<S: BlockingObjectStore>(store: &S) {
     assert_eq!(got.tree, tree_hash, "tree hash changed after round-trip");
 }
 
-fn state_has<S: BlockingObjectStore>(store: &S) {
+fn state_has<S: LocalObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -264,7 +268,7 @@ fn state_has<S: BlockingObjectStore>(store: &S) {
     );
 }
 
-fn state_list<S: BlockingObjectStore>(store: &S) {
+fn state_list<S: LocalObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)

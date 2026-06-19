@@ -11,7 +11,7 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use refs::Head;
 use repo::Repository as HeddleRepository;
@@ -746,7 +746,7 @@ impl<'a> GitBridge<'a> {
         let mut sorted = Vec::new();
         let mut visited: std::collections::HashSet<ChangeId> = std::collections::HashSet::new();
 
-        fn visit<S: BlockingObjectStore + ?Sized>(
+        fn visit<S: LocalObjectStore + ?Sized>(
             state_id: &ChangeId,
             store: &S,
             visited: &mut std::collections::HashSet<ChangeId>,
@@ -2501,7 +2501,7 @@ fn path_prefix_conflict(a: &str, b: &str) -> bool {
 /// resolving subtrees through `store`. Missing subtree objects are
 /// skipped rather than treated as errors, matching the repo's other
 /// tree walks. Paths use `/` separators, the form Git's index expects.
-fn collect_capture_paths<S: BlockingObjectStore + ?Sized>(
+fn collect_capture_paths<S: LocalObjectStore + ?Sized>(
     store: &S,
     tree: &Tree,
     prefix: &str,

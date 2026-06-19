@@ -44,6 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .file_descriptor_set_path(&descriptor_path)
         .build_server(true)
         .build_client(true)
+        .bytes(".heddle.v1.ObjectChunk.data")
+        .bytes(".heddle.v1.PackChunk.data")
+        .bytes(".heddle.v1.RedactionTransfer.redactions_blob")
+        .bytes(".heddle.v1.StateVisibilityTransfer.state_visibility_blob")
+        .bytes(".heddle.v1.TransferCheckpoint.checkpoint")
         .compile_protos(&proto_files, &[proto_dir])?;
 
     Ok(())

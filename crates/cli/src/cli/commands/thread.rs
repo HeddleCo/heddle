@@ -11,9 +11,9 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
     object::{ChangeId, State, ThreadName, TransactionId, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, BlockingObjectStore, current_boot_id},
+    store::{AgentEntry, AgentRegistry, AgentStatus, LocalObjectStore, current_boot_id},
 };
-use oplog::BlockingOpLogRecorder;
+use oplog::LocalOpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,

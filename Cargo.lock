@@ -1442,6 +1442,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "biscuit-auth",
+ "bytes",
  "chrono",
  "clap",
  "futures",
@@ -1737,7 +1738,9 @@ dependencies = [
 name = "heddle-wire"
 version = "0.4.0"
 dependencies = [
+ "bytes",
  "chrono",
+ "futures",
  "heddle-objects",
  "heddle-repo",
  "rmp-serde",

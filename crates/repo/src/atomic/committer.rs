@@ -13,7 +13,7 @@ use objects::{
     error::{HeddleError, Result},
     object::{Principal, Scope},
 };
-use oplog::{BlockingOpLogBackend, OpLog, OpRecord};
+use oplog::{LocalOpLogBackend, OpLog, OpRecord};
 use refs::RefCommitter;
 
 /// Appends ref-carrying records to the file oplog as the phase-4 commit point.

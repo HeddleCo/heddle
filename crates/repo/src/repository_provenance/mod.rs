@@ -14,7 +14,7 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{ChangeId, ContentHash, FileProvenance, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use super::{HeddleError, Repository, Result};

@@ -22,7 +22,7 @@
 //! 2. **Warm tier (CAS-promoted blobs).** When the kernel signals end
 //!    of file (`flush`/`close`), or after an idle threshold (the
 //!    [`PromotionPolicy::idle_after`] window), we hash the buffer,
-//!    write a blob via the same [`BlockingObjectStore`] API that
+//!    write a blob via the same [`LocalObjectStore`] API that
 //!    `heddle capture` uses, and record `path -> blob_oid` in a
 //!    per-thread *pending tree*. The hot buffer is dropped.
 //!
@@ -70,7 +70,7 @@ use objects::{
     object::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
     },
-    store::{AnyStore, BlockingObjectStore, LocalObjectStoreExt},
+    store::{AnyStore, LocalObjectStore, LocalObjectStoreExt},
 };
 use oplog::OpLog;
 use refs::RefManager;
@@ -645,7 +645,7 @@ impl<'brand> Pending<'brand> {
 /// Writes never modify the immutable state; they accumulate in
 /// [`Pending`] until [`ContentAddressedMount::capture`] folds them
 /// into a fresh state.
-pub struct ContentAddressedMount<S: BlockingObjectStore + 'static = AnyStore> {
+pub struct ContentAddressedMount<S: LocalObjectStore + 'static = AnyStore> {
     inner: Arc<MountInner<S>>,
     /// Background safety-sweep worker. Held in an `Option` so the
     /// `Drop` impl can `take()` it, signal shutdown, and join cleanly
@@ -692,7 +692,7 @@ pub struct ContentAddressedMount<S: BlockingObjectStore + 'static = AnyStore> {
 /// templates — search for `state.write` / `state.read` and trace
 /// the subsequent `pending.lock()` / `inodes.lock()` to see the
 /// pattern in action.
-pub(crate) struct MountInner<S: BlockingObjectStore> {
+pub(crate) struct MountInner<S: LocalObjectStore> {
     repo: Repository<RefManager, OpLog, S>,
     thread: String,
     state: RwLock<MountState>,
@@ -840,7 +840,7 @@ pub struct PrewarmHandle {
 }
 
 impl PrewarmHandle {
-    fn start<S: BlockingObjectStore + 'static>(weak: Weak<MountInner<S>>) -> Self {
+    fn start<S: LocalObjectStore + 'static>(weak: Weak<MountInner<S>>) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_worker = Arc::clone(&cancel);
         let join = std::thread::Builder::new()
@@ -887,7 +887,7 @@ impl Drop for PrewarmHandle {
 /// Coordinator thread body: walk the tree to collect blob hashes,
 /// then fan the hashes out across [`PREWARM_WORKERS`] worker
 /// threads. Returns aggregate stats.
-fn prewarm_run<S: BlockingObjectStore + 'static>(
+fn prewarm_run<S: LocalObjectStore + 'static>(
     weak: Weak<MountInner<S>>,
     cancel: Arc<AtomicBool>,
 ) -> PrewarmStats {
@@ -1014,7 +1014,7 @@ fn prewarm_run<S: BlockingObjectStore + 'static>(
     stats
 }
 
-impl<S: BlockingObjectStore + 'static> Drop for ContentAddressedMount<S> {
+impl<S: LocalObjectStore + 'static> Drop for ContentAddressedMount<S> {
     fn drop(&mut self) {
         // Signal the worker before dropping the Arc<MountInner> so
         // it observes the shutdown promptly rather than waiting for
@@ -1045,7 +1045,7 @@ pub struct MountOptions {
     pub blob_cache: Option<Arc<BlobCachePool>>,
 }
 
-impl<S: BlockingObjectStore + 'static> ContentAddressedMount<S> {
+impl<S: LocalObjectStore + 'static> ContentAddressedMount<S> {
     /// Open a writable mount of `thread` against `repo`.
     ///
     /// Resolves the thread once, up front, so every subsequent
@@ -1149,7 +1149,7 @@ impl<S: BlockingObjectStore + 'static> ContentAddressedMount<S> {
     }
 
     /// Drop every cached blob — both the mount-side LRU and the
-    /// underlying `BlockingObjectStore`'s `recent_blobs`/`recent_trees`
+    /// underlying `LocalObjectStore`'s `recent_blobs`/`recent_trees`
     /// caches. The next `read` on each blob pays full I/O +
     /// decompression cost. Exposed for benchmarks that want to
     /// measure the true cold-cache path without rebuilding the
@@ -2876,7 +2876,7 @@ enum PendingChildKind {
     Dir,
 }
 
-impl<S: BlockingObjectStore> MountInner<S> {
+impl<S: LocalObjectStore> MountInner<S> {
     /// Drain any hot buffer whose `last_touched` is older than
     /// `idle_after`. Mirrors `ContentAddressedMount::promote_idle_buffers`
     /// but is callable from the worker thread which only holds a
@@ -3077,7 +3077,7 @@ impl<S: BlockingObjectStore> MountInner<S> {
 /// weak handle and drains any hot buffer that's been idle longer
 /// than `idle_after`. A `None` `sweep_interval` returns `None`,
 /// meaning event-driven promotion only.
-fn spawn_sweep_worker<S: BlockingObjectStore + 'static>(
+fn spawn_sweep_worker<S: LocalObjectStore + 'static>(
     inner: &Arc<MountInner<S>>,
 ) -> Option<SweepHandle> {
     let interval = inner
@@ -3102,7 +3102,7 @@ fn spawn_sweep_worker<S: BlockingObjectStore + 'static>(
 /// condvar until either the timer interval elapses (run a sweep) or
 /// `signal_and_join` wakes us (exit). Also exits when the weak
 /// `MountInner` reference can no longer be upgraded.
-fn sweep_worker_loop<S: BlockingObjectStore + 'static>(
+fn sweep_worker_loop<S: LocalObjectStore + 'static>(
     inner: std::sync::Weak<MountInner<S>>,
     state: Arc<SweepShutdown>,
     interval: Duration,
@@ -3125,7 +3125,7 @@ fn sweep_worker_loop<S: BlockingObjectStore + 'static>(
     }
 }
 
-fn resolve_thread<S: BlockingObjectStore>(
+fn resolve_thread<S: LocalObjectStore>(
     repo: &Repository<RefManager, OpLog, S>,
     thread: &str,
 ) -> Result<MountState> {
@@ -3144,7 +3144,7 @@ fn resolve_thread<S: BlockingObjectStore>(
     })
 }
 
-impl<S: BlockingObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
+impl<S: LocalObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
     fn lookup(&self, parent: NodeId, name: &OsStr) -> Result<Option<Entry>> {
         let record = self.record_for(parent)?;
         let parent_path = match self.dir_path_of(&record) {
@@ -4076,7 +4076,7 @@ impl ContentAddressedMount {
 /// Returns the root tree's content hash. The caller writes this to
 /// the new state.
 fn apply_pending_to_tree(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     parent: &Tree,
     pending: &Pending,
     inodes: &Inodes,
@@ -4255,7 +4255,7 @@ fn apply_pending_to_tree(
     fn materialize(
         v: &VDir,
         captured: &Tree,
-        store: &impl BlockingObjectStore,
+        store: &impl LocalObjectStore,
     ) -> Result<Option<ContentHash>> {
         let mut entries: BTreeMap<String, TreeEntry> = captured
             .entries()
@@ -4354,7 +4354,7 @@ fn apply_pending_to_tree(
     Ok(hash)
 }
 
-impl<S: BlockingObjectStore + 'static> ContentAddressedMount<S> {
+impl<S: LocalObjectStore + 'static> ContentAddressedMount<S> {
     /// Test-only accessor for the warm tier so unit tests can verify
     /// promotions landed without going through `read`. Returns paths
     /// resolved via the inode registry (warm is NodeId-keyed under

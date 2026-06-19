@@ -17,7 +17,7 @@ use std::{fs, path::Path};
 
 use objects::{
     object::{ContentHash, ThreadName},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;

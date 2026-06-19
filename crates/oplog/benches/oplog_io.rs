@@ -24,8 +24,8 @@ use chrono::{TimeZone, Utc};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use objects::object::{ChangeId, Principal, TransactionId};
 use oplog::{
-    BlockingOpLogBackend, BlockingOpLogRecorder, ConditionalCommitOutcome, IsolationKey,
-    IsolationPrecondition, OpEntry, OpLog, OpRecord,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpEntry, OpLog, OpLogBackend,
+    OpLogRecorder, OpRecord,
 };
 use tempfile::TempDir;
 

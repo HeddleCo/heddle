@@ -33,7 +33,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, Scope, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::{BlockingOpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
+use oplog::{LocalOpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
     namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
@@ -854,7 +854,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use objects::object::{Principal, VisibilityTier};
-    use oplog::BlockingOpLogBackend;
+    use oplog::LocalOpLogBackend;
     use tempfile::TempDir;
 
     use super::*;

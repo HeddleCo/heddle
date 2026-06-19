@@ -6,11 +6,11 @@ use chrono::Utc;
 use objects::{
     object::ThreadName,
     store::{
-        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, BlockingObjectStore,
+        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, LocalObjectStore,
         ReserveOutcome, current_boot_id,
     },
 };
-use oplog::BlockingOpLogRecorder;
+use oplog::LocalOpLogRecorder;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,

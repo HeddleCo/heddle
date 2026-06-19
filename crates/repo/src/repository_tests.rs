@@ -3,10 +3,10 @@ use std::fs;
 
 use objects::{
     object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     util::symlink_target_bytes,
 };
-use oplog::{BlockingOpLogBackend, OpRecord};
+use oplog::{LocalOpLogBackend, OpRecord};
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
@@ -1478,7 +1478,7 @@ mod blob_hydrator_callback {
     use objects::{
         error::Result,
         object::{Blob, ContentHash},
-        store::BlockingObjectStore,
+        store::LocalObjectStore,
     };
 
     use super::create_test_repo;
@@ -1773,7 +1773,7 @@ mod require_tree_callback {
 
     use objects::{
         object::{ContentHash, Tree},
-        store::BlockingObjectStore,
+        store::LocalObjectStore,
     };
 
     use super::create_test_repo;

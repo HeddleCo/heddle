@@ -12,7 +12,7 @@ use super::FileChangeSet;
 use crate::{
     error::HeddleError,
     object::{ContentHash, DiffKind, EntryType, FileChange, Tree, TreeEntry},
-    store::{BlockingObjectStore, ObjectKey, ObjectStore},
+    store::{LocalObjectStore, ObjectKey, ObjectStore},
 };
 
 /// Collect all file changes between two trees.
@@ -21,7 +21,7 @@ use crate::{
 /// [`diff_trees_visit`] and collects every [`FileChange`] into a
 /// [`FileChangeSet`]. Streaming or early-exit consumers should prefer
 /// [`diff_trees_visit`], which avoids allocating the full change list.
-pub fn diff_trees<S: BlockingObjectStore + ?Sized>(
+pub fn diff_trees<S: LocalObjectStore + ?Sized>(
     store: &S,
     from: &ContentHash,
     to: &ContentHash,
@@ -57,7 +57,7 @@ pub fn diff_trees_visit<S, V, B>(
     mut visitor: V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: BlockingObjectStore + ?Sized,
+    S: LocalObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     if from == to {
@@ -287,7 +287,7 @@ fn diff_trees_recursive<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: BlockingObjectStore + ?Sized,
+    S: LocalObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
@@ -365,7 +365,7 @@ fn visit_added_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: BlockingObjectStore + ?Sized,
+    S: LocalObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     // Symmetric with the delete branch below: if the added entry is itself a
@@ -386,7 +386,7 @@ fn visit_deleted_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: BlockingObjectStore + ?Sized,
+    S: LocalObjectStore + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let path = child_path(prefix, &from_entry.name);

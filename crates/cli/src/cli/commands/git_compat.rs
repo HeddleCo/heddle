@@ -13,10 +13,10 @@ use objects::{
         Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
         TreeEntry,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     worktree::should_ignore as should_ignore_path,
 };
-use oplog::{BlockingOpLogBackend, OpBatch, OpRecord};
+use oplog::{LocalOpLogBackend, OpBatch, OpRecord};
 use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
 use serde::Serialize;
 use sley::{

@@ -358,7 +358,7 @@ impl TransactionService for LocalTransactionService {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use oplog::BlockingOpLogBackend;
+    use oplog::LocalOpLogBackend;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 

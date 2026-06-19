@@ -11,7 +11,7 @@ use std::{
 use objects::{
     object::{Blob, ChangeId, ContentHash},
     store::{
-        BlockingObjectStore, CompressionConfig, PackBuilder, PackObjectId,
+        CompressionConfig, LocalObjectStore, PackBuilder, PackObjectId,
         pack::ObjectType as PackObjectType,
     },
 };

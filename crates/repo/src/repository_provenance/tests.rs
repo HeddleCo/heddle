@@ -3,7 +3,7 @@ use std::path::Path;
 
 use objects::{
     object::{Attribution, Blob, ChangeId, ContentHash, Origin, Principal, State, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use tempfile::TempDir;
 
@@ -22,7 +22,7 @@ fn lcs_preserves_existing_line_matches() {
 /// return the resulting state. Each call invents a fresh principal so
 /// the per-state attribution differs across the chain.
 fn put_state_with_file(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     file: &str,
     content: &[u8],
     parents: Vec<ChangeId>,

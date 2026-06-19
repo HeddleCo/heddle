@@ -366,8 +366,8 @@ fn test_detect_grouped_use_edit_does_not_report_dependency_churn() {
     let changes = detect_import_changes(
         std::path::Path::new("test.rs"),
         std::path::Path::new("test.rs"),
-        "use objects::{\n    object::{Blob, Tree},\n    store::BlockingObjectStore,\n};\n",
-        "use objects::{\n    object::{Blob, SemanticChange, Tree},\n    store::BlockingObjectStore,\n};\n",
+        "use objects::{\n    object::{Blob, Tree},\n    store::ObjectStore,\n};\n",
+        "use objects::{\n    object::{Blob, SemanticChange, Tree},\n    store::ObjectStore,\n};\n",
     );
     assert!(
         changes.is_empty(),

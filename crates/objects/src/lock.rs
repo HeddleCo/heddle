@@ -198,7 +198,7 @@ impl RepoLock {
         let mut state = lock_gate(&entry);
         // Non-blocking acquisition is NON-reentrant: a `try_write` while the lock
         // is held — by ANY thread, including this one — reports contention
-        // (`None`). Reentrancy exists only to keep the BLOCKING `write()` from
+        // (`None`). Reentrancy exists only to keep the blocking `write()` from
         // self-deadlocking on its own `flock`; a `try_*` can never deadlock, so a
         // caller that uses it to detect contention (e.g. the undo/redo
         // serialization lock, heddle#355) must see "held" regardless of holder.
@@ -425,7 +425,7 @@ mod tests {
 
     /// `try_write` is intentionally NON-reentrant: even the thread that already
     /// holds the write lock gets `None`, not a nested guard. Reentrancy exists
-    /// only so the BLOCKING `write()` can't self-deadlock on its own `flock`; a
+    /// only so the blocking `write()` can't self-deadlock on its own `flock`; a
     /// non-blocking `try_*` can never deadlock, and callers use it to DETECT
     /// contention (the undo/redo serialization lock, heddle#355), so it must
     /// report "held" regardless of holder. Do NOT "fix" this to mirror

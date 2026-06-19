@@ -5,7 +5,7 @@ use cli::bench::{detect_renames_for_bench, find_merge_base_for_bench, three_way_
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use objects::{
     object::{Blob, ChangeId, MarkerName, ThreadName, Tree, TreeEntry},
-    store::{BlockingObjectStore, InMemoryStore},
+    store::{InMemoryStore, LocalObjectStore},
 };
 use refs::{Head, RefExpectation, RefManager};
 use repo::{

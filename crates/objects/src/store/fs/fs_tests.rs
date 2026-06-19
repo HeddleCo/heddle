@@ -12,7 +12,7 @@ use crate::{
         TreeEntry,
     },
     store::{
-        BlockingObjectStore, HeddleError, LocalObjectStoreExt, PackMaintenanceStoreExt,
+        HeddleError, LocalObjectStore, LocalObjectStoreExt, PackMaintenanceStoreExt,
         atomic::temp_path,
         compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},

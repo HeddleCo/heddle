@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crypto::{Signer, StateSigningExt, load_signer, verify_state_signature_bytes};
 use objects::{
     object::{ChangeId, ContentHash, SignatureStatus, State, StateSignature},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use tracing::{debug, instrument};
 

@@ -8,7 +8,7 @@ use std::{
 
 use objects::{
     object::{ContentHash, EntryType, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use crate::{

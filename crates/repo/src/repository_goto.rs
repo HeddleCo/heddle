@@ -6,9 +6,9 @@ use std::time::Instant;
 use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, Scope},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
-use oplog::BlockingOpLogRecorder;
+use oplog::LocalOpLogRecorder;
 use refs::Head;
 use tracing::debug;
 

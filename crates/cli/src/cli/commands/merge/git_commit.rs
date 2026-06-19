@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow};
 use objects::{
     object::{Attribution, ChangeId},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use serde::Serialize;

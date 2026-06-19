@@ -6,7 +6,7 @@ use std::fs;
 use anyhow::{Result, anyhow};
 use objects::{
     object::{Blob, ChangeId, ContentHash, FileMode, State, TransactionId, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use oplog::OpRecord;
 use refs::Head;

@@ -19,7 +19,7 @@
 
 use objects::{
     object::{Principal, State},
-    store::{BlockingObjectStore, StoreError},
+    store::{LocalObjectStore, StoreError},
 };
 use repo::Repository as HeddleRepository;
 use sley::{

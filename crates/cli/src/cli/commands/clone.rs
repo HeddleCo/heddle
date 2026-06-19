@@ -16,7 +16,7 @@ use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash, ThreadName},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};

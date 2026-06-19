@@ -15,7 +15,7 @@ use objects::{
     object::{Scope, TransactionId},
 };
 use oplog::{
-    BlockingOpLogBackend, ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpRecord,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, LocalOpLogBackend, OpRecord,
 };
 
 use super::traits::{DeferredMutation, EagerMutation, StagedCommit};

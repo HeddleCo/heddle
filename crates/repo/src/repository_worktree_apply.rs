@@ -11,7 +11,7 @@ use std::{
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty as fs_is_directory_not_empty},
     object::{EntryType, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     worktree::should_ignore as should_ignore_path,
 };
 use tracing::{debug, warn};

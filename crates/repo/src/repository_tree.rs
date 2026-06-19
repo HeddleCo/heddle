@@ -5,7 +5,7 @@ use std::{collections::HashSet, fs, path::Path, time::Instant};
 
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     worktree::WorktreeStatus,
 };
 use tracing::{debug, instrument, trace, warn};
@@ -403,7 +403,7 @@ struct TreeBuildPolicy<'a> {
     stat_cache_hits: u64,
     /// Blobs encountered during the walk that aren't already in the
     /// store. Drained once at the end of the walk into a single
-    /// packfile via `BlockingObjectStore::put_blobs_packed` — turns N×fsync
+    /// packfile via `LocalObjectStore::put_blobs_packed` — turns N×fsync
     /// per blob into 2×fsync total (the .pack + .idx).
     pending_blobs: Vec<(ContentHash, Vec<u8>)>,
     /// Hashes already queued in `pending_blobs` so we don't double-add

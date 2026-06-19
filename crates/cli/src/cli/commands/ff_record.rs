@@ -17,7 +17,7 @@
 
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
-use oplog::{BlockingOpLogRecorder, OpRecord};
+use oplog::{LocalOpLogRecorder, OpRecord};
 use refs::Head;
 use repo::Repository;
 

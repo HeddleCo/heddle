@@ -19,7 +19,7 @@
 //! - **Cheap opt-out.** Repos without transcript history still get a
 //!   clean Heddle repo — they just skip this pass.
 //! - **Scoped to what's here.** `Importer` takes raw backends and works
-//!   against any `BlockingObjectStore`; the pipeline takes a full `Repository`
+//!   against any `LocalObjectStore`; the pipeline takes a full `Repository`
 //!   because writing annotations needs the context-tree helpers.
 //!
 //! # Commit selection
@@ -37,7 +37,7 @@ use std::{
 
 use objects::{
     object::{ContentHash, EntryType},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use tracing::{debug, info, warn};
@@ -806,7 +806,7 @@ fn has_durable_language(lower: &str) -> bool {
 /// hash. Directory entries expand; the returned map is keyed on the
 /// slash-joined repo-relative path. Missing tree objects (shouldn't
 /// happen if `Importer` succeeded) propagate as store errors.
-fn collect_tree_files<S: BlockingObjectStore + ?Sized>(
+fn collect_tree_files<S: LocalObjectStore + ?Sized>(
     store: &S,
     root: &ContentHash,
 ) -> Result<BTreeMap<String, ContentHash>, anyhow::Error> {
@@ -815,7 +815,7 @@ fn collect_tree_files<S: BlockingObjectStore + ?Sized>(
     Ok(out)
 }
 
-fn walk_tree<S: BlockingObjectStore + ?Sized>(
+fn walk_tree<S: LocalObjectStore + ?Sized>(
     store: &S,
     hash: &ContentHash,
     prefix: &str,

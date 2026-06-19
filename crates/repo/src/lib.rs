@@ -80,7 +80,7 @@ pub use objects::object::{
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
     store::{
-        AgentUsageSummary, BlockingObjectStore, FsStore, ShallowInfo,
+        AgentUsageSummary, FsStore, LocalObjectStore, ObjectStore, ShallowInfo,
         agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
     },
 };

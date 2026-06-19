@@ -15,7 +15,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     object::{ChangeId, RiskSignal, RiskSignalBlob, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use tokio_stream::wrappers::ReceiverStream;

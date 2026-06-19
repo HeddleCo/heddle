@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use objects::{object::ChangeId, store::BlockingObjectStore};
+use objects::{object::ChangeId, store::LocalObjectStore};
 use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
 
 use super::{

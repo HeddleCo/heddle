@@ -3,7 +3,7 @@ use std::path::Path;
 
 use objects::{
     object::{ContentHash, EntryType, FileProvenance, State, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use super::{

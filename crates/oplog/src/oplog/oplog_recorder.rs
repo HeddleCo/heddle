@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Domain event constructors for operation-log records.
 //!
-//! `BlockingOpLogBackend` is the storage contract. This trait is the explicit domain
+//! `OpLogBackend` is the storage contract. This trait is the explicit domain
 //! recording surface for callers that intentionally build canonical `OpRecord`
 //! variants from model values.
 
@@ -11,7 +11,7 @@ use objects::{
 };
 
 use super::{
-    oplog_backend::{BlockingOpLogBackend, OpLogBackend},
+    oplog_backend::{LocalOpLogBackend, OpLogBackend},
     oplog_types::{OpRecord, ThreadUpdateSnapshots},
 };
 
@@ -28,7 +28,7 @@ pub struct VisibilitySidecarSnapshots {
 
 #[allow(async_fn_in_trait)]
 pub trait OpLogRecorder: OpLogBackend {
-    async fn record_snapshot(
+    async fn record_snapshot_async(
         &self,
         new_state: &ChangeId,
         prev_head: Option<&ChangeId>,
@@ -36,7 +36,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Snapshot {
                     new_state: *new_state,
                     prev_head: prev_head.copied(),
@@ -49,14 +49,14 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_goto(
+    async fn record_goto_async(
         &self,
         target: &ChangeId,
         prev_head: Option<&ChangeId>,
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Goto {
                     target: *target,
                     prev_head: prev_head.copied(),
@@ -68,7 +68,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_thread_create(
+    async fn record_thread_create_async(
         &self,
         name: &ThreadName,
         state: &ChangeId,
@@ -76,7 +76,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::ThreadCreate {
                     name: name.to_string(),
                     state: *state,
@@ -88,14 +88,14 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_thread_delete(
+    async fn record_thread_delete_async(
         &self,
         name: &ThreadName,
         state: &ChangeId,
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::ThreadDelete {
                     name: name.to_string(),
                     state: *state,
@@ -106,7 +106,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_thread_update(
+    async fn record_thread_update_async(
         &self,
         name: &ThreadName,
         old_state: &ChangeId,
@@ -115,7 +115,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::ThreadUpdate {
                     name: name.to_string(),
                     old_state: *old_state,
@@ -128,14 +128,14 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_thread_rename(
+    async fn record_thread_rename_async(
         &self,
         old_name: &ThreadName,
         new_name: &ThreadName,
         state: &ChangeId,
         scope: Option<&Scope>,
     ) -> Result<Vec<u64>> {
-        self.record_batch_scoped(
+        self.record_batch_scoped_async(
             vec![
                 OpRecord::ThreadCreate {
                     name: new_name.to_string(),
@@ -152,7 +152,7 @@ pub trait OpLogRecorder: OpLogBackend {
         .await
     }
 
-    async fn record_fork(
+    async fn record_fork_async(
         &self,
         from: &ChangeId,
         new_state: &ChangeId,
@@ -161,7 +161,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Fork {
                     from: *from,
                     new_state: *new_state,
@@ -174,7 +174,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_collapse(
+    async fn record_collapse_async(
         &self,
         sources: &[ChangeId],
         result: &ChangeId,
@@ -182,7 +182,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Collapse {
                     sources: sources.to_vec(),
                     result: *result,
@@ -195,7 +195,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_remote_thread_update(
+    async fn record_remote_thread_update_async(
         &self,
         remote: &str,
         thread: &str,
@@ -203,7 +203,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::RemoteThreadUpdate {
                     remote: objects::object::RemoteName::new(remote),
                     thread: thread.to_string(),
@@ -215,7 +215,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_remote_thread_delete(
+    async fn record_remote_thread_delete_async(
         &self,
         remote: &str,
         thread: &str,
@@ -223,7 +223,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::RemoteThreadDelete {
                     remote: objects::object::RemoteName::new(remote),
                     thread: thread.to_string(),
@@ -235,20 +235,20 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_undo_recovery_update(
+    async fn record_undo_recovery_update_async(
         &self,
         state: &ChangeId,
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)
+            .record_batch_scoped_async(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)
             .await?;
         Ok(ids[0])
     }
 
-    async fn record_marker_create(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+    async fn record_marker_create_async(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
         let ids = self
-            .record_batch(vec![OpRecord::MarkerCreate {
+            .record_batch_async(vec![OpRecord::MarkerCreate {
                 name: name.to_string(),
                 state: *state,
             }])
@@ -256,9 +256,9 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_marker_delete(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
+    async fn record_marker_delete_async(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
         let ids = self
-            .record_batch(vec![OpRecord::MarkerDelete {
+            .record_batch_async(vec![OpRecord::MarkerDelete {
                 name: name.to_string(),
                 state: *state,
             }])
@@ -266,7 +266,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_redact(
+    async fn record_redact_async(
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
@@ -275,7 +275,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Redact {
                     redaction_id: *redaction_id,
                     blob: *blob,
@@ -288,14 +288,14 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_purge(
+    async fn record_purge_async(
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::Purge {
                     redaction_id: *redaction_id,
                     blob: *blob,
@@ -306,7 +306,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_state_visibility_set(
+    async fn record_state_visibility_set_async(
         &self,
         state: &ChangeId,
         record_id: &ContentHash,
@@ -315,7 +315,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::StateVisibilitySet {
                     state: *state,
                     record_id: *record_id,
@@ -329,7 +329,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_state_visibility_promote(
+    async fn record_state_visibility_promote_async(
         &self,
         state: &ChangeId,
         superseded: &ContentHash,
@@ -339,7 +339,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::StateVisibilityPromote {
                     state: *state,
                     superseded: *superseded,
@@ -354,7 +354,7 @@ pub trait OpLogRecorder: OpLogBackend {
         Ok(ids[0])
     }
 
-    async fn record_fast_forward(
+    async fn record_fast_forward_async(
         &self,
         source_thread: &ThreadName,
         target_thread: &ThreadName,
@@ -363,7 +363,7 @@ pub trait OpLogRecorder: OpLogBackend {
         scope: Option<&Scope>,
     ) -> Result<u64> {
         let ids = self
-            .record_batch_scoped(
+            .record_batch_scoped_async(
                 vec![OpRecord::FastForward {
                     source_thread: source_thread.to_string(),
                     target_thread: target_thread.to_string(),
@@ -377,9 +377,7 @@ pub trait OpLogRecorder: OpLogBackend {
     }
 }
 
-impl<T: OpLogBackend + ?Sized> OpLogRecorder for T {}
-
-pub trait BlockingOpLogRecorder: BlockingOpLogBackend {
+pub trait LocalOpLogRecorder: LocalOpLogBackend {
     fn record_snapshot(
         &self,
         new_state: &ChangeId,
@@ -719,4 +717,6 @@ pub trait BlockingOpLogRecorder: BlockingOpLogBackend {
     }
 }
 
-impl<T: BlockingOpLogBackend + ?Sized> BlockingOpLogRecorder for T {}
+impl<T: OpLogBackend + ?Sized> OpLogRecorder for T {}
+
+impl<T: LocalOpLogBackend + ?Sized> LocalOpLogRecorder for T {}

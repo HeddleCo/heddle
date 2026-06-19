@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     object::{ContextTarget, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use crate::{HistoryQuery, Repository, staleness};

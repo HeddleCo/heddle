@@ -9,7 +9,7 @@ use objects::{
         AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
         ProvenanceError, Tree,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 use serde::Serialize;

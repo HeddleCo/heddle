@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::BlockingObjectStore};
+use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::LocalObjectStore};
 use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
 use wire::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};

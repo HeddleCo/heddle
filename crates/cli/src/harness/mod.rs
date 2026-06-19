@@ -17,9 +17,9 @@ use objects::{
         TimelineStepId, TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1,
         ToolCallStartedV1, Tree,
     },
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, BlockingObjectStore},
+    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, LocalObjectStore},
 };
-use oplog::BlockingOpLogRecorder;
+use oplog::LocalOpLogRecorder;
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,

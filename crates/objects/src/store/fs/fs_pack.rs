@@ -11,7 +11,7 @@ use super::{
 use crate::{
     object::ContentHash,
     store::{
-        BlockingObjectStore, HeddleError, Result,
+        HeddleError, LocalObjectStore, Result,
         pack::{ObjectType as PackObjectType, PackBuilder},
     },
 };
@@ -44,7 +44,7 @@ impl FsStore {
         let mut builder = PackBuilder::new(compression);
         let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(blobs.len());
         for (hash, data) in blobs {
-            if BlockingObjectStore::has_blob(self, &hash)? {
+            if LocalObjectStore::has_blob(self, &hash)? {
                 continue;
             }
             staged.push((hash, data.clone()));
@@ -86,13 +86,13 @@ impl FsStore {
         let mut builder = PackBuilder::new(self.compression);
 
         for hash in &blobs {
-            if let Some(blob) = BlockingObjectStore::get_blob(self, hash)? {
+            if let Some(blob) = LocalObjectStore::get_blob(self, hash)? {
                 builder.add(*hash, PackObjectType::Blob, blob.content().to_vec());
             }
         }
 
         for hash in &trees {
-            if let Some(tree) = BlockingObjectStore::get_tree(self, hash)? {
+            if let Some(tree) = LocalObjectStore::get_tree(self, hash)? {
                 let data = rmp_serde::to_vec(&tree)?;
                 builder.add(*hash, PackObjectType::Tree, data);
             }

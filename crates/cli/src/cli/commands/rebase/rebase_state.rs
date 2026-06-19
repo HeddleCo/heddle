@@ -4,7 +4,7 @@
 use std::{fs, io::Write};
 
 use anyhow::{Result, anyhow};
-use objects::{object::ChangeId, store::BlockingObjectStore};
+use objects::{object::ChangeId, store::LocalObjectStore};
 use oplog::OpRecord;
 use repo::Repository;
 

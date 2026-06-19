@@ -9,7 +9,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use objects::{
     object::ContentHash,
     store::{
-        BlockingObjectStore, CompressionConfig, FsStore, PackMaintenanceStoreExt,
+        CompressionConfig, FsStore, PackMaintenanceStoreExt,
         pack::{ObjectType, PackBuilder, PackObjectId, PackReader, StreamingPackBuilder},
     },
 };

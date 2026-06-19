@@ -10,7 +10,7 @@ use objects::{
     object::{
         ChangeId, TimelineBranchId, TimelineCursorMoveReason, TimelineLabel, TimelineOperationId,
     },
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use crate::{

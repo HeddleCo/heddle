@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, ContentHash, Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     worktree::WorktreeStatus,
 };
 use repo::{Repository, StashEntry};

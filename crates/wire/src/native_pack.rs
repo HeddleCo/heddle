@@ -1,10 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::{
-    BlockingObjectStore, CompressionConfig,
-    pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
 };
 
-use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object_data};
+use bytes::Bytes;
+use objects::store::{
+    ByteStream, CompressionConfig, LocalObjectStore, ObjectStore, PackStats,
+    async_store::single_chunk_stream,
+    pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
+};
+
+use crate::{
+    ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object_data,
+    load_object_data_async,
+};
 
 /// Maximum hosted native-pack body accepted by the receive primitive.
 ///
@@ -29,6 +40,15 @@ pub const MAX_RECEIVED_PACK_INDEX_SIZE: u64 = 256 * 1024 * 1024;
 pub struct NativePackBundle {
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativePackFiles {
+    pub pack_path: PathBuf,
+    pub index_path: PathBuf,
+    pub pack_len: u64,
+    pub index_len: u64,
+    pub stats: PackStats,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -56,7 +76,7 @@ pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
 }
 
 pub fn build_native_pack(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<NativePackBundle> {
     let mut builder = PackBuilder::new(sync_pack_compression());
@@ -82,6 +102,151 @@ pub fn build_native_pack(
     })
 }
 
+pub async fn build_native_pack_async<S>(
+    store: &S,
+    objects: &[ObjectInfo],
+) -> Result<NativePackBundle>
+where
+    S: ObjectStore + ?Sized,
+{
+    let mut builder = PackBuilder::new(sync_pack_compression());
+
+    for info in objects {
+        if !is_native_packable_object_type(info.obj_type) {
+            continue;
+        }
+        let object = load_object_data_async(store, &info.id, info.obj_type).await?;
+        let pack_id = to_pack_object_id(&object.id);
+        builder.add_id(pack_id, to_pack_object_type(object.obj_type)?, object.data);
+    }
+
+    let (pack_data, index_data, _) = builder.build()?;
+    Ok(NativePackBundle {
+        pack_data,
+        index_data,
+    })
+}
+
+pub fn build_native_pack_to_paths(
+    store: &impl LocalObjectStore,
+    objects: &[ObjectInfo],
+    pack_path: impl AsRef<Path>,
+    index_path: impl AsRef<Path>,
+    bucket_dir: impl AsRef<Path>,
+) -> Result<NativePackFiles> {
+    let pack_path = pack_path.as_ref().to_path_buf();
+    let index_path = index_path.as_ref().to_path_buf();
+    let bucket_dir = bucket_dir.as_ref().to_path_buf();
+    build_native_pack_to_paths_with_loader(objects, pack_path, index_path, bucket_dir, |info| {
+        let object = load_object_data(store, &info.id, info.obj_type)?;
+        Ok(object.data.into())
+    })
+}
+
+pub async fn build_native_pack_to_paths_async<S>(
+    store: &S,
+    objects: &[ObjectInfo],
+    pack_path: impl AsRef<Path>,
+    index_path: impl AsRef<Path>,
+    bucket_dir: impl AsRef<Path>,
+) -> Result<NativePackFiles>
+where
+    S: ObjectStore + ?Sized,
+{
+    let pack_path = pack_path.as_ref().to_path_buf();
+    let index_path = index_path.as_ref().to_path_buf();
+    let bucket_dir = bucket_dir.as_ref().to_path_buf();
+    prepare_output_paths(&pack_path, &index_path, &bucket_dir)?;
+    let pack_file = create_pack_output(&pack_path)?;
+    let mut builder = StreamingPackBuilder::new(
+        pack_file,
+        index_path.clone(),
+        sync_pack_compression(),
+        bucket_dir,
+    )?;
+
+    for info in objects {
+        if !is_native_packable_object_type(info.obj_type) {
+            continue;
+        }
+        let object = load_object_data_async(store, &info.id, info.obj_type).await?;
+        let pack_id = to_pack_object_id(&object.id);
+        builder.add_bytes(
+            pack_id,
+            to_pack_object_type(object.obj_type)?,
+            object.data.into(),
+        )?;
+    }
+
+    finish_native_pack_files(builder, pack_path, index_path)
+}
+
+fn build_native_pack_to_paths_with_loader(
+    objects: &[ObjectInfo],
+    pack_path: PathBuf,
+    index_path: PathBuf,
+    bucket_dir: PathBuf,
+    mut load: impl FnMut(&ObjectInfo) -> Result<bytes::Bytes>,
+) -> Result<NativePackFiles> {
+    prepare_output_paths(&pack_path, &index_path, &bucket_dir)?;
+    let pack_file = create_pack_output(&pack_path)?;
+    let mut builder = StreamingPackBuilder::new(
+        pack_file,
+        index_path.clone(),
+        sync_pack_compression(),
+        bucket_dir,
+    )?;
+
+    for info in objects {
+        if !is_native_packable_object_type(info.obj_type) {
+            continue;
+        }
+        let pack_id = to_pack_object_id(&info.id);
+        builder.add_bytes(pack_id, to_pack_object_type(info.obj_type)?, load(info)?)?;
+    }
+
+    finish_native_pack_files(builder, pack_path, index_path)
+}
+
+fn prepare_output_paths(pack_path: &Path, index_path: &Path, bucket_dir: &Path) -> Result<()> {
+    if let Some(parent) = pack_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir_all(bucket_dir)?;
+    Ok(())
+}
+
+fn create_pack_output(path: &Path) -> Result<File> {
+    Ok(OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(path)?)
+}
+
+fn finish_native_pack_files(
+    builder: StreamingPackBuilder<File>,
+    pack_path: PathBuf,
+    index_path: PathBuf,
+) -> Result<NativePackFiles> {
+    let (pack_file, stats) = builder.finalize()?;
+    pack_file.sync_all()?;
+    drop(pack_file);
+    let pack_len = std::fs::metadata(&pack_path)?.len();
+    let index_len = std::fs::metadata(&index_path)?.len();
+    Ok(NativePackFiles {
+        pack_path,
+        index_path,
+        pack_len,
+        index_len,
+        stats,
+    })
+}
+
 fn sync_pack_compression() -> CompressionConfig {
     CompressionConfig {
         level: 1,
@@ -92,7 +257,7 @@ fn sync_pack_compression() -> CompressionConfig {
 }
 
 pub fn install_received_pack(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     pack_data: &[u8],
     index_data: &[u8],
 ) -> Result<Vec<PackObjectId>> {
@@ -101,14 +266,105 @@ pub fn install_received_pack(
         .map_err(ProtocolError::from)
 }
 
+pub fn install_received_pack_from_paths(
+    store: &impl LocalObjectStore,
+    pack_path: &Path,
+    index_path: &Path,
+) -> Result<Vec<PackObjectId>> {
+    store
+        .install_pack_from_paths(pack_path, index_path)
+        .map_err(ProtocolError::from)
+}
+
+pub async fn install_received_pack_async<S>(
+    store: &S,
+    pack_data: &[u8],
+    index_data: &[u8],
+) -> Result<Vec<PackObjectId>>
+where
+    S: ObjectStore + ?Sized,
+{
+    install_received_pack_stream(
+        store,
+        single_chunk_stream(pack_data.to_vec().into()),
+        single_chunk_stream(index_data.to_vec().into()),
+    )
+    .await
+}
+
+pub async fn install_received_pack_from_paths_async<S>(
+    store: &S,
+    pack_path: &Path,
+    index_path: &Path,
+) -> Result<Vec<PackObjectId>>
+where
+    S: ObjectStore + ?Sized,
+{
+    store
+        .install_pack_from_paths(pack_path, index_path)
+        .await
+        .map_err(ProtocolError::from)
+}
+
+pub async fn install_received_pack_stream<S>(
+    store: &S,
+    pack_stream: ByteStream,
+    index_stream: ByteStream,
+) -> Result<Vec<PackObjectId>>
+where
+    S: ObjectStore + ?Sized,
+{
+    store
+        .install_pack_stream(pack_stream, index_stream)
+        .await
+        .map_err(ProtocolError::from)
+}
+
 pub fn next_pack_chunk(
     data: &[u8],
     chunk_size: usize,
     chunk_index: usize,
-) -> Option<(usize, Vec<u8>, bool)> {
+) -> Option<(usize, Bytes, bool)> {
     let (start, len) = crate::chunk_bounds(data.len(), chunk_size.max(1), chunk_index)?;
     let is_final = start + len == data.len();
-    Some((start, data[start..start + len].to_vec(), is_final))
+    Some((
+        start,
+        Bytes::copy_from_slice(&data[start..start + len]),
+        is_final,
+    ))
+}
+
+pub fn next_pack_chunk_bytes(
+    data: &Bytes,
+    chunk_size: usize,
+    chunk_index: usize,
+) -> Option<(usize, Bytes, bool)> {
+    let (start, len) = crate::chunk_bounds(data.len(), chunk_size.max(1), chunk_index)?;
+    let is_final = start + len == data.len();
+    Some((start, data.slice(start..start + len), is_final))
+}
+
+pub fn next_pack_file_chunk(
+    path: &Path,
+    chunk_size: usize,
+    chunk_index: usize,
+) -> Result<Option<(u64, Bytes, bool)>> {
+    let chunk_size = chunk_size.max(1);
+    let total_len = std::fs::metadata(path)?.len();
+    let start = (chunk_index as u64)
+        .checked_mul(chunk_size as u64)
+        .ok_or_else(|| ProtocolError::InvalidState("pack chunk offset overflow".into()))?;
+    if start >= total_len {
+        return Ok(None);
+    }
+
+    let len = (chunk_size as u64).min(total_len - start) as usize;
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut data = vec![0; len];
+    file.read_exact(&mut data)?;
+    let is_final = start + len as u64 == total_len;
+    Ok(Some((start, Bytes::from(data), is_final)))
 }
 
 pub fn receive_pack_chunk(
@@ -224,14 +480,15 @@ fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
 mod tests {
     use objects::{
         object::Blob,
-        store::{BlockingObjectStore, FsStore, pack::PackObjectId},
+        store::{FsStore, LocalObjectStore, pack::PackObjectId},
     };
     use tempfile::TempDir;
 
     use super::{
         MAX_RECEIVED_PACK_SIZE, ObjectId, ObjectInfo, ObjectType, PackChunkState,
-        build_native_pack, install_received_pack, next_pack_chunk, receive_pack_chunk,
-        receive_pack_chunk_with_limit,
+        build_native_pack, build_native_pack_to_paths, install_received_pack,
+        install_received_pack_from_paths, next_pack_chunk, next_pack_file_chunk,
+        receive_pack_chunk, receive_pack_chunk_with_limit,
     };
 
     fn create_test_store() -> (TempDir, FsStore) {
@@ -386,6 +643,81 @@ mod tests {
 
         let installed_ids =
             install_received_pack(&dest_store, &state.pack_data, &state.index_data).unwrap();
+
+        assert_eq!(installed_ids, vec![PackObjectId::Hash(hash)]);
+        let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();
+        assert_eq!(installed_blob.content(), blob.content());
+    }
+
+    #[test]
+    fn native_pack_to_paths_chunks_and_installs_from_paths() {
+        let (source_temp, source_store) = create_test_store();
+        let (_dest_temp, dest_store) = create_test_store();
+        let blob = Blob::from("native pack path streaming regression");
+        let hash = source_store.put_blob(&blob).unwrap();
+        let info = ObjectInfo {
+            id: ObjectId::Hash(hash),
+            obj_type: ObjectType::Blob,
+            size: blob.size() as u64,
+            delta_base: None,
+        };
+        let pack_path = source_temp.path().join("out/native.pack");
+        let index_path = source_temp.path().join("out/native.idx");
+        let bucket_dir = source_temp.path().join("out/buckets");
+
+        let files = build_native_pack_to_paths(
+            &source_store,
+            &[info],
+            &pack_path,
+            &index_path,
+            &bucket_dir,
+        )
+        .unwrap();
+        assert_eq!(files.stats.object_count, 1);
+        assert!(files.pack_len > 0);
+        assert!(files.index_len > 0);
+
+        let mut state = PackChunkState::default();
+        let mut chunk_index = 0usize;
+        while let Some((start, data, is_final)) =
+            next_pack_file_chunk(&files.pack_path, 7, chunk_index).unwrap()
+        {
+            receive_pack_chunk(
+                &mut state,
+                false,
+                start,
+                chunk_index as u32,
+                is_final,
+                &data,
+                is_final,
+            )
+            .unwrap();
+            chunk_index += 1;
+        }
+
+        let mut index_chunk = 0usize;
+        while let Some((start, data, is_final)) =
+            next_pack_file_chunk(&files.index_path, 5, index_chunk).unwrap()
+        {
+            receive_pack_chunk(
+                &mut state,
+                true,
+                start,
+                index_chunk as u32,
+                is_final,
+                &data,
+                is_final,
+            )
+            .unwrap();
+            index_chunk += 1;
+        }
+        assert!(state.is_complete());
+        assert_eq!(state.pack_data.len() as u64, files.pack_len);
+        assert_eq!(state.index_data.len() as u64, files.index_len);
+
+        let installed_ids =
+            install_received_pack_from_paths(&dest_store, &files.pack_path, &files.index_path)
+                .unwrap();
 
         assert_eq!(installed_ids, vec![PackObjectId::Hash(hash)]);
         let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();

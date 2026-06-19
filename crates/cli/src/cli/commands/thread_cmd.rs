@@ -11,9 +11,9 @@ use chrono::Utc;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
-    store::{AgentRegistry, BlockingObjectStore},
+    store::{AgentRegistry, LocalObjectStore},
 };
-use oplog::{BlockingOpLogRecorder, ThreadUpdateSnapshots};
+use oplog::{LocalOpLogRecorder, ThreadUpdateSnapshots};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,

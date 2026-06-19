@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use objects::{
     lock::RepositoryLockExt,
     object::{Attribution, Blob, ChangeId, ContentHash, State, TransactionId, Tree, TreeEntry},
-    store::{BlockingObjectStore, PackMaintenanceStoreExt},
+    store::{LocalObjectStore, PackMaintenanceStoreExt},
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;

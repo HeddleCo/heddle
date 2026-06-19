@@ -6,9 +6,9 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow};
 use objects::{
     object::{Attribution, ChangeId, ThreadName, Tree},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
-use oplog::{BlockingOpLogBackend, BlockingOpLogRecorder, OpBatch, OpRecord};
+use oplog::{LocalOpLogBackend, LocalOpLogRecorder, OpBatch, OpRecord};
 use refs::Head;
 use repo::{
     AgentRegistry, AgentStatus, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy,
@@ -1712,7 +1712,7 @@ pub(crate) fn bench_three_way_merge(
 }
 
 pub(crate) fn bench_detect_renames(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> Result<(usize, rename_matcher::RenameMatcherStats)> {

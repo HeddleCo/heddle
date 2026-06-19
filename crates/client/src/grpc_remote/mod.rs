@@ -15,7 +15,7 @@ use grpc::heddle::v1::{
     hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
     repo_sync_service_client::RepoSyncServiceClient,
 };
-use objects::{object::MarkerName, store::BlockingObjectStore};
+use objects::{object::MarkerName, store::LocalObjectStore};
 use repo::Repository;
 use tonic::{
     Request,

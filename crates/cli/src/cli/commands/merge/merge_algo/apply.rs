@@ -4,7 +4,7 @@ use std::{collections::HashMap, fs, path::Path};
 use anyhow::{Result, anyhow};
 use objects::{
     object::{Tree, TreeEntry},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use repo::Repository;
 

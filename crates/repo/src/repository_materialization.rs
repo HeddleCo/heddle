@@ -14,7 +14,7 @@ use std::{
 use objects::{
     fs_atomic::enrich_fs_error,
     object::{ChangeId, ContentHash, EntryType, Tree},
-    store::{BlockingObjectStore, LocalObjectStoreExt},
+    store::{LocalObjectStore, LocalObjectStoreExt},
 };
 use tracing::{debug, instrument};
 
@@ -937,7 +937,7 @@ mod tests {
     use objects::{
         fs_clone::filesystem_supports_reflink,
         object::Blob,
-        store::{BlockingObjectStore, LocalObjectStoreExt, PackMaintenanceStoreExt},
+        store::{LocalObjectStore, LocalObjectStoreExt, PackMaintenanceStoreExt},
     };
     use tempfile::TempDir;
 

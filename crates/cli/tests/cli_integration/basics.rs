@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use cli::config::UserConfig;
-use objects::{object::ThreadName, store::BlockingObjectStore};
+use objects::{object::ThreadName, store::LocalObjectStore};
 
 use super::*;
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{path::Path, process::Command};
 
-use objects::store::BlockingObjectStore;
+use objects::store::LocalObjectStore;
 use repo::Repository;
 
 use super::*;

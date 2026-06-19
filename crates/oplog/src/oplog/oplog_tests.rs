@@ -8,7 +8,10 @@ use std::{
 use objects::object::{ChangeId, ContentHash, MarkerName, Scope, ThreadName, TransactionId};
 use tempfile::TempDir;
 
-use super::{BlockingOpLogRecorder, OpLog, OpRecord, oplog_backend::BlockingOpLogBackend};
+use super::{
+    LocalOpLogRecorder, OpLog, OpRecord,
+    oplog_backend::{LocalOpLogBackend, OpLogBackend},
+};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -339,8 +342,8 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
     // The CLI calls OpLog's inherent (sync) batch methods; the generic
     // backend plumbing and the hosted server reach the async trait
     // surface. Drive the trait methods explicitly so the
-    // `impl BlockingOpLogBackend for OpLog` async bodies and the non-scoped trait
-    // defaults that delegate to them are covered.
+    // `impl LocalOpLogBackend for OpLog` async helpers and the non-scoped
+    // trait defaults that delegate to them are covered.
     let (_temp, oplog) = create_oplog();
     let state1 = ChangeId::generate();
     let state2 = ChangeId::generate();
@@ -352,12 +355,12 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
         .unwrap();
 
     // Non-scoped trait defaults delegate to the *_scoped overrides.
-    let recent = pollster::block_on(BlockingOpLogBackend::recent_batches(&oplog, 2)).unwrap();
+    let recent = pollster::block_on(OpLogBackend::recent_batches_async(&oplog, 2)).unwrap();
     assert_eq!(recent.len(), 2);
-    let undo = pollster::block_on(BlockingOpLogBackend::undo_batches(&oplog, 2)).unwrap();
+    let undo = pollster::block_on(OpLogBackend::undo_batches_async(&oplog, 2)).unwrap();
     assert_eq!(undo.len(), 2);
     oplog.mark_batch_undone(&undo[0]).unwrap();
-    let redo = pollster::block_on(BlockingOpLogBackend::redo_batches(&oplog, 2)).unwrap();
+    let redo = pollster::block_on(OpLogBackend::redo_batches_async(&oplog, 2)).unwrap();
     assert_eq!(redo.len(), 1);
 
     // OpLog's override of the dedup'd transaction commit: first append
@@ -368,7 +371,7 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
             op_count: 0,
         }]
     };
-    let first = pollster::block_on(BlockingOpLogBackend::record_batch_scoped_if_no_transaction(
+    let first = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction_async(
         &oplog,
         tx_op(),
         Some(&scope("lane-a")),
@@ -377,7 +380,7 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
     ))
     .unwrap();
     assert!(first.is_some());
-    let dup = pollster::block_on(BlockingOpLogBackend::record_batch_scoped_if_no_transaction(
+    let dup = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction_async(
         &oplog,
         tx_op(),
         Some(&scope("lane-a")),
@@ -955,7 +958,7 @@ mod default_backend {
 
     use super::{
         super::oplog_types::{OpBatch, OpEntry, OpRecord},
-        BlockingOpLogBackend, BlockingOpLogRecorder, scope, transaction_id,
+        LocalOpLogBackend, LocalOpLogRecorder, scope, transaction_id,
     };
 
     #[derive(Default)]
@@ -964,7 +967,7 @@ mod default_backend {
         next_id: Mutex<u64>,
     }
 
-    impl BlockingOpLogBackend for MemOpLog {
+    impl LocalOpLogBackend for MemOpLog {
         fn record_batch_scoped(
             &self,
             operations: Vec<OpRecord>,
@@ -1002,7 +1005,7 @@ mod default_backend {
         fn recent(&self, _count: usize) -> Result<Vec<OpEntry>> {
             Ok(Vec::new())
         }
-        async fn recent_batches_scoped(
+        fn recent_batches_scoped(
             &self,
             count: usize,
             _scope: Option<&Scope>,
@@ -1017,14 +1020,14 @@ mod default_backend {
                 .cloned()
                 .collect())
         }
-        async fn undo_batches_scoped(
+        fn undo_batches_scoped(
             &self,
             _count: usize,
             _scope: Option<&Scope>,
         ) -> Result<Vec<OpBatch>> {
             Ok(Vec::new())
         }
-        async fn redo_batches_scoped(
+        fn redo_batches_scoped(
             &self,
             _count: usize,
             _scope: Option<&Scope>,
@@ -1051,28 +1054,30 @@ mod default_backend {
         };
 
         // Nothing recorded yet → the default appends and returns the ids.
-        let first = pollster::block_on(backend.record_batch_scoped_if_no_transaction(
-            ops(),
-            Some(&scope("scope")),
-            &transaction_id("tx-9"),
-            16,
-        ))
-        .unwrap();
+        let first = backend
+            .record_batch_scoped_if_no_transaction(
+                ops(),
+                Some(&scope("scope")),
+                &transaction_id("tx-9"),
+                16,
+            )
+            .unwrap();
         assert!(first.is_some());
 
         // tx-9 now appears in the recent window → deduped to None.
-        let second = pollster::block_on(backend.record_batch_scoped_if_no_transaction(
-            ops(),
-            Some(&scope("scope")),
-            &transaction_id("tx-9"),
-            16,
-        ))
-        .unwrap();
+        let second = backend
+            .record_batch_scoped_if_no_transaction(
+                ops(),
+                Some(&scope("scope")),
+                &transaction_id("tx-9"),
+                16,
+            )
+            .unwrap();
         assert!(second.is_none());
     }
 
-    /// The `record_*` convenience wrappers on `BlockingOpLogRecorder` are default trait
-    /// methods layered above `BlockingOpLogBackend`. A backend that only implements the
+    /// The `record_*` convenience wrappers on `LocalOpLogRecorder` are default trait
+    /// methods layered above `LocalOpLogBackend`. A backend that only implements the
     /// storage contract can still opt into this domain recorder surface, and
     /// these calls assert that the expected variants land in recorded batches.
     #[test]
@@ -1165,7 +1170,7 @@ mod default_backend {
 
         // Every wrapper appended through `record_batch_scoped`; spot-check the
         // distinctive published-ref variants made it into the recorded batches.
-        let batches = pollster::block_on(backend.recent_batches(256)).unwrap();
+        let batches = backend.recent_batches(256).unwrap();
         let ops: Vec<&OpRecord> = batches
             .iter()
             .flat_map(|b| b.entries.iter().map(|e| &e.operation))

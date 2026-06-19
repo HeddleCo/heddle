@@ -8,7 +8,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use objects::{error::Result as HeddleResult, object::ChangeId};
-use oplog::{BlockingOpLogBackend, OpEntry, OpLog, OpRecord};
+use oplog::{LocalOpLogBackend, OpEntry, OpLog, OpRecord};
 pub use refs::operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 
 /// Query is an operator-facing inspection command, so it should answer from

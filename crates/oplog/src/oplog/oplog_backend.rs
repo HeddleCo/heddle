@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Abstract backend trait for the operation log.
+//! Operation-log backend traits.
 //!
-//! The local CLI uses `OpLog` (disk-based). Hosted/server backends live
-//! outside this crate and implement the async [`OpLogBackend`] trait.
-
-use std::future::Future;
+//! [`OpLogBackend`] is the async/cloud-native contract. [`LocalOpLogBackend`]
+//! is the synchronous local capability used by the file-backed CLI/repo path.
 
 use objects::{
-    error::Result,
+    error::{HeddleError, Result, StorageErrorKind},
     object::{Scope, TransactionId},
 };
 
@@ -16,29 +14,44 @@ use super::oplog_types::{
     is_transaction_commit_for,
 };
 
+fn unsupported_local_method(method: &str) -> HeddleError {
+    HeddleError::storage(
+        StorageErrorKind::Unsupported,
+        format!("{method} is only available on local oplog backends"),
+    )
+}
+
 /// Async backend-agnostic interface for the operation log.
 #[allow(async_fn_in_trait)]
-pub trait OpLogBackend {
-    /// Append a batch of operations atomically. Returns the assigned IDs.
-    async fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
-        self.record_batch_scoped(operations, None).await
+pub trait OpLogBackend: Send + Sync {
+    async fn record_batch_async(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
+        self.record_batch_scoped_async(operations, None).await
     }
 
-    async fn record_batch_scoped(
+    async fn record_batch_scoped_async(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
-    ) -> Result<Vec<u64>>;
+    ) -> Result<Vec<u64>> {
+        let _ = (operations, scope);
+        Err(unsupported_local_method("record_batch_scoped_async"))
+    }
 
-    /// Atomic dedup+append for transaction-scoped batches.
-    async fn record_batch_scoped_if_no_transaction(
+    /// Async atomic dedup+append for transaction-scoped batches.
+    ///
+    /// The default implementation composes async read + append and is therefore
+    /// non-atomic. Backends should override when their storage authority can
+    /// serialize the check and append.
+    async fn record_batch_scoped_if_no_transaction_async(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
         transaction_id: &TransactionId,
         recent_window: usize,
     ) -> Result<Option<Vec<u64>>> {
-        let recent = self.recent_batches_scoped(recent_window, scope).await?;
+        let recent = self
+            .recent_batches_scoped_async(recent_window, scope)
+            .await?;
         if recent.iter().any(|batch| {
             batch
                 .entries
@@ -47,13 +60,11 @@ pub trait OpLogBackend {
         }) {
             return Ok(None);
         }
-        let ids = self.record_batch_scoped(operations, scope).await?;
+        let ids = self.record_batch_scoped_async(operations, scope).await?;
         Ok(Some(ids))
     }
 
-    /// Exact-once transaction append guarded by a per-key isolation
-    /// precondition.
-    async fn record_batch_exactly_once_if_unchanged(
+    async fn record_batch_exactly_once_if_unchanged_async(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
@@ -61,230 +72,121 @@ pub trait OpLogBackend {
         precondition: &IsolationPrecondition,
     ) -> Result<ConditionalCommitOutcome> {
         let _ = (operations, scope, transaction_id, precondition);
-        Err(objects::error::HeddleError::Config(
+        Err(HeddleError::Config(
             "oplog backend does not support conditional transaction commits".to_string(),
         ))
     }
 
-    async fn last(&self) -> Result<Option<OpEntry>>;
-    async fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
-    async fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.recent_batches_scoped(count, None).await
+    async fn last_async(&self) -> Result<Option<OpEntry>> {
+        Err(unsupported_local_method("last_async"))
     }
-    async fn recent_batches_scoped(
+
+    async fn recent_async(&self, count: usize) -> Result<Vec<OpEntry>> {
+        let _ = count;
+        Err(unsupported_local_method("recent_async"))
+    }
+
+    async fn recent_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped_async(count, None).await
+    }
+
+    async fn recent_batches_scoped_async(
         &self,
         count: usize,
         scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>>;
-
-    async fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.undo_batches_scoped(count, None).await
+    ) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("recent_batches_scoped_async"))
     }
-    async fn undo_batches_scoped(
+
+    async fn undo_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped_async(count, None).await
+    }
+
+    async fn undo_batches_scoped_async(
         &self,
         count: usize,
         scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>>;
-
-    async fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.redo_batches_scoped(count, None).await
+    ) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("undo_batches_scoped_async"))
     }
-    async fn redo_batches_scoped(
+
+    async fn redo_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped_async(count, None).await
+    }
+
+    async fn redo_batches_scoped_async(
         &self,
         count: usize,
         scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>>;
+    ) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("redo_batches_scoped_async"))
+    }
 
-    async fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch>;
-    async fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch>;
+    async fn mark_batch_undone_async(&self, batch: &OpBatch) -> Result<OpBatch> {
+        let _ = batch;
+        Err(unsupported_local_method("mark_batch_undone_async"))
+    }
 
-    /// Coalesce two existing batches into one logical undo/redo unit.
-    async fn coalesce_batches(
+    async fn mark_batch_redone_async(&self, batch: &OpBatch) -> Result<OpBatch> {
+        let _ = batch;
+        Err(unsupported_local_method("mark_batch_redone_async"))
+    }
+
+    async fn coalesce_batches_async(
         &self,
         primary_batch_id: u64,
         secondary_batch_id: u64,
     ) -> Result<OpBatch> {
         let _ = (primary_batch_id, secondary_batch_id);
-        Err(objects::error::HeddleError::Config(
+        Err(HeddleError::Config(
             "oplog backend does not support batch coalescing".to_string(),
         ))
     }
 }
 
-impl<T> OpLogBackend for T
-where
-    T: BlockingOpLogBackend + Send + Sync,
-{
-    async fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
-        BlockingOpLogBackend::record_batch(self, operations)
-    }
-
-    async fn record_batch_scoped(
-        &self,
-        operations: Vec<OpRecord>,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<u64>> {
-        BlockingOpLogBackend::record_batch_scoped(self, operations, scope)
-    }
-
-    async fn record_batch_scoped_if_no_transaction(
-        &self,
-        operations: Vec<OpRecord>,
-        scope: Option<&Scope>,
-        transaction_id: &TransactionId,
-        recent_window: usize,
-    ) -> Result<Option<Vec<u64>>> {
-        BlockingOpLogBackend::record_batch_scoped_if_no_transaction(
-            self,
-            operations,
-            scope,
-            transaction_id,
-            recent_window,
-        )
-        .await
-    }
-
-    async fn record_batch_exactly_once_if_unchanged(
-        &self,
-        operations: Vec<OpRecord>,
-        scope: Option<&Scope>,
-        transaction_id: &TransactionId,
-        precondition: &IsolationPrecondition,
-    ) -> Result<ConditionalCommitOutcome> {
-        BlockingOpLogBackend::record_batch_exactly_once_if_unchanged(
-            self,
-            operations,
-            scope,
-            transaction_id,
-            precondition,
-        )
-    }
-
-    async fn last(&self) -> Result<Option<OpEntry>> {
-        BlockingOpLogBackend::last(self)
-    }
-
-    async fn recent(&self, count: usize) -> Result<Vec<OpEntry>> {
-        BlockingOpLogBackend::recent(self, count)
-    }
-
-    async fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::recent_batches(self, count).await
-    }
-
-    async fn recent_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::recent_batches_scoped(self, count, scope).await
-    }
-
-    async fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::undo_batches(self, count).await
-    }
-
-    async fn undo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::undo_batches_scoped(self, count, scope).await
-    }
-
-    async fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::redo_batches(self, count).await
-    }
-
-    async fn redo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
-        BlockingOpLogBackend::redo_batches_scoped(self, count, scope).await
-    }
-
-    async fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        BlockingOpLogBackend::mark_batch_undone(self, batch)
-    }
-
-    async fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        BlockingOpLogBackend::mark_batch_redone(self, batch)
-    }
-
-    async fn coalesce_batches(
-        &self,
-        primary_batch_id: u64,
-        secondary_batch_id: u64,
-    ) -> Result<OpBatch> {
-        BlockingOpLogBackend::coalesce_batches(self, primary_batch_id, secondary_batch_id)
-    }
-}
-
-/// Blocking local backend interface for the file-backed operation log.
-///
-/// Existing local code remains explicit about using the blocking filesystem
-/// backend, while hosted implementations can implement [`OpLogBackend`]
-/// directly.
-///
-/// Backend-agnostic interface for the operation log.
-///
-/// The batch-history reads (`recent_batches*`, `undo_batches*`,
-/// `redo_batches*`) and the dedup'd commit
-/// (`record_batch_scoped_if_no_transaction`, which scans recent batches)
-/// are spelled as `-> impl Future + Send` rather than `async fn` so the
-/// returned future carries an explicit `Send` bound and the trait stays
-/// clean under `-D warnings` (the `async_fn_in_trait` lint).
-pub trait BlockingOpLogBackend: Send + Sync {
+/// Local synchronous backend interface for the operation log.
+pub trait LocalOpLogBackend: Send + Sync {
     /// Append a batch of operations atomically. Returns the assigned IDs.
     fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
         self.record_batch_scoped(operations, None)
     }
+
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
-    ) -> Result<Vec<u64>>;
+    ) -> Result<Vec<u64>> {
+        let _ = (operations, scope);
+        Err(unsupported_local_method("record_batch_scoped"))
+    }
 
-    /// Atomic dedup+append for transaction-scoped batches: scan the
-    /// most recent `recent_window` batches under the same write lock
-    /// used by [`BlockingOpLogBackend::record_batch_scoped`] for an
-    /// `OpRecord::TransactionCommit { transaction_id: id, .. }` marker.
-    /// On a hit, return `Ok(None)` (batch was already committed by a
-    /// prior call). Otherwise append `operations` and return
-    /// `Ok(Some(ids))`.
+    /// Atomic dedup+append for transaction-scoped batches.
     ///
-    /// The default implementation is non-atomic — it calls the two
-    /// existing methods in sequence and is therefore subject to a
-    /// check/append race under concurrent writers. The local
-    /// file-backed `OpLog` overrides it to hold the write lock across
-    /// the scan and the append (heddle#198 r4 / Codex PR #218 P2).
+    /// The default implementation is non-atomic. Local backends that can
+    /// serialize the scan+append at their write authority should override it.
     fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
         transaction_id: &TransactionId,
         recent_window: usize,
-    ) -> impl Future<Output = Result<Option<Vec<u64>>>> + Send {
-        async move {
-            let recent = self.recent_batches_scoped(recent_window, scope).await?;
-            if recent.iter().any(|batch| {
-                batch
-                    .entries
-                    .iter()
-                    .any(|entry| is_transaction_commit_for(&entry.operation, transaction_id))
-            }) {
-                return Ok(None);
-            }
-            let ids = self.record_batch_scoped(operations, scope)?;
-            Ok(Some(ids))
+    ) -> Result<Option<Vec<u64>>> {
+        let recent = self.recent_batches_scoped(recent_window, scope)?;
+        if recent.iter().any(|batch| {
+            batch
+                .entries
+                .iter()
+                .any(|entry| is_transaction_commit_for(&entry.operation, transaction_id))
+        }) {
+            return Ok(None);
         }
+        let ids = self.record_batch_scoped(operations, scope)?;
+        Ok(Some(ids))
     }
 
-    /// Exact-once transaction append guarded by a per-key isolation
-    /// precondition. Implementations that support local/hosted AtomicMutation
-    /// commits must override this so dedup, conflict detection, and append are
-    /// serialized at the backend's write authority.
     fn record_batch_exactly_once_if_unchanged(
         &self,
         operations: Vec<OpRecord>,
@@ -293,50 +195,155 @@ pub trait BlockingOpLogBackend: Send + Sync {
         precondition: &IsolationPrecondition,
     ) -> Result<ConditionalCommitOutcome> {
         let _ = (operations, scope, transaction_id, precondition);
-        Err(objects::error::HeddleError::Config(
+        Err(HeddleError::Config(
             "oplog backend does not support conditional transaction commits".to_string(),
         ))
     }
 
-    fn last(&self) -> Result<Option<OpEntry>>;
-    fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
-    fn recent_batches(&self, count: usize) -> impl Future<Output = Result<Vec<OpBatch>>> + Send {
-        async move { self.recent_batches_scoped(count, None).await }
+    fn last(&self) -> Result<Option<OpEntry>> {
+        Err(unsupported_local_method("last"))
     }
-    fn recent_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> impl Future<Output = Result<Vec<OpBatch>>> + Send;
 
-    fn undo_batches(&self, count: usize) -> impl Future<Output = Result<Vec<OpBatch>>> + Send {
-        async move { self.undo_batches_scoped(count, None).await }
+    fn recent(&self, count: usize) -> Result<Vec<OpEntry>> {
+        let _ = count;
+        Err(unsupported_local_method("recent"))
     }
-    fn undo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> impl Future<Output = Result<Vec<OpBatch>>> + Send;
-    fn redo_batches(&self, count: usize) -> impl Future<Output = Result<Vec<OpBatch>>> + Send {
-        async move { self.redo_batches_scoped(count, None).await }
-    }
-    fn redo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> impl Future<Output = Result<Vec<OpBatch>>> + Send;
-    fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch>;
-    fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch>;
 
-    /// Coalesce two existing batches into one logical undo/redo unit.
-    ///
-    /// Implementations should preserve entry IDs and chronological entry
-    /// order, rewriting only batch metadata. Backends that cannot rewrite
-    /// local batch metadata may keep the default fail-closed behavior.
+    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped(count, None)
+    }
+
+    fn recent_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("recent_batches_scoped"))
+    }
+
+    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped(count, None)
+    }
+
+    fn undo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("undo_batches_scoped"))
+    }
+
+    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped(count, None)
+    }
+
+    fn redo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
+        let _ = (count, scope);
+        Err(unsupported_local_method("redo_batches_scoped"))
+    }
+
+    fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {
+        let _ = batch;
+        Err(unsupported_local_method("mark_batch_undone"))
+    }
+
+    fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch> {
+        let _ = batch;
+        Err(unsupported_local_method("mark_batch_redone"))
+    }
+
     fn coalesce_batches(&self, primary_batch_id: u64, secondary_batch_id: u64) -> Result<OpBatch> {
         let _ = (primary_batch_id, secondary_batch_id);
-        Err(objects::error::HeddleError::Config(
+        Err(HeddleError::Config(
             "oplog backend does not support batch coalescing".to_string(),
         ))
+    }
+}
+
+impl<T: LocalOpLogBackend + ?Sized> OpLogBackend for T {
+    async fn record_batch_async(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
+        self.record_batch(operations)
+    }
+
+    async fn record_batch_scoped_async(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<u64>> {
+        self.record_batch_scoped(operations, scope)
+    }
+
+    async fn record_batch_scoped_if_no_transaction_async(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
+        recent_window: usize,
+    ) -> Result<Option<Vec<u64>>> {
+        self.record_batch_scoped_if_no_transaction(operations, scope, transaction_id, recent_window)
+    }
+
+    async fn record_batch_exactly_once_if_unchanged_async(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&Scope>,
+        transaction_id: &TransactionId,
+        precondition: &IsolationPrecondition,
+    ) -> Result<ConditionalCommitOutcome> {
+        self.record_batch_exactly_once_if_unchanged(operations, scope, transaction_id, precondition)
+    }
+
+    async fn last_async(&self) -> Result<Option<OpEntry>> {
+        self.last()
+    }
+
+    async fn recent_async(&self, count: usize) -> Result<Vec<OpEntry>> {
+        self.recent(count)
+    }
+
+    async fn recent_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches(count)
+    }
+
+    async fn recent_batches_scoped_async(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped(count, scope)
+    }
+
+    async fn undo_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches(count)
+    }
+
+    async fn undo_batches_scoped_async(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped(count, scope)
+    }
+
+    async fn redo_batches_async(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches(count)
+    }
+
+    async fn redo_batches_scoped_async(
+        &self,
+        count: usize,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped(count, scope)
+    }
+
+    async fn mark_batch_undone_async(&self, batch: &OpBatch) -> Result<OpBatch> {
+        self.mark_batch_undone(batch)
+    }
+
+    async fn mark_batch_redone_async(&self, batch: &OpBatch) -> Result<OpBatch> {
+        self.mark_batch_redone(batch)
+    }
+
+    async fn coalesce_batches_async(
+        &self,
+        primary_batch_id: u64,
+        secondary_batch_id: u64,
+    ) -> Result<OpBatch> {
+        self.coalesce_batches(primary_batch_id, secondary_batch_id)
     }
 }

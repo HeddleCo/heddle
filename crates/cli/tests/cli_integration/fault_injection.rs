@@ -15,7 +15,7 @@
 
 use std::process::Command;
 
-use oplog::{BlockingOpLogBackend, OpRecord};
+use oplog::{LocalOpLogBackend, OpRecord};
 
 use super::*;
 

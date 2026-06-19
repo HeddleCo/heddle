@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use objects::{
     object::{ChangeId, State},
-    store::{AgentRegistry, BlockingObjectStore},
+    store::{AgentRegistry, LocalObjectStore},
 };
 use oplog::OpRecord;
 use repo::Repository;
@@ -633,7 +633,7 @@ mod tests {
     use std::sync::Mutex;
 
     use objects::object::{Attribution, Principal};
-    use oplog::BlockingOpLogBackend;
+    use oplog::LocalOpLogBackend;
     use repo::Repository;
     use tempfile::TempDir;
 

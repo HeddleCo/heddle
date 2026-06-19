@@ -6,7 +6,7 @@
 use std::{fs, process::Command, str};
 
 use ntest::timeout;
-use objects::store::BlockingObjectStore;
+use objects::store::LocalObjectStore;
 use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;

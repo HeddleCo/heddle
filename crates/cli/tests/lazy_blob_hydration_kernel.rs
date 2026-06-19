@@ -28,7 +28,7 @@ use std::{
 };
 
 use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
-use objects::{object::Blob, store::BlockingObjectStore};
+use objects::{object::Blob, store::LocalObjectStore};
 use repo::Repository;
 use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,

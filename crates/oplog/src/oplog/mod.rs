@@ -11,9 +11,9 @@ mod packed_oplog;
 #[cfg(test)]
 mod oplog_tests;
 
-pub use oplog_backend::{BlockingOpLogBackend, OpLogBackend};
+pub use oplog_backend::{LocalOpLogBackend, OpLogBackend};
 pub use oplog_core::OpLog;
-pub use oplog_recorder::{BlockingOpLogRecorder, OpLogRecorder, VisibilitySidecarSnapshots};
+pub use oplog_recorder::{LocalOpLogRecorder, OpLogRecorder, VisibilitySidecarSnapshots};
 pub use oplog_types::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
     RedactionUndoClass, ThreadUpdateSnapshots, is_transaction_commit, is_transaction_commit_for,

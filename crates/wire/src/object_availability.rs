@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::BlockingObjectStore;
+use objects::{
+    object::ActionId,
+    store::{LocalObjectStore, ObjectKey, ObjectStore},
+};
 
-use crate::{ObjectId, ObjectInfo, ObjectType, Result};
+use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectAvailabilityPlan {
@@ -14,7 +17,7 @@ pub struct ObjectAvailabilityPlan {
     pub partial_fetch_allowed: bool,
 }
 
-pub fn has_object(store: &impl BlockingObjectStore, info: &ObjectInfo) -> Result<bool> {
+pub fn has_object(store: &impl LocalObjectStore, info: &ObjectInfo) -> Result<bool> {
     match (&info.id, info.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
@@ -34,8 +37,18 @@ pub fn has_object(store: &impl BlockingObjectStore, info: &ObjectInfo) -> Result
     }
 }
 
+pub async fn has_object_async<S>(store: &S, info: &ObjectInfo) -> Result<bool>
+where
+    S: ObjectStore + ?Sized,
+{
+    let Some(key) = object_key_for_availability(info) else {
+        return Ok(false);
+    };
+    Ok(store.has_object(&key).await?)
+}
+
 pub fn plan_object_availability(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<ObjectAvailabilityPlan> {
     let mut plan = ObjectAvailabilityPlan::default();
@@ -51,6 +64,63 @@ pub fn plan_object_availability(
     }
 
     Ok(plan)
+}
+
+pub async fn plan_object_availability_async<S>(
+    store: &S,
+    objects: &[ObjectInfo],
+) -> Result<ObjectAvailabilityPlan>
+where
+    S: ObjectStore + ?Sized,
+{
+    let mut plan = ObjectAvailabilityPlan::default();
+    let keyed: Vec<_> = objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, info)| object_key_for_availability(info).map(|key| (index, key)))
+        .collect();
+    let keys: Vec<_> = keyed.iter().map(|(_, key)| key.clone()).collect();
+    let presence = store.has_many(&keys).await?;
+    if presence.len() != keyed.len() {
+        return Err(ProtocolError::InvalidState(format!(
+            "object store returned {} availability results for {} requested objects",
+            presence.len(),
+            keyed.len()
+        )));
+    }
+
+    let mut present = vec![false; objects.len()];
+    for ((index, _key), result) in keyed.into_iter().zip(presence) {
+        present[index] = result.present;
+    }
+
+    for (info, is_present) in objects.iter().zip(present) {
+        if is_present {
+            plan.have_objects.push(info.id.clone());
+            plan.present_objects.push(info.id.clone());
+        } else {
+            plan.want_objects.push(info.id.clone());
+            plan.missing_objects.push(info.id.clone());
+        }
+    }
+
+    Ok(plan)
+}
+
+fn object_key_for_availability(info: &ObjectInfo) -> Option<ObjectKey> {
+    match (&info.id, info.obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Blob) => Some(ObjectKey::Blob(*hash)),
+        (ObjectId::Hash(hash), ObjectType::Tree) => Some(ObjectKey::Tree(*hash)),
+        (ObjectId::Hash(hash), ObjectType::Action) => {
+            Some(ObjectKey::Action(ActionId::from_hash(*hash)))
+        }
+        (ObjectId::ChangeId(id), ObjectType::State) => Some(ObjectKey::State(*id)),
+        // Sidecars are merge/dedupe records. Keep the existing conservative
+        // sync semantics: fetch them and validate at the repository boundary.
+        (ObjectId::Hash(_), ObjectType::Redaction)
+        | (ObjectId::ChangeId(_), ObjectType::StateVisibility) => None,
+        _ => None,
+    }
 }
 
 impl ObjectAvailabilityPlan {
@@ -75,7 +145,7 @@ impl ObjectAvailabilityPlan {
 mod tests {
     use objects::{
         object::{Blob, ChangeId, ContentHash, Tree},
-        store::{BlockingObjectStore, Result as StoreResult},
+        store::{LocalObjectStore, Result as StoreResult},
     };
 
     use super::*;
@@ -85,7 +155,7 @@ mod tests {
         blob: Option<ContentHash>,
     }
 
-    impl BlockingObjectStore for DummyStore {
+    impl LocalObjectStore for DummyStore {
         fn get_blob(&self, _hash: &ContentHash) -> StoreResult<Option<Blob>> {
             Ok(None)
         }

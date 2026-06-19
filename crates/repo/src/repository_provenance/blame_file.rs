@@ -60,7 +60,7 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{ChangeId, ContentHash, FileProvenance, Origin, State},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 
 use super::{

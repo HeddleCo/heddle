@@ -24,12 +24,12 @@ use std::{
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
-        BlockingObjectStore, CompressionConfig, PackMaintenanceStoreExt,
+        CompressionConfig, LocalObjectStore, PackMaintenanceStoreExt,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
     util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
-use oplog::oplog::{BlockingOpLogBackend, OpLog};
+use oplog::oplog::{LocalOpLogBackend, OpLog};
 use refs::refs::RefBackend;
 use tracing::info;
 
@@ -181,8 +181,8 @@ fn ref_stats_from_heads(heads: &[RefHead]) -> RefDiscoveryStats {
 pub struct Importer<
     'a,
     R: RefBackend,
-    S: BlockingObjectStore + PackMaintenanceStoreExt,
-    O: BlockingOpLogBackend = OpLog,
+    S: LocalObjectStore + PackMaintenanceStoreExt,
+    O: LocalOpLogBackend = OpLog,
 > {
     git: &'a GitSource,
     store: &'a S,
@@ -213,9 +213,7 @@ pub struct ImportProgressEvent {
     pub states_created: usize,
 }
 
-impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt>
-    Importer<'a, R, S, OpLog>
-{
+impl<'a, R: RefBackend, S: LocalObjectStore + PackMaintenanceStoreExt> Importer<'a, R, S, OpLog> {
     pub fn new(git: &'a GitSource, store: &'a S, refs: &'a R, map: &'a mut ShaMap) -> Self {
         Self {
             git,
@@ -231,7 +229,7 @@ impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt>
     }
 }
 
-impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt, O: BlockingOpLogBackend>
+impl<'a, R: RefBackend, S: LocalObjectStore + PackMaintenanceStoreExt, O: LocalOpLogBackend>
     Importer<'a, R, S, O>
 {
     /// Attach an oplog backend so the importer also translates reflog
@@ -240,7 +238,7 @@ impl<'a, R: RefBackend, S: BlockingObjectStore + PackMaintenanceStoreExt, O: Blo
     /// import boundary.
     ///
     /// Rebinds the oplog type parameter to the attached backend's type.
-    pub fn with_oplog<O2: BlockingOpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, S, O2> {
+    pub fn with_oplog<O2: LocalOpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, S, O2> {
         Importer {
             git: self.git,
             store: self.store,

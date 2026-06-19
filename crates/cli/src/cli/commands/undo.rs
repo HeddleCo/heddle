@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use objects::{
     object::{ChangeId, ContentHash},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use oplog::{OpBatch, RedactionUndoClass};
 use refs::UNDO_RECOVERY_HANDLE;
@@ -936,7 +936,7 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
 #[cfg(test)]
 mod tests {
-    use oplog::{BlockingOpLogBackend, OpRecord};
+    use oplog::{LocalOpLogBackend, OpRecord};
     use tempfile::TempDir;
 
     use super::*;

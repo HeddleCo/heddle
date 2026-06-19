@@ -7,7 +7,7 @@ use anyhow::Result;
 use objects::{
     delta::DeltaEncoder,
     object::{ContentHash, EntryType, Tree},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
 };
 use tracing::debug;
 
@@ -93,7 +93,7 @@ struct AddedIndex<'a> {
 }
 
 pub(crate) fn flatten_tree(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     tree: &Tree,
     prefix: &str,
 ) -> Result<FlatTree> {
@@ -122,7 +122,7 @@ pub(crate) fn flatten_tree(
 }
 
 pub(crate) fn detect_renames(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base: &FlatTree,
     branch: &FlatTree,
     config: RenameMatcherConfig,
@@ -131,7 +131,7 @@ pub(crate) fn detect_renames(
 }
 
 pub(crate) fn detect_renames_with_stats(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     base: &FlatTree,
     branch: &FlatTree,
     config: RenameMatcherConfig,
@@ -341,7 +341,7 @@ fn match_exact_hashes(
 }
 
 fn load_candidate_files<'a>(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     entries: &[(usize, &'a str, &ContentHash)],
     load_content: bool,
     stats: &mut RenameMatcherStats,
@@ -371,7 +371,7 @@ fn load_candidate_files<'a>(
 }
 
 fn build_added_index<'a>(
-    store: &impl BlockingObjectStore,
+    store: &impl LocalObjectStore,
     entries: &[(usize, &'a str, &ContentHash)],
     load_content: bool,
     stats: &mut RenameMatcherStats,

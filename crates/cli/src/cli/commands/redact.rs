@@ -22,10 +22,10 @@ use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
 use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
-    store::BlockingObjectStore,
+    store::LocalObjectStore,
     worktree::should_ignore,
 };
-use oplog::BlockingOpLogRecorder;
+use oplog::LocalOpLogRecorder;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

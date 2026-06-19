@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use objects::{object::ThreadName, store::BlockingObjectStore};
+use objects::{object::ThreadName, store::LocalObjectStore};
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,

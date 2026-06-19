@@ -30,7 +30,7 @@ use crypto::verify_payload_signature;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ContentHash, Principal, Redaction, RedactionsBlob, Tree},
-    store::{BlockingObjectStore, LocalObjectStoreExt},
+    store::{LocalObjectStore, LocalObjectStoreExt},
 };
 
 use crate::repository::Repository;

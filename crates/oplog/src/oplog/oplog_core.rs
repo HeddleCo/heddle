@@ -14,7 +14,7 @@ use objects::{
 };
 
 use super::{
-    oplog_backend::BlockingOpLogBackend,
+    oplog_backend::LocalOpLogBackend,
     oplog_types::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
@@ -495,7 +495,7 @@ impl OpLog {
     }
 }
 
-impl BlockingOpLogBackend for OpLog {
+impl LocalOpLogBackend for OpLog {
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -520,7 +520,7 @@ impl BlockingOpLogBackend for OpLog {
         Ok(ids)
     }
 
-    async fn record_batch_scoped_if_no_transaction(
+    fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&Scope>,
@@ -589,27 +589,15 @@ impl BlockingOpLogBackend for OpLog {
         guard.as_ref().unwrap().recent_entries(count)
     }
 
-    async fn recent_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
+    fn recent_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
         OpLog::recent_batches_scoped(self, count, scope)
     }
 
-    async fn undo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
+    fn undo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
         OpLog::undo_batches_scoped(self, count, scope)
     }
 
-    async fn redo_batches_scoped(
-        &self,
-        count: usize,
-        scope: Option<&Scope>,
-    ) -> Result<Vec<OpBatch>> {
+    fn redo_batches_scoped(&self, count: usize, scope: Option<&Scope>) -> Result<Vec<OpBatch>> {
         OpLog::redo_batches_scoped(self, count, scope)
     }
 
