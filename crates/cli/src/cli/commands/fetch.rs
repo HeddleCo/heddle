@@ -20,7 +20,7 @@ use super::{
     remote::resolved_default_remote_name,
 };
 #[cfg(feature = "client")]
-use crate::client::{HostedAuthMode, HostedGrpcClient};
+use crate::client::{RemoteAuthMode, RemoteGrpcClient};
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
 use crate::{
@@ -48,7 +48,7 @@ struct FetchOutput {
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
     let repo = cli.open_repo()?;
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    if repo.capability() == RepositoryCapability::GitOverlay && !repo.remote_linked() {
         let remotes = if all {
             let configured = repo.refs().list_remotes()?;
             if configured.is_empty() {
@@ -265,13 +265,13 @@ async fn fetch_network(
 ) -> Result<(usize, usize)> {
     let repo_path = options
         .repo_path
-        .context("network remotes must include a hosted repository path")?;
+        .context("network remotes must include a repository path")?;
 
-    let mut client = HostedGrpcClient::open_session(
+    let mut client = RemoteGrpcClient::open_session(
         options.addr,
         options.user_config,
         options.server_key,
-        HostedAuthMode::ConfigToken,
+        RemoteAuthMode::ConfigToken,
     )
     .await?;
 
@@ -334,7 +334,7 @@ async fn fetch_network(
 
 #[cfg(feature = "client")]
 async fn fetch_remote_state(
-    client: &mut HostedGrpcClient,
+    client: &mut RemoteGrpcClient,
     repo: &Repository,
     repo_path: &str,
     remote_name: &str,

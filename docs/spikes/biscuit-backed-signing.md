@@ -64,7 +64,7 @@ but it appears in exactly one crate — the **client** — and only ever in the
   (`device_flow.rs:62-67`): *"Uses `UnverifiedBiscuit` because attenuation
   appends a new block… the new block's signature chains off the parent's keys…
   The CLI never holds the server's signing key."*
-- `crates/client/src/grpc_hosted/mod.rs:215` — the actual biscuit is obtained via
+- `crates/client/src/grpc_remote/mod.rs:215` — the actual biscuit is obtained via
   the `mint_biscuit` RPC; the **server** holds the root key and mints.
 
 So the biscuit *signing* key (the root `KeyPair`) is **not available locally** at
@@ -90,9 +90,9 @@ generated during `heddle auth login`:
 - This local key is what *gates biscuit minting*. It signs the proof the server
   checks before minting/rotating a biscuit:
   - per-request proof header `x-heddle-proof` = `sign("{bearer}|{proof_ts}")`
-    (`grpc_hosted/mod.rs:106-107`),
+    (`grpc_remote/mod.rs:106-107`),
   - the mint/rotation challenge `sign("{timestamp}\n{public_key_id}\n")`
-    (`grpc_hosted/mod.rs:191`, request built at `:200-211` with
+    (`grpc_remote/mod.rs:191`, request built at `:200-211` with
     `Proof::Keypair(KeypairProof{ public_key_id, timestamp, signature })`).
 
 **Conclusion.** "The biscuit local keypair" = the device-binding ed25519 key.
@@ -213,9 +213,9 @@ A small repo-level helper that returns `Option<Box<dyn Signer>>`:
 
 1. **Preferred — reuse the device key.** Resolve the active server credential
    (`credentials::resolve_credential_for_server`, already used by
-   `grpc_hosted/mod.rs` rotation at `:151`), read `private_key_pem`
+   `grpc_remote/mod.rs` rotation at `:151`), read `private_key_pem`
    (`credentials.rs:49`), and build `Ed25519Signer::from_pem(pem)` — the exact
-   call `grpc_hosted/mod.rs:92` and `:176` already make. **No new key.** The
+   call `grpc_remote/mod.rs:92` and `:176` already make. **No new key.** The
    pubkey is the server-registered device key, so `StateSignature.public_key`
    ties directly to a known identity.
 2. **Fallback — config-pointed key.** Honor an explicit signing-key path from
@@ -385,7 +385,7 @@ state-signing. Analysis:
   repeated disk reads.
 - *Key-reuse-across-purposes risk.* The two uses sign **disjoint, unambiguous
   payloads**: auth proofs sign `"{bearer}|{ts}"` / `"{ts}\n{pubkey_id}\n"`
-  (`grpc_hosted/mod.rs:107,191`); state-signing signs a 32-byte blake3 content
+  (`grpc_remote/mod.rs:107,191`); state-signing signs a 32-byte blake3 content
   hash. There is no payload-confusion path (an attacker can't get a state
   signature to validate as an auth proof or vice-versa — different lengths,
   different structures, no shared prefix). This is acceptable, but **recommend a

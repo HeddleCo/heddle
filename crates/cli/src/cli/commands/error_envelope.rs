@@ -368,7 +368,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
         if let Some(advice) = cause.downcast_ref::<RecoveryAdvice>() {
             return ErrorClassification::from_advice(advice);
         }
-        if let Some(advice) = cause.downcast_ref::<weft_client_shim::HostedRecoveryAdvice>() {
+        if let Some(advice) = cause.downcast_ref::<cli_shared::RemoteRecoveryAdvice>() {
             return ErrorClassification {
                 kind: advice.kind.to_string(),
                 human_error: Some(advice.error.clone()),

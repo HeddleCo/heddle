@@ -8,10 +8,12 @@
 //! `RemoteTarget` / `ClientConfig`). Pulling them out lets both sides
 //! resolve cleanly.
 
+pub mod client_command;
 pub mod client_config;
 pub mod config;
 pub mod remote;
 
+pub use client_command::{ClientCommandContext, ClientOutputOverride, RemoteRecoveryAdvice};
 pub use client_config::ClientConfig;
 pub use config::UserConfig;
 pub use remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key};

@@ -36,7 +36,6 @@ objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 wire = { path = "../wire", package = "heddle-wire", version = "0.4", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.4", default-features = false, features = ["git-overlay", "native"] }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.4" }
 
 [dev-dependencies]
 tempfile.workspace = true

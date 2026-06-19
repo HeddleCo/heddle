@@ -154,7 +154,7 @@ pub(crate) fn export_state(
     // through here. See `git_util::build_commit_message_with_footer`.
     let hosted_url = heddle_repo
         .config()
-        .hosted
+        .remote
         .upstream_url
         .as_deref()
         .filter(|s| !s.is_empty());

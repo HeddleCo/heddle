@@ -23,7 +23,6 @@ pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod exit;
-pub mod extensions;
 pub mod harness;
 pub mod logging;
 pub mod operation_id;

@@ -561,7 +561,7 @@ Run `heddle clone --help` for the flag list.
   advertised default branch (its Git HEAD); if the remote advertises
   none, they fall back to a thread named `main`, then to the
   alphabetically first imported thread.
-- Native-local and hosted Heddle clones target `main` directly with no
+- Native-local and network Heddle clones target `main` directly with no
   fallback chain; if the remote has no `main` thread the clone fails —
   pass `--thread <name>` to select one.
 - Clone never prompts.
@@ -579,7 +579,7 @@ Depth controls history extent only — how many states the clone fetches —
 and says nothing about object contents. Whether a state's blobs are
 present locally or fetched lazily is a separate concern that `--depth`
 never governs. Advanced/planned flags `--lazy` and `--filter blob:none`
-skip blob content and hydrate it on demand for hosted/network Heddle
+skip blob content and hydrate it on demand for network Heddle
 remotes; local and Git-overlay clone paths reject them today.
 
 See `heddle help threads` for the thread model and `heddle help remotes`
@@ -687,7 +687,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
 | `git tag v1.0` | `heddle thread marker create v1.0`. A marker names a Heddle State; it is for pinning a state in Heddle history, not for creating a signed or annotated Git tag object. |
-| `git remote add origin <url>` | `heddle remote add origin <url>`. Heddle remotes can be native Heddle endpoints, hosted addresses, local paths, or Git remotes depending on repository mode. |
+| `git remote add origin <url>` | `heddle remote add origin <url>`. Heddle remotes can be native Heddle endpoints, network addresses, local paths, or Git remotes depending on repository mode. |
 | `git push` / `git pull` | `heddle push` / `heddle pull`. Heddle pushes or pulls the selected thread/state through its remote contract and refuses when verification says the mapping is unsafe. |
 | `git fetch` | `heddle fetch`. Fetch updates remote knowledge without making your current thread's checkout silently absorb changes. |
 | `git rebase` to catch up | `heddle sync`. Sync refreshes a stale thread onto its target when replay is clean; conflicts route through `heddle resolve` / `heddle continue`. |
@@ -837,7 +837,7 @@ rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n
 Without an id, dedup is bypassed and the call executes normally. For the\n\
 authoritative per-command contract, use `heddle help --output json`.\n";
 
-const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and hosted destinations.\n\
+const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and network destinations.\n\
 \n\
 Core loop:\n\
 \n\
@@ -848,7 +848,7 @@ Core loop:\n\
     heddle pull\n\
     heddle verify\n\
 \n\
-Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
+Remote values may be network endpoints, Git URLs, file URLs, or local bare Git\n\
 paths depending on the workflow. Top-level `fetch`, `push`, and `pull` use the\n\
 default remote unless a positional remote name is supplied, for example\n\
 `heddle fetch backup`. `heddle bridge git status` shows Git-overlay mapping and\n\
@@ -993,7 +993,7 @@ Export metadata for Git readers:\n\
 Every exported commit carries a footer at the tail of the commit message:\n\
 \n\
     Heddle-State: <change_id>\n\
-    Heddle-URL: <hosted_url>/state/<change_id>     (omitted if no hosted URL)\n\
+    Heddle-URL: <remote_url>/state/<change_id>     (omitted if no remote URL)\n\
     Heddle-Annotations-Omitted: <count>\n\
 \n\
 This is the durable record — every reader on every host sees it regardless\n\

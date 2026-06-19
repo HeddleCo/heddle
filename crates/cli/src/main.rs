@@ -92,17 +92,7 @@ async fn async_main() -> Result<()> {
     // `--lazy` clone would see `MissingObject` on every blob read.
     cli::cli::commands::register_git_overlay_factory();
     #[cfg(feature = "client")]
-    heddle_client::grpc_hosted::register_hosted_factory();
-
-    // Pick the WeftExtensions implementation at startup for hosted
-    // client builds. OSS builds do not compile the hosted command
-    // variants, so there is no fallback implementation here.
-    #[cfg(feature = "client")]
-    let hosted: Box<dyn weft_client_shim::WeftExtensions> =
-        Box::new(cli::extensions::EnabledWeftExtensions);
-    // OSS builds dispatch no hosted commands (those `Commands` variants
-    // are gated behind `client`), so the trait object is unused and we
-    // drop the binding entirely.
+    heddle_client::grpc_remote::register_remote_factory();
 
     let total_start = Instant::now();
     let profile = profile_enabled();
@@ -217,6 +207,18 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     };
+    #[cfg(feature = "client")]
+    let client_ctx = cli_shared::ClientCommandContext::new(
+        cli.repo.clone(),
+        cli::operation_id::wire(&cli),
+        user_config.output.format,
+        cli.output.map(|output| match output {
+            cli::cli::OutputMode::Json | cli::cli::OutputMode::JsonCompact => {
+                cli_shared::ClientOutputOverride::Json
+            }
+            cli::cli::OutputMode::Text => cli_shared::ClientOutputOverride::Text,
+        }),
+    );
     let config_load_ms = config_start.elapsed().as_millis();
     let logging_start = Instant::now();
     // Foreground CLI commands default to WARN-level logs so the human-facing
@@ -600,10 +602,7 @@ async fn async_main() -> Result<()> {
         Commands::Remote { command } => cmd_remote(&cli, command.clone()),
 
         #[cfg(feature = "client")]
-        Commands::Auth { command } => {
-            let cmd = command.clone();
-            hosted.auth(&cli, &cmd).await
-        }
+        Commands::Auth { command } => heddle_client::cmd_auth(&client_ctx, command.clone()).await,
 
         Commands::Context { command } => match command {
             ContextCommands::Set(args) => {
@@ -700,8 +699,7 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Support { command } => {
-            let cmd = command.clone();
-            hosted.support(&cli, &cmd).await
+            heddle_client::cmd_support(&client_ctx, command.clone()).await
         }
 
         #[cfg(feature = "git-overlay")]
@@ -825,8 +823,7 @@ async fn async_main() -> Result<()> {
                 session,
                 interval_secs,
             } => {
-                hosted
-                    .presence_publish(&cli, session.clone(), *interval_secs)
+                heddle_client::cmd_presence_publish(&client_ctx, session.clone(), *interval_secs)
                     .await
             }
         },

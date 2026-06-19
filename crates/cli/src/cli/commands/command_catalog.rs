@@ -925,7 +925,7 @@ const fn json_discriminator(
 /// backed by a documented schema verb — used for preliminary /
 /// transport-envelope records emitted alongside the primary payload
 /// (e.g. `clone_connection` ahead of the final `clone` object on
-/// hosted clones). The `reason` is required by the metadata invariant
+/// network clones). The `reason` is required by the metadata invariant
 /// test so the catalog can't carry orphan discriminators.
 const fn json_discriminator_no_schema(
     reason: &'static str,
@@ -1472,7 +1472,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 ),
                 &[
                     json_discriminator(Some("clone"), "output_kind", "clone"),
-                    // `clone --output json` on a hosted/network remote
+                    // `clone --output json` on a network remote
                     // emits a preliminary connection envelope before the
                     // final clone payload. Both records carry
                     // `output_kind` so agents that route on the
@@ -1483,7 +1483,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     // `schemas`. Source-of-truth value:
                     // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
                     json_discriminator_no_schema(
-                        "preliminary connection envelope emitted by hosted clones \
+                        "preliminary connection envelope emitted by network clones \
                          before the final clone payload (no separate schema)",
                         "output_kind",
                         "clone_connection",
@@ -4425,9 +4425,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::Resolve(_) => vec!["thread", "resolve"],
             ThreadCommands::Promote(_) => vec!["thread", "promote"],
             ThreadCommands::Drop(_) => vec!["thread", "drop"],
+            #[cfg(feature = "client")]
             ThreadCommands::Approve(_) => vec!["thread", "approve"],
+            #[cfg(feature = "client")]
             ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
+            #[cfg(feature = "client")]
             ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
+            #[cfg(feature = "client")]
             ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
             ThreadCommands::Marker { command } => match command {
@@ -5834,7 +5838,7 @@ mod tests {
         // verbs). Any further sweep MUST extend this list and document the
         // addition.
         //
-        // `clone` appears twice because hosted `clone --output json`
+        // `clone` appears twice because network `clone --output json`
         // emits two JSON records per invocation (a preliminary
         // `clone_connection` envelope followed by the final `clone`
         // payload); both discriminator values are advertised so agents
@@ -6134,7 +6138,7 @@ mod tests {
         let raw_discriminators = raw_json_discriminator_specs();
         // A single command path MAY advertise more than one
         // discriminator (e.g. `clone` carries both `clone` and
-        // `clone_connection` because hosted `clone --output json`
+        // `clone_connection` because network `clone --output json`
         // emits a preliminary connection envelope before the final
         // payload — see heddle#272). But each (path, value) pair must
         // still be unique, otherwise two entries would advertise the

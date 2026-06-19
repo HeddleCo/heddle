@@ -664,8 +664,8 @@ chokepoint." But a count over a hand-picked set of method *names* is exactly the
 frame, for the same reason r6's enumerated reader hook was: it is incomplete, and
 silently so. Production publishes refs through **more** entry points than those four
 names — the public **CAS wrappers** `set_thread_cas` (`thread.rs:1647-1650`) and
-`set_marker_cas` (`grpc_hosted/mod.rs:334-338`), the **create/delete** wrappers
-`create_marker` (`grpc_hosted/mod.rs:339`) and `delete_marker`, the `delete_*_cas`
+`set_marker_cas` (`grpc_remote/mod.rs:334-338`), the **create/delete** wrappers
+`create_marker` (`grpc_remote/mod.rs:339`) and `delete_marker`, the `delete_*_cas`
 siblings, and the r9 remote/undo setters — none of which the four-name grep counts.
 (The grep was worse than incomplete: `set_marker` is not even a `RefManager` method —
 markers publish via `set_marker_cas`/`create_marker`/`delete_marker` — so the audit
@@ -780,7 +780,7 @@ entry points cid 3329019023 flagged are folded in):
 | `cli/.../commands/clone.rs`, `actor_cmd.rs`, `attempt.rs`, `context/mod.rs`, `bridge.rs`, `undo_apply.rs`, `git_overlay_health.rs` | HEAD / thread / marker publishes |
 | `cli/.../commands/remote/{mod,remote_ops}.rs` | remote-thread + HEAD publishes |
 | `cli/src/bridge/{git_core,git_sync}.rs` | git-overlay HEAD/thread sync |
-| `client/src/grpc_hosted/{hydration,sync,mod}.rs` | hosted-sync ref materialization (incl. `set_marker_cas`/`create_marker` `mod.rs:334-339`) |
+| `client/src/grpc_remote/{hydration,sync,mod}.rs` | hosted-sync ref materialization (incl. `set_marker_cas`/`create_marker` `mod.rs:334-339`) |
 | `repo/src/repository_thread_materialize.rs` | thread-materialize HEAD/thread publish |
 
 The op-descriptor model (r15) cleanly **separates the two concerns**: the primitive
@@ -1019,7 +1019,7 @@ loader). The four **list** readers (#6–#9) read a *different* substrate — th
 — so they bypassed the hook entirely, and they are live on production paths:
 `thread list` → `collect_thread_summaries` (`cli/src/cli/commands/thread.rs:507`),
 `marker list` → `cmd_marker_list` (`cli/src/cli/commands/marker.rs:64`), and
-hosted-sync freshness (`client/src/grpc_hosted/sync.rs:1001`). The **remote** (#5,
+hosted-sync freshness (`client/src/grpc_remote/sync.rs:1001`). The **remote** (#5,
 #8, #9) and **undo-recovery** (#4) readers likewise bypassed it. After an
 oplog-committed create/delete in the "after ph4, before ph5" window, every one of
 #4–#9 would observe a *stale* name set — the "every read reconciles" invariant had
@@ -1164,7 +1164,7 @@ level).* Placing reconciliation on the `Repository` accessors (`repo.head()`
 → 124 non-test hits, verified 2026-05-30), going straight around any `Repository`
 accessor — e.g. `status` (`cli/src/cli/commands/status.rs:1795`), `collapse`
 (`cli/src/cli/commands/collapse.rs:99`), hosted sync
-(`client/src/grpc_hosted/sync.rs:588`, `:1001`), `thread list` (`thread.rs:507`),
+(`client/src/grpc_remote/sync.rs:588`, `:1001`), `thread list` (`thread.rs:507`),
 `marker list` (`marker.rs:64`). Enforcement at a layer callers skip is not
 enforcement. The primitive sits *below* every `RefManager` read method, so all
 ~124 direct readers — plus every `Repository` accessor and the daemon handler
@@ -2319,7 +2319,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
     **not** at the `Repository`
     accessors, because an accessor-layer hook is bypassed by the ~124 direct
     `repo.refs()` readers (`cli/src/cli/commands/status.rs:1795`,
-    `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
+    `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_remote/sync.rs:588`,
     `:1001`, `thread.rs:507`, `marker.rs:64`, …); and it is **not** a hand-picked
     subset of read methods (r6's three-method hook left the four `list_*`, both
     remote, undo-recovery, and `resolve` readers bypassing — cid 3328832780). Any
@@ -2480,7 +2480,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
   HEAD ref has no replay record.** **(f)** Make the raw publish private so
   `commit_and_publish` is its **sole** caller (r17, cid 3329019023): the public writers —
   including the CAS wrappers `set_thread_cas`/`set_marker_cas` (`thread.rs:1647-1650`,
-  `grpc_hosted/mod.rs:334-338`), `create_marker`/`delete_marker`, and the `delete_*_cas`
+  `grpc_remote/mod.rs:334-338`), `create_marker`/`delete_marker`, and the `delete_*_cas`
   siblings — already converge on `update_refs` (`refs_manager.rs:319`) whose
   `update_refs_with_lock` temp→rename half (`refs_transactions.rs:228-256`, already
   `pub(super)`) is that one publish, so routing them through `commit_and_publish` is the
@@ -2729,7 +2729,7 @@ revision, only one migration is in flight, not five.
   present *reader* **and any future read method** now reconciles because raw storage
   has no other logical-read entry. An accessor-layer hook would be bypassed by the
   **~124** direct `repo.refs()` readers (e.g. `cli/src/cli/commands/status.rs:1795`,
-  `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
+  `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_remote/sync.rs:588`,
   `:1001`, `thread.rs:507`, `marker.rs:64`). The
   `refs` crate has no `oplog` dep (`crates/refs/Cargo.toml`); the seam clears that
   by **dependency inversion** — a `RefReconciler` trait defined in `refs`, injected
@@ -2825,13 +2825,13 @@ revision, only one migration is in flight, not five.
   ref-write call sites (verified 2026-05-30 — the same enumeration r7 did for the ten
   readers; `fork.rs`, `collapse.rs`, `thread.rs`/`thread_cmd.rs`, `clone.rs`,
   `actor_cmd.rs`, `attempt.rs`, `remote/*`, `git_core.rs`/`git_sync.rs`,
-  `grpc_hosted/{hydration,sync,mod}.rs`, `repository_thread_materialize.rs`, …) inherit
+  `grpc_remote/{hydration,sync,mod}.rs`, `repository_thread_materialize.rs`, …) inherit
   correct ordering + atomicity **by construction** — but the *proof* is not that count
   (r17, cid 3329019023): the raw publish (`update_refs_with_lock`'s temp→rename half,
   `refs_transactions.rs:228-256`) is made **private**, with `commit_and_publish` its
   **sole** caller, and every public writer family delegates through it — the plain edits,
   the CAS wrappers `set_thread_cas`/`set_marker_cas` (`thread.rs:1647-1650`,
-  `grpc_hosted/mod.rs:334-338`), `create_marker`/`delete_marker` (`grpc_hosted/mod.rs:339`),
+  `grpc_remote/mod.rs:334-338`), `create_marker`/`delete_marker` (`grpc_remote/mod.rs:339`),
   the `delete_*_cas` siblings, and the r9 remote/undo setters — all already converging on
   `update_refs` (`refs_manager.rs:319`). So any future writer is covered too: there is no
   raw publish to call around the primitive (a one-line write-side conformance check, the

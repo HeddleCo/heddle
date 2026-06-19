@@ -1410,7 +1410,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
- "weft-client-shim",
 ]
 
 [[package]]
@@ -1463,7 +1462,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
- "weft-client-shim",
 ]
 
 [[package]]
@@ -5171,14 +5169,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "weft-client-shim"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "heddle-repo",
 ]
 
 [[package]]

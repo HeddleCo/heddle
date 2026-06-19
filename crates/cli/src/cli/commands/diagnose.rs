@@ -35,7 +35,7 @@ pub(crate) struct DiagnoseOutput {
     repository: String,
     repository_capability: String,
     storage_model: String,
-    hosted_enabled: bool,
+    remote_linked: bool,
     git_overlay_import_hint: Option<DiagnoseGitOverlayImportHintOutput>,
     git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
@@ -202,7 +202,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         repository: probe.root.display().to_string(),
         repository_capability: "plain-git".to_string(),
         storage_model: "git-only".to_string(),
-        hosted_enabled: false,
+        remote_linked: false,
         git_overlay_import_hint: import_hint,
         git_overlay_health,
         trust: trust.clone(),
@@ -372,7 +372,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         repository: repo.root().display().to_string(),
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        hosted_enabled: repo.hosted_enabled(),
+        remote_linked: repo.remote_linked(),
         git_overlay_import_hint: import_hint.clone().map(|hint| {
             DiagnoseGitOverlayImportHintOutput {
                 current_branch: hint.current_branch,
@@ -557,8 +557,8 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             &output.storage_model
         )
     );
-    if output.hosted_enabled {
-        println!("Hosted: enabled");
+    if output.remote_linked {
+        println!("Remote: linked");
     }
     if let Some(operation) = &output.operation {
         println!(

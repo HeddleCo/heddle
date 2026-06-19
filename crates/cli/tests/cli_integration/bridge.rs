@@ -771,7 +771,7 @@ fn test_cli_push_mirror_json_success_emits_mirrored_true() {
 
 /// `heddle push --mirror=<git-remote>` in a Git-overlay (non-hosted)
 /// repo must push to BOTH the primary and the mirror. The cmd_push
-/// early-return for the `GitOverlay && !hosted_enabled` branch
+/// early-return for the `GitOverlay && !remote_linked` branch
 /// previously skipped the mirror block entirely, silently ignoring
 /// `--mirror` for the overlay drop-in case.
 #[test]
@@ -783,7 +783,7 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     let mirror_repo = SleyRepository::init_bare(mirror_remote.path()).unwrap();
 
     // Plain `git init` → RepositoryCapability::GitOverlay,
-    // hosted_enabled() == false. This is the drop-in case the
+    // remote_linked() == false. This is the drop-in case the
     // early-return in cmd_push handles.
     assert!(
         Command::new("git")

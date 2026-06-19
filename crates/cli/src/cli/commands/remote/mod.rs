@@ -23,7 +23,7 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
-use crate::client::{HostedAuthMode, HostedSession};
+use crate::client::{RemoteAuthMode, RemoteSession};
 use crate::{
     bridge::{
         GitBridge,
@@ -208,7 +208,7 @@ pub async fn cmd_push(
 
     let user_config = UserConfig::load_default()?;
 
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    if repo.capability() == RepositoryCapability::GitOverlay && !repo.remote_linked() {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
         } else {
@@ -359,10 +359,10 @@ pub async fn cmd_push(
     // config must leave no partial state behind.
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
-        Some(HostedSession::build(
+        Some(RemoteSession::build(
             &user_config,
             server_key,
-            HostedAuthMode::CredentialFallback,
+            RemoteAuthMode::CredentialFallback,
         )?)
     } else {
         None
@@ -1166,7 +1166,7 @@ async fn push_local(
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let repo_path = options
         .repo_path
-        .context("network remotes must include a hosted repository path")?;
+        .context("network remotes must include a repository path")?;
 
     let mut client = options.session.connect(options.addr).await?;
 
@@ -1221,7 +1221,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 struct PushNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
-    session: &'a HostedSession,
+    session: &'a RemoteSession,
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
     force: bool,

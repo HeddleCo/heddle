@@ -32,7 +32,7 @@ pub struct RepoConfig {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
-    pub hosted: HostedConfig,
+    pub remote: RemoteLinkConfig,
     #[serde(default)]
     pub review: ReviewConfig,
     #[serde(default)]
@@ -220,18 +220,18 @@ fn review_default_self_flag_cap() -> u32 {
     5
 }
 
-/// Per-repository hosted-service linkage. Populated when the repo is attached
-/// to a Heddle hosted server; consulted by presence publishers, sync workflows,
-/// and any future feature that needs to know which upstream namespace owns
-/// the local checkout.
+/// Per-repository remote-service linkage. Populated when the repo is attached
+/// to a Weft/Heddle remote service; consulted by presence publishers, sync
+/// workflows, and any future feature that needs to know which upstream
+/// namespace owns the local checkout.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HostedConfig {
-    /// Base URL of the hosted server (e.g. `https://heddle.example.com`).
+pub struct RemoteLinkConfig {
+    /// Base URL of the remote service (e.g. `https://heddle.example.com`).
     /// Presence WebSocket clients append `/presence/ws` — they tolerate
     /// `http(s)://` or `ws(s)://` on input.
     #[serde(default)]
     pub upstream_url: Option<String>,
-    /// Hosted namespace path (e.g. `heddle/core`) that this repository
+    /// Remote namespace path (e.g. `heddle/core`) that this repository
     /// publishes into. When absent, presence stays local-only.
     #[serde(default)]
     pub namespace: Option<String>,
@@ -408,7 +408,7 @@ impl Default for RepoConfig {
             policies: PoliciesConfig::default(),
             display: DisplayConfig::default(),
             storage: StorageConfig::default(),
-            hosted: HostedConfig::default(),
+            remote: RemoteLinkConfig::default(),
             review: ReviewConfig::default(),
             redact: RedactConfig::default(),
         }

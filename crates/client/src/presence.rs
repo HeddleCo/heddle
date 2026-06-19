@@ -1,13 +1,13 @@
 //! Local-agent presence publisher (Track B).
 //!
-//! Runs in the foreground: reads the configured hosted upstream + namespace
+//! Runs in the foreground: reads the configured remote upstream + namespace
 //! from `.heddle/config.toml`, resolves a bearer token from the user config or
 //! `HEDDLE_REMOTE_TOKEN`, opens a WebSocket to `<upstream>/presence/ws`, and
 //! streams `agent_start` → periodic `agent_heartbeat` → `agent_done` events.
 //!
 //! This module is gated on the `client` feature because the WebSocket
-//! client (and therefore `tokio-tungstenite`) is only pulled in for hosted
-//! builds.
+//! client (and therefore `tokio-tungstenite`) is only pulled in for remote
+//! client builds.
 //!
 //! # Scope
 //!
@@ -23,10 +23,10 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
-use cli_shared::UserConfig;
+use cli_shared::{ClientCommandContext, UserConfig};
 use futures::{SinkExt, StreamExt};
 use objects::store::{AgentEntry, AgentRegistry};
-use repo::{HostedConfig, Repository};
+use repo::{RemoteLinkConfig, Repository};
 use serde::{Deserialize, Serialize};
 use tokio::{
     select,
@@ -42,7 +42,6 @@ use tokio_tungstenite::{
     },
 };
 use tracing::{debug, info, warn};
-use weft_client_shim::CliContext;
 
 use crate::credentials;
 
@@ -134,7 +133,7 @@ pub struct PublisherConfig {
 
 /// Entry point used by `main.rs`.
 pub async fn cmd_presence_publish(
-    ctx: &dyn CliContext,
+    ctx: &ClientCommandContext,
     session: String,
     interval_secs: u64,
 ) -> Result<()> {
@@ -149,20 +148,20 @@ pub async fn cmd_presence_publish(
         )
     })?;
 
-    let hosted = repo.config().hosted.clone();
+    let remote = repo.config().remote.clone();
     let agent = load_agent_entry(repo.heddle_dir(), &session)?;
 
     let user_config = UserConfig::load_default()?;
 
     match resolve_publisher_config(
-        &hosted,
+        &remote,
         &agent,
         &user_config,
         Duration::from_secs(interval_secs),
     )? {
         Some(config) => run_publisher(config).await,
         None => Err(anyhow!(
-            "hosted presence requires a repository linked to a Heddle hosted upstream. Configure [hosted] in .heddle/config.toml or use a hosted-enabled repository."
+            "remote presence requires a repository linked to a remote upstream. Configure [remote] in .heddle/config.toml or use a remote-linked repository."
         )),
     }
 }
@@ -189,14 +188,14 @@ fn load_agent_entry(heddle_dir: &Path, session: &str) -> Result<AgentEntry> {
 /// namespace configured). Returns `Err` only for unrecoverable setup problems
 /// (missing token, malformed URL, etc).
 pub fn resolve_publisher_config(
-    hosted: &HostedConfig,
+    remote: &RemoteLinkConfig,
     agent: &AgentEntry,
     user_config: &UserConfig,
     interval: Duration,
 ) -> Result<Option<PublisherConfig>> {
     let (Some(upstream), Some(namespace)) = (
-        hosted.upstream_url.as_deref().filter(|s| !s.is_empty()),
-        hosted.namespace.as_deref().filter(|s| !s.is_empty()),
+        remote.upstream_url.as_deref().filter(|s| !s.is_empty()),
+        remote.namespace.as_deref().filter(|s| !s.is_empty()),
     ) else {
         return Ok(None);
     };
@@ -640,12 +639,12 @@ mod tests {
 
     #[test]
     fn skips_when_upstream_missing() {
-        let hosted = HostedConfig {
+        let remote = RemoteLinkConfig {
             upstream_url: None,
             namespace: Some("heddle/core".into()),
         };
         let result = resolve_publisher_config(
-            &hosted,
+            &remote,
             &make_agent("agent-1"),
             &user_with_token_and_principal(),
             Duration::from_secs(15),
@@ -656,12 +655,12 @@ mod tests {
 
     #[test]
     fn skips_when_namespace_missing() {
-        let hosted = HostedConfig {
+        let remote = RemoteLinkConfig {
             upstream_url: Some("https://heddle.example.com".into()),
             namespace: None,
         };
         let result = resolve_publisher_config(
-            &hosted,
+            &remote,
             &make_agent("agent-1"),
             &user_with_token_and_principal(),
             Duration::from_secs(15),
@@ -672,12 +671,12 @@ mod tests {
 
     #[test]
     fn resolves_subject_from_principal_when_token_is_opaque() {
-        let hosted = HostedConfig {
+        let remote = RemoteLinkConfig {
             upstream_url: Some("https://heddle.example.com".into()),
             namespace: Some("heddle/core".into()),
         };
         let config = resolve_publisher_config(
-            &hosted,
+            &remote,
             &make_agent("agent-1"),
             &user_with_token_and_principal(),
             Duration::from_secs(15),
@@ -706,12 +705,12 @@ mod tests {
         )
         .unwrap();
 
-        let hosted = HostedConfig {
+        let remote = RemoteLinkConfig {
             upstream_url: Some("https://heddle.example.com".into()),
             namespace: Some("heddle/core".into()),
         };
         let config = resolve_publisher_config(
-            &hosted,
+            &remote,
             &make_agent("agent-1"),
             &UserConfig {
                 remote: Default::default(),
@@ -761,7 +760,7 @@ mod tests {
     #[test]
     fn errors_on_missing_token() {
         // Isolate the env so an ambient `HEDDLE_REMOTE_TOKEN` (common in
-        // dev shells that source a `.env` for the hosted services) can't
+        // dev shells that source a `.env` for remote services) can't
         // satisfy `user_config.remote_token()` and flip the error path
         // to "could not derive subject from principal config" instead of
         // the "no remote token available" message this test pins. The
@@ -775,13 +774,13 @@ mod tests {
             std::env::remove_var("HEDDLE_REMOTE_TOKEN");
         }
 
-        let hosted = HostedConfig {
+        let remote = RemoteLinkConfig {
             upstream_url: Some("https://heddle.example.com".into()),
             namespace: Some("heddle/core".into()),
         };
         let user = UserConfig::default();
         let err = resolve_publisher_config(
-            &hosted,
+            &remote,
             &make_agent("agent-1"),
             &user,
             Duration::from_secs(15),

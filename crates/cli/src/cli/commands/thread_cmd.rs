@@ -268,7 +268,7 @@ fn render_plain_git_thread_list(cli: &Cli, probe: &PlainGitVerificationProbe) ->
             serde_json::to_string(&serde_json::json!({
                 "repository_capability": "plain-git",
                 "storage_model": "git",
-                "hosted_enabled": false,
+                "remote_linked": false,
                 "threads": [],
                 "current": null,
                 "verification": &probe.trust,
@@ -420,41 +420,34 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         }
         #[cfg(feature = "client")]
         ThreadCommands::Approve(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
+            require_remote_linked_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_approve(cli, args).await
         }
         #[cfg(feature = "client")]
         ThreadCommands::Approvals(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
+            require_remote_linked_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_approvals(cli, args).await
         }
         #[cfg(feature = "client")]
         ThreadCommands::RevokeApproval(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
+            require_remote_linked_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_revoke_approval(cli, args).await
         }
         #[cfg(feature = "client")]
         ThreadCommands::CheckMerge(args) => {
-            require_hosted_repo(&repo, "hosted merge checks")?;
+            require_remote_linked_repo(&repo, "remote merge checks")?;
             super::thread_approval::cmd_thread_check_merge(cli, args).await
         }
-        #[cfg(not(feature = "client"))]
-        ThreadCommands::Approve(_)
-        | ThreadCommands::Approvals(_)
-        | ThreadCommands::RevokeApproval(_)
-        | ThreadCommands::CheckMerge(_) => Err(anyhow!(
-            "rebuild cli with --features client to use thread approvals"
-        )),
     }
 }
 
 #[cfg(feature = "client")]
-fn require_hosted_repo(repo: &Repository, feature: &str) -> Result<()> {
-    if repo.hosted_enabled() {
+fn require_remote_linked_repo(repo: &Repository, feature: &str) -> Result<()> {
+    if repo.remote_linked() {
         Ok(())
     } else {
         Err(anyhow!(
-            "{} require a repository linked to a Heddle hosted upstream. Configure [hosted] in .heddle/config.toml or run this in a hosted-enabled repository.",
+            "{} require a repository linked to a remote upstream. Configure [remote] in .heddle/config.toml or run this in a remote-linked repository.",
             feature
         ))
     }

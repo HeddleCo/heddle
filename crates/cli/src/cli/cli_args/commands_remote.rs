@@ -12,7 +12,7 @@ pub enum RemoteCommands {
     Add {
         /// Remote name.
         name: String,
-        /// Remote URL, hosted endpoint, or local bare Git path.
+        /// Remote URL, network endpoint, or local bare Git path.
         url: String,
     },
 

@@ -169,7 +169,7 @@ in-progress operation.
   "repository_capability": "git-overlay",
   "repository_label": "Git + Heddle",
   "storage_model": "git+heddle-sidecar",
-  "hosted_enabled": false,
+  "remote_linked": false,
   "operation": null,
   "remote_tracking": null,
   "git_overlay_health": {
@@ -299,7 +299,7 @@ in-progress operation.
 | `repository_label` | string | required | Human-facing repository identity. In managed Git-overlay child checkouts this is `"Git + Heddle isolated checkout"` even though core capability remains `native-heddle`. |
 | `repository_context` | object | optional | Present for managed child checkouts; includes `kind`, `parent_repository`, and any recorded `target_thread` / `parent_thread`. |
 | `storage_model` | string | required | E.g. `"git+heddle-sidecar"`. |
-| `hosted_enabled` | bool | required | Whether the repo is connected to a hosted server. |
+| `remote_linked` | bool | required | Whether the repo is connected to a remote service. |
 | `operation` | object \| null | required | In-progress operation (`merge`, `rebase`, …) or `null`. |
 | `remote_tracking` | object \| null | required | Remote drift summary or `null`. |
 | `git_overlay_health` | object | required | Compatibility health view derived from the shared verification checks. |
@@ -917,7 +917,7 @@ Report manual follow-up after a blocked or refreshed thread.
 
 ## `heddle thread approve --output json`
 
-Hosted approval records are pinned to a source thread state.
+Remote approval records are pinned to a source thread state.
 `heddle thread approve --output json` emits one approval; `thread approvals`
 emits an array of the same object.
 
@@ -1685,7 +1685,7 @@ the same ready envelope.
 |-------|------|-------------|-----------|
 | `output_kind`, `action`, `status`, `success`, `cloned`, `transport`, `remote`, `local`, `branch`, `repository_capability` | mixed | required for successful `clone` | Stable clone envelope, transport, source, destination, checked-out branch, and initialized repository capability. |
 | `commits_imported`, `states_created` | int \| null | required for Git-overlay `clone` | Import counts reported after clone verification. |
-| `objects`, `state` | int/string \| null | native/hosted Heddle clone only | Transferred object count and resulting Heddle state when the transport is native Heddle rather than Git-overlay. |
+| `objects`, `state` | int/string \| null | native/network Heddle clone only | Transferred object count and resulting Heddle state when the transport is native Heddle rather than Git-overlay. |
 | `verification` | object \| null | required for Git-overlay `clone` | Post-clone repository verification proof; clean clones report `clone_verification: "verified"`. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
@@ -2015,7 +2015,7 @@ State detail view, pretty-printed.
   "output_kind": "thread_list",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "hosted_enabled": false,
+  "remote_linked": false,
   "threads": [
     {
       "name": "feature/parser-fast",
@@ -2276,7 +2276,7 @@ instead of treating it as a global catalog option.
 
 ## `heddle review show --output json`
 
-Hosted-review payload for a single state.
+Remote-review payload for a single state.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
@@ -2478,7 +2478,7 @@ is to surface every relevant signal for the operator.
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "hosted_enabled": false,
+  "remote_linked": false,
   "git_overlay_import_hint": null,
   "git_overlay_health": {"status": "clean", "clean": true, "summary": "Git overlay and Heddle agree", "recovery_commands": [], "checks": []},
   "verification": {"verified": true, "status": "clean", "checks": [], "recommended_action": "", "recovery_commands": []},

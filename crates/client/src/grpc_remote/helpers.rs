@@ -11,13 +11,13 @@ use tonic::Status;
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
 #[derive(Debug, Clone)]
-pub(crate) struct HostedTransportPolicy {
+pub(crate) struct RemoteTransportPolicy {
     pub chunk_size: usize,
     pub max_inflight_objects: usize,
     pub resume_attempts: usize,
 }
 
-impl HostedTransportPolicy {
+impl RemoteTransportPolicy {
     pub fn from_client_config(config: &ClientConfig) -> Self {
         let chunk_size = config.chunk_size.max(1);
         let max_inflight_objects = (chunk_size / (16 * 1024)).clamp(1, 16);

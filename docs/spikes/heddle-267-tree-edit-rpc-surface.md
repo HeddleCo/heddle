@@ -61,7 +61,7 @@ The substrate needed for a no-local-FS surface is already present.
 | `StatusForThread` | Current `status` is a CLI view over local repo open, current state, operation state, git-overlay health, remote tracking, worktree index/fsmonitor, materialized-thread manifests, and thread summaries (`crates/cli/src/cli/commands/status.rs:422-500`, `:631-760`). | Split the contract. `StatusForThread` without content reports committed hosted thread state, target/base relation, remote tracking known to hosted, and optional policy/actor facts. Dirty-worktree fields exist only when the request supplies `compare_tree`, `capture_id`, or inline edits. No server claim about a client filesystem. |
 | `DiffForThread` | State-to-state diff is already object-store based (`Repository::diff_trees`, `crates/repo/src/repository_diff.rs:11-16`; tree diff uses `ObjectStore`, `crates/objects/src/object/tree_diff.rs:15-29`). Default CLI diff still means HEAD vs live worktree unless `to` is supplied (`crates/cli/src/cli/commands/diff/diff_compute.rs:56-228`). | Clean for committed refs and staged captures. The RPC requires `from` and either `to_ref`, `to_capture_id`, or inline `to_tree`. A missing `to` should mean "thread head versus first parent" or be rejected; it must not imply an invisible worktree. |
 | `LogForThread` | `cmd_log` opens a local repo and resolves CLI flags, but history traversal is over refs, states, and object-store graph data (`crates/cli/src/cli/commands/log.rs:128-183`; `Repository::query_history`, `crates/repo/src/repository_history.rs:132-190`). Path filters may diff trees, still through `ObjectStore`. | Clean. `LogForThread` names repo + thread/ref + filters and returns state summaries. It can reuse the content service's state summary shape, with path-filter cost called out. |
-| `PushToRemote` | Current push is a local orchestration command: it runs local hooks, switches between git-overlay/local/native network paths, opens local targets, enumerates local object closures, and invokes `HostedGrpcClient::push` for hosted network remotes (`crates/cli/src/cli/commands/remote/mod.rs:153-420`, `:1091-1205`; `crates/client/src/grpc_hosted/sync.rs:159-330`). | Needs a hosted bridge contract. Native hosted-to-hosted push can reuse repo-sync semantics internally. External Git push must delegate to the server-side subprocess fetch/push work from #264, using server-held remote credentials and returning a job/result. It must not run client-local hooks or inspect client-local Git. |
+| `PushToRemote` | Current push is a local orchestration command: it runs local hooks, switches between git-overlay/local/native network paths, opens local targets, enumerates local object closures, and invokes `RemoteGrpcClient::push` for network remotes (`crates/cli/src/cli/commands/remote/mod.rs:153-420`, `:1091-1205`; `crates/client/src/grpc_remote/sync.rs:159-330`). | Needs a hosted bridge contract. Native hosted-to-hosted push can reuse repo-sync semantics internally. External Git push must delegate to the server-side subprocess fetch/push work from #264, using server-held remote credentials and returning a job/result. It must not run client-local hooks or inspect client-local Git. |
 
 The key product decision is that FS-less "status" and "diff" are about a
 named hosted tree unless the caller supplies an overlay tree. This avoids
@@ -199,7 +199,7 @@ service TreeEditService {
 }
 
 message TreeEditRepo {
-  string repo_path = 1; // hosted namespace/repo path
+  string repo_path = 1; // remote namespace/repo path
 }
 
 message TreeBase {

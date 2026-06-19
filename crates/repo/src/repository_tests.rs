@@ -1653,7 +1653,7 @@ mod blob_hydrator_callback {
         use crate::lazy_hydrator::{HydratorSection, LazyHydratorConfig, register_factory};
 
         // Test-isolated kind name — does not collide with the production
-        // "git-overlay" / "hosted" kinds that other tests / CLI startup
+        // "git-overlay" / "remote" kinds that other tests / CLI startup
         // register.
         const KIND: &str = "test-kind-cross-open-reopen";
 
@@ -1674,7 +1674,7 @@ mod blob_hydrator_callback {
         let cfg = LazyHydratorConfig {
             hydrator: HydratorSection {
                 kind: KIND.to_string(),
-                hosted: None,
+                remote: None,
                 git_overlay: None,
             },
         };

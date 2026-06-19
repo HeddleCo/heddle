@@ -1,4 +1,4 @@
-//! Hosted gRPC client for the transport rewrite.
+//! Remote gRPC client for the transport rewrite.
 
 mod content;
 mod helpers;
@@ -26,13 +26,13 @@ use wire::ProtocolError;
 
 use crate::credentials;
 
-pub struct HostedGrpcClient {
+pub struct RemoteGrpcClient {
     pub(super) inner: RepoSyncServiceClient<Channel>,
     pub(super) user: HostedUserServiceClient<Channel>,
     pub(super) auth: AuthServiceClient<Channel>,
     pub(super) content: ContentServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
-    transport: helpers::HostedTransportPolicy,
+    transport: helpers::RemoteTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
     /// The key used to look up this server's credential in the credential
     /// store.  When set, `auto_rotate_if_needed` will use it to read and
@@ -40,7 +40,7 @@ pub struct HostedGrpcClient {
     server_key: Option<String>,
 }
 
-impl HostedGrpcClient {
+impl RemoteGrpcClient {
     pub async fn connect(
         addr: std::net::SocketAddr,
         config: &ClientConfig,
@@ -70,7 +70,7 @@ impl HostedGrpcClient {
             .map(|token| MetadataValue::try_from(format!("Bearer {}", token.id)))
             .transpose()
             .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
-        let transport = helpers::HostedTransportPolicy::from_client_config(config);
+        let transport = helpers::RemoteTransportPolicy::from_client_config(config);
         Ok(Self {
             // Bound the single-shot, server-controlled sidecar allocation at
             // the gRPC decode boundary: tonic rejects an oversized inbound
@@ -350,5 +350,5 @@ impl HostedGrpcClient {
     }
 }
 
-pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
-pub use session::{HostedAuthMode, HostedSession};
+pub use hydration::{LazyRemoteHydrator, PullMaterialization, register_remote_factory};
+pub use session::{RemoteAuthMode, RemoteSession};

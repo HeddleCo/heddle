@@ -256,7 +256,7 @@ links these crates from a separate workspace.
 
 ### Added
 - Build flavors: `git-overlay`, `native`, both — pick at install time via Cargo features
-- `weft-client-shim` trait surface for closed-side hosted-client integration
+- Closed-side hosted-client integration boundary
 - TTY-aware CLI flags, error hints, and inline examples on the most-used commands
 
 ### Changed

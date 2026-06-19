@@ -34,7 +34,7 @@ pub struct SupportGrantArgs {
     /// Free-form reason, surfaced in the audit listing. Required.
     #[arg(long)]
     pub reason: String,
-    /// Remote that maps to the hosted server (default: `origin`).
+    /// Remote that maps to the remote service (default: `origin`).
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }
@@ -50,7 +50,7 @@ pub struct SupportListArgs {
     /// Include revoked + expired entries. Defaults to active-only.
     #[arg(long)]
     pub include_inactive: bool,
-    /// Remote that maps to the hosted server (default: `origin`).
+    /// Remote that maps to the remote service (default: `origin`).
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }
@@ -59,7 +59,7 @@ pub struct SupportListArgs {
 pub struct SupportRevokeArgs {
     /// Audit-row id of the grant to revoke (UUID).
     pub id: String,
-    /// Remote that maps to the hosted server (default: `origin`).
+    /// Remote that maps to the remote service (default: `origin`).
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }

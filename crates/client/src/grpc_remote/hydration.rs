@@ -12,14 +12,14 @@ use objects::{
 use repo::{BlobHydrator, Repository};
 use wire::ProtocolError;
 
-use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
+use super::{RemoteAuthMode, RemoteGrpcClient, RemoteSession};
 
-/// Default hosted lazy-hydration deadline.
+/// Default remote lazy-hydration deadline.
 ///
-/// This matches the hosted client config's 30s default connection timeout and
+/// This matches the remote client config's 30s default connection timeout and
 /// gives lazy reads a bounded failure mode when a gRPC request stalls without a
 /// transport-level TCP timeout.
-const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_REMOTE_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PullMaterialization {
@@ -33,7 +33,7 @@ impl PullMaterialization {
     }
 }
 
-impl HostedGrpcClient {
+impl RemoteGrpcClient {
     pub async fn hydrate_pulled_state(
         &mut self,
         repo: &Repository,
@@ -46,11 +46,11 @@ impl HostedGrpcClient {
     }
 }
 
-/// Read-time blob hydrator for **hosted** lazy clones (issue #50).
+/// Read-time blob hydrator for remote lazy clones (issue #50).
 ///
 /// Plugs into [`repo::Repository::set_blob_hydrator`]: when
 /// [`Repository::require_blob`] hits a missing-blob marker left behind by a
-/// lazy hosted clone (`heddle clone --lazy <hosted-url>` /
+/// lazy remote clone (`heddle clone --lazy <remote-url>` /
 /// `--filter blob:none`), the read path delegates here, this hydrator re-runs
 /// the pull with full materialization for the *current* tip of `local_thread`,
 /// and the read is retried against the freshly populated store.
@@ -65,12 +65,12 @@ impl HostedGrpcClient {
 /// runtime"), so we cannot bridge in-place.
 ///
 /// Instead, on first use we spawn a dedicated worker thread that owns its
-/// own current-thread Tokio runtime + a connected `HostedGrpcClient`. Each
+/// own current-thread Tokio runtime + a connected `RemoteGrpcClient`. Each
 /// `hydrate()` call sends a request over an mpsc channel and blocks on the
 /// reply. The worker `block_on`s the gRPC call inside its private runtime,
 /// avoiding any nesting. This pattern is robust regardless of what the
 /// caller's thread is doing.
-pub struct LazyHostedHydrator {
+pub struct LazyRemoteHydrator {
     /// Endpoint spec as `host:port` (or an IP literal). Re-resolved via DNS
     /// on first connect so a hostname behind a load balancer with rotating
     /// IPs still works across process restarts. We deliberately do NOT
@@ -91,7 +91,7 @@ pub struct LazyHostedHydrator {
     init_lock: Mutex<()>,
 }
 
-impl LazyHostedHydrator {
+impl LazyRemoteHydrator {
     pub fn new(
         endpoint: impl Into<String>,
         repo_path: impl Into<String>,
@@ -129,8 +129,8 @@ impl LazyHostedHydrator {
         // The init_lock guarantees no race: `set` must succeed here.
         self.bridge.set(bridge).map_err(|_| {
             HeddleError::Config(
-                "lazy hosted hydrator: bridge slot already filled under init_lock — \
-                     this indicates a logic bug in LazyHostedHydrator"
+                "lazy remote hydrator: bridge slot already filled under init_lock — \
+                     this indicates a logic bug in LazyRemoteHydrator"
                     .to_string(),
             )
         })?;
@@ -138,11 +138,11 @@ impl LazyHostedHydrator {
     }
 }
 
-impl BlobHydrator for LazyHostedHydrator {
+impl BlobHydrator for LazyRemoteHydrator {
     fn hydrate(&self, repo: &Repository, _hash: &ContentHash) -> objects::error::Result<()> {
         // `_hash` is ignored: `hydrate_pulled_state` refetches every
         // missing blob reachable from `target_state`, not just one. This
-        // matches the hosted-side strategy that already exists
+        // matches the remote-side strategy that already exists
         // (sync.rs:541) and is the cheapest correct behaviour given the
         // partial-fetch metadata records the blake3 only.
 
@@ -157,14 +157,14 @@ impl BlobHydrator for LazyHostedHydrator {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return Err(HeddleError::Config(format!(
-                    "lazy hosted hydrator: local thread '{}' has no recorded tip — \
+                    "lazy remote hydrator: local thread '{}' has no recorded tip — \
                      was the lazy clone interrupted? Try `heddle pull --lazy` to refresh.",
                     self.local_thread,
                 )));
             }
             Err(err) => {
                 return Err(HeddleError::Config(format!(
-                    "lazy hosted hydrator: failed to read local thread '{}': {err}",
+                    "lazy remote hydrator: failed to read local thread '{}': {err}",
                     self.local_thread,
                 )));
             }
@@ -180,7 +180,7 @@ impl BlobHydrator for LazyHostedHydrator {
 
 /// Background worker bridging sync `BlobHydrator::hydrate` calls to the
 /// async gRPC stack. Owns a dedicated current-thread Tokio runtime and a
-/// connected `HostedGrpcClient`. Callers reopen the repository root into
+/// connected `RemoteGrpcClient`. Callers reopen the repository root into
 /// an owned handle, dispatch hydrate requests over an mpsc channel, and
 /// block on a per-request reply channel.
 ///
@@ -212,26 +212,26 @@ impl HydrationBridge {
             .to_socket_addrs()
             .map_err(|err| {
                 HeddleError::Config(format!(
-                    "lazy hosted hydrator: resolve endpoint '{endpoint}': {err}",
+                    "lazy remote hydrator: resolve endpoint '{endpoint}': {err}",
                 ))
             })?
             .next()
             .ok_or_else(|| {
                 HeddleError::Config(format!(
-                    "lazy hosted hydrator: DNS returned no addresses for '{endpoint}'",
+                    "lazy remote hydrator: DNS returned no addresses for '{endpoint}'",
                 ))
             })?;
 
         let user_config = cli_shared::UserConfig::load_default().map_err(|err| {
-            HeddleError::Config(format!("lazy hosted hydrator: load user config: {err}"))
+            HeddleError::Config(format!("lazy remote hydrator: load user config: {err}"))
         })?;
         // Build + validate the session config on this thread so a rejected
         // TLS/auth config surfaces synchronously, before the worker thread is
         // spawned. The worker connects + rotates through `session.connect`.
-        let session = HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)
+        let session = RemoteSession::build(&user_config, None, RemoteAuthMode::ConfigToken)
             .map_err(|err| {
                 HeddleError::Config(format!(
-                    "lazy hosted hydrator: load TLS/auth client config: {err}"
+                    "lazy remote hydrator: load TLS/auth client config: {err}"
                 ))
             })?;
 
@@ -257,7 +257,7 @@ impl HydrationBridge {
                     Ok(rt) => rt,
                     Err(err) => {
                         let _ = ready_tx.send(Err(HeddleError::Config(format!(
-                            "lazy hosted hydrator: build worker runtime: {err}",
+                            "lazy remote hydrator: build worker runtime: {err}",
                         ))));
                         return;
                     }
@@ -265,27 +265,27 @@ impl HydrationBridge {
 
                 let connect_result = runtime.block_on(async {
                     // `session.connect` connects and runs mandatory rotation
-                    // together — the same seam every other hosted entry point
+                    // together — the same path every other remote entry point
                     // (clone, fetch, push, pull, support, approval) opens
                     // through — so a process whose cached token has slipped
                     // past expiry recovers on first lazy hydrate.
                     let client = match tokio::time::timeout(
-                        DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+                        DEFAULT_REMOTE_HYDRATION_TIMEOUT,
                         session.connect(addr),
                     )
                     .await
                     {
                         Ok(result) => result.map_err(|err: ProtocolError| {
                             HeddleError::Config(format!(
-                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                                "lazy remote hydrator: connect to '{endpoint_for_thread}' \
                                      (resolved to {addr}): {err}",
                             ))
                         })?,
                         Err(_) => {
                             return Err(HeddleError::Config(format!(
-                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                                "lazy remote hydrator: connect to '{endpoint_for_thread}' \
                                      (resolved to {addr}) timed out after {}",
-                                format_duration(DEFAULT_HOSTED_HYDRATION_TIMEOUT)
+                                format_duration(DEFAULT_REMOTE_HYDRATION_TIMEOUT)
                             )));
                         }
                     };
@@ -308,7 +308,7 @@ impl HydrationBridge {
                 }
 
                 // Drive the request loop. `recv` returns Err when the
-                // last `Sender` is dropped (i.e. the LazyHostedHydrator
+                // last `Sender` is dropped (i.e. the LazyRemoteHydrator
                 // owning the bridge has been dropped), which is our
                 // shutdown signal — we drop the runtime + client and
                 // exit.
@@ -328,7 +328,7 @@ impl HydrationBridge {
                                     &repo_path,
                                     &remote_thread,
                                     target_state,
-                                    DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+                                    DEFAULT_REMOTE_HYDRATION_TIMEOUT,
                                 )
                                 .await;
                                 let _ = reply.send(result);
@@ -338,24 +338,24 @@ impl HydrationBridge {
                 });
             })
             .map_err(|err| {
-                HeddleError::Config(format!("lazy hosted hydrator: spawn worker thread: {err}",))
+                HeddleError::Config(format!("lazy remote hydrator: spawn worker thread: {err}",))
             })?;
 
         // Wait for the worker to either confirm connect or report an
         // error. The wait is bounded so a stalled first-use connect cannot
         // wedge the sync read path.
-        match ready_rx.recv_timeout(DEFAULT_HOSTED_HYDRATION_TIMEOUT) {
+        match ready_rx.recv_timeout(DEFAULT_REMOTE_HYDRATION_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
                 tx,
                 _worker: worker,
             }),
             Ok(Err(err)) => Err(err),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(HeddleError::Config(format!(
-                "lazy hosted hydrator: worker did not signal readiness within {}",
-                format_duration(DEFAULT_HOSTED_HYDRATION_TIMEOUT)
+                "lazy remote hydrator: worker did not signal readiness within {}",
+                format_duration(DEFAULT_REMOTE_HYDRATION_TIMEOUT)
             ))),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(HeddleError::Config(
-                "lazy hosted hydrator: worker thread exited before signalling readiness"
+                "lazy remote hydrator: worker thread exited before signalling readiness"
                     .to_string(),
             )),
         }
@@ -373,7 +373,7 @@ impl HydrationBridge {
             repo_path,
             remote_thread,
             target_state,
-            DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+            DEFAULT_REMOTE_HYDRATION_TIMEOUT,
         )
     }
 
@@ -400,7 +400,7 @@ impl HydrationBridge {
             })
             .map_err(|err| {
                 ProtocolError::Io(std::io::Error::other(format!(
-                    "lazy hosted hydrator: worker channel closed: {err}",
+                    "lazy remote hydrator: worker channel closed: {err}",
                 )))
             })?;
         match reply_rx.recv_timeout(timeout) {
@@ -413,7 +413,7 @@ impl HydrationBridge {
             )),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(ProtocolError::Io(std::io::Error::other(
-                    "lazy hosted hydrator: worker reply channel closed before hydration completed",
+                    "lazy remote hydrator: worker reply channel closed before hydration completed",
                 )))
             }
         }
@@ -421,7 +421,7 @@ impl HydrationBridge {
 }
 
 async fn hydrate_with_rpc_timeout(
-    client: &mut HostedGrpcClient,
+    client: &mut RemoteGrpcClient,
     repo: &Repository,
     repo_path: &str,
     remote_thread: &str,
@@ -453,7 +453,7 @@ fn hydration_timeout_error(
     ProtocolError::Io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         format!(
-            "lazy hosted hydrator: blob hydration timed out after {} \
+            "lazy remote hydrator: blob hydration timed out after {} \
              (repo={repo_path}, remote_thread={remote_thread}, target_state={target_state})",
             format_duration(timeout)
         ),
@@ -468,38 +468,38 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// Register the `"hosted"` factory in the global lazy-hydrator registry.
-/// Call once at process startup. The factory reads the hosted-section
+/// Register the `"remote"` factory in the global lazy-hydrator registry.
+/// Call once at process startup. The factory reads the remote-section
 /// fields out of `lazy-hydrator.toml` and hands back a
-/// [`LazyHostedHydrator`] adapter that defers the actual gRPC connect (and
+/// [`LazyRemoteHydrator`] adapter that defers the actual gRPC connect (and
 /// worker-thread spawn) until the first `require_blob` call needs it.
-pub fn register_hosted_factory() {
+pub fn register_remote_factory() {
     use std::{path::Path as StdPath, sync::Arc as StdArc};
 
     use repo::lazy_hydrator::{
-        BlobHydratorFactory, HydratorSection, KIND_HOSTED, register_factory,
+        BlobHydratorFactory, HydratorSection, KIND_REMOTE, register_factory,
     };
 
     let factory: BlobHydratorFactory = StdArc::new(
         |_root: &StdPath,
          section: &HydratorSection|
          -> objects::error::Result<StdArc<dyn BlobHydrator>> {
-            let hosted = section.hosted.as_ref().ok_or_else(|| {
+            let remote = section.remote.as_ref().ok_or_else(|| {
                 HeddleError::Config(
-                    "lazy hosted hydrator: lazy-hydrator.toml has kind=\"hosted\" \
-                     but no [hydrator.hosted] table was found"
+                    "lazy remote hydrator: lazy-hydrator.toml has kind=\"remote\" \
+                     but no [hydrator.remote] table was found"
                         .to_string(),
                 )
             })?;
-            Ok(StdArc::new(LazyHostedHydrator::new(
-                hosted.endpoint.clone(),
-                hosted.repo_path.clone(),
-                hosted.remote_thread.clone(),
-                hosted.local_thread.clone(),
+            Ok(StdArc::new(LazyRemoteHydrator::new(
+                remote.endpoint.clone(),
+                remote.repo_path.clone(),
+                remote.remote_thread.clone(),
+                remote.local_thread.clone(),
             )))
         },
     );
-    register_factory(KIND_HOSTED, factory);
+    register_factory(KIND_REMOTE, factory);
 }
 
 #[cfg(test)]
@@ -533,19 +533,19 @@ mod tests {
     use tonic::transport::Endpoint;
 
     use super::{
-        super::{HostedGrpcClient, helpers::HostedTransportPolicy},
-        BlobHydrator, HydrationBridge, LazyHostedHydrator,
+        super::{RemoteGrpcClient, helpers::RemoteTransportPolicy},
+        BlobHydrator, HydrationBridge, LazyRemoteHydrator,
     };
 
-    /// Build a `HostedGrpcClient` that points at a closed loopback port
+    /// Build a `RemoteGrpcClient` that points at a closed loopback port
     /// via `connect_lazy`. RPCs fail with a transport error rather than
     /// hanging. Must be called from inside a tokio runtime context.
-    fn fabricate_offline_client() -> HostedGrpcClient {
+    fn fabricate_offline_client() -> RemoteGrpcClient {
         let endpoint = Endpoint::from_static("http://127.0.0.1:1");
         let channel = endpoint.connect_lazy();
         let config = ClientConfig::default();
-        let transport = HostedTransportPolicy::from_client_config(&config);
-        HostedGrpcClient {
+        let transport = RemoteTransportPolicy::from_client_config(&config);
+        RemoteGrpcClient {
             inner: RepoSyncServiceClient::new(channel.clone()),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
@@ -608,11 +608,11 @@ mod tests {
         }
     }
 
-    /// Construct a `LazyHostedHydrator` whose bridge is already installed
+    /// Construct a `LazyRemoteHydrator` whose bridge is already installed
     /// from `offline_bridge`. Bypasses the real `ensure_bridge` connect
     /// path so we can drive the trait surface deterministically.
-    fn offline_lazy_hydrator(local_thread: &str) -> LazyHostedHydrator {
-        let hydrator = LazyHostedHydrator::new(
+    fn offline_lazy_hydrator(local_thread: &str) -> LazyRemoteHydrator {
+        let hydrator = LazyRemoteHydrator::new(
             "ignored.example.test:443",
             "org/acme/repo",
             "main",
@@ -715,7 +715,7 @@ mod tests {
         };
 
         let hydrator =
-            LazyHostedHydrator::new("ignored.example.test:443", "org/acme/repo", "main", "main");
+            LazyRemoteHydrator::new("ignored.example.test:443", "org/acme/repo", "main", "main");
         hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
 
         let (_temp, repo) = temp_repo();
@@ -934,7 +934,7 @@ mod tests {
         // Note: no `offline_lazy_hydrator` — this constructor leaves
         // `bridge` empty so the first `hydrate()` exercises the real
         // ensure_bridge → HydrationBridge::connect path including DNS.
-        let hydrator = LazyHostedHydrator::new(
+        let hydrator = LazyRemoteHydrator::new(
             "definitely-nonexistent-host-for-tests.invalid:443",
             "org/acme/repo",
             "main",
@@ -965,42 +965,42 @@ mod tests {
 
 #[cfg(test)]
 mod register_factory_tests {
-    //! Round-4 patch-coverage fill for `register_hosted_factory` and the
+    //! Round-4 patch-coverage fill for `register_remote_factory` and the
     //! closure it installs in the lazy-hydrator registry. Both branches
-    //! of the closure (missing `[hydrator.hosted]` table → Config error;
+    //! of the closure (missing `[hydrator.remote]` table → Config error;
     //! present table → ready-to-install adapter) are exercised here.
 
     use std::sync::Mutex;
 
-    use repo::lazy_hydrator::{HostedHydratorConfig, HydratorSection, KIND_HOSTED, lookup_factory};
+    use repo::lazy_hydrator::{HydratorSection, KIND_REMOTE, RemoteHydratorConfig, lookup_factory};
     use tempfile::TempDir;
 
-    use super::register_hosted_factory;
+    use super::register_remote_factory;
 
     /// Serialize tests that mutate the process-wide hydrator registry so
-    /// they don't race on the global `"hosted"` key.
+    /// they don't race on the global `"remote"` key.
     static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn register_hosted_factory_installs_factory_for_kind_hosted() {
+    fn register_remote_factory_installs_factory_for_kind_remote() {
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        register_hosted_factory();
+        register_remote_factory();
         assert!(
-            lookup_factory(KIND_HOSTED).is_some(),
-            "register_hosted_factory must populate the registry under KIND_HOSTED"
+            lookup_factory(KIND_REMOTE).is_some(),
+            "register_remote_factory must populate the registry under KIND_REMOTE"
         );
     }
 
     #[test]
-    fn registered_factory_builds_adapter_for_hosted_section() {
+    fn registered_factory_builds_adapter_for_remote_section() {
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        register_hosted_factory();
+        register_remote_factory();
         let factory =
-            lookup_factory(KIND_HOSTED).expect("factory present after register_hosted_factory");
+            lookup_factory(KIND_REMOTE).expect("factory present after register_remote_factory");
         let temp = TempDir::new().expect("temp");
         let section = HydratorSection {
-            kind: KIND_HOSTED.to_string(),
-            hosted: Some(HostedHydratorConfig {
+            kind: KIND_REMOTE.to_string(),
+            remote: Some(RemoteHydratorConfig {
                 endpoint: "example.heddle.cloud:443".to_string(),
                 repo_path: "org/acme/repo".to_string(),
                 remote_thread: "main".to_string(),
@@ -1009,29 +1009,29 @@ mod register_factory_tests {
             git_overlay: None,
         };
         let _hydrator = factory(temp.path(), &section)
-            .expect("factory must produce an adapter when [hydrator.hosted] is present");
+            .expect("factory must produce an adapter when [hydrator.remote] is present");
     }
 
     #[test]
-    fn registered_factory_errors_when_hosted_section_absent() {
+    fn registered_factory_errors_when_remote_section_absent() {
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        register_hosted_factory();
-        let factory = lookup_factory(KIND_HOSTED).expect("factory present");
+        register_remote_factory();
+        let factory = lookup_factory(KIND_REMOTE).expect("factory present");
         let temp = TempDir::new().expect("temp");
         let section = HydratorSection {
-            kind: KIND_HOSTED.to_string(),
-            hosted: None,
+            kind: KIND_REMOTE.to_string(),
+            remote: None,
             git_overlay: None,
         };
         let err = match factory(temp.path(), &section) {
             Ok(_) => panic!(
-                "factory must reject a kind=hosted section that omits the [hydrator.hosted] table"
+                "factory must reject a kind=remote section that omits the [hydrator.remote] table"
             ),
             Err(e) => e,
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("[hydrator.hosted]") || msg.contains("hydrator.hosted"),
+            msg.contains("[hydrator.remote]") || msg.contains("hydrator.remote"),
             "error must name the missing TOML table; got: {msg}"
         );
     }
@@ -1040,23 +1040,23 @@ mod register_factory_tests {
 #[cfg(test)]
 mod connect_path_tests {
     //! Source-presence test for the credential-rotation invariant. Lazy
-    //! hydration must open its session through the shared `HostedSession`
-    //! seam — whose `connect` connects and rotates together (guarded by a
+    //! hydration must open its session through the shared `RemoteSession`
+    //! path — whose `connect` connects and rotates together (guarded by a
     //! source-presence test in `session.rs`) — rather than connecting by
     //! hand and risking a dropped rotation. Without rotation, a process
     //! whose cached token has slipped past expiry hits an auth failure on
     //! first lazy hydrate even though the rotation data is on disk.
     #[test]
-    fn lazy_hosted_connect_opens_session_through_rotating_seam() {
+    fn lazy_remote_connect_opens_session_through_rotating_path() {
         let source = include_str!("hydration.rs");
         assert!(
             source
-                .contains("HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)"),
-            "hydration.rs must build its session through the shared HostedSession seam",
+                .contains("RemoteSession::build(&user_config, None, RemoteAuthMode::ConfigToken)"),
+            "hydration.rs must build its session through the shared RemoteSession path",
         );
         assert!(
             source.contains("session.connect(addr)"),
-            "hydration.rs must connect via HostedSession::connect, which owns rotation",
+            "hydration.rs must connect via RemoteSession::connect, which owns rotation",
         );
     }
 }
@@ -1066,7 +1066,7 @@ mod config_persistence_tests {
     //! Tests for the round-3 hostname-vs-IP persistence fix. These live
     //! alongside the hydrator tests because the contract — "endpoint
     //! field stores a host:port string, NOT a resolved SocketAddr" — is
-    //! enforced at the LazyHostedHydrator boundary.
+    //! enforced at the LazyRemoteHydrator boundary.
     use repo::lazy_hydrator::LazyHydratorConfig;
     use tempfile::TempDir;
 
@@ -1078,17 +1078,17 @@ mod config_persistence_tests {
         // SocketAddr-formatted IP. clone.rs is the producer; here we
         // simulate it and verify load round-trips byte-for-byte.
         let endpoint = "example.heddle.cloud:443";
-        let cfg = LazyHydratorConfig::hosted(endpoint, "org/acme/repo", "main", "main");
+        let cfg = LazyHydratorConfig::remote(endpoint, "org/acme/repo", "main", "main");
         cfg.save(&heddle).expect("save");
         let loaded = LazyHydratorConfig::load(&heddle)
             .expect("load")
             .expect("present");
-        let hosted = loaded
+        let remote = loaded
             .hydrator
-            .hosted
-            .expect("hosted section present after round-trip");
+            .remote
+            .expect("remote section present after round-trip");
         assert_eq!(
-            hosted.endpoint, endpoint,
+            remote.endpoint, endpoint,
             "endpoint MUST round-trip as the original hostname:port spec; \
              pinning the IP at clone time would break hosts with rotating IPs"
         );
@@ -1096,7 +1096,7 @@ mod config_persistence_tests {
         // if it does, the producer was silently resolving DNS at save
         // time and we'd be back to the round-2 bug shape.
         assert!(
-            hosted.endpoint.parse::<std::net::SocketAddr>().is_err(),
+            remote.endpoint.parse::<std::net::SocketAddr>().is_err(),
             "persisted endpoint must be a hostname spec, not a SocketAddr literal"
         );
     }

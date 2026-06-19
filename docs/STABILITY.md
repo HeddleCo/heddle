@@ -305,10 +305,10 @@ ecosystem investment safe.
 - `heddle-cli-shared`, `heddle-client`, `heddle-daemon`,
   `heddle-devtools`, `heddle-ingest`, `heddle-mount`,
   `heddle-oplog`, `heddle-refs`, `heddle-repo`, `heddle-semantic`,
-  `heddle-state-review`, `heddle-crypto`,
-  `weft-client-shim` — internal-shaped today. Promoting any of these
-  to 1.0 is a follow-up decision after the first 1.0.x release proves
-  the stability contract is workable on the three above.
+  `heddle-state-review`, `heddle-crypto` — internal-shaped today.
+  Promoting any of these to 1.0 is a follow-up decision after the
+  first 1.0.x release proves the stability contract is workable on
+  the three above.
 
 Tradeoff: a wider 1.0 scope (e.g. "all 16 crates frozen") is a
 stronger ecosystem signal but raises the cost of every internal

@@ -36,7 +36,7 @@ impl<'a> GitBridge<'a> {
     /// <body>
     ///
     /// Heddle-State: <hex change-id>
-    /// Heddle-URL: <hosted_url>/state/<id>     (omitted when no hosted URL)
+    /// Heddle-URL: <remote_url>/state/<id>     (omitted when no remote URL)
     /// Heddle-Annotations-Omitted: <count>
     /// ```
     ///

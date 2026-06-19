@@ -12,12 +12,12 @@ use tonic::{
     metadata::MetadataValue,
     transport::{Channel, Endpoint},
 };
-use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{auth_args::AuthCommands, credentials, credentials::ServerCredential};
+use cli_shared::{ClientCommandContext, RemoteRecoveryAdvice};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
-/// reserved for future hosted commands that need repo path / output
+/// reserved for future remote commands that need repo path / output
 /// mode — today's auth subcommands all operate on global credential
 /// state and don't read it.
 #[derive(Serialize)]
@@ -53,7 +53,7 @@ struct ServiceTokenOutput {
     expires_in_days: u32,
 }
 
-pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommands) -> Result<()> {
+pub async fn cmd_auth(ctx: &ClientCommandContext, command: AuthCommands) -> Result<()> {
     match command {
         AuthCommands::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
         AuthCommands::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
@@ -167,7 +167,7 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
 }
 
 /// Remove stored credentials.
-fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
+fn cmd_auth_logout(ctx: &ClientCommandContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
 
     // Remove the device signing identity `auth login` recorded for THIS server
@@ -203,7 +203,7 @@ fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 }
 
 /// Show current authentication status.
-fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
+fn cmd_auth_status(ctx: &ClientCommandContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
     match credentials::get_server_credential(&server)? {
         Some(cred) => {
@@ -257,7 +257,7 @@ fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
 
 /// Create a namespace-scoped service token for CI/ephemeral runners.
 async fn cmd_create_service_token(
-    ctx: &dyn CliContext,
+    ctx: &ClientCommandContext,
     server: Option<&str>,
     name: String,
     namespace: String,
@@ -267,7 +267,7 @@ async fn cmd_create_service_token(
 
     // Load the calling user's token to authenticate with the server.
     let cred = credentials::get_server_credential(&server)?
-        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(&server)))?;
+        .ok_or_else(|| anyhow::anyhow!(RemoteRecoveryAdvice::auth_required(&server)))?;
 
     // Generate a fresh Ed25519 keypair for the service account credential.
     let signer = Ed25519Signer::generate()
@@ -561,19 +561,8 @@ mod tests {
         );
     }
 
-    /// Minimal `CliContext` for the logout tests — text output, no repo.
-    struct TextCtx;
-
-    impl CliContext for TextCtx {
-        fn repo_path(&self) -> Option<&std::path::Path> {
-            None
-        }
-        fn operation_id_wire(&self) -> String {
-            String::new()
-        }
-        fn should_output_json(&self, _repo_config: Option<&repo::Config>) -> bool {
-            false
-        }
+    fn text_ctx() -> ClientCommandContext {
+        ClientCommandContext::new(None, "", repo::OutputFormat::Text, None)
     }
 
     /// Run `f` with `HOME` pointed at a fresh temp dir and `HEDDLE_HOME` cleared,
@@ -637,7 +626,7 @@ mod tests {
 
             // No explicit --server: resolve_server falls back to the stored
             // default written by `store_server_credential`.
-            cmd_auth_logout(&TextCtx, None).expect("logout succeeds");
+            cmd_auth_logout(&text_ctx(), None).expect("logout succeeds");
 
             assert!(
                 credentials::get_server_credential("grpc.S")
@@ -672,7 +661,7 @@ mod tests {
             )
             .expect("write corrupt device identity");
 
-            let result = cmd_auth_logout(&TextCtx, None);
+            let result = cmd_auth_logout(&text_ctx(), None);
             assert!(
                 result.is_err(),
                 "a failed device unlink must fail the logout, not report a clean removal",

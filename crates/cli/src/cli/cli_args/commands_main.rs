@@ -583,11 +583,11 @@ Examples:
         command: SessionCommands,
     },
 
-    /// Advanced debugging/provenance commands for the hosted local-agent presence relay.
+    /// Advanced debugging/provenance commands for the remote local-agent presence relay.
     ///
     /// `heddle presence publish` runs a foreground publisher that streams
     /// agent_start / agent_heartbeat / agent_done events to the configured
-    /// hosted server over a bearer-authenticated WebSocket.
+    /// remote service over a bearer-authenticated WebSocket.
     #[cfg(feature = "client")]
     Presence {
         #[command(subcommand)]
@@ -603,8 +603,8 @@ pub enum PresenceCommands {
     ///
     /// Intended to be launched detached by an orchestrator (or called
     /// manually for debugging). Reads agent metadata from
-    /// `.heddle/agents/<session>.toml` and hosted upstream from
-    /// `.heddle/config.toml` `[hosted]`. Exits 0 (with a log line) when no
+    /// `.heddle/agents/<session>.toml` and remote upstream from
+    /// `.heddle/config.toml` `[remote]`. Exits 0 (with a log line) when no
     /// upstream is configured.
     Publish {
         /// Agent session ID (matches `.heddle/agents/<session>.toml`).

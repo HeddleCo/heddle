@@ -143,20 +143,6 @@ pub fn json_output_mode_for_kind(
     }
 }
 
-impl weft_client_shim::CliContext for Cli {
-    fn repo_path(&self) -> Option<&std::path::Path> {
-        self.repo.as_deref()
-    }
-
-    fn operation_id_wire(&self) -> String {
-        crate::operation_id::wire(self)
-    }
-
-    fn should_output_json(&self, repo_config: Option<&Config>) -> bool {
-        should_output_json(self, repo_config)
-    }
-}
-
 /// Resolve worktree status options from user, repo, and env config.
 pub fn worktree_status_options(config: Option<&Config>) -> repo::WorktreeStatusOptions {
     user_config_or_exit().worktree_status_options(config)

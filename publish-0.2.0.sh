@@ -41,7 +41,6 @@ PUBLISHES=(
   "new:heddle-mount"
   "new:heddle-ingest"
   "new:heddle-cli-shared"
-  "new:weft-client-shim"
   "new:heddle-daemon"
   "new:heddle-cli"
 )

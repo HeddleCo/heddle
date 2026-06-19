@@ -4,7 +4,7 @@
 
 use anyhow::{Result, anyhow};
 use cli_shared::{
-    UserConfig,
+    ClientCommandContext, RemoteRecoveryAdvice, UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
 use grpc::heddle::v1::{
@@ -13,10 +13,9 @@ use grpc::heddle::v1::{
 };
 use repo::Repository;
 use serde::Serialize;
-use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
-    grpc_hosted::{HostedAuthMode, HostedGrpcClient},
+    grpc_remote::{RemoteAuthMode, RemoteGrpcClient},
     support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs},
 };
 
@@ -86,7 +85,7 @@ impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
     }
 }
 
-pub async fn run(ctx: &dyn CliContext, command: SupportCommands) -> Result<()> {
+pub async fn run(ctx: &ClientCommandContext, command: SupportCommands) -> Result<()> {
     match command {
         SupportCommands::Grant(args) => run_grant(ctx, args).await,
         SupportCommands::List(args) => run_list(ctx, args).await,
@@ -94,30 +93,30 @@ pub async fn run(ctx: &dyn CliContext, command: SupportCommands) -> Result<()> {
     }
 }
 
-/// Resolve the working repo path from `CliContext`. `--repo` override
+/// Resolve the working repo path from `ClientCommandContext`. `--repo` override
 /// wins; falling back to the cwd is fallible (the cwd can be deleted or
 /// permission-denied) so we propagate the error rather than panicking.
-fn resolve_repo_path(ctx: &dyn CliContext) -> Result<std::path::PathBuf> {
+fn resolve_repo_path(ctx: &ClientCommandContext) -> Result<std::path::PathBuf> {
     match ctx.repo_path() {
         Some(p) => Ok(p.to_path_buf()),
         None => std::env::current_dir().map_err(anyhow::Error::from),
     }
 }
 
-async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient> {
+async fn open_client(repo: &Repository, remote: &str) -> Result<RemoteGrpcClient> {
     let (target, server_key) =
         resolve_remote_with_key(repo, Some(remote)).map_err(anyhow::Error::msg)?;
     let addr = match target {
         RemoteTarget::Network { addr, .. } => addr,
         RemoteTarget::Local(_) => {
-            return Err(anyhow!(HostedRecoveryAdvice::hosted_remote_required(
+            return Err(anyhow!(RemoteRecoveryAdvice::remote_required(
                 remote,
                 "support access",
             )));
         }
     };
     let user_config = UserConfig::load_default()?;
-    HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken)
+    RemoteGrpcClient::open_session(addr, &user_config, server_key, RemoteAuthMode::ConfigToken)
         .await
 }
 
@@ -133,7 +132,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         Some('h') => (&raw[..raw.len() - 1], 3600u64),
         Some('d') => (&raw[..raw.len() - 1], 86400u64),
         _ => {
-            return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+            return Err(anyhow!(RemoteRecoveryAdvice::invalid_usage(
                 "invalid_ttl",
                 format!("invalid --ttl '{raw}': use 30s/15m/2h/3d or seconds"),
                 "Use a TTL like `30s`, `15m`, `2h`, `3d`, or a bare number of seconds.",
@@ -142,7 +141,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         }
     };
     let n: u64 = num_part.parse().map_err(|_| {
-        anyhow!(HostedRecoveryAdvice::invalid_usage(
+        anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "invalid_ttl",
             format!("invalid --ttl '{raw}'"),
             "Use a TTL like `30s`, `15m`, `2h`, `3d`, or a bare number of seconds.",
@@ -150,7 +149,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         ))
     })?;
     let total = n.checked_mul(multiplier_secs).ok_or_else(|| {
-        anyhow!(HostedRecoveryAdvice::invalid_usage(
+        anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "invalid_ttl",
             "--ttl too large",
             "Use a smaller support-access TTL.",
@@ -158,7 +157,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         ))
     })?;
     if total == 0 {
-        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+        return Err(anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "invalid_ttl",
             "--ttl must be > 0",
             "Use a positive support-access TTL.",
@@ -166,7 +165,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         )));
     }
     let secs: u32 = total.try_into().map_err(|_| {
-        anyhow!(HostedRecoveryAdvice::invalid_usage(
+        anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "invalid_ttl",
             "--ttl too large",
             "Use a smaller support-access TTL.",
@@ -176,19 +175,19 @@ fn parse_ttl(raw: &str) -> Result<u32> {
     Ok(secs)
 }
 
-async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
+async fn run_grant(ctx: &ClientCommandContext, args: SupportGrantArgs) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
-        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+        return Err(anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "support_target_required",
             "one of --namespace or --repo is required",
-            "Choose the hosted namespace or repository that should receive support access.",
+            "Choose the remote namespace or repository that should receive support access.",
             "heddle support grant --namespace <namespace>",
         )));
     }
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
     let ttl_secs = parse_ttl(&args.ttl)?;
-    let op_id = ctx.operation_id_wire();
+    let op_id = ctx.operation_id_wire().to_string();
     let grant = client
         .grant_support_access(
             &args.operator_email,
@@ -221,12 +220,12 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_list(ctx: &dyn CliContext, args: SupportListArgs) -> Result<()> {
+async fn run_list(ctx: &ClientCommandContext, args: SupportListArgs) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
-        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+        return Err(anyhow!(RemoteRecoveryAdvice::invalid_usage(
             "support_target_required",
             "one of --namespace or --repo is required",
-            "Choose the hosted namespace or repository whose support grants should be listed.",
+            "Choose the remote namespace or repository whose support grants should be listed.",
             "heddle support list --namespace <namespace>",
         )));
     }
@@ -276,10 +275,10 @@ async fn run_list(ctx: &dyn CliContext, args: SupportListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_revoke(ctx: &dyn CliContext, args: SupportRevokeArgs) -> Result<()> {
+async fn run_revoke(ctx: &ClientCommandContext, args: SupportRevokeArgs) -> Result<()> {
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
-    let op_id = ctx.operation_id_wire();
+    let op_id = ctx.operation_id_wire().to_string();
     client.revoke_support_access(&args.id, op_id).await?;
     if ctx.should_output_json(Some(repo.config())) {
         let output = SupportRevokeOutput {

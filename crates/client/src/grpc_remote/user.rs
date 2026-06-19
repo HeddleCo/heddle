@@ -13,7 +13,7 @@ use tonic::Request;
 use wire::ProtocolError;
 
 use super::{
-    HostedGrpcClient,
+    RemoteGrpcClient,
     helpers::{
         status_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
     },
@@ -41,7 +41,7 @@ macro_rules! authed_call {
     }};
 }
 
-impl HostedGrpcClient {
+impl RemoteGrpcClient {
     pub async fn begin_login(
         &mut self,
         username: &str,

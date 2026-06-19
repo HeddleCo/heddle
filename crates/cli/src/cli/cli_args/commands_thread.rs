@@ -4,9 +4,12 @@
 use clap::{Args, Subcommand};
 
 use super::{
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs,
+    ThreadAbsorbArgs, ThreadCapturesArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
+    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
+};
+#[cfg(feature = "client")]
+use super::{
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCheckMergeArgs, ThreadRevokeApprovalArgs,
 };
 
 #[derive(Subcommand, Clone)]
@@ -105,16 +108,20 @@ Advanced split form:
     Drop(ThreadDropArgs),
 
     /// Record a merge approval for `<source> -> <target>`.
+    #[cfg(feature = "client")]
     Approve(ThreadApproveArgs),
 
     /// List approvals recorded for `<source> -> <target>`.
+    #[cfg(feature = "client")]
     Approvals(ThreadApprovalsArgs),
 
     /// Revoke a previously recorded approval by id.
+    #[cfg(feature = "client")]
     RevokeApproval(ThreadRevokeApprovalArgs),
 
     /// Check whether `<source> -> <target>` would merge under
     /// the repo's branch-protection policies. Read-only.
+    #[cfg(feature = "client")]
     CheckMerge(ThreadCheckMergeArgs),
 
     /// Sweep merged or stale auto-created threads.

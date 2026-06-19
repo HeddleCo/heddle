@@ -35,7 +35,7 @@ This fits the accepted CLI consolidation direction: `sync` is the canonical refr
 - Thread records persist `parent_thread`, `target_thread`, `base_state`, and `base_root`, so Heddle already has the metadata shape needed to describe a thread with both a live dependency and a frozen replay anchor (`crates/repo/src/thread_model.rs:195-206`, `crates/repo/src/thread_storage.rs:24-35`).
 - Thread storage round-trips those fields through record serialization and deserialization (`crates/repo/src/thread_storage.rs:88-115`, `crates/repo/src/thread_storage.rs:118-146`).
 - `status` can already surface parent/child information because its output model includes `parent_thread` and `child_threads`, and thread summary collection derives stack depth and stale-from-parent data from thread records (`crates/cli/src/cli/commands/status.rs:55-148`, `crates/cli/src/cli/commands/thread.rs:655-692`, `crates/cli/src/cli/commands/status.rs:780-799`, `crates/cli/src/cli/commands/status.rs:1531-1545`).
-- Hosted approval primitives already reason about a source thread, a target thread, and a pinned source state (`crates/client/src/grpc_hosted/user.rs:326-354`, `crates/client/src/grpc_hosted/user.rs:391-424`, `crates/cli/src/cli/commands/thread_approval.rs:128-184`).
+- Hosted approval primitives already reason about a source thread, a target thread, and a pinned source state (`crates/client/src/grpc_remote/user.rs:326-354`, `crates/client/src/grpc_remote/user.rs:391-424`, `crates/cli/src/cli/commands/thread_approval.rs:128-184`).
 
 **Foundation in place**
 
@@ -219,8 +219,8 @@ A stack should appear as N reviewable thread units with recorded dependencies:
 - each thread review shows `depends on <parent>` and `blocks <children>`;
 - each review is anchored at the thread's `base_state` and `current_state`;
 - the chain view is computed from the same `parent_thread` edges used locally;
-- approvals remain pinned to source thread state, matching current hosted approval calls (`crates/client/src/grpc_hosted/user.rs:326-354`, `crates/cli/src/cli/commands/thread_approval.rs:128-184`);
-- merge eligibility remains source/target based and can be extended to require parent reviews landed or approved first (`crates/client/src/grpc_hosted/user.rs:391-424`, `crates/cli/src/cli/commands/thread_approval.rs:266-330`);
+- approvals remain pinned to source thread state, matching current hosted approval calls (`crates/client/src/grpc_remote/user.rs:326-354`, `crates/cli/src/cli/commands/thread_approval.rs:128-184`);
+- merge eligibility remains source/target based and can be extended to require parent reviews landed or approved first (`crates/client/src/grpc_remote/user.rs:391-424`, `crates/cli/src/cli/commands/thread_approval.rs:266-330`);
 - per-thread review payloads can use the existing local review service shape, which builds payloads for changed symbols consumed by CLI/web review surfaces (`crates/cli/src/cli/commands/review.rs:1-12`, `crates/cli/src/cli/commands/review.rs:39-51`, `crates/state_review/src/payload.rs:1-20`).
 
 The local snapshot data already has the right projection shape for this: `ThreadSnapshot` exposes `thread`, `parent_thread`, `base_state`, `current_state`, `state`, and freshness (`crates/repo/src/stack_snapshot.rs:61-75`), and `RepositorySnapshot::capture` reads thread records and computes stacks (`crates/repo/src/stack_snapshot.rs:111-134`).

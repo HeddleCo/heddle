@@ -1040,7 +1040,7 @@ async fn push_after_land(
     remote: Option<String>,
     state: Option<String>,
 ) -> Result<String> {
-    if repo.capability() == repo::RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    if repo.capability() == repo::RepositoryCapability::GitOverlay && !repo.remote_linked() {
         let (remote_name, _, _, _, _, _) =
             super::remote::push_git_overlay_refs(repo, remote.as_deref(), false, false)?;
         Ok(remote_name)

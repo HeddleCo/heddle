@@ -23,7 +23,7 @@ use tonic::Request;
 use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 
 use super::{
-    HostedGrpcClient, PullMaterialization,
+    PullMaterialization, RemoteGrpcClient,
     helpers::{
         descriptor_id, descriptor_id_from_info, object_descriptor_with_status,
         parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
@@ -97,7 +97,7 @@ pub struct PullProfile {
     pub object_mix: PullObjectMix,
 }
 
-impl HostedGrpcClient {
+impl RemoteGrpcClient {
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
         let mut request = Request::new(ListRefsRequest {
             repo_path: repo_path.to_string(),
@@ -1381,7 +1381,7 @@ fn encode_native_pack_messages(
     bundle: &wire::NativePackBundle,
     transfer_id: &str,
     chunk_size: usize,
-    transport: &super::helpers::HostedTransportPolicy,
+    transport: &super::helpers::RemoteTransportPolicy,
     transport_mode: TransportMode,
 ) -> Result<Vec<PushMessage>, ProtocolError> {
     let mut messages = Vec::new();
@@ -1438,7 +1438,7 @@ fn encode_native_pack_messages(
 }
 
 fn preferred_transport_mode(
-    transport: &super::helpers::HostedTransportPolicy,
+    transport: &super::helpers::RemoteTransportPolicy,
     object_count: usize,
 ) -> TransportMode {
     let _ = transport;
@@ -1773,11 +1773,11 @@ mod tests {
 
     async fn connect_sidecar_only_service(
         service: SidecarOnlyPullService,
-    ) -> Option<(HostedGrpcClient, tokio::task::JoinHandle<()>)> {
+    ) -> Option<(RemoteGrpcClient, tokio::task::JoinHandle<()>)> {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(listener) => listener,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping hosted sync local gRPC test: TCP bind denied: {err}");
+                eprintln!("skipping remote sync local gRPC test: TCP bind denied: {err}");
                 return None;
             }
             Err(err) => panic!("bind test server: {err}"),
@@ -1798,7 +1798,7 @@ mod tests {
                 .expect("serve sidecar-only test service");
         });
 
-        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+        let client = RemoteGrpcClient::connect(addr, &ClientConfig::default())
             .await
             .expect("connect client");
         Some((client, handle))
@@ -2227,11 +2227,11 @@ mod tests {
 
     async fn connect_state_and_visibility_service(
         service: StateAndVisibilityPullService,
-    ) -> Option<(HostedGrpcClient, tokio::task::JoinHandle<()>)> {
+    ) -> Option<(RemoteGrpcClient, tokio::task::JoinHandle<()>)> {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(listener) => listener,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping hosted sync local gRPC test: TCP bind denied: {err}");
+                eprintln!("skipping remote sync local gRPC test: TCP bind denied: {err}");
                 return None;
             }
             Err(err) => panic!("bind test server: {err}"),
@@ -2252,7 +2252,7 @@ mod tests {
                 .expect("serve state-and-visibility test service");
         });
 
-        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+        let client = RemoteGrpcClient::connect(addr, &ClientConfig::default())
             .await
             .expect("connect client");
         Some((client, handle))

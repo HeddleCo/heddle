@@ -78,7 +78,7 @@ use objects::{
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
-pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
+pub use repo_config::{OutputFormat, RedactConfig, RemoteLinkConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.
@@ -262,10 +262,10 @@ struct GitBridgeMappingFile {
 /// Two production implementations exist:
 /// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
 ///   uses sley promisor-fetch semantics against the bare `.git/` repo.
-/// - Hosted clones: `heddle_client::grpc_hosted::LazyHostedHydrator`
+/// - Remote clones: `heddle_client::grpc_remote::LazyRemoteHydrator`
 ///   bridges sync `hydrate` calls to async gRPC via a dedicated worker
 ///   thread + private Tokio runtime; on each call the worker invokes
-///   `HostedGrpcClient::hydrate_pulled_state` for the current local-thread
+///   `RemoteGrpcClient::hydrate_pulled_state` for the current local-thread
 ///   tip.
 ///
 /// On success the hydrator is expected to write the blob into
@@ -482,7 +482,7 @@ impl Repository {
                 // Hydrator construction failed (factory error or
                 // malformed metadata). Surface as a warning rather
                 // than blocking `open` — eager `heddle status` calls
-                // shouldn't fail just because a stale hosted
+                // shouldn't fail just because a stale remote
                 // endpoint is unreachable; the user will get the real
                 // error on the first `require_blob` that needs it.
                 tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
@@ -870,15 +870,15 @@ impl Repository {
         }
     }
 
-    pub fn hosted_enabled(&self) -> bool {
+    pub fn remote_linked(&self) -> bool {
         self.config
-            .hosted
+            .remote
             .upstream_url
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
             || self
                 .config
-                .hosted
+                .remote
                 .namespace
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())

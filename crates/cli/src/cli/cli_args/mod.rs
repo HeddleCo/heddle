@@ -42,12 +42,15 @@ pub use commands_args::{
     DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs,
     LandArgs, LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs,
     RevertArgs, RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-    SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
-    ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs,
-    ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs,
-    ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs, TimelineCommands,
+    SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadCapturesArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs, TimelineCommands,
     TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineTargetArgs, TryArgs,
     UndoArgs, WatchArgs, WorkspaceModeArg,
+};
+#[cfg(feature = "client")]
+pub use commands_args::{
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCheckMergeArgs, ThreadRevokeApprovalArgs,
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};

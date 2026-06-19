@@ -1041,6 +1041,7 @@ pub struct ThreadDropArgs {
 /// Arguments for `thread approve` — record an approval for a
 /// `<source> -> <target>` merge against the source thread's
 /// current state.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadApproveArgs {
     /// Source thread identifier (the change set being merged).
@@ -1053,13 +1054,14 @@ pub struct ThreadApproveArgs {
     #[arg(long)]
     pub note: Option<String>,
 
-    /// Hosted remote name (default: `origin`).
+    /// Network remote name (default: `origin`).
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }
 
 /// Arguments for `thread approvals` — list every approval recorded
 /// for `<source> -> <target>`.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadApprovalsArgs {
     pub source: String,
@@ -1070,6 +1072,7 @@ pub struct ThreadApprovalsArgs {
 
 /// Arguments for `thread revoke-approval` — remove a recorded
 /// approval by id.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadRevokeApprovalArgs {
     /// UUID of the approval row to revoke.
@@ -1080,6 +1083,7 @@ pub struct ThreadRevokeApprovalArgs {
 
 /// Arguments for `thread check-merge` — query the merge gate
 /// without recording anything. Returns the unmet requirements.
+#[cfg(feature = "client")]
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadCheckMergeArgs {
     pub source: String,
@@ -1156,7 +1160,7 @@ pub struct ResolveArgs {
 /// option-only thread selector.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RemoteOperationArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Remote name, local path, URL, or network address.
     pub remote: Option<String>,
 
     /// Thread to act on.
@@ -1167,7 +1171,7 @@ pub struct RemoteOperationArgs {
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct PushArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Remote name, local path, URL, or network address.
     pub remote: Option<String>,
 
     /// Thread to push.
@@ -1224,7 +1228,7 @@ impl PushArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Advanced (hidden) flags:
-  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
+  --lazy leaves blob content absent by design and hydrates it explicitly later. Network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
 ")]
 pub struct PullArgs {
     #[command(flatten)]
@@ -1272,7 +1276,7 @@ pub struct CloneArgs {
     #[arg(long)]
     pub depth: Option<u32>,
 
-    // Hosted/network remotes only; Git-overlay clones reject it today —
+    // Network remotes only; Git-overlay clones reject it today —
     // lazy hydration over the Git transport is planned for v0.3.1. The
     // user-facing exposition lives in the after-help breadcrumb above and
     // `heddle help clone`.
@@ -1280,7 +1284,7 @@ pub struct CloneArgs {
     #[arg(long, hide = true)]
     pub lazy: bool,
 
-    // Only `blob:none` is accepted (a synonym for --lazy on hosted
+    // Only `blob:none` is accepted (a synonym for --lazy on network
     // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
     // rejected at parse time, and Git-overlay clones reject the flag at
     // runtime until v0.3.1. See the after-help breadcrumb and

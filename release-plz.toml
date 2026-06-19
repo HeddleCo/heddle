@@ -70,7 +70,3 @@ release = true
 [[package]]
 name = "heddle-state-review"
 release = true
-
-[[package]]
-name = "weft-client-shim"
-release = true

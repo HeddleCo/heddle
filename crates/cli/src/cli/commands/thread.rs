@@ -267,7 +267,7 @@ struct ThreadListOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_context: Option<crate::cli::render::RepositoryContextInfo>,
     storage_model: String,
-    hosted_enabled: bool,
+    remote_linked: bool,
     threads: Vec<ThreadSummary>,
     available_git_refs: Vec<AvailableGitRef>,
     current: Option<String>,
@@ -1337,7 +1337,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         repository_label: presentation.label,
         repository_context: presentation.context,
         storage_model: repo.storage_model_label().to_string(),
-        hosted_enabled: repo.hosted_enabled(),
+        remote_linked: repo.remote_linked(),
         recommended_action: recommended_action.clone(),
         recommended_action_template: recommended_action_template(&recommended_action),
         recovery_commands: trust.recovery_commands.clone(),
@@ -1375,8 +1375,8 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         );
         println!("Repository: {}", output.repository_label);
         render_repository_context_lines(output.repository_context.as_ref());
-        if output.hosted_enabled {
-            println!("Hosted: {}", style::accent("enabled"));
+        if output.remote_linked {
+            println!("Remote: {}", style::accent("linked"));
         }
         let trust_only_blocks_on_this_ready_thread = output.trust.workflow_status == "ready"
             && output.trust.recommended_action == output.recommended_action;
@@ -2980,8 +2980,8 @@ pub(crate) fn show_thread_summary(
     } else {
         println!("Repository: {}", presentation.label);
         render_repository_context_lines(presentation.context.as_ref());
-        if repo.hosted_enabled() {
-            println!("Hosted: enabled");
+        if repo.remote_linked() {
+            println!("Remote: linked");
         }
         let trust_only_blocks_on_this_ready_thread = trust.workflow_status == "ready"
             && trust.recommended_action == summary.recommended_action;

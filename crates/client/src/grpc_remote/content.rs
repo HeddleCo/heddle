@@ -8,9 +8,9 @@ use grpc::heddle::v1::{
 use tonic::Request;
 use wire::ProtocolError;
 
-use super::{HostedGrpcClient, helpers::status_to_protocol_error};
+use super::{RemoteGrpcClient, helpers::status_to_protocol_error};
 
-impl HostedGrpcClient {
+impl RemoteGrpcClient {
     pub async fn get_compare(
         &mut self,
         repo_path: &str,

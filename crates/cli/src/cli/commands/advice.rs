@@ -440,9 +440,9 @@ impl RecoveryAdvice {
             format!(
                 "network {operation} support is not available in this build; enable the `client` feature"
             ),
-            "Use a Heddle binary built with the `client` feature for hosted network remotes, or use a local Git-overlay remote.",
-            "this Heddle binary was built without hosted network transport support",
-            format!("network {operation} cannot contact or mutate the requested hosted remote"),
+            "Use a Heddle binary built with the `client` feature for network remotes, or use a local Git-overlay remote.",
+            "this Heddle binary was built without network transport support",
+            format!("network {operation} cannot contact or mutate the requested remote service"),
             "repository state, refs, metadata, and worktree files were left unchanged",
             "heddle remote list",
             vec![
@@ -1019,7 +1019,7 @@ impl RecoveryAdvice {
             "remote_not_configured",
             format!("No default remote is configured for {action}"),
             format!(
-                "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle {action} <remote>` accepts a remote name, URL, local path, or hosted address positionally."
+                "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle {action} <remote>` accepts a remote name, URL, local path, or network address positionally."
             ),
             "the command did not receive a remote argument and no default remote is configured",
             format!(
@@ -1122,9 +1122,9 @@ impl RecoveryAdvice {
         let pull_without_lazy = format!("heddle pull {source}");
         Self::safety_refusal(
             "local_lazy_pull_unsupported",
-            "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote",
+            "Refusing lazy pull from local remote: lazy materialization requires a network remote",
             format!(
-                "Run `{pull_without_lazy}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
+                "Run `{pull_without_lazy}` without `--lazy`, or configure a network remote and retry lazy pull there."
             ),
             format!("selected remote resolves to local path file://{source}"),
             "lazy pull would leave the worktree depending on on-demand object fetches that the local transport does not provide",

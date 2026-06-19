@@ -11,7 +11,7 @@
 //!
 //! This module closes that gap. At clone time the CLI writes a small
 //! `.heddle/lazy-hydrator.toml` recording the hydrator *kind* and the
-//! per-kind config the factory needs to reconstruct it (hosted endpoint
+//! per-kind config the factory needs to reconstruct it (remote endpoint
 //! and target state, or git-overlay marker). At `Repository::open` time
 //! the repo reads that file, looks up a *factory* in a process-wide
 //! registry, and installs the resulting hydrator. Entry-point binaries
@@ -44,12 +44,12 @@ pub const LAZY_HYDRATOR_FILE: &str = "lazy-hydrator.toml";
 /// Stable kind identifier for the git-overlay hydrator.
 pub const KIND_GIT_OVERLAY: &str = "git-overlay";
 
-/// Stable kind identifier for the hosted-gRPC hydrator.
-pub const KIND_HOSTED: &str = "hosted";
+/// Stable kind identifier for the remote gRPC hydrator.
+pub const KIND_REMOTE: &str = "remote";
 
 /// Persisted hydrator metadata. Wire-format is the TOML serialization of
 /// this struct, written to `.heddle/lazy-hydrator.toml`. The shape is
-/// intentionally additive: future hydrator kinds can extend the `hosted`
+/// intentionally additive: future hydrator kinds can extend the `remote`
 /// table or add new tables next to it without breaking existing readers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LazyHydratorConfig {
@@ -59,13 +59,13 @@ pub struct LazyHydratorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HydratorSection {
     /// Stable identifier the factory registry uses to dispatch.
-    /// Currently `"git-overlay"` or `"hosted"`.
+    /// Currently `"git-overlay"` or `"remote"`.
     pub kind: String,
-    /// Hosted-only fields. Present when `kind == "hosted"`, absent
+    /// Remote-only fields. Present when `kind == "remote"`, absent
     /// otherwise. Optional so a future heddle-server can read the toml
-    /// without forcing the hosted table to exist for every kind.
+    /// without forcing the remote table to exist for every kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hosted: Option<HostedHydratorConfig>,
+    pub remote: Option<RemoteHydratorConfig>,
     /// Git-overlay-only fields. Present when `kind == "git-overlay"`,
     /// absent otherwise. The bare repo lives at `<root>/.git` so we
     /// don't strictly need to record its path, but reserving the table
@@ -74,15 +74,15 @@ pub struct HydratorSection {
     pub git_overlay: Option<GitOverlayHydratorConfig>,
 }
 
-/// Hosted-clone reconstruction config: enough state for the hosted
+/// Remote-clone reconstruction config: enough state for the remote
 /// factory to dial the upstream and replay the hydration call that
 /// happened at clone time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostedHydratorConfig {
-    /// `host:port` of the hosted server. Parseable by
+pub struct RemoteHydratorConfig {
+    /// `host:port` of the remote server. Parseable by
     /// [`std::net::SocketAddr::from_str`].
     pub endpoint: String,
-    /// Hosted-namespace path the clone targeted, e.g. `org/acme/repo`.
+    /// Remote namespace path the clone targeted, e.g. `org/acme/repo`.
     pub repo_path: String,
     /// Remote branch / thread the clone tracked (`"main"` by default).
     pub remote_thread: String,
@@ -103,8 +103,8 @@ pub struct HostedHydratorConfig {
 pub struct GitOverlayHydratorConfig {}
 
 impl LazyHydratorConfig {
-    /// Construct a hosted-kind config in one call.
-    pub fn hosted(
+    /// Construct a remote-kind config in one call.
+    pub fn remote(
         endpoint: impl Into<String>,
         repo_path: impl Into<String>,
         remote_thread: impl Into<String>,
@@ -112,8 +112,8 @@ impl LazyHydratorConfig {
     ) -> Self {
         Self {
             hydrator: HydratorSection {
-                kind: KIND_HOSTED.to_string(),
-                hosted: Some(HostedHydratorConfig {
+                kind: KIND_REMOTE.to_string(),
+                remote: Some(RemoteHydratorConfig {
                     endpoint: endpoint.into(),
                     repo_path: repo_path.into(),
                     remote_thread: remote_thread.into(),
@@ -129,7 +129,7 @@ impl LazyHydratorConfig {
         Self {
             hydrator: HydratorSection {
                 kind: KIND_GIT_OVERLAY.to_string(),
-                hosted: None,
+                remote: None,
                 git_overlay: Some(GitOverlayHydratorConfig::default()),
             },
         }
@@ -179,7 +179,7 @@ impl LazyHydratorConfig {
 /// Factory signature: given the repo root and the persisted config,
 /// produce a hydrator ready to install. Sync on purpose — runs inside
 /// `Repository::open`, which is sync and may execute outside any tokio
-/// runtime. Factories that need async I/O (the hosted one does) should
+/// runtime. Factories that need async I/O (the remote one does) should
 /// return an adapter that defers the connect to first `hydrate()` call.
 pub type BlobHydratorFactory =
     Arc<dyn Fn(&Path, &HydratorSection) -> Result<Arc<dyn BlobHydrator>> + Send + Sync>;
@@ -257,11 +257,11 @@ mod tests {
     use crate::Repository;
 
     #[test]
-    fn save_roundtrips_hosted_config() {
+    fn save_roundtrips_remote_config() {
         let temp = TempDir::new().unwrap();
         let heddle = temp.path().join(".heddle");
         let original =
-            LazyHydratorConfig::hosted("127.0.0.1:8443", "org/acme/repo", "main", "main");
+            LazyHydratorConfig::remote("127.0.0.1:8443", "org/acme/repo", "main", "main");
         original.save(&heddle).unwrap();
         let loaded = LazyHydratorConfig::load(&heddle).unwrap().unwrap();
         assert_eq!(loaded, original);
@@ -352,7 +352,7 @@ mod tests {
         let cfg = LazyHydratorConfig {
             hydrator: HydratorSection {
                 kind: kind.to_string(),
-                hosted: None,
+                remote: None,
                 git_overlay: None,
             },
         };
@@ -425,7 +425,7 @@ mod tests {
         let cfg = LazyHydratorConfig {
             hydrator: HydratorSection {
                 kind: kind.to_string(),
-                hosted: None,
+                remote: None,
                 git_overlay: None,
             },
         };
@@ -456,7 +456,7 @@ mod tests {
         let cfg = LazyHydratorConfig {
             hydrator: HydratorSection {
                 kind: "never-registered-kind".to_string(),
-                hosted: None,
+                remote: None,
                 git_overlay: None,
             },
         };

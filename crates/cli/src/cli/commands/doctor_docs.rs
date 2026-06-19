@@ -1176,7 +1176,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "Hosted builds expose `heddle support grant --help` for operators.",
+            "Client builds expose `heddle support grant --help` for operators.",
             &cli(),
             &mut issues,
         );

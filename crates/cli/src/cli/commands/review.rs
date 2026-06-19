@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle review` handler — calls hosted services in-process.
+//! `heddle review` handler — calls review services in-process.
 
 use std::sync::Arc;
 

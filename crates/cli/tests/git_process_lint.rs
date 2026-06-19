@@ -348,7 +348,6 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/repo/src",
         "crates/semantic/src",
         "crates/state_review/src",
-        "crates/weft-client-shim/src",
     ]
     .into_iter()
     .map(|path| workspace.join(path))

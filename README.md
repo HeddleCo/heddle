@@ -52,7 +52,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 
 ### Foundation in place
 
-- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` provides the shared trait boundary)
+- Remote client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to Weft-backed remotes)
 - Verification and verification metadata across the wire protocol
 - Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; the bridge export/checkout gate that withholds non-served commits from a Git mirror is landing; hosted serve-side enforcement is in progress
 
@@ -183,7 +183,7 @@ in the command catalog; use each command's `op_id_behavior` field.
 
 Heddle uses three local config scopes:
 
-- `UserConfig` (`~/.config/heddle/config.toml`) — user identity, agent defaults, output preferences, hosted-client credentials
+- `UserConfig` (`~/.config/heddle/config.toml`) — user identity, agent defaults, output preferences, remote-client credentials
 - `RepoConfig` (`.heddle/config.toml`) — repository-local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
 - `WorktreeState` — per-checkout runtime state (current session, segment) tracked separately from repo config
 
@@ -222,8 +222,7 @@ crates/state_review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
 crates/grpc/                # gRPC client and server transport
-crates/client/              # local-side hosted client
-crates/weft-client-shim/    # shared trait boundary for the `client` feature
+crates/client/              # gated remote client commands and transport
 crates/crypto/              # crypto primitives
 crates/daemon/              # background daemon
 crates/devtools/            # developer tooling

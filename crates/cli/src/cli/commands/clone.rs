@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
+use heddle_client::grpc_remote::PullMaterialization;
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -52,7 +52,7 @@ use crate::{
 pub const CLONE_OUTPUT_KIND: &str = "clone";
 
 /// `output_kind` value carried by the *preliminary* JSON record emitted
-/// by `clone_network` before the final clone payload. Hosted clones
+/// by `clone_network` before the final clone payload. Network clones
 /// emit two JSON objects on one invocation (connection envelope, then
 /// the clone result), so the catalog advertises both discriminators.
 pub const CLONE_CONNECTION_OUTPUT_KIND: &str = "clone_connection";
@@ -201,7 +201,7 @@ pub async fn cmd_clone(
                 local_path,
                 &options,
                 server_key,
-                hosted_endpoint_spec(&remote),
+                remote_endpoint_spec(&remote),
             )
             .await?;
             #[cfg(not(feature = "client"))]
@@ -218,7 +218,7 @@ fn clone_invalid_remote_url_advice(remote: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "clone_invalid_remote_url",
         format!("Invalid remote URL: {remote}"),
-        "Use `file:///path/to/repo`, an existing local path, a hosted/network remote, or a Git clone URL.",
+        "Use `file:///path/to/repo`, an existing local path, a network remote, or a Git clone URL.",
         format!("remote '{remote}' could not be parsed as a supported Heddle or Git remote"),
         "clone cannot determine which transport or repository to read from",
         "no destination directory, repository metadata, refs, or worktree files were written",
@@ -855,8 +855,8 @@ fn network_clone_unavailable_advice() -> RecoveryAdvice {
         "network_clone_unavailable",
         "Network clone support is not available in this build",
         "Use a build with the `client` feature enabled, or clone from a local path.",
-        "this heddle binary was built without hosted/network clone support",
-        "clone cannot contact hosted/network remotes without the client transport",
+        "this heddle binary was built without network clone support",
+        "clone cannot contact network remotes without the client transport",
         "no destination directory, repository metadata, refs, or worktree files were written",
         "heddle clone <local-path> <path>",
         vec!["heddle clone <local-path> <path>".to_string()],
@@ -1148,9 +1148,9 @@ fn local_clone_option_unsupported_advice(option: &'static str, value: &str) -> R
     };
     RecoveryAdvice::safety_refusal(
         "local_clone_option_unsupported",
-        format!("{detail} is only supported for hosted/network remotes"),
-        "Retry without lazy/filter options for local remotes, or use a hosted/network remote that supports lazy materialization.",
-        format!("selected clone transport is local but {detail} requires hosted/network hydration"),
+        format!("{detail} is only supported for network remotes"),
+        "Retry without lazy/filter options for local remotes, or use a network remote that supports lazy materialization.",
+        format!("selected clone transport is local but {detail} requires network hydration"),
         "clone cannot create a lazy local checkout because the local transport does not provide on-demand object hydration",
         "destination path was left unchanged; no local clone repository was initialized",
         "heddle clone <remote> <path>",
@@ -1214,7 +1214,7 @@ fn clone_remote_thread_not_found_advice(track_name: &str, remote_path: &Path) ->
 /// though the original URL still resolves. The hydrator re-resolves DNS
 /// on every process start when given a hostname spec.
 #[cfg(feature = "client")]
-fn hosted_endpoint_spec(remote: &str) -> String {
+fn remote_endpoint_spec(remote: &str) -> String {
     let trimmed = remote.strip_prefix("heddle://").unwrap_or(remote);
     // The address ends at the first slash that introduces a repo path.
     trimmed.split('/').next().unwrap_or(trimmed).to_string()
@@ -1260,7 +1260,7 @@ async fn clone_network(
     endpoint_spec: String,
 ) -> Result<()> {
     use crate::{
-        client::{HostedAuthMode, HostedSession},
+        client::{RemoteAuthMode, RemoteSession},
         config::UserConfig,
     };
 
@@ -1271,7 +1271,7 @@ async fn clone_network(
         filter,
     } = options;
     let depth = *depth;
-    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
+    // `--filter blob:none` is a synonym for `--lazy` on network
     // remotes; both produce a clone whose blob content is hydrated on demand.
     let lazy = *lazy || filter.is_some();
 
@@ -1281,8 +1281,8 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(&user_config, server_key, HostedAuthMode::ConfigToken)?;
-    let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
+    let session = RemoteSession::build(&user_config, server_key, RemoteAuthMode::ConfigToken)?;
+    let repo_path = repo_path.context("network remotes must include a repository path")?;
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
 
@@ -1336,7 +1336,7 @@ async fn clone_network(
             // which is a resolved IP). The hydrator re-resolves DNS on
             // every process start so a future LB rotation doesn't pin us
             // to a stale IP.
-            let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
+            let cfg = LazyHydratorConfig::remote(endpoint_spec, repo_path, track_name, track_name);
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
         }
@@ -1703,35 +1703,35 @@ mod tests {
 
     #[cfg(feature = "client")]
     #[test]
-    fn hosted_endpoint_spec_preserves_hostname_with_port() {
+    fn remote_endpoint_spec_preserves_hostname_with_port() {
         // The lazy-hydrator marker must carry the original hostname so
         // the hydrator can re-resolve DNS on every process start. If we
         // accidentally persist a resolved IP, hosts behind a rotating-IP
         // load balancer break on the next process restart.
         assert_eq!(
-            hosted_endpoint_spec("example.heddle.cloud:443"),
+            remote_endpoint_spec("example.heddle.cloud:443"),
             "example.heddle.cloud:443",
         );
     }
 
     #[cfg(feature = "client")]
     #[test]
-    fn hosted_endpoint_spec_strips_scheme_prefix() {
+    fn remote_endpoint_spec_strips_scheme_prefix() {
         assert_eq!(
-            hosted_endpoint_spec("heddle://example.heddle.cloud:443"),
+            remote_endpoint_spec("heddle://example.heddle.cloud:443"),
             "example.heddle.cloud:443",
         );
     }
 
     #[cfg(feature = "client")]
     #[test]
-    fn hosted_endpoint_spec_strips_repo_path_suffix() {
+    fn remote_endpoint_spec_strips_repo_path_suffix() {
         assert_eq!(
-            hosted_endpoint_spec("example.heddle.cloud:443/org/acme/repo"),
+            remote_endpoint_spec("example.heddle.cloud:443/org/acme/repo"),
             "example.heddle.cloud:443",
         );
         assert_eq!(
-            hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
+            remote_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
             "example.heddle.cloud:443",
         );
     }

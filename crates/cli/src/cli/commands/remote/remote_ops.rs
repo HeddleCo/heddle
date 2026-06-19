@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
+use heddle_client::grpc_remote::{PullMaterialization, RemoteAuthMode};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ThreadName, Tree},
@@ -37,7 +37,7 @@ use super::super::{
     worktree_safety::ensure_worktree_clean,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::RemoteGrpcClient;
 use crate::{
     bridge::{GitBridge, git_core::GitPullOutcome},
     cli::{Cli, RemoteCommands, should_output_json, style},
@@ -214,7 +214,7 @@ pub async fn cmd_pull(
             "pull"
         )));
     }
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    if repo.capability() == RepositoryCapability::GitOverlay && !repo.remote_linked() {
         ensure_worktree_clean(&repo, "pull")?;
         let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
         let branch = repo.git_overlay_current_branch()?;
@@ -492,12 +492,12 @@ fn changed_paths_between_states(
 async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Result<()> {
     let repo_path = options
         .repo_path
-        .context("network remotes must include a hosted repository path")?;
-    let mut client = HostedGrpcClient::open_session(
+        .context("network remotes must include a repository path")?;
+    let mut client = RemoteGrpcClient::open_session(
         options.addr,
         options.user_config,
         options.server_key,
-        HostedAuthMode::CredentialFallback,
+        RemoteAuthMode::CredentialFallback,
     )
     .await?;
 

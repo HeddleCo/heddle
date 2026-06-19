@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle thread approve` / `approvals` / `revoke-approval` /
 //! `check-merge` — record and inspect merge approvals against the
-//! hosted server's policies.
+//! remote service's policies.
 //!
 //! Each subcommand:
 //! 1. Opens the local repo to read the source thread's current state.
-//! 2. Resolves the named remote to a hosted address + repo_path.
+//! 2. Resolves the named remote to a network address + repo_path.
 //! 3. Calls the corresponding RPC and renders the result.
 //!
-//! These commands are server-only operations, but the source-state
-//! lookup happens locally — that's how the gate distinguishes a
+//! These commands are remote-policy operations, but the source-state
+//! lookup happens locally — that's how the service distinguishes a
 //! fresh approval from a stale one across pushes.
 
 #![cfg(feature = "client")]
@@ -28,7 +28,7 @@ use crate::{
         },
         should_output_json,
     },
-    client::{HostedAuthMode, HostedGrpcClient},
+    client::{RemoteAuthMode, RemoteGrpcClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -84,26 +84,26 @@ struct ApprovalRevokeOutput {
 }
 
 /// Resolve the named remote and its repo_path. Errors if the remote
-/// is local (approvals are a hosted-server concept) or has no path.
+/// is local (approvals are a remote-policy concept) or has no path.
 async fn open_heddle_client(
     repo: &Repository,
     remote_name: &str,
-) -> Result<(HostedGrpcClient, String)> {
+) -> Result<(RemoteGrpcClient, String)> {
     let (target, server_key) =
         resolve_remote_with_key(repo, Some(remote_name)).map_err(anyhow::Error::msg)?;
     let (addr, repo_path) = match target {
         RemoteTarget::Network { addr, repo_path } => (
             addr,
-            repo_path.context("hosted remote must include a repository path")?,
+            repo_path.context("network remote must include a repository path")?,
         ),
         RemoteTarget::Local(_) => {
             return Err(anyhow!(RecoveryAdvice::safety_refusal(
-                "hosted_remote_required",
-                format!("approvals require a hosted remote; remote '{remote_name}' is local"),
-                "Configure a hosted remote or retry against one that resolves to a network target.",
-                format!("remote '{remote_name}' is local, but approvals run on the hosted server"),
-                "running locally would imply a hosted approval policy change that no server recorded",
-                "no hosted request was sent and local repository state was left unchanged",
+                "remote_required",
+                format!("approvals require a network remote; remote '{remote_name}' is local"),
+                "Configure a network remote or retry against one that resolves to a network target.",
+                format!("remote '{remote_name}' is local, but approvals run on the remote service"),
+                "running locally would imply a remote approval policy change that no service recorded",
+                "no network request was sent and local repository state was left unchanged",
                 "heddle remote list",
                 vec!["heddle remote list".to_string()],
             )));
@@ -112,7 +112,7 @@ async fn open_heddle_client(
 
     let user_config = UserConfig::load_default()?;
     let client =
-        HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken)
+        RemoteGrpcClient::open_session(addr, &user_config, server_key, RemoteAuthMode::ConfigToken)
             .await?;
     Ok((client, repo_path))
 }

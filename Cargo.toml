@@ -20,7 +20,6 @@ members = [
     "crates/repo",
     "crates/semantic",
     "crates/state_review",
-    "crates/weft-client-shim",
 ]
 default-members = ["crates/cli"]
 resolver = "2"

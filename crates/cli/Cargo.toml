@@ -44,7 +44,6 @@ grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7", optional = 
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
 heddle-query = { path = "../query", package = "heddle-query", version = "0.4" }
 heddle-client = { path = "../client", version = "0.4", optional = true }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.4" }
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
 # end-to-end. Without these breaks, every dep's own default-on `zstd`

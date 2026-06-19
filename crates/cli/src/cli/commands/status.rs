@@ -61,7 +61,7 @@ pub(crate) struct StatusOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_context: Option<crate::cli::render::RepositoryContextInfo>,
     storage_model: String,
-    hosted_enabled: bool,
+    remote_linked: bool,
     #[serde(skip)]
     render_json: bool,
     #[serde(skip)]
@@ -614,7 +614,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             repository_label: presentation.label,
             repository_context: presentation.context,
             storage_model: repo.storage_model_label().to_string(),
-            hosted_enabled: repo.hosted_enabled(),
+            remote_linked: repo.remote_linked(),
             render_json: as_json,
             validation_capability: repo.capability(),
             git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
@@ -793,7 +793,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         repository_label: presentation.label,
         repository_context: presentation.context,
         storage_model: repo.storage_model_label().to_string(),
-        hosted_enabled: repo.hosted_enabled(),
+        remote_linked: repo.remote_linked(),
         render_json: as_json,
         validation_capability: repo.capability(),
         git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
@@ -1227,7 +1227,7 @@ async fn watch_status(
     let mut iterations = 0usize;
 
     #[cfg(feature = "client")]
-    let mut hosted_watch = HostedPresenceWatch::connect_if_configured(cli).await;
+    let mut remote_watch = RemotePresenceWatch::connect_if_configured(cli).await;
 
     loop {
         let output = build_status_output(cli, short)?;
@@ -1260,7 +1260,7 @@ async fn watch_status(
         }
 
         #[cfg(feature = "client")]
-        if let Some(watch) = hosted_watch.as_mut() {
+        if let Some(watch) = remote_watch.as_mut() {
             watch.wait_for_event(interval).await;
             continue;
         }
@@ -1433,8 +1433,8 @@ fn render_status_header(output: &StatusOutput) {
             .unwrap_or_else(|| style::warn("detached HEAD"))
     );
     println!("Repository: {}", output.repository_label);
-    if output.hosted_enabled {
-        println!("Hosted: {}", style::accent("enabled"));
+    if output.remote_linked {
+        println!("Remote: {}", style::accent("linked"));
     }
 }
 
@@ -2393,18 +2393,18 @@ fn render_status_parallel(output: &StatusOutput) {
 }
 
 #[cfg(feature = "client")]
-struct HostedPresenceWatch {
+struct RemotePresenceWatch {
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 }
 
 #[cfg(feature = "client")]
-impl HostedPresenceWatch {
+impl RemotePresenceWatch {
     async fn connect_if_configured(cli: &Cli) -> Option<Self> {
         let repo = cli.open_repo().ok()?;
-        let upstream = repo.config().hosted.upstream_url.as_deref()?.trim();
-        let namespace = repo.config().hosted.namespace.as_deref()?.trim();
+        let upstream = repo.config().remote.upstream_url.as_deref()?.trim();
+        let namespace = repo.config().remote.namespace.as_deref()?.trim();
         if upstream.is_empty() || namespace.is_empty() {
             return None;
         }
@@ -2505,7 +2505,7 @@ fn normalize_presence_ws_url(upstream: &str) -> Result<String> {
         ));
     }
     Err(anyhow::anyhow!(
-        "unsupported hosted upstream url: {upstream}"
+        "unsupported remote upstream url: {upstream}"
     ))
 }
 

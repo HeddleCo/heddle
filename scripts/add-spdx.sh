@@ -25,7 +25,6 @@ OSS_CRATES=(
   crates/daemon
   crates/cli
   crates/cli-shared
-  crates/weft-client-shim
   crates/devtools
   crates/state_review
 )
