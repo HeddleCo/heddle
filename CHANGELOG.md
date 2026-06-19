@@ -13,12 +13,22 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.4.0 - 2026-06-19
+
 ### Changed
 
-- Renamed the native Heddle wire/protocol crate from `heddle-proto`
-  (`crates/proto`, Rust crate `proto`) to `heddle-wire`
-  (`crates/wire`, Rust crate `wire`). The protobuf/gRPC IDL remains in
-  `heddle-grpc` under `crates/grpc/proto/heddle/v1`.
+- **Breaking (crate surface):** renamed the native Heddle wire/protocol
+  crate from `heddle-proto` (`crates/proto`, Rust crate `proto`) to
+  `heddle-wire` (`crates/wire`, Rust crate `wire`). The protobuf/gRPC IDL
+  remains in `heddle-grpc` under `crates/grpc/proto/heddle/v1`.
+
+### Added
+
+- `@heddle/grpc`: a generated TypeScript protobuf + Connect (v2) client
+  package for the Heddle gRPC API, versioned with `heddle-grpc` (`0.7.1`),
+  publishable to GitHub Packages for Tapestry consumption. New path-gated
+  `ts-grpc-client` CI workflow validates/typechecks/packs it and gates
+  publish to `main`.
 
 ## 0.3.0 - 2026-06-16
 
