@@ -3311,9 +3311,10 @@ struct FlushReportsResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let temp = tempfile::TempDir::new().unwrap();

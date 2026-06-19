@@ -1241,11 +1241,41 @@ const CONTRACTS: &[CommandContractEntry] = &[
     #[cfg(feature = "client")]
     entry(&["auth", "login"], MUTATING_TEXT),
     #[cfg(feature = "client")]
-    entry(&["auth", "logout"], MUTATING_NO_OP_ID),
+    entry(
+        &["auth", "logout"],
+        json_discriminators(
+            documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
+            &[json_discriminator(
+                Some("auth logout"),
+                "output_kind",
+                "auth_logout",
+            )],
+        ),
+    ),
     #[cfg(feature = "client")]
-    entry(&["auth", "status"], READ_JSON),
+    entry(
+        &["auth", "status"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["auth status"]),
+            &[json_discriminator(
+                Some("auth status"),
+                "output_kind",
+                "auth_status",
+            )],
+        ),
+    ),
     #[cfg(feature = "client")]
-    entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
+    entry(
+        &["auth", "create-service-token"],
+        json_discriminators(
+            documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
+            &[json_discriminator(
+                Some("auth create-service-token"),
+                "output_kind",
+                "auth_create_service_token",
+            )],
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
     entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
@@ -2013,9 +2043,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["presence"],
-        category(feature_gated(READ_JSON, "client"), "collab"),
+        category(feature_gated(GROUP, "client"), "collab"),
     ),
-    entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["presence", "publish"],
+        feature_gated(
+            CommandContract {
+                network_io: true,
+                daemon_process: true,
+                may_move_ref: false,
+                writes_heddle_refs: false,
+                ..MUTATING_TEXT
+            },
+            "client",
+        ),
+    ),
     entry(
         &["pull"],
         exits(
@@ -2552,16 +2594,49 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["support"],
-        category(feature_gated(MUTATING, "client"), "repo"),
+        category(feature_gated(GROUP, "client"), "repo"),
     ),
     entry(
         &["support", "grant"],
-        feature_gated(MUTATING_NO_OP_ID, "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["support grant"]),
+                &[json_discriminator(
+                    Some("support grant"),
+                    "output_kind",
+                    "support_grant",
+                )],
+            ),
+            "client",
+        ),
     ),
-    entry(&["support", "list"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["support", "list"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["support list"]),
+                &[json_discriminator(
+                    Some("support list"),
+                    "output_kind",
+                    "support_list",
+                )],
+            ),
+            "client",
+        ),
+    ),
     entry(
         &["support", "revoke"],
-        feature_gated(MUTATING_NO_OP_ID, "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["support revoke"]),
+                &[json_discriminator(
+                    Some("support revoke"),
+                    "output_kind",
+                    "support_revoke",
+                )],
+            ),
+            "client",
+        ),
     ),
     entry(
         &["switch"],
@@ -3805,10 +3880,20 @@ pub(crate) fn feature_gated_command_roots() -> Vec<&'static str> {
         .filter(|entry| entry.path.len() == 1 && entry.contract.feature_gate.is_some())
         .map(|entry| entry.path[0])
         .collect::<Vec<_>>();
+    roots.extend(COMPILED_OUT_FEATURE_GATED_COMMAND_ROOTS.iter().copied());
     roots.sort_unstable();
     roots.dedup();
     roots
 }
+
+const COMPILED_OUT_FEATURE_GATED_COMMAND_ROOTS: &[&str] = &[
+    #[cfg(not(feature = "local-services"))]
+    "discuss",
+    #[cfg(not(feature = "local-services"))]
+    "review",
+    #[cfg(not(feature = "local-services"))]
+    "transaction",
+];
 
 pub fn command_supports_op_id_for_command(command: &Commands) -> bool {
     command_runtime_contract_for_command(command).supports_op_id

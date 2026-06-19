@@ -53,6 +53,7 @@ pub(crate) enum VirtualizedMountBackend {
 /// RPC path. `InProcess` mounts live in this process' registry and must be
 /// unwound there, but we still keep the concrete backend for diagnostics and
 /// tests.
+#[allow(dead_code)] // The in-process variant is only built by target-gated mount adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VirtualizedMountOwner {
     Daemon,
@@ -977,6 +978,7 @@ mod stub {
     /// Placeholder type so call sites compile on every platform.
     /// Constructing one is impossible because the real
     /// constructors are gated to a supported target + feature.
+    #[allow(dead_code)] // Unconstructable placeholder for unsupported target/feature builds.
     pub struct MountHandle(std::convert::Infallible);
 
     pub fn spawn_mount_for_thread(

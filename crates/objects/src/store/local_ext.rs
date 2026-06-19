@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Local filesystem-oriented object-store extension traits.
 
-use std::{path::Path, path::PathBuf};
-
-use crate::object::ContentHash;
+use std::path::{Path, PathBuf};
 
 use super::{LocalObjectStore, Result, pack};
+use crate::object::ContentHash;
 
 /// Extension trait for hardlink/reflink-friendly local materialization.
 pub trait LocalObjectStoreExt: Send + Sync {

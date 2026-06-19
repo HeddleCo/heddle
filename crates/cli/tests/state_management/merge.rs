@@ -2897,6 +2897,7 @@ fn test_merge_no_semantic_switches_relation_to_path_conflicts() {
     );
 }
 
+#[cfg(feature = "semantic")]
 fn create_structural_reshape_merge_fixture(temp: &TempDir) -> std::path::PathBuf {
     heddle(&["init"], Some(temp.path())).unwrap();
     let src = temp.path().join("lib.rs");

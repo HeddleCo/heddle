@@ -15,5 +15,5 @@ out_dir="${1:-$repo_root/clients/npm/generated}"
 
 cd "$repo_root"
 cargo run --locked -p heddle-cli --example gen_ts_types \
-  --features git-overlay,native,semantic,zstd \
+  --all-features \
   -- "$out_dir"

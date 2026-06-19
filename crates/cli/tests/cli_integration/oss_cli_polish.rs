@@ -2994,8 +2994,11 @@ fn core_loop_schemas_are_discoverable() {
         "actor show",
         "actor explain",
         "actor done",
+        #[cfg(feature = "local-services")]
         "agent serve",
+        #[cfg(feature = "local-services")]
         "agent status",
+        #[cfg(feature = "local-services")]
         "agent stop",
         "agent reserve",
         "agent heartbeat",
@@ -3054,6 +3057,7 @@ fn core_loop_schemas_are_discoverable() {
     }
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn review_next_envelope_top_level_keys_match_registered_schema() {
     // The output_kind sweep wrapped `review next --output json` in a
@@ -8168,13 +8172,13 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
 
     let push_help = heddle_help(&["push", "--help"]);
     assert!(
-        push_help.contains("Remote name, local path, URL, or hosted address"),
-        "push help should match Git-overlay and hosted reality, not only host:port remotes: {push_help}"
+        push_help.contains("Remote name, local path, URL, or network address"),
+        "push help should match Git-overlay and network remote reality, not only host:port remotes: {push_help}"
     );
     let pull_help = heddle_help(&["pull", "--help"]);
     assert!(
-        pull_help.contains("Remote name, local path, URL, or hosted address"),
-        "pull help should match Git-overlay and hosted reality, not only host:port remotes: {pull_help}"
+        pull_help.contains("Remote name, local path, URL, or network address"),
+        "pull help should match Git-overlay and network remote reality, not only host:port remotes: {pull_help}"
     );
 
     let operation_ids = heddle_help(&["help", "operation-ids"]);
@@ -9734,6 +9738,7 @@ fn context_invalid_scope_uses_typed_advice_json() {
     );
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn discuss_resolve_conditional_options_use_typed_advice_json() {
     let temp = TempDir::new().unwrap();
@@ -9809,6 +9814,7 @@ fn discuss_resolve_conditional_options_use_typed_advice_json() {
     }
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn review_sign_malformed_symbols_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
@@ -9976,6 +9982,7 @@ fn integration_codex_repo_scope_uses_typed_advice_json() {
     );
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn agent_serve_background_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
@@ -10003,6 +10010,7 @@ fn agent_serve_background_uses_typed_advice_json() {
     );
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn agent_stop_invalid_pidfile_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
@@ -10065,6 +10073,7 @@ fn agent_heartbeat_missing_session_uses_typed_advice_json() {
     );
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     let temp = TempDir::new().unwrap();
@@ -10205,6 +10214,7 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     );
 }
 
+#[cfg(feature = "local-services")]
 #[test]
 fn agent_daemon_status_honors_global_repo_argument() {
     let cwd_repo = TempDir::new().unwrap();
@@ -11306,8 +11316,11 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "actor show",
         "actor explain",
         "actor done",
+        #[cfg(feature = "local-services")]
         "agent serve",
+        #[cfg(feature = "local-services")]
         "agent status",
+        #[cfg(feature = "local-services")]
         "agent stop",
         "agent reserve",
         "agent heartbeat",

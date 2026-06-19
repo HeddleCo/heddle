@@ -957,8 +957,9 @@ mod chokepoint {
     /// `resolve`, and the `RefBackend`/`CoreRefBackend` trait delegations.
     #[test]
     fn remote_threads_pack_and_trait_delegations() {
-        use super::super::{CoreRefBackend, RefBackend};
         use objects::object::RemoteName;
+
+        use super::super::{CoreRefBackend, RefBackend};
 
         let (_t, dir) = manager();
         let refs = RefManager::new(&dir);

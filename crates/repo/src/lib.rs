@@ -70,15 +70,15 @@ pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
-pub use objects::object::{
-    BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
-    TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
-    TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
-    TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
-    TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
-};
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
+    object::{
+        BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
+        TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
+        TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
+        TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId,
+        TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
+    },
     store::{
         AgentUsageSummary, FsStore, LocalObjectStore, ObjectStore, ShallowInfo,
         agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},

@@ -11,9 +11,9 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.4", default-features = false }
+objects = { path = "../objects", package = "heddle-objects", version = "0.5" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.5", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.5", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

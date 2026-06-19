@@ -4,6 +4,9 @@
 //! Call [`run_compliance_tests`] from any `#[test]` or `#[tokio::test]` that
 //! has a concrete [`LocalObjectStore`] to verify it satisfies the full contract.
 
+use bytes::Bytes;
+use futures::{StreamExt, executor::block_on, stream};
+
 use crate::{
     error::StorageErrorKind,
     object::{Attribution, Blob, ContentHash, Principal, State, Tree},
@@ -12,9 +15,6 @@ use crate::{
         ObjectStore, PageRequest, PageToken,
     },
 };
-
-use bytes::Bytes;
-use futures::{StreamExt, executor::block_on, stream};
 
 fn attribution() -> Attribution {
     Attribution::human(Principal::new("Compliance Test", "test@example.com"))

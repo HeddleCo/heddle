@@ -129,10 +129,14 @@ pub struct CommandContractSchemaCoverage {
     pub verified_scope_mutating_commands_without_schema: usize,
     pub advanced_scope_mutating_commands_total: usize,
     pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
+    pub schema_verbs_total: usize,
+    pub documented_schema_verbs_total: usize,
     pub undocumented_schema_verbs_total: usize,
     pub opaque_schema_verbs_total: usize,
     pub accepted_opaque_schema_verbs_total: usize,
     pub unaccepted_opaque_schema_verbs_total: usize,
+    pub supports_op_id_total: usize,
+    pub jsonl_commands_total: usize,
     pub missing_schema_examples: Vec<String>,
     pub missing_mutating_schema_examples: Vec<String>,
     #[serde(rename = "verified_scope_missing_schema_examples")]
@@ -185,10 +189,14 @@ impl From<MachineContractCoverage> for CommandContractSchemaCoverage {
             advanced_scope_mutating_commands_total: coverage.advanced_scope_mutating_commands_total,
             advanced_scope_mutating_commands_with_accepted_opaque_schema: coverage
                 .advanced_scope_mutating_commands_with_accepted_opaque_schema,
+            schema_verbs_total: coverage.schema_verbs_total,
+            documented_schema_verbs_total: coverage.documented_schema_verbs_total,
             undocumented_schema_verbs_total: coverage.undocumented_schema_verbs_total,
             opaque_schema_verbs_total: coverage.opaque_schema_verbs_total,
             accepted_opaque_schema_verbs_total: coverage.accepted_opaque_schema_verbs_total,
             unaccepted_opaque_schema_verbs_total: coverage.unaccepted_opaque_schema_verbs_total,
+            supports_op_id_total: coverage.supports_op_id_total,
+            jsonl_commands_total: coverage.jsonl_commands_total,
             missing_schema_examples: coverage.missing_schema_examples,
             missing_mutating_schema_examples: coverage.missing_mutating_schema_examples,
             verified_scope_missing_schema_examples: coverage.verified_scope_missing_schema_examples,
@@ -491,6 +499,9 @@ fn collect_coverage_drift_issues(
     command_coverage: &Value,
     issues: &mut Vec<SchemaIssue>,
 ) {
+    if !feature_complete_schema_coverage_doc_validation() {
+        return;
+    }
     collect_coverage_drift_issues_at_path(
         &sample.json,
         "",
@@ -500,6 +511,10 @@ fn collect_coverage_drift_issues(
         command_coverage,
         issues,
     );
+}
+
+fn feature_complete_schema_coverage_doc_validation() -> bool {
+    cfg!(all(feature = "client", feature = "local-services"))
 }
 
 fn collect_coverage_drift_issues_at_path(
@@ -1154,6 +1169,7 @@ Some prose.
         assert!(schema_property_keys(&schema).is_empty());
     }
 
+    #[cfg(all(feature = "client", feature = "local-services"))]
     #[test]
     fn coverage_samples_must_match_runtime_coverage_values() {
         let sample = DocSample {
@@ -1293,10 +1309,14 @@ Some prose.
                 verified_scope_mutating_commands_without_schema: 0,
                 advanced_scope_mutating_commands_total: 0,
                 advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
+                schema_verbs_total: 1,
+                documented_schema_verbs_total: 1,
                 undocumented_schema_verbs_total: 0,
                 opaque_schema_verbs_total: 0,
                 accepted_opaque_schema_verbs_total: 0,
                 unaccepted_opaque_schema_verbs_total: 0,
+                supports_op_id_total: 0,
+                jsonl_commands_total: 0,
                 missing_schema_examples: Vec::new(),
                 missing_mutating_schema_examples: Vec::new(),
                 verified_scope_missing_schema_examples: Vec::new(),

@@ -50,6 +50,23 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["agent", "release", "--session", "session-1"],
     ),
     sample(&["agent", "list"], &["agent", "list"]),
+    #[cfg(feature = "client")]
+    sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
+    #[cfg(feature = "client")]
+    sample(&["auth", "logout"], &["auth", "logout"]),
+    #[cfg(feature = "client")]
+    sample(&["auth", "status"], &["auth", "status"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["auth", "create-service-token"],
+        &[
+            "auth",
+            "create-service-token",
+            "github-ci-main",
+            "--namespace",
+            "heddle/platform",
+        ],
+    ),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
     #[cfg(feature = "git-overlay")]
@@ -172,6 +189,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["maintenance", "index"], &["maintenance", "index"]),
     sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
     sample(&["merge"], &["merge", "feature"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["presence", "publish"],
+        &["presence", "publish", "--session", "session-1"],
+    ),
     sample(&["pull"], &["pull"]),
     sample(&["push"], &["push"]),
     sample(&["query"], &["query"]),
@@ -302,6 +324,29 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["stash", "clear"], &["stash", "clear"]),
     sample(&["stash", "show"], &["stash", "show"]),
     sample(&["status"], &["status"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["support", "grant"],
+        &[
+            "support",
+            "grant",
+            "support@heddle.sh",
+            "--namespace",
+            "heddle/platform",
+            "--reason",
+            "debug incident",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["support", "list"],
+        &["support", "list", "--namespace", "heddle/platform"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["support", "revoke"],
+        &["support", "revoke", "00000000-0000-0000-0000-000000000000"],
+    ),
     sample(&["switch"], &["switch", "main"]),
     sample(&["sync"], &["sync"]),
     sample(&["thread", "create"], &["thread", "create", "feature"]),
@@ -324,14 +369,17 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["thread", "resolve"], &["thread", "resolve", "feature"]),
     sample(&["thread", "promote"], &["thread", "promote", "feature"]),
     sample(&["thread", "drop"], &["thread", "drop", "feature"]),
+    #[cfg(feature = "client")]
     sample(
         &["thread", "approve"],
         &["thread", "approve", "source", "target"],
     ),
+    #[cfg(feature = "client")]
     sample(
         &["thread", "approvals"],
         &["thread", "approvals", "source", "target"],
     ),
+    #[cfg(feature = "client")]
     sample(
         &["thread", "revoke-approval"],
         &[
@@ -340,6 +388,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "00000000-0000-0000-0000-000000000000",
         ],
     ),
+    #[cfg(feature = "client")]
     sample(
         &["thread", "check-merge"],
         &["thread", "check-merge", "source", "target"],
@@ -1238,9 +1287,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // session verbs, bridge git push/pull, continue, daemon stop,
     // doctor, expand, fetch, land, log,
     // maintenance gc/index, merge --preview, pull, push, query, ready,
-    // the remote family, start, switch, sync, and the thread lifecycle
-    // verbs). Any further sweep MUST extend this list and document the
-    // addition.
+    // the remote family, start, switch, sync, the thread lifecycle
+    // verbs, and the client-gated auth/support contracts). Any further
+    // sweep MUST extend this list and document the addition.
     //
     // `clone` appears twice because network `clone --output json`
     // emits two JSON records per invocation (a preliminary
@@ -1274,6 +1323,12 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent stop",
             "agent capture",
             "agent ready",
+            #[cfg(feature = "client")]
+            "auth logout",
+            #[cfg(feature = "client")]
+            "auth status",
+            #[cfg(feature = "client")]
+            "auth create-service-token",
             "bridge git status",
             "bridge git import",
             "bridge git sync",
@@ -1363,6 +1418,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "stash list",
             "stash show",
             "status",
+            "support grant",
+            "support list",
+            "support revoke",
             "switch",
             "sync",
             "thread create",
@@ -1963,5 +2021,9 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    assert_eq!(feature_gated_command_roots(), &["presence", "support"]);
+    let mut expected = vec!["presence", "support"];
+    #[cfg(not(feature = "local-services"))]
+    expected.extend(["discuss", "review", "transaction"]);
+    expected.sort_unstable();
+    assert_eq!(feature_gated_command_roots(), expected);
 }

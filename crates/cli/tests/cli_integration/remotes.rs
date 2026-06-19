@@ -2974,9 +2974,9 @@ fn test_cli_pull_local_lazy_is_rejected() {
         serde_json::from_str(stderr).expect("local lazy pull should emit JSON envelope");
     assert_eq!(envelope["kind"], "local_lazy_pull_unsupported");
     assert!(
-        envelope["error"].as_str().is_some_and(
-            |error| error.contains("lazy materialization requires a hosted or network remote")
-        ),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("lazy materialization requires a network remote")),
         "local lazy pull should include typed recovery detail: {stderr}"
     );
     assert!(

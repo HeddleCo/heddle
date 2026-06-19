@@ -45,6 +45,124 @@ const N_SIDES: usize = 3;
 /// (heddle#468 r5: the duplicate-import class the positional path produced).
 type MatchKey = (ItemKey, usize);
 
+#[derive(Default)]
+struct MovedOutMethods<'a> {
+    ours: BTreeMap<ItemKey, MovedOutMethod<'a>>,
+    theirs: BTreeMap<ItemKey, MovedOutMethod<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct MovedOutMethod<'a> {
+    base_inline: &'a Item,
+    opposite_inline: Option<&'a Item>,
+}
+
+impl<'a> MovedOutMethods<'a> {
+    fn detect(
+        base_segments: &'a FileSegments,
+        ours_segments: &'a FileSegments,
+        theirs_segments: &'a FileSegments,
+    ) -> Self {
+        Self {
+            ours: detect_moved_out_methods(base_segments, ours_segments, theirs_segments),
+            theirs: detect_moved_out_methods(base_segments, theirs_segments, ours_segments),
+        }
+    }
+
+    fn virtualize_top_level(
+        &self,
+        depth: usize,
+        key: &ItemKey,
+        mut base_item: Option<&'a Item>,
+        mut ours_item: Option<&'a Item>,
+        mut theirs_item: Option<&'a Item>,
+    ) -> (Option<&'a Item>, Option<&'a Item>, Option<&'a Item>) {
+        if depth != 0 || base_item.is_some() {
+            return (base_item, ours_item, theirs_item);
+        }
+        if let Some(moved) = self.ours.get(key)
+            && ours_item.is_some()
+        {
+            base_item = Some(moved.base_inline);
+            if theirs_item.is_none() {
+                theirs_item = moved.opposite_inline;
+            }
+        }
+        if let Some(moved) = self.theirs.get(key)
+            && theirs_item.is_some()
+        {
+            base_item = Some(moved.base_inline);
+            if ours_item.is_none() {
+                ours_item = moved.opposite_inline;
+            }
+        }
+        (base_item, ours_item, theirs_item)
+    }
+
+    fn consumes_nested_inline(
+        &self,
+        key: &ItemKey,
+        base_item: Option<&Item>,
+        ours_item: Option<&Item>,
+        theirs_item: Option<&Item>,
+    ) -> bool {
+        base_item.is_some()
+            && ((self.ours.contains_key(key) && ours_item.is_none())
+                || (self.theirs.contains_key(key) && theirs_item.is_none()))
+    }
+}
+
+fn detect_moved_out_methods<'a>(
+    base_segments: &'a FileSegments,
+    moving_segments: &'a FileSegments,
+    opposite_segments: &'a FileSegments,
+) -> BTreeMap<ItemKey, MovedOutMethod<'a>> {
+    let mut moved = BTreeMap::new();
+    for item in moving_segments.items.iter().filter(|item| {
+        item.body.is_none() && item.key.kind == ItemKind::Function && !item.key.scope.is_empty()
+    }) {
+        if find_nested_item(&moving_segments.items, &item.key).is_some() {
+            continue;
+        }
+        let Some(base_inline) = find_nested_item(&base_segments.items, &item.key) else {
+            continue;
+        };
+        moved.insert(
+            item.key.clone(),
+            MovedOutMethod {
+                base_inline,
+                opposite_inline: find_nested_item(&opposite_segments.items, &item.key),
+            },
+        );
+    }
+    moved
+}
+
+fn find_nested_item<'a>(items: &'a [Item], key: &ItemKey) -> Option<&'a Item> {
+    for item in items {
+        if let Some(body) = &item.body
+            && let Some(found) = find_item(&body.items, key)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_item<'a>(items: &'a [Item], key: &ItemKey) -> Option<&'a Item> {
+    for item in items {
+        if item.key == *key {
+            return Some(item);
+        }
+        if let Some(body) = &item.body
+            && let Some(found) = find_item(&body.items, key)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Stitch three sides together via recursive per-region tree merge.
 ///
 /// The whole file is the outermost region; each matched container body is a
@@ -65,9 +183,12 @@ pub(crate) fn reconstruct_merged_file(
     // (`emit_addadd_conflict`) when the conflicting item bodies carry zero
     // EOL observations (Codex r8, cid 3256283857).
     let sides = SideSources::new(base, ours, theirs);
+    let moved_out = MovedOutMethods::detect(base_segments, ours_segments, theirs_segments);
 
     let (mut output, total_conflicts) = merge_region(
         sides,
+        &moved_out,
+        0,
         &base_segments.items,
         &ours_segments.items,
         &theirs_segments.items,
@@ -100,11 +221,13 @@ pub(crate) fn reconstruct_merged_file(
 /// per-side inter-item segments (including a container body's own braces,
 /// which live in its region's preamble/postamble) back between the items.
 #[allow(clippy::too_many_arguments)]
-fn merge_region(
+fn merge_region<'items>(
     sides: SideSources<'_>,
-    base_items: &[Item],
-    ours_items: &[Item],
-    theirs_items: &[Item],
+    moved_out: &MovedOutMethods<'items>,
+    depth: usize,
+    base_items: &'items [Item],
+    ours_items: &'items [Item],
+    theirs_items: &'items [Item],
     base_bounds: (usize, usize),
     ours_bounds: (usize, usize),
     theirs_bounds: (usize, usize),
@@ -153,13 +276,26 @@ fn merge_region(
         if key.0.kind == ItemKind::Use {
             continue;
         }
-        let resolution = resolve_node(
-            sides,
-            base_map.get(*key).copied(),
-            ours_map.get(*key).copied(),
-            theirs_map.get(*key).copied(),
-            markers,
-        );
+        let base_item = base_map.get(*key).copied();
+        let ours_item = ours_map.get(*key).copied();
+        let theirs_item = theirs_map.get(*key).copied();
+        let resolution = if depth > 0
+            && moved_out.consumes_nested_inline(&key.0, base_item, ours_item, theirs_item)
+        {
+            (None, 0)
+        } else {
+            let (base_item, ours_item, theirs_item) =
+                moved_out.virtualize_top_level(depth, &key.0, base_item, ours_item, theirs_item);
+            resolve_node(
+                sides,
+                moved_out,
+                depth,
+                base_item,
+                ours_item,
+                theirs_item,
+                markers,
+            )
+        };
         total_conflicts += resolution.1;
         resolved.insert((*key).clone(), resolution);
     }
@@ -219,6 +355,13 @@ fn merge_region(
     let mut output: Vec<u8> = Vec::new();
 
     for key in &item_emit_order {
+        let Some((item_resolution, _)) = resolved.get(key) else {
+            continue;
+        };
+        if item_resolution.is_none() && key.0.kind != ItemKind::Use {
+            continue;
+        }
+
         let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
         for s in 0..N_SIDES {
             // A side contributes the gap PRECEDING `key` only if it actually
@@ -240,7 +383,7 @@ fn merge_region(
         output.extend_from_slice(&seg_bytes);
         total_conflicts += seg_conflicts;
 
-        if let Some((Some(item_bytes), _)) = resolved.get(key) {
+        if let Some(item_bytes) = item_resolution {
             output.extend_from_slice(item_bytes);
         }
     }
@@ -688,6 +831,8 @@ fn footer_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
 /// P2).
 fn resolve_node(
     sides: SideSources<'_>,
+    moved_out: &MovedOutMethods<'_>,
+    depth: usize,
     base_item: Option<&Item>,
     ours_item: Option<&Item>,
     theirs_item: Option<&Item>,
@@ -699,7 +844,15 @@ fn resolve_node(
         .peekable();
     let all_containers = present.peek().is_some() && present.all(|i| i.body.is_some());
     if all_containers {
-        resolve_container(sides, base_item, ours_item, theirs_item, markers)
+        resolve_container(
+            sides,
+            moved_out,
+            depth,
+            base_item,
+            ours_item,
+            theirs_item,
+            markers,
+        )
     } else {
         resolve_item(sides, base_item, ours_item, theirs_item, markers)
     }
@@ -715,6 +868,8 @@ fn resolve_node(
 /// by construction.
 fn resolve_container(
     sides: SideSources<'_>,
+    moved_out: &MovedOutMethods<'_>,
+    depth: usize,
     base_item: Option<&Item>,
     ours_item: Option<&Item>,
     theirs_item: Option<&Item>,
@@ -780,7 +935,7 @@ fn resolve_container(
             } else if tw == bw || ow == tw {
                 (Some(ow.to_vec()), 0)
             } else {
-                merge_container_3way(sides, b, o, t, markers)
+                merge_container_3way(sides, moved_out, depth, b, o, t, markers)
             }
         }
     }
@@ -796,6 +951,8 @@ fn resolve_container(
 /// recursion without an anchor — heddle#490 r5).
 fn merge_container_3way(
     sides: SideSources<'_>,
+    moved_out: &MovedOutMethods<'_>,
+    depth: usize,
     base: &Item,
     ours: &Item,
     theirs: &Item,
@@ -838,6 +995,8 @@ fn merge_container_3way(
     );
     let (body, bc) = merge_region(
         sides,
+        moved_out,
+        depth + 1,
         &bb.items,
         &ob.items,
         &tb.items,

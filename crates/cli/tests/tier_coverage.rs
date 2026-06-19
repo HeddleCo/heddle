@@ -44,6 +44,11 @@ fn every_commands_variant_has_explicit_root_contract() {
         {
             continue;
         }
+        if cfg!(not(feature = "local-services"))
+            && matches!(variant.as_str(), "Discuss" | "Transaction" | "Review")
+        {
+            continue;
+        }
         let kebab = variant_to_verb(variant);
         if command_contract_removed_alias_root(&kebab) {
             continue;

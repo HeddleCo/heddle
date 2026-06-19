@@ -1,6 +1,7 @@
 //! `heddle auth` command implementations.
 
 use anyhow::{Result, bail};
+use cli_shared::{ClientCommandContext, RemoteRecoveryAdvice};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthorizationResponse,
@@ -14,7 +15,6 @@ use tonic::{
 };
 
 use crate::{auth_args::AuthCommands, credentials, credentials::ServerCredential};
-use cli_shared::{ClientCommandContext, RemoteRecoveryAdvice};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
 /// reserved for future remote commands that need repo path / output

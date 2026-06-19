@@ -3322,6 +3322,7 @@ pub(crate) fn canonical_bridge_reconcile_ref_preview_command(
     }
 }
 
+#[cfg(feature = "git-overlay")]
 pub(crate) fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
         "bridge",

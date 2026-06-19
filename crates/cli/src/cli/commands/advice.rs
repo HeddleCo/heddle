@@ -371,6 +371,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     pub(crate) fn bridge_ingest_required(map_path: &str, git_path: &str) -> Self {
         let command = format!("heddle bridge git import --path {git_path}");
         Self::safety_refusal(

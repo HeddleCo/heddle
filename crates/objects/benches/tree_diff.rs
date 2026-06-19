@@ -11,7 +11,7 @@ use objects::{
         Action, ActionId, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
         diff_trees,
     },
-    store::Result,
+    store::{LocalObjectStore, Result},
 };
 
 const SIZES: &[usize] = &[1_000, 10_000, 100_000];

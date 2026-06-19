@@ -85,10 +85,15 @@ const SWEPT: &[&str] = &[
     "stash list",
     "stash show",
     "clean",
+    #[cfg(feature = "local-services")]
     "discuss open",
+    #[cfg(feature = "local-services")]
     "discuss append",
+    #[cfg(feature = "local-services")]
     "discuss resolve",
+    #[cfg(feature = "local-services")]
     "discuss list",
+    #[cfg(feature = "local-services")]
     "discuss show",
     "context set",
     "context get",
@@ -100,9 +105,13 @@ const SWEPT: &[&str] = &[
     "context check",
     "context suggest",
     "context audit",
+    #[cfg(feature = "local-services")]
     "review show",
+    #[cfg(feature = "local-services")]
     "review sign",
+    #[cfg(feature = "local-services")]
     "review next",
+    #[cfg(feature = "local-services")]
     "review health",
     "resolve",
     "cherry-pick",
@@ -120,9 +129,18 @@ const SWEPT: &[&str] = &[
     "adopt",
     "agent capture",
     "agent ready",
+    #[cfg(feature = "local-services")]
     "agent serve",
+    #[cfg(feature = "local-services")]
     "agent status",
+    #[cfg(feature = "local-services")]
     "agent stop",
+    #[cfg(feature = "client")]
+    "auth create-service-token",
+    #[cfg(feature = "client")]
+    "auth logout",
+    #[cfg(feature = "client")]
+    "auth status",
     "bridge git pull",
     "bridge git push",
     "continue",
@@ -146,6 +164,12 @@ const SWEPT: &[&str] = &[
     "remote set-default",
     "remote show",
     "start",
+    #[cfg(feature = "client")]
+    "support grant",
+    #[cfg(feature = "client")]
+    "support list",
+    #[cfg(feature = "client")]
+    "support revoke",
     "switch",
     "sync",
     "timeline fork",
@@ -162,6 +186,7 @@ const SWEPT: &[&str] = &[
     "thread refresh",
     "thread rename",
     "thread resolve",
+    #[cfg(feature = "client")]
     "thread revoke-approval",
     "thread switch",
 ];

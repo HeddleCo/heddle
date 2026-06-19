@@ -130,6 +130,12 @@ schema_registry! {
     (&["doctor"], DiagnoseSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
+    (&["auth logout"], AuthLogoutSchema),
+    (&["auth status"], AuthStatusSchema),
+    (&["auth create-service-token"], AuthCreateServiceTokenSchema),
+    (&["support grant"], SupportGrantSchema),
+    (&["support list"], SupportListSchema),
+    (&["support revoke"], SupportRevokeSchema),
     (&["actor spawn", "actor show"], ActorSingleSchema),
     (&["actor list"], ActorListSchema),
     (&["actor done"], ActorDoneSchema),
@@ -2655,6 +2661,64 @@ pub struct DoctorSchemaIssueSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthLogoutSchema {
+    pub output_kind: String,
+    pub server: String,
+    pub removed: bool,
+    pub device_identity_removed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthStatusSchema {
+    pub output_kind: String,
+    pub server: String,
+    pub authenticated: bool,
+    pub subject: Option<String>,
+    pub credential_id: Option<String>,
+    pub expires_at: Option<String>,
+    pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthCreateServiceTokenSchema {
+    pub output_kind: String,
+    pub name: String,
+    pub namespace: String,
+    pub scope: String,
+    pub token: String,
+    pub expires_in_days: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportGrantSchema {
+    pub output_kind: String,
+    pub id: String,
+    pub operator_email: String,
+    pub namespace_path: String,
+    pub repo_path: String,
+    pub role: String,
+    pub granted_by: String,
+    pub granted_at: u64,
+    pub expires_at: u64,
+    pub revoked_at: u64,
+    pub revoked_by: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportListSchema {
+    pub output_kind: String,
+    pub grants: Vec<SupportGrantSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportRevokeSchema {
+    pub output_kind: String,
+    pub id: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct CommandContractSchemaCoverageSchema {
     pub status: String,
     #[serde(rename = "verified_scope")]
@@ -3283,23 +3347,37 @@ mod tests {
     }
 
     fn schema_implementation_is_feature_gated_out(verb: &str) -> bool {
-        !cfg!(feature = "local-services")
+        (!cfg!(feature = "client")
             && matches!(
                 verb,
-                "agent serve"
-                    | "agent status"
-                    | "agent stop"
-                    | "discuss open"
-                    | "discuss append"
-                    | "discuss resolve"
-                    | "discuss show"
-                    | "discuss list"
-                    | "review show"
-                    | "review sign"
-                    | "review next"
-                    | "review health"
-                    | "transaction commit"
-            )
+                "auth logout"
+                    | "auth status"
+                    | "auth create-service-token"
+                    | "support grant"
+                    | "support list"
+                    | "support revoke"
+                    | "thread approve"
+                    | "thread approvals"
+                    | "thread revoke-approval"
+                    | "thread check-merge"
+            ))
+            || !cfg!(feature = "local-services")
+                && matches!(
+                    verb,
+                    "agent serve"
+                        | "agent status"
+                        | "agent stop"
+                        | "discuss open"
+                        | "discuss append"
+                        | "discuss resolve"
+                        | "discuss show"
+                        | "discuss list"
+                        | "review show"
+                        | "review sign"
+                        | "review next"
+                        | "review health"
+                        | "transaction commit"
+                )
     }
 
     #[test]

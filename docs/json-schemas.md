@@ -198,32 +198,32 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 192,
-      "catalog_mutating_commands_total": 100,
-      "json_commands_total": 161,
-      "json_mutating_commands_total": 99,
-      "json_commands_with_schema": 114,
+      "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 203,
+      "catalog_mutating_commands_total": 106,
+      "json_commands_total": 167,
+      "json_mutating_commands_total": 103,
+      "json_commands_with_schema": 120,
       "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 37,
       "verified_scope_json_commands_with_schema": 37,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 124,
+      "advanced_scope_json_commands_total": 130,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-      "mutating_commands_total": 99,
-      "mutating_commands_with_schema": 72,
+      "mutating_commands_total": 103,
+      "mutating_commands_with_schema": 76,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 76,
+      "advanced_scope_mutating_commands_total": 80,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 167,
-      "documented_schema_verbs_total": 167,
+      "schema_verbs_total": 173,
+      "documented_schema_verbs_total": 173,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 47,
       "accepted_opaque_schema_verbs_total": 47,
@@ -2559,26 +2559,30 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 124,
+    "advanced_scope_json_commands_total": 130,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 76,
+    "advanced_scope_mutating_commands_total": 80,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 192,
-    "catalog_mutating_commands_total": 100,
-    "json_commands_total": 161,
+    "catalog_commands_total": 203,
+    "catalog_mutating_commands_total": 106,
+    "documented_schema_verbs_total": 173,
+    "json_commands_total": 167,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 114,
+    "json_commands_with_schema": 120,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 99,
+    "json_mutating_commands_total": 103,
+    "jsonl_commands_total": 4,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 99,
+    "mutating_commands_total": 103,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 72,
+    "mutating_commands_with_schema": 76,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
+    "schema_verbs_total": 173,
     "status": "available",
-    "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "supports_op_id_total": 94,
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -2616,7 +2620,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 161 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3094,6 +3098,42 @@ no record exists — public-by-absence):
 
 ```json
 {"hotspots": [{"path": "src/lib.rs", "score": 0.87, "reasons": ["changed often"]}]}
+```
+
+`heddle auth logout --output json` emits:
+
+```json
+{"output_kind": "auth_logout", "server": "https://weft.example.com", "removed": true, "device_identity_removed": true}
+```
+
+`heddle auth status --output json` emits:
+
+```json
+{"output_kind": "auth_status", "server": "https://weft.example.com", "authenticated": true, "subject": "alice@example.com", "credential_id": "cred_123", "expires_at": "2026-02-01T00:00:00Z", "recommended_action": null}
+```
+
+`heddle auth create-service-token --output json` emits:
+
+```json
+{"output_kind": "auth_create_service_token", "name": "github-ci-main", "namespace": "heddle/platform", "scope": "repo:heddle/platform/*", "token": "hdt_example", "expires_in_days": 30}
+```
+
+`heddle support grant --output json` emits:
+
+```json
+{"output_kind": "support_grant", "id": "00000000-0000-0000-0000-000000000000", "operator_email": "support@heddle.sh", "namespace_path": "heddle/platform", "repo_path": "", "role": "admin", "granted_by": "alice@example.com", "granted_at": 1767225600, "expires_at": 1767312000, "revoked_at": 0, "revoked_by": "", "reason": "debug incident"}
+```
+
+`heddle support list --output json` emits:
+
+```json
+{"output_kind": "support_list", "grants": [{"id": "00000000-0000-0000-0000-000000000000", "operator_email": "support@heddle.sh", "namespace_path": "heddle/platform", "repo_path": "", "role": "admin", "granted_by": "alice@example.com", "granted_at": 1767225600, "expires_at": 1767312000, "revoked_at": 0, "revoked_by": "", "reason": "debug incident"}]}
+```
+
+`heddle support revoke --output json` emits:
+
+```json
+{"output_kind": "support_revoke", "id": "00000000-0000-0000-0000-000000000000", "revoked": true}
 ```
 
 ## Other verbs

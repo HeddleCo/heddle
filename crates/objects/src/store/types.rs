@@ -3,12 +3,11 @@
 
 use bytes::Bytes;
 
+use super::pack::PackObjectId;
 use crate::{
     error::{HeddleError, Result, StorageErrorKind},
     object::{ActionId, ChangeId, ContentHash},
 };
-
-use super::pack::PackObjectId;
 
 /// Opaque continuation token returned by paginated storage listings.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle query` handler — structured query over the operation log.
 
-use anyhow::Context;
-use anyhow::{Result, anyhow};
-use chrono::TimeZone;
-use chrono::{DateTime, Utc};
+use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, TimeZone, Utc};
 use heddle_query::OperationLogQuery;
 use repo::Repository;
 use serde::Serialize;
 
-use crate::cli::cli_args::{Cli, QueryArgs};
-use crate::cli::should_output_json;
+use crate::cli::{
+    cli_args::{Cli, QueryArgs},
+    should_output_json,
+};
 
 #[derive(Serialize)]
 struct QueryOutput {

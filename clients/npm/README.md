@@ -148,7 +148,7 @@ runtime introspection the CLI already ships (`heddle schemas <verb>`,
 ```sh
 scripts/gen-ts-types.sh
 # or, directly:
-cargo run -p heddle-cli --example gen_ts_types -- clients/npm/generated
+cargo run -p heddle-cli --example gen_ts_types --all-features -- clients/npm/generated
 ```
 
 Output is deterministic (everything sorted), so regenerating against an

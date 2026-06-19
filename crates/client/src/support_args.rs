@@ -21,12 +21,16 @@ pub enum SupportCommands {
 pub struct SupportGrantArgs {
     /// The Heddle staff email being granted access.
     pub operator_email: String,
-    /// Namespace path, e.g. `org/acme`. Mutually exclusive with --repo.
-    #[arg(long, conflicts_with = "repo")]
+    /// Namespace path, e.g. `org/acme`. Mutually exclusive with --target-repo.
+    #[arg(long, conflicts_with = "support_repo")]
     pub namespace: Option<String>,
     /// Repository path, e.g. `org/acme/heddle`. Mutually exclusive with
     /// --namespace.
-    #[arg(long, conflicts_with = "namespace")]
+    #[arg(
+        long = "target-repo",
+        id = "support_repo",
+        conflicts_with = "namespace"
+    )]
     pub repo: Option<String>,
     /// Time-to-live, e.g. `2h`, `24h`, `4d`. Hard-capped at 7d server-side.
     #[arg(long, default_value = "24h")]
@@ -41,11 +45,15 @@ pub struct SupportGrantArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct SupportListArgs {
-    /// Namespace path. Mutually exclusive with --repo.
-    #[arg(long, conflicts_with = "repo")]
+    /// Namespace path. Mutually exclusive with --target-repo.
+    #[arg(long, conflicts_with = "support_repo")]
     pub namespace: Option<String>,
     /// Repository path. Mutually exclusive with --namespace.
-    #[arg(long, conflicts_with = "namespace")]
+    #[arg(
+        long = "target-repo",
+        id = "support_repo",
+        conflicts_with = "namespace"
+    )]
     pub repo: Option<String>,
     /// Include revoked + expired entries. Defaults to active-only.
     #[arg(long)]

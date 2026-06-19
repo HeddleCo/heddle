@@ -24,8 +24,8 @@ use chrono::{TimeZone, Utc};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use objects::object::{ChangeId, Principal, TransactionId};
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpEntry, OpLog, OpLogBackend,
-    OpLogRecorder, OpRecord,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, LocalOpLogBackend,
+    LocalOpLogRecorder, OpEntry, OpLog, OpRecord,
 };
 use tempfile::TempDir;
 
@@ -273,6 +273,9 @@ fn bench_exactly_once_cas(c: &mut Criterion) {
     let transaction_fixture = transaction_fixture();
     let contention_fixture = indexed_read_fixture();
     let committed_tx = format!("tx-{:06}", LARGE_LOG_SIZE - 1);
+    let committed_tx_id = TransactionId::new(committed_tx.clone());
+    let new_cas_tx = TransactionId::new("tx-new-cas");
+    let conflicting_cas_tx = TransactionId::new("tx-conflicting-cas");
     let current_head = transaction_fixture.log().head_id().unwrap();
     let no_change = cas_precondition(current_head, []);
     let conflicting_thread = thread_name(LARGE_LOG_SIZE - 1);
@@ -292,7 +295,7 @@ fn bench_exactly_once_cas(c: &mut Criterion) {
                 .record_batch_exactly_once_if_unchanged(
                     exact_once_operations(&committed_tx, LARGE_LOG_SIZE + 3),
                     None,
-                    &committed_tx,
+                    &committed_tx_id,
                     &no_change,
                 )
                 .unwrap();
@@ -312,7 +315,7 @@ fn bench_exactly_once_cas(c: &mut Criterion) {
                         .record_batch_exactly_once_if_unchanged(
                             exact_once_operations("tx-new-cas", LARGE_LOG_SIZE + 4),
                             None,
-                            "tx-new-cas",
+                            &new_cas_tx,
                             &no_change,
                         )
                         .unwrap();
@@ -332,7 +335,7 @@ fn bench_exactly_once_cas(c: &mut Criterion) {
                     .record_batch_exactly_once_if_unchanged(
                         exact_once_operations("tx-conflicting-cas", LARGE_LOG_SIZE + 5),
                         None,
-                        "tx-conflicting-cas",
+                        &conflicting_cas_tx,
                         &contention,
                     )
                     .unwrap();

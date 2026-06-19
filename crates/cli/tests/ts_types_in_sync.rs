@@ -6,18 +6,19 @@
 //! schema changes without regenerating, this fails — run
 //! `scripts/gen-ts-types.sh` and commit the result.
 //!
-//! The checked-in artifacts are generated under the full feature set
-//! (`scripts/gen-ts-types.sh` builds with `git-overlay,native,semantic,zstd`).
-//! Under a feature-pruned CI job fewer verbs compile, so the live catalog is a
-//! strict subset and the drift assertion would spuriously fail — gate the
-//! assertions to the full feature set so they're only checked against the
-//! configuration the checked-in files were generated from.
+//! The checked-in artifacts are generated with `--all-features`
+//! (`scripts/gen-ts-types.sh` does the same). Under a feature-pruned CI job
+//! fewer verbs compile, so the live catalog is a strict subset and the drift
+//! assertion would spuriously fail — gate the assertions to the feature set
+//! that exposes every generated verb.
 
 #[cfg(all(
     feature = "git-overlay",
     feature = "native",
     feature = "semantic",
-    feature = "zstd"
+    feature = "zstd",
+    feature = "client",
+    feature = "local-services"
 ))]
 mod full_feature {
     use std::path::PathBuf;
@@ -61,12 +62,14 @@ mod full_feature {
     feature = "git-overlay",
     feature = "native",
     feature = "semantic",
-    feature = "zstd"
+    feature = "zstd",
+    feature = "client",
+    feature = "local-services"
 )))]
 #[test]
 fn drift_check_skipped_under_feature_pruned_build() {
     eprintln!(
-        "skipping generated-TS drift check: requires the full feature set \
-         (git-overlay,native,semantic,zstd) the checked-in types were generated from"
+        "skipping generated-TS drift check: requires the full generated feature set \
+         (git-overlay,native,semantic,zstd,client,local-services) the checked-in types were generated from"
     );
 }

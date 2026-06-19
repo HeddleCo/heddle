@@ -1744,7 +1744,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
