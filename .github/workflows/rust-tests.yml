@@ -191,9 +191,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ steps.decide.outputs.force_all }}" = "true" ]; then
-            python3 scripts/ci-affected-rust-packages.py --all --github-output "$GITHUB_OUTPUT"
+            bash scripts/ci-affected-rust-packages.sh --all --github-output "$GITHUB_OUTPUT"
           else
-            python3 scripts/ci-affected-rust-packages.py --changed-paths changed-paths.txt --github-output "$GITHUB_OUTPUT"
+            bash scripts/ci-affected-rust-packages.sh --changed-paths changed-paths.txt --github-output "$GITHUB_OUTPUT"
           fi
 
       - id: affected_scopes

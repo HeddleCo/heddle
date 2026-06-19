@@ -1,13 +1,11 @@
 import json
+import subprocess
 import tempfile
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 
-MODULE = SourceFileLoader(
-    "ci_affected_rust_packages", "scripts/ci-affected-rust-packages.py"
-).load_module()
+SCRIPT = Path("scripts/ci-affected-rust-packages.sh")
 
 
 def metadata():
@@ -39,6 +37,26 @@ def metadata():
 
 
 class AffectedRustPackagesTests(unittest.TestCase):
+    def run_selector(self, *args):
+        run = subprocess.run(
+            ["bash", str(SCRIPT), *args],
+            text=True,
+            check=True,
+            capture_output=True,
+        )
+        outputs = {}
+        for line in run.stdout.splitlines():
+            if "=" in line and not line.startswith("  "):
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        return {
+            "all": outputs["all_packages"] == "true",
+            "bench_all": outputs["bench_all"] == "true",
+            "selected": [
+                package for package in outputs["package_names_csv"].split(",") if package
+            ],
+        }
+
     def select(self, paths):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -47,16 +65,18 @@ class AffectedRustPackagesTests(unittest.TestCase):
             metadata_path.write_text(json.dumps(metadata()))
             paths_path.write_text("\n".join(paths))
 
-            md = json.loads(metadata_path.read_text())
-            names, by_name, by_dir = MODULE.workspace_packages(md)
-            reverse = MODULE.reverse_dependencies(names, by_name)
-            all_packages, direct, bench_all, _ = MODULE.classify_paths(paths, by_dir)
-            selected = set(names) if all_packages else MODULE.closure(direct, reverse)
-            return {
-                "all": all_packages,
-                "bench_all": bench_all,
-                "selected": [name for name in names if name in selected],
-            }
+            return self.run_selector(
+                "--changed-paths",
+                str(paths_path),
+                "--metadata-json",
+                str(metadata_path),
+            )
+
+    def select_all(self):
+        with tempfile.TemporaryDirectory() as td:
+            metadata_path = Path(td) / "metadata.json"
+            metadata_path.write_text(json.dumps(metadata()))
+            return self.run_selector("--all", "--metadata-json", str(metadata_path))
 
     def test_crate_change_selects_reverse_dependency_closure(self):
         result = self.select(["crates/objects/src/lib.rs"])
@@ -74,6 +94,15 @@ class AffectedRustPackagesTests(unittest.TestCase):
     def test_workspace_manifest_fails_closed_to_all_packages(self):
         result = self.select(["Cargo.lock"])
         self.assertTrue(result["all"])
+
+    def test_explicit_all_selects_every_package_and_benchmarks(self):
+        result = self.select_all()
+        self.assertTrue(result["all"])
+        self.assertTrue(result["bench_all"])
+        self.assertEqual(
+            result["selected"],
+            ["heddle-objects", "heddle-repo", "heddle-cli", "heddle-review"],
+        )
 
     def test_script_only_change_can_skip_cargo(self):
         result = self.select(["scripts/tests/test_fuse_bench_compare.py"])
