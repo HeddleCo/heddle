@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Prototype reftable-style binary model for the refs spike (HeddleCo/heddle#21).
 //!
-//! Parallel to [`super::PackedRefsModel`] (line-oriented text) but stored as a
+//! Parallel to [`PackedRefsModel`](super::PackedRefsModel) (line-oriented text) but stored as a
 //! binary file with a fixed header, per-section offset indexes, and sorted
 //! variable-length records. Designed for O(log N) cold lookup without parsing
 //! the whole payload.
@@ -38,13 +38,13 @@
 use objects::object::ChangeId;
 
 /// Magic bytes at the start (and end) of a serialized reftable.
-pub(super) const MAGIC: &[u8; 8] = b"REFT01\0\0";
+pub const MAGIC: &[u8; 8] = b"REFT01\0\0";
 
 /// On-disk header size in bytes: 8 magic + 4 thread_count + 4 marker_count.
-pub(super) const HEADER_LEN: usize = 16;
+pub const HEADER_LEN: usize = 16;
 
 /// On-disk footer size in bytes: 8 magic.
-pub(super) const FOOTER_LEN: usize = 8;
+pub const FOOTER_LEN: usize = 8;
 
 const ID_LEN: usize = 16;
 

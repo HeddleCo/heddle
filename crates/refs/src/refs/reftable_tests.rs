@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Red-commit tests for the reftable spike (HeddleCo/heddle#21).
 //!
-//! These pin the contract of [`super::reftable_model::ReftableModel`]:
+//! These pin the contract of [`super::ReftableModel`]:
 //! roundtrip, sorted iteration, presence/absence lookup, removal, and the
 //! cold-lookup helper that binary-searches against serialized bytes without
 //! parsing the whole payload.
 
 use objects::object::ChangeId;
 
-use super::reftable_model::{FOOTER_LEN, HEADER_LEN, MAGIC, ReftableModel};
+use super::{FOOTER_LEN, HEADER_LEN, MAGIC, ReftableModel};
 
 fn cid(n: u8) -> ChangeId {
     let mut bytes = [0u8; 16];

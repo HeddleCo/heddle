@@ -2265,6 +2265,7 @@ dependencies = [
  "fs2",
  "heddle-objects",
  "heddle-runtime-bridge",
+ "heddle-schema",
  "pollster",
  "rand 0.10.1",
  "rmp-serde",
@@ -2341,6 +2342,7 @@ dependencies = [
  "heddle-objects",
  "rmp-serde",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

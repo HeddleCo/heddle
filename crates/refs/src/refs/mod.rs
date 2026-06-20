@@ -5,7 +5,6 @@ mod backend;
 mod head;
 mod name;
 pub mod operation_index;
-mod packed_model;
 mod packed_refs;
 mod reconcile;
 mod ref_backend;
@@ -15,7 +14,6 @@ mod refs_manager;
 mod refs_storage;
 mod refs_transactions;
 mod refs_types;
-mod reftable_model;
 mod resolve;
 mod text;
 mod types;
@@ -34,16 +32,17 @@ mod reftable_tests;
 
 pub use backend::CoreRefBackend;
 pub use head::{Head, HeadParseError};
+pub use heddle_schema::refs::{
+    FOOTER_LEN, HEADER_LEN, MAGIC, PackedRefsModel, ReftableError, ReftableModel,
+};
 pub use name::{RefNameError, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
-pub use packed_model::PackedRefsModel;
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;
 pub use reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefClass, RefCommitter, RefReconciler};
 pub use ref_backend::RefBackend;
 pub use ref_summary_index::RefSummaryIndexInspection;
 pub use refs_manager::{RefManager, UNDO_RECOVERY_HANDLE};
-pub use reftable_model::{ReftableError, ReftableModel};
 pub use resolve::resolve_refspec;
 pub use text::{ChangeIdTextError, format_change_id_text, parse_change_id_text};
 pub use types::{RefExpectation, RefUpdate};
