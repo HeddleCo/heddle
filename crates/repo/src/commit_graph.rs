@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-memory commit graph index with persistence and Bloom filter support.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use objects::{
     object::{ChangeId, ContentHash, Tree, diff_trees},
-    store::ObjectStore,
+    store::{AnyStore, ObjectSource, ObjectStore},
 };
+use oplog::OpLogBackend;
+use refs::RefBackend;
 use tracing::warn;
 
 use super::{
     Repository,
     bloom_filter::bloom_insert,
     commit_graph_persistence::{
-        PersistedCommitGraphNode, commit_graph_path, load_commit_graph, save_commit_graph,
+        CommitGraphCache, FsCommitGraphCache, LoadedCommitGraph, PersistedCommitGraphNode,
     },
 };
 
@@ -39,41 +38,43 @@ pub struct CachedNodeMetadata {
     pub created_at_secs: i64,
 }
 
-pub struct CommitGraphIndex<'repo> {
-    repo: &'repo Repository,
+pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
+    source: &'source S,
     nodes: HashMap<ChangeId, CommitGraphNode>,
-    graph_path: PathBuf,
+    cache: Box<dyn CommitGraphCache + 'source>,
     persistence_dirty: bool,
 }
 
-impl<'repo> CommitGraphIndex<'repo> {
-    pub fn new(repo: &'repo Repository) -> Self {
-        let graph_path = commit_graph_path(repo.root());
-        let (nodes, persistence_dirty) = match load_commit_graph(&graph_path) {
-            Ok(Some(nodes)) => (
-                nodes
-                    .into_iter()
-                    .map(|(change_id, node)| {
-                        (
-                            change_id,
-                            CommitGraphNode {
-                                parents: node.parents,
-                                generation: node.generation,
-                                tree_hash: node.tree_hash,
-                                created_at_secs: node.created_at_secs,
-                                agent_model: node.agent_model,
-                                bloom: node.bloom,
-                            },
-                        )
-                    })
-                    .collect(),
-                false,
-            ),
+impl<'source, S> CommitGraphIndex<'source, S>
+where
+    S: ObjectStore,
+{
+    pub fn new<R, O>(repo: &'source Repository<R, O, S>) -> Self
+    where
+        R: RefBackend,
+        O: OpLogBackend,
+    {
+        let cache = FsCommitGraphCache::new(&repo.root);
+        Self::with_cache(repo.store(), cache)
+    }
+}
+
+impl<'source, S> CommitGraphIndex<'source, S>
+where
+    S: ObjectSource + ?Sized,
+{
+    pub(crate) fn with_cache<C>(source: &'source S, cache: C) -> Self
+    where
+        C: CommitGraphCache + 'source,
+    {
+        let (nodes, persistence_dirty) = match cache.load() {
+            Ok(Some(nodes)) => (nodes.into_memory_nodes(), false),
             Ok(None) => (HashMap::new(), false),
             Err(error) => {
+                let cache_label = cache_label(&cache);
                 warn!(
                     "Failed to load commit graph from {}: {}. Rebuilding in memory.",
-                    graph_path.display(),
+                    cache_label,
                     error
                 );
                 (HashMap::new(), true)
@@ -81,9 +82,9 @@ impl<'repo> CommitGraphIndex<'repo> {
         };
 
         Self {
-            repo,
+            source,
             nodes,
-            graph_path,
+            cache: Box::new(cache),
             persistence_dirty,
         }
     }
@@ -257,7 +258,7 @@ impl<'repo> CommitGraphIndex<'repo> {
             Tree::new().hash()
         };
 
-        let changes = diff_trees(self.repo.store(), &parent_tree, &state_tree)?;
+        let changes = diff_trees(self.source, &parent_tree, &state_tree)?;
         let mut bloom = [0u8; 256];
         for change in changes.iter() {
             bloom_insert(&mut bloom, &change.path);
@@ -277,7 +278,7 @@ impl<'repo> CommitGraphIndex<'repo> {
         &self,
         change_id: ChangeId,
     ) -> Result<(Vec<ChangeId>, ContentHash, i64, Option<String>)> {
-        match self.repo.store().get_state(&change_id)? {
+        match self.source.get_state(&change_id)? {
             Some(state) => Ok((
                 state.parents,
                 state.tree,
@@ -315,22 +316,60 @@ impl<'repo> CommitGraphIndex<'repo> {
             })
             .collect();
 
-        match save_commit_graph(&self.graph_path, &persisted_nodes) {
+        match self.cache.save(&persisted_nodes) {
             Ok(()) => self.persistence_dirty = false,
-            Err(error) => warn!(
-                "Failed to persist commit graph to {}: {}",
-                self.graph_path.display(),
-                error
-            ),
+            Err(error) => {
+                let cache_label = cache_label(self.cache.as_ref());
+                warn!(
+                    "Failed to persist commit graph to {}: {}",
+                    cache_label, error
+                );
+            }
         }
     }
 }
 
-pub fn find_merge_base(
-    repo: &Repository,
+fn cache_label(cache: &(impl CommitGraphCache + ?Sized)) -> String {
+    cache
+        .path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "commit graph cache".to_string())
+}
+
+trait LoadedCommitGraphExt {
+    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode>;
+}
+
+impl LoadedCommitGraphExt for LoadedCommitGraph {
+    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode> {
+        self.into_iter()
+            .map(|(change_id, node)| {
+                (
+                    change_id,
+                    CommitGraphNode {
+                        parents: node.parents,
+                        generation: node.generation,
+                        tree_hash: node.tree_hash,
+                        created_at_secs: node.created_at_secs,
+                        agent_model: node.agent_model,
+                        bloom: node.bloom,
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+pub fn find_merge_base<R, O, S>(
+    repo: &Repository<R, O, S>,
     state_a: &ChangeId,
     state_b: &ChangeId,
-) -> Result<Option<ChangeId>> {
+) -> Result<Option<ChangeId>>
+where
+    R: RefBackend,
+    O: OpLogBackend,
+    S: ObjectStore,
+{
     let mut graph = CommitGraphIndex::new(repo);
     graph.find_merge_base(state_a, state_b)
 }

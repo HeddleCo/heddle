@@ -101,6 +101,8 @@ pub use repository::{
     is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
+#[cfg(feature = "async-source")]
+pub use repository::query_history_async;
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,

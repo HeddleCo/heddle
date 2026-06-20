@@ -19,6 +19,55 @@ const GRAPH_VERSION: u32 = 1;
 const CHANGE_ID_BYTES: usize = 16;
 const CONTENT_HASH_BYTES: usize = 32;
 
+pub(crate) type LoadedCommitGraph = HashMap<ChangeId, PersistedCommitGraphNode>;
+
+pub(crate) trait CommitGraphCache {
+    fn load(&self) -> Result<Option<LoadedCommitGraph>>;
+    fn save(&self, nodes: &LoadedCommitGraph) -> Result<()>;
+    fn path(&self) -> Option<&Path> {
+        None
+    }
+}
+
+pub(crate) struct FsCommitGraphCache {
+    path: PathBuf,
+}
+
+impl FsCommitGraphCache {
+    pub(crate) fn new(repo_root: &Path) -> Self {
+        Self {
+            path: commit_graph_path(repo_root),
+        }
+    }
+}
+
+impl CommitGraphCache for FsCommitGraphCache {
+    fn load(&self) -> Result<Option<LoadedCommitGraph>> {
+        load_commit_graph(&self.path)
+    }
+
+    fn save(&self, nodes: &LoadedCommitGraph) -> Result<()> {
+        save_commit_graph(&self.path, nodes)
+    }
+
+    fn path(&self) -> Option<&Path> {
+        Some(&self.path)
+    }
+}
+
+#[cfg_attr(not(feature = "async-source"), allow(dead_code))]
+pub(crate) struct NullCommitGraphCache;
+
+impl CommitGraphCache for NullCommitGraphCache {
+    fn load(&self) -> Result<Option<LoadedCommitGraph>> {
+        Ok(None)
+    }
+
+    fn save(&self, _nodes: &LoadedCommitGraph) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PersistedCommitGraphNode {
     pub(crate) parents: Vec<ChangeId>,
