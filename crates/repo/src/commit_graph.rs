@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-memory commit graph index with persistence and Bloom filter support.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use objects::{
@@ -17,7 +14,7 @@ use super::{
     Repository,
     bloom_filter::bloom_insert,
     commit_graph_persistence::{
-        PersistedCommitGraphNode, commit_graph_path, load_commit_graph, save_commit_graph,
+        CommitGraphCache, FsCommitGraphCache, LoadedCommitGraph, PersistedCommitGraphNode,
     },
 };
 
@@ -42,33 +39,16 @@ pub struct CachedNodeMetadata {
 pub struct CommitGraphIndex<'repo> {
     repo: &'repo Repository,
     nodes: HashMap<ChangeId, CommitGraphNode>,
-    graph_path: PathBuf,
+    cache: FsCommitGraphCache,
     persistence_dirty: bool,
 }
 
 impl<'repo> CommitGraphIndex<'repo> {
     pub fn new(repo: &'repo Repository) -> Self {
-        let graph_path = commit_graph_path(repo.root());
-        let (nodes, persistence_dirty) = match load_commit_graph(&graph_path) {
-            Ok(Some(nodes)) => (
-                nodes
-                    .into_iter()
-                    .map(|(change_id, node)| {
-                        (
-                            change_id,
-                            CommitGraphNode {
-                                parents: node.parents,
-                                generation: node.generation,
-                                tree_hash: node.tree_hash,
-                                created_at_secs: node.created_at_secs,
-                                agent_model: node.agent_model,
-                                bloom: node.bloom,
-                            },
-                        )
-                    })
-                    .collect(),
-                false,
-            ),
+        let cache = FsCommitGraphCache::new(repo.root());
+        let graph_path = cache.path().expect("fs commit graph cache has a path");
+        let (nodes, persistence_dirty) = match cache.load() {
+            Ok(Some(nodes)) => (nodes.into_memory_nodes(), false),
             Ok(None) => (HashMap::new(), false),
             Err(error) => {
                 warn!(
@@ -83,7 +63,7 @@ impl<'repo> CommitGraphIndex<'repo> {
         Self {
             repo,
             nodes,
-            graph_path,
+            cache,
             persistence_dirty,
         }
     }
@@ -315,14 +295,39 @@ impl<'repo> CommitGraphIndex<'repo> {
             })
             .collect();
 
-        match save_commit_graph(&self.graph_path, &persisted_nodes) {
+        let graph_path = self.cache.path().expect("fs commit graph cache has a path");
+        match self.cache.save(&persisted_nodes) {
             Ok(()) => self.persistence_dirty = false,
             Err(error) => warn!(
                 "Failed to persist commit graph to {}: {}",
-                self.graph_path.display(),
+                graph_path.display(),
                 error
             ),
         }
+    }
+}
+
+trait LoadedCommitGraphExt {
+    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode>;
+}
+
+impl LoadedCommitGraphExt for LoadedCommitGraph {
+    fn into_memory_nodes(self) -> HashMap<ChangeId, CommitGraphNode> {
+        self.into_iter()
+            .map(|(change_id, node)| {
+                (
+                    change_id,
+                    CommitGraphNode {
+                        parents: node.parents,
+                        generation: node.generation,
+                        tree_hash: node.tree_hash,
+                        created_at_secs: node.created_at_secs,
+                        agent_model: node.agent_model,
+                        bloom: node.bloom,
+                    },
+                )
+            })
+            .collect()
     }
 }
 
