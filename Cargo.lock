@@ -2119,6 +2119,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-format"
+version = "0.4.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "zstd",
+]
+
+[[package]]
 name = "heddle-grpc"
 version = "0.7.1"
 dependencies = [
@@ -2204,6 +2212,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fs2",
+ "heddle-format",
  "heddle-runtime-bridge",
  "hex",
  "hyper-util",
