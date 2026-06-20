@@ -10,12 +10,19 @@ use objects::{
     object::{ChangeId, ContentHash, State, Tree, diff_trees_visit},
     store::ObjectSource,
 };
+#[cfg(feature = "async-source")]
+use objects::{
+    object::diff_trees_visit_async,
+    store::AsyncObjectSource,
+};
 use tracing::{instrument, trace};
 
 use crate::{
     HeddleError, Repository, Result,
     repository::commit_graph_persistence::{CommitGraphCache, FsCommitGraphCache},
 };
+#[cfg(feature = "async-source")]
+use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 
 /// A normalized changed-path filter for history traversal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,6 +288,106 @@ where
     }
 }
 
+/// Walk first-parent history against an async read-only object source.
+#[cfg(feature = "async-source")]
+pub async fn query_history_async<S>(source: &S, query: &HistoryQuery) -> Result<Vec<State>>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    query_history_async_with_cache(source, query, NullCommitGraphCache).await
+}
+
+#[cfg(feature = "async-source")]
+async fn query_history_async_with_cache<S>(
+    source: &S,
+    query: &HistoryQuery,
+    _cache: NullCommitGraphCache,
+) -> Result<Vec<State>>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    let mut candidate_ids = Vec::new();
+    let mut current = query.start;
+
+    while let Some(state_id) = current {
+        if candidate_ids.len() >= query.limit {
+            break;
+        }
+
+        if let Some(stop) = query.stop_at
+            && state_id == stop
+        {
+            break;
+        }
+
+        let Some(state) = source.get_state(&state_id).await? else {
+            break;
+        };
+        current = state.parents.first().copied();
+
+        if let Some(ref filter) = query.agent_model_substring {
+            match state.attribution.agent.as_ref().map(|agent| &agent.model) {
+                Some(model) if model.contains(filter.as_str()) => {}
+                _ => continue,
+            }
+        }
+
+        if query.changed_paths.is_empty()
+            || state_matches_changed_paths_async(source, &state, &query.changed_paths).await?
+        {
+            trace!(state = %state_id, "async history query matched state");
+            candidate_ids.push(state_id);
+        }
+    }
+
+    let mut result = Vec::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        if let Some(state) = source.get_state(&id).await? {
+            result.push(state);
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "async-source")]
+async fn state_matches_changed_paths_async<S>(
+    source: &S,
+    state: &State,
+    changed_paths: &ChangedPathFilters,
+) -> Result<bool>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    let base_tree = parent_tree_hash_async(source, state).await?;
+    let flow = diff_trees_visit_async(source, &base_tree, &state.tree, |change| {
+        if changed_paths.matches(&change.path) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .await
+    .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))?;
+    Ok(flow.is_break())
+}
+
+#[cfg(feature = "async-source")]
+async fn parent_tree_hash_async<S>(source: &S, state: &State) -> Result<ContentHash>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    match state.first_parent() {
+        Some(parent_id) => {
+            let parent = source
+                .get_state(parent_id)
+                .await?
+                .ok_or(HeddleError::StateNotFound(*parent_id))?;
+            Ok(parent.tree)
+        }
+        None => Ok(Tree::new().hash()),
+    }
+}
+
 fn normalize_repo_relative_path(path: &str) -> Result<String> {
     let input = Path::new(path);
     if input.is_absolute() {
@@ -335,6 +442,15 @@ mod tests {
     };
     use crate::Repository;
     use crate::repository::commit_graph_persistence::NullCommitGraphCache;
+
+    #[cfg(feature = "async-source")]
+    use objects::{
+        object::{
+            Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State, Tree,
+            TreeEntry,
+        },
+        store::{AsyncObjectSource, InMemoryStore, ObjectStore},
+    };
 
     #[test]
     fn changed_path_filter_matches_exact_paths_and_children() {
@@ -399,6 +515,125 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[cfg(feature = "async-source")]
+    #[test]
+    fn query_history_async_matches_sync_null_cache_for_path_filtered_first_parent_walk() {
+        let store = InMemoryStore::new();
+
+        let base_tree = root_tree(&store, "one\n", None);
+        let base = put_state(&store, base_tree, vec![]);
+
+        let docs_tree = root_tree(&store, "one\n", Some("docs\n"));
+        let docs = put_state(&store, docs_tree, vec![base.change_id]);
+
+        let src_tree = root_tree(&store, "two\n", Some("docs\n"));
+        let src = put_state(&store, src_tree, vec![docs.change_id]);
+
+        let side_tree = root_tree(&store, "side\n", None);
+        let side = put_state(&store, side_tree, vec![base.change_id]);
+
+        let head_tree = root_tree(&store, "two\n", Some("more docs\n"));
+        let head = put_state(&store, head_tree, vec![src.change_id, side.change_id]);
+
+        let query = HistoryQuery::new(Some(head.change_id))
+            .with_limit(10)
+            .with_changed_paths(ChangedPathFilters::try_from_paths(["src"]).unwrap());
+
+        let sync = query_history_with_cache(&store, &query, NullCommitGraphCache).unwrap();
+        let async_source = AsyncInMemorySource(&store);
+        let async_result = block_on(super::query_history_async(&async_source, &query)).unwrap();
+
+        assert_eq!(sync, async_result);
+        assert_eq!(
+            async_result
+                .iter()
+                .map(|state| state.change_id)
+                .collect::<Vec<_>>(),
+            vec![src.change_id, base.change_id]
+        );
+    }
+
+    #[cfg(feature = "async-source")]
+    struct AsyncInMemorySource<'a>(&'a InMemoryStore);
+
+    #[cfg(feature = "async-source")]
+    impl AsyncObjectSource for AsyncInMemorySource<'_> {
+        async fn get_tree(&self, hash: &ContentHash) -> objects::error::Result<Option<Tree>> {
+            ObjectStore::get_tree(self.0, hash)
+        }
+
+        async fn get_state(
+            &self,
+            id: &objects::object::ChangeId,
+        ) -> objects::error::Result<Option<State>> {
+            ObjectStore::get_state(self.0, id)
+        }
+
+        async fn get_blob(&self, hash: &ContentHash) -> objects::error::Result<Option<Blob>> {
+            ObjectStore::get_blob(self.0, hash)
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn root_tree(store: &InMemoryStore, src_content: &str, readme: Option<&str>) -> ContentHash {
+        let lib = ObjectStore::put_blob(store, &Blob::from_slice(src_content.as_bytes())).unwrap();
+        let src = tree(
+            store,
+            vec![("lib.rs", lib, EntryType::Blob)],
+        );
+        let mut entries = vec![("src", src, EntryType::Tree)];
+        if let Some(readme) = readme {
+            let readme =
+                ObjectStore::put_blob(store, &Blob::from_slice(readme.as_bytes())).unwrap();
+            entries.push(("README.md", readme, EntryType::Blob));
+        }
+        tree(store, entries)
+    }
+
+    #[cfg(feature = "async-source")]
+    fn tree(
+        store: &InMemoryStore,
+        entries: Vec<(&str, ContentHash, EntryType)>,
+    ) -> ContentHash {
+        let entries = entries
+            .into_iter()
+            .map(|(name, hash, entry_type)| TreeEntry {
+                name: name.to_string(),
+                mode: FileMode::Normal,
+                hash,
+                entry_type,
+            })
+            .collect();
+        ObjectStore::put_tree(store, &Tree::from_entries(entries)).unwrap()
+    }
+
+    #[cfg(feature = "async-source")]
+    fn put_state(store: &InMemoryStore, tree: ContentHash, parents: Vec<ChangeId>) -> State {
+        let state = State::new(
+            tree,
+            parents,
+            Attribution::human(Principal::new("Test User", "test@example.com")),
+        );
+        ObjectStore::put_state(store, &state).unwrap();
+        state
     }
 
     #[test]

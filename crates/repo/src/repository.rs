@@ -86,6 +86,8 @@ pub use repo_config::{
     SignalModuleToml, TestReachabilityToml,
 };
 pub use repository_history::{ChangedPathFilter, ChangedPathFilters, HistoryQuery};
+#[cfg(feature = "async-source")]
+pub use repository_history::query_history_async;
 pub use repository_maintenance::{
     ChangeMonitorInspection, CommitGraphInspection, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
