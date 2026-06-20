@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
+heddle-schema = { path = "../schema", version = "0.4" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 rand.workspace = true
 rmp-serde.workspace = true

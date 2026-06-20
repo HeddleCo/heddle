@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Operation log for undo/redo functionality.
 
-mod op_record_codec;
 mod oplog_backend;
 mod oplog_core;
 mod oplog_recorder;

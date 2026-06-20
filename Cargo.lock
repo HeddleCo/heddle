@@ -2119,6 +2119,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-format"
+version = "0.4.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "zstd",
+]
+
+[[package]]
 name = "heddle-grpc"
 version = "0.7.1"
 dependencies = [
@@ -2204,6 +2212,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fs2",
+ "heddle-format",
  "heddle-runtime-bridge",
  "hex",
  "hyper-util",
@@ -2236,6 +2245,7 @@ dependencies = [
  "criterion",
  "heddle-objects",
  "heddle-runtime-bridge",
+ "heddle-schema",
  "pollster",
  "rmp-serde",
  "serde",
@@ -2255,6 +2265,7 @@ dependencies = [
  "fs2",
  "heddle-objects",
  "heddle-runtime-bridge",
+ "heddle-schema",
  "pollster",
  "rand 0.10.1",
  "rmp-serde",
@@ -2321,6 +2332,17 @@ name = "heddle-runtime-bridge"
 version = "0.4.0"
 dependencies = [
  "tokio",
+]
+
+[[package]]
+name = "heddle-schema"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "heddle-objects",
+ "rmp-serde",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

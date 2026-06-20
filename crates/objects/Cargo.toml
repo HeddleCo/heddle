@@ -17,6 +17,7 @@ bytes.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
+heddle-format = { path = "../format", version = "0.4" }
 ignore.workspace = true
 libc = "0.2"
 memmap2.workspace = true
@@ -40,10 +41,10 @@ aws-smithy-async = { workspace = true, optional = true }
 runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
 
 [features]
-bench = []
+bench = ["heddle-format/bench"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
-zstd = ["dep:zstd"]
+zstd = ["dep:zstd", "heddle-format/zstd"]
 
 [dev-dependencies]
 criterion = "0.8"
