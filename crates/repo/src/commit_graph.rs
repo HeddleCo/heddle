@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+#[cfg(feature = "async-source")]
+use objects::store::AsyncObjectSource;
 use objects::{
     object::{ChangeId, ContentHash, Tree, diff_trees},
     store::{AnyStore, ObjectSource, ObjectStore},
@@ -28,6 +30,13 @@ struct CommitGraphNode {
     created_at_secs: i64,
     agent_model: Option<String>,
     bloom: Option<[u8; 256]>,
+}
+
+#[cfg(feature = "async-source")]
+#[derive(Clone, Debug)]
+struct AsyncCommitGraphNode {
+    parents: Vec<ChangeId>,
+    generation: usize,
 }
 
 /// Cached metadata for a node — cheap to return by value.
@@ -74,8 +83,7 @@ where
                 let cache_label = cache_label(&cache);
                 warn!(
                     "Failed to load commit graph from {}: {}. Rebuilding in memory.",
-                    cache_label,
-                    error
+                    cache_label, error
                 );
                 (HashMap::new(), true)
             }
@@ -360,6 +368,172 @@ impl LoadedCommitGraphExt for LoadedCommitGraph {
     }
 }
 
+/// Return whether `ancestor_id` is reachable from `descendant_id` using an async object source.
+#[cfg(feature = "async-source")]
+pub async fn is_ancestor_async<S>(
+    source: &S,
+    ancestor_id: &ChangeId,
+    descendant_id: &ChangeId,
+) -> Result<bool>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    if ancestor_id == descendant_id {
+        return Ok(true);
+    }
+
+    let mut nodes = HashMap::new();
+    ensure_loaded_async(source, &mut nodes, *descendant_id).await?;
+    let Some(ancestor_generation) = generation_async(&nodes, *ancestor_id) else {
+        return Ok(false);
+    };
+
+    let mut stack = vec![*descendant_id];
+    let mut visited = HashSet::new();
+    while let Some(change_id) = stack.pop() {
+        if !visited.insert(change_id) {
+            continue;
+        }
+        if change_id == *ancestor_id {
+            return Ok(true);
+        }
+
+        let Some(node) = nodes.get(&change_id) else {
+            continue;
+        };
+        for parent in &node.parents {
+            if generation_async(&nodes, *parent)
+                .is_some_and(|generation| generation >= ancestor_generation)
+            {
+                stack.push(*parent);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// Find the best common ancestor of two states using an async object source.
+#[cfg(feature = "async-source")]
+pub async fn find_merge_base_async<S>(
+    source: &S,
+    state_a: &ChangeId,
+    state_b: &ChangeId,
+) -> Result<Option<ChangeId>>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    let mut nodes = HashMap::new();
+    ensure_loaded_async(source, &mut nodes, *state_a).await?;
+    ensure_loaded_async(source, &mut nodes, *state_b).await?;
+
+    let ancestors_a = collect_ancestors_async(source, &mut nodes, *state_a).await?;
+    let ancestors_b = collect_ancestors_async(source, &mut nodes, *state_b).await?;
+    let best = ancestors_a
+        .intersection(&ancestors_b)
+        .copied()
+        .max_by(|left, right| {
+            generation_async(&nodes, *left)
+                .cmp(&generation_async(&nodes, *right))
+                .then_with(|| right.as_bytes().cmp(left.as_bytes()))
+        });
+
+    Ok(best)
+}
+
+#[cfg(feature = "async-source")]
+async fn collect_ancestors_async<S>(
+    source: &S,
+    nodes: &mut HashMap<ChangeId, AsyncCommitGraphNode>,
+    start: ChangeId,
+) -> Result<HashSet<ChangeId>>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    ensure_loaded_async(source, nodes, start).await?;
+
+    let mut ancestors = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(change_id) = stack.pop() {
+        if !ancestors.insert(change_id) {
+            continue;
+        }
+        if let Some(node) = nodes.get(&change_id) {
+            stack.extend(node.parents.iter().copied());
+        }
+    }
+
+    Ok(ancestors)
+}
+
+#[cfg(feature = "async-source")]
+async fn ensure_loaded_async<S>(
+    source: &S,
+    nodes: &mut HashMap<ChangeId, AsyncCommitGraphNode>,
+    change_id: ChangeId,
+) -> Result<()>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    if nodes.contains_key(&change_id) {
+        return Ok(());
+    }
+
+    let mut expanded = HashSet::new();
+    let mut stack = vec![change_id];
+    while let Some(current) = stack.pop() {
+        if nodes.contains_key(&current) {
+            continue;
+        }
+
+        if expanded.insert(current) {
+            stack.push(current);
+            let parents = load_state_parents_async(source, current).await?;
+            for parent in &parents {
+                if !nodes.contains_key(parent) {
+                    stack.push(*parent);
+                }
+            }
+            continue;
+        }
+
+        let parents = load_state_parents_async(source, current).await?;
+        let generation = parents
+            .iter()
+            .filter_map(|parent| generation_async(nodes, *parent))
+            .max()
+            .map_or(0, |generation| generation + 1);
+        nodes.insert(
+            current,
+            AsyncCommitGraphNode {
+                parents,
+                generation,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "async-source")]
+async fn load_state_parents_async<S>(source: &S, change_id: ChangeId) -> Result<Vec<ChangeId>>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    Ok(source
+        .get_state(&change_id)
+        .await?
+        .map_or_else(Vec::new, |state| state.parents))
+}
+
+#[cfg(feature = "async-source")]
+fn generation_async(
+    nodes: &HashMap<ChangeId, AsyncCommitGraphNode>,
+    change_id: ChangeId,
+) -> Option<usize> {
+    nodes.get(&change_id).map(|node| node.generation)
+}
+
 pub fn find_merge_base<R, O, S>(
     repo: &Repository<R, O, S>,
     state_a: &ChangeId,
@@ -382,6 +556,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{super::Repository, CommitGraphIndex};
+    #[cfg(feature = "async-source")]
+    use objects::{
+        object::{Attribution, Blob, ChangeId, ContentHash, Principal, State, Tree},
+        store::{AsyncObjectSource, InMemoryStore, ObjectStore},
+    };
 
     fn commit_graph_path(repo: &Repository) -> std::path::PathBuf {
         repo.root().join(".heddle/state").join("commit-graph.bin")
@@ -559,5 +738,119 @@ mod tests {
         assert!(bloom_maybe_contains(bloom, "alpha.txt"));
 
         Ok(())
+    }
+
+    #[cfg(feature = "async-source")]
+    #[test]
+    fn async_ancestry_matches_sync_commit_graph_on_fixture() {
+        let store = InMemoryStore::new();
+
+        let root = put_state(&store, vec![]);
+        let left_base = put_state(&store, vec![root.change_id]);
+        let right_base = put_state(&store, vec![root.change_id]);
+        let left_tip = put_state(&store, vec![left_base.change_id]);
+        let right_tip = put_state(&store, vec![right_base.change_id]);
+        let merge_a = put_state(&store, vec![left_base.change_id, right_base.change_id]);
+        let merge_b = put_state(&store, vec![right_base.change_id, left_base.change_id]);
+
+        let async_source = AsyncInMemorySource(&store);
+        for (ancestor, descendant) in [
+            (root.change_id, merge_a.change_id),
+            (left_base.change_id, merge_a.change_id),
+            (merge_a.change_id, merge_a.change_id),
+            (merge_a.change_id, merge_b.change_id),
+            (left_tip.change_id, right_tip.change_id),
+        ] {
+            let mut graph = CommitGraphIndex::with_cache(
+                &store,
+                super::super::commit_graph_persistence::NullCommitGraphCache,
+            );
+            let sync = graph.is_ancestor(&ancestor, &descendant).unwrap();
+            let async_result = block_on(super::is_ancestor_async(
+                &async_source,
+                &ancestor,
+                &descendant,
+            ))
+            .unwrap();
+            assert_eq!(
+                async_result, sync,
+                "is_ancestor mismatch for {ancestor} -> {descendant}"
+            );
+        }
+
+        for (left, right) in [
+            (merge_a.change_id, merge_b.change_id),
+            (left_base.change_id, merge_a.change_id),
+            (left_tip.change_id, right_tip.change_id),
+            (merge_a.change_id, merge_a.change_id),
+        ] {
+            let mut graph = CommitGraphIndex::with_cache(
+                &store,
+                super::super::commit_graph_persistence::NullCommitGraphCache,
+            );
+            let sync = graph.find_merge_base(&left, &right).unwrap();
+            let async_result =
+                block_on(super::find_merge_base_async(&async_source, &left, &right)).unwrap();
+            assert_eq!(
+                async_result, sync,
+                "find_merge_base mismatch for {left} and {right}"
+            );
+        }
+
+        let mut graph = CommitGraphIndex::with_cache(
+            &store,
+            super::super::commit_graph_persistence::NullCommitGraphCache,
+        );
+        let tie_base = graph
+            .find_merge_base(&merge_a.change_id, &merge_b.change_id)
+            .unwrap();
+        assert!(
+            matches!(tie_base, Some(id) if id == left_base.change_id || id == right_base.change_id)
+        );
+    }
+
+    #[cfg(feature = "async-source")]
+    struct AsyncInMemorySource<'a>(&'a InMemoryStore);
+
+    #[cfg(feature = "async-source")]
+    impl AsyncObjectSource for AsyncInMemorySource<'_> {
+        async fn get_tree(&self, hash: &ContentHash) -> objects::error::Result<Option<Tree>> {
+            ObjectStore::get_tree(self.0, hash)
+        }
+
+        async fn get_state(&self, id: &ChangeId) -> objects::error::Result<Option<State>> {
+            ObjectStore::get_state(self.0, id)
+        }
+
+        async fn get_blob(&self, hash: &ContentHash) -> objects::error::Result<Option<Blob>> {
+            ObjectStore::get_blob(self.0, hash)
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn put_state(store: &InMemoryStore, parents: Vec<ChangeId>) -> State {
+        let state = State::new(
+            Tree::new().hash(),
+            parents,
+            Attribution::human(Principal::new("Test User", "test@example.com")),
+        );
+        ObjectStore::put_state(store, &state).unwrap();
+        state
+    }
+
+    #[cfg(feature = "async-source")]
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     }
 }
