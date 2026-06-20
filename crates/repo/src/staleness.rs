@@ -7,29 +7,18 @@
 use std::{collections::HashMap, path::Path};
 
 use objects::{
-    object::{Annotation, AnnotationScope, Blob, ContentHash, ContextTarget, State, Tree},
+    object::{
+        Annotation, Blob, ContextTarget, State, Tree,
+        annotation_status_for_source_with_symbol_resolver,
+    },
     store::ObjectStore,
 };
 
 use crate::Repository;
 
-/// Result of checking an annotation's freshness against current code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StalenessStatus {
-    /// Source hash matches -- annotation is current.
-    Fresh,
-    /// Source at the annotated scope has changed since the annotation was written.
-    SourceChanged {
-        old_hash: ContentHash,
-        new_hash: ContentHash,
-    },
-    /// The file referenced by the annotation no longer exists in the tree.
-    FileMissing,
-    /// Symbol referenced by annotation no longer exists in the file.
-    SymbolMissing { symbol: String },
-    /// No provenance data stored -- staleness cannot be determined.
-    Unknown,
-}
+pub use objects::object::{
+    StalenessStatus, annotation_status_for_source, extract_line_range, resolve_current_symbol,
+};
 
 /// Check a single annotation's staleness against current code.
 ///
@@ -45,14 +34,13 @@ pub fn check_annotation_staleness(
         return Ok(StalenessStatus::Unknown);
     };
     let file_path = Path::new(file_path);
-    let Some(revision) = annotation.current_revision() else {
+    if annotation
+        .current_revision()
+        .and_then(|revision| revision.source_hash.as_ref())
+        .is_none()
+    {
         return Ok(StalenessStatus::Unknown);
-    };
-    // If no source_hash stored, annotation predates provenance tracking.
-    let expected_hash = match &revision.source_hash {
-        Some(h) => h,
-        None => return Ok(StalenessStatus::Unknown),
-    };
+    }
 
     // Load the current code tree.
     let tree = match repo.store().get_tree(&current_state.tree)? {
@@ -68,62 +56,13 @@ pub fn check_annotation_staleness(
     };
 
     let source = blob.content();
-
-    // Extract the bytes at the annotation's scope.
-    let scoped_bytes = match &annotation.scope {
-        AnnotationScope::File => source.to_vec(),
-        AnnotationScope::Lines(start, end) => extract_line_range(source, *start, *end),
-        AnnotationScope::Symbol {
-            name,
-            resolved_lines,
-        } => {
-            // Re-resolve the symbol against the current tree when tree-
-            // sitter is available: this tracks symbols that moved within
-            // the file (e.g. an unrelated function was added above).
-            //   - resolver succeeds → use the current line range (handles
-            //     "symbol moved but body unchanged" as Fresh).
-            //   - resolver reports SymbolNotFound → report SymbolMissing
-            //     even if we have stale `resolved_lines` from creation time.
-            //   - resolver errors for parse/language reasons → fall back to
-            //     stored `resolved_lines` (best effort).
-            // When the feature is disabled, fall back to the stored range.
-            let current_lines = resolve_current_symbol(source, file_path, name, *resolved_lines);
-            match current_lines {
-                Some((start, end)) => extract_line_range(source, start, end),
-                None => {
-                    return Ok(StalenessStatus::SymbolMissing {
-                        symbol: name.clone(),
-                    });
-                }
-            }
-        }
-    };
-
-    // BLAKE3 hash the current bytes and compare with expected.
-    let current_hash = ContentHash::compute(&scoped_bytes);
-    if current_hash == *expected_hash {
-        Ok(StalenessStatus::Fresh)
-    } else {
-        Ok(StalenessStatus::SourceChanged {
-            old_hash: *expected_hash,
-            new_hash: current_hash,
-        })
-    }
-}
-
-/// Extract bytes for a line range from source content.
-///
-/// Lines are 1-indexed. Returns the bytes spanning `start..=end` lines
-/// (inclusive on both ends), joined with newlines.
-pub fn extract_line_range(source: &[u8], start: u32, end: u32) -> Vec<u8> {
-    let text = std::str::from_utf8(source).unwrap_or("");
-    let lines: Vec<&str> = text.lines().collect();
-    let start_idx = (start as usize).saturating_sub(1);
-    let end_idx = (end as usize).min(lines.len());
-    if start_idx >= end_idx {
-        return Vec::new();
-    }
-    lines[start_idx..end_idx].join("\n").into_bytes()
+    Ok(annotation_status_for_source_with_symbol_resolver(
+        annotation,
+        &annotation.scope,
+        source,
+        file_path,
+        resolve_current_symbol_for_repo,
+    ))
 }
 
 /// Batch check: check staleness for all annotations across all files in a context tree.
@@ -177,7 +116,7 @@ pub fn live_symbol_lines(
     let tree = repo.store().get_tree(&state.tree).ok().flatten()?;
     let blob = get_blob_at_path(repo.store(), &tree, path).ok().flatten()?;
     let file_path = std::path::Path::new(path);
-    resolve_current_symbol(blob.content(), file_path, symbol, None)
+    resolve_current_symbol_for_repo(blob.content(), file_path, symbol, None)
 }
 
 /// Internal: tree-sitter resolution with a fallback. When the feature is
@@ -185,7 +124,7 @@ pub fn live_symbol_lines(
 /// language/parse errors fall back to `stored`. When the feature is
 /// disabled, simply return `stored`.
 #[cfg(feature = "tree-sitter-symbols")]
-fn resolve_current_symbol(
+fn resolve_current_symbol_for_repo(
     source: &[u8],
     file_path: &std::path::Path,
     symbol: &str,
@@ -202,7 +141,7 @@ fn resolve_current_symbol(
 }
 
 #[cfg(not(feature = "tree-sitter-symbols"))]
-fn resolve_current_symbol(
+fn resolve_current_symbol_for_repo(
     _source: &[u8],
     _file_path: &std::path::Path,
     _symbol: &str,
@@ -252,6 +191,7 @@ fn get_blob_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objects::object::{AnnotationScope, ContentHash};
 
     fn make_annotation(scope: AnnotationScope, source_hash: Option<ContentHash>) -> Annotation {
         Annotation::new(
@@ -307,6 +247,43 @@ mod tests {
     fn extract_line_range_empty_source() {
         let result = extract_line_range(b"", 1, 5);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn annotation_status_for_source_matches_legacy_inline_tail() {
+        let source = b"fn kept() {\n    println!(\"kept\");\n}\n\nfn other() {}\n";
+        let file_path = Path::new("src/lib.rs");
+        let file_hash = ContentHash::compute(source);
+        let lines_hash = ContentHash::compute(&extract_line_range(source, 1, 3));
+        let symbol_hash = ContentHash::compute(&extract_line_range(source, 1, 3));
+        let changed_hash = ContentHash::compute(b"old bytes");
+
+        let cases = vec![
+            make_annotation(AnnotationScope::File, Some(file_hash)),
+            make_annotation(AnnotationScope::Lines(1, 3), Some(lines_hash)),
+            make_annotation(
+                AnnotationScope::Symbol {
+                    name: "kept".to_string(),
+                    resolved_lines: Some((1, 3)),
+                },
+                Some(symbol_hash),
+            ),
+            make_annotation(
+                AnnotationScope::Symbol {
+                    name: "missing".to_string(),
+                    resolved_lines: None,
+                },
+                Some(changed_hash),
+            ),
+            make_annotation(AnnotationScope::File, None),
+        ];
+
+        for annotation in cases {
+            let legacy = legacy_annotation_status_for_source(&annotation, source, file_path);
+            let lifted =
+                annotation_status_for_source(&annotation, &annotation.scope, source, file_path);
+            assert_eq!(lifted, legacy, "scope {}", annotation.scope);
+        }
     }
 
     #[test]
@@ -504,6 +481,46 @@ mod tests {
     }
 
     // -- test helpers --
+
+    fn legacy_annotation_status_for_source(
+        annotation: &Annotation,
+        source: &[u8],
+        file_path: &Path,
+    ) -> StalenessStatus {
+        let Some(revision) = annotation.current_revision() else {
+            return StalenessStatus::Unknown;
+        };
+        let expected_hash = match &revision.source_hash {
+            Some(h) => h,
+            None => return StalenessStatus::Unknown,
+        };
+
+        let scoped_bytes = match &annotation.scope {
+            AnnotationScope::File => source.to_vec(),
+            AnnotationScope::Lines(start, end) => extract_line_range(source, *start, *end),
+            AnnotationScope::Symbol {
+                name,
+                resolved_lines,
+            } => match resolve_current_symbol_for_repo(source, file_path, name, *resolved_lines) {
+                Some((start, end)) => extract_line_range(source, start, end),
+                None => {
+                    return StalenessStatus::SymbolMissing {
+                        symbol: name.clone(),
+                    };
+                }
+            },
+        };
+
+        let current_hash = ContentHash::compute(&scoped_bytes);
+        if current_hash == *expected_hash {
+            StalenessStatus::Fresh
+        } else {
+            StalenessStatus::SourceChanged {
+                old_hash: *expected_hash,
+                new_hash: current_hash,
+            }
+        }
+    }
 
     fn make_test_repo() -> (tempfile::TempDir, Repository) {
         let dir = tempfile::TempDir::new().unwrap();
