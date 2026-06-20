@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use objects::{
     object::{ChangeId, ContentHash, Tree, diff_trees},
-    store::{ObjectSource, ObjectStore},
+    store::{AnyStore, ObjectSource, ObjectStore},
 };
 use oplog::OpLogBackend;
 use refs::RefBackend;
@@ -38,7 +38,7 @@ pub struct CachedNodeMetadata {
     pub created_at_secs: i64,
 }
 
-pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized> {
+pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
     source: &'source S,
     nodes: HashMap<ChangeId, CommitGraphNode>,
     cache: Box<dyn CommitGraphCache + 'source>,
