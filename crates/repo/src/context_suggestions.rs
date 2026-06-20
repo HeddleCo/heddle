@@ -4,50 +4,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
-    object::{ContextTarget, State},
+    object::{
+        ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions,
+    },
     store::ObjectStore,
 };
 
 use crate::{HistoryQuery, Repository, staleness};
 
-pub const SUGGESTION_WINDOW: usize = 24;
-pub const MEDIUM_SUGGESTION_THRESHOLD: u32 = 45;
-pub const HIGH_SUGGESTION_THRESHOLD: u32 = 70;
-pub const MAJOR_REWRITE_THRESHOLD_PCT: u32 = 50;
-
-const CHANGE_WEIGHT: u32 = 16;
-const DISTINCT_STATE_WEIGHT: u32 = 8;
-const DISTINCT_AGENT_WEIGHT: u32 = 10;
-const RECENCY_WEIGHT: u32 = 12;
-const STALE_WEIGHT: u32 = 18;
-const HAS_CONTEXT_PENALTY: u32 = 35;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ContextSuggestionTier {
-    Medium,
-    High,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContextSuggestion {
-    pub path: String,
-    pub score: u32,
-    pub tier: ContextSuggestionTier,
-    pub reasons: Vec<String>,
-    pub recent_changes: u32,
-    pub distinct_states: u32,
-    pub distinct_agents: u32,
-    pub has_context: bool,
-    pub stale_annotations: u32,
-}
-
-#[derive(Default)]
-struct SuggestionSignal {
-    recent_changes: u32,
-    distinct_states: BTreeSet<String>,
-    distinct_agents: BTreeSet<String>,
-    latest_seen_index: Option<usize>,
-}
+pub use objects::object::{
+    ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
+    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
+};
 
 impl Repository {
     pub fn suggest_context_targets(
@@ -103,79 +71,15 @@ impl Repository {
             })
             .collect();
 
-        let mut suggestions = Vec::new();
-        for (path, signal) in signals {
-            let has_context = active_paths.contains(&path);
-            let stale_annotations = stale_map
-                .iter()
-                .filter(|(key, status)| {
-                    key.starts_with(&format!("{path}:"))
-                        && !matches!(status, staleness::StalenessStatus::Fresh)
-                })
-                .count() as u32;
-
-            let mut score = signal.recent_changes.saturating_mul(CHANGE_WEIGHT);
-            score += (signal.distinct_states.len() as u32).saturating_mul(DISTINCT_STATE_WEIGHT);
-            score += (signal.distinct_agents.len() as u32).saturating_mul(DISTINCT_AGENT_WEIGHT);
-            if signal.latest_seen_index.unwrap_or(usize::MAX) <= 3 {
-                score += RECENCY_WEIGHT;
-            }
-            if stale_annotations > 0 {
-                score += stale_annotations.saturating_mul(STALE_WEIGHT);
-            }
-            if has_context && stale_annotations == 0 {
-                score = score.saturating_sub(HAS_CONTEXT_PENALTY);
-            }
-
-            let tier = if score >= HIGH_SUGGESTION_THRESHOLD {
-                Some(ContextSuggestionTier::High)
-            } else if score >= MEDIUM_SUGGESTION_THRESHOLD {
-                Some(ContextSuggestionTier::Medium)
-            } else {
-                None
-            };
-
-            let Some(tier) = tier else {
-                continue;
-            };
-
-            let mut reasons = Vec::new();
-            if signal.recent_changes >= 3 {
-                reasons.push(format!(
-                    "{} recent changes across the last {} states",
-                    signal.recent_changes,
-                    history.len()
-                ));
-            }
-            if signal.distinct_agents.len() >= 2 {
-                reasons.push(format!(
-                    "{} distinct agents touched this file",
-                    signal.distinct_agents.len()
-                ));
-            }
-            if stale_annotations > 0 {
-                reasons.push(format!("{stale_annotations} annotation(s) may be stale"));
-            }
-            if !has_context {
-                reasons.push("no active file guidance exists yet".to_string());
-            }
-
-            suggestions.push(ContextSuggestion {
-                path,
-                score,
-                tier,
-                reasons,
-                recent_changes: signal.recent_changes,
-                distinct_states: signal.distinct_states.len() as u32,
-                distinct_agents: signal.distinct_agents.len() as u32,
-                has_context,
-                stale_annotations,
-            });
-        }
-
-        suggestions.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
-        suggestions.truncate(limit);
-        Ok(suggestions)
+        Ok(score_suggestions(
+            SuggestionInputs {
+                signals,
+                stale_map,
+                active_paths,
+                history_len: history.len(),
+            },
+            limit,
+        ))
     }
 
     fn collect_state_window(
@@ -231,6 +135,7 @@ fn normalize_tokens(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn rewrite_pct_is_zero_for_identical_content() {
@@ -242,5 +147,44 @@ mod tests {
         let pct = compute_rewrite_pct("alpha beta gamma", "delta epsilon zeta");
         assert!(pct >= MAJOR_REWRITE_THRESHOLD_PCT);
         assert!(is_major_rewrite(pct));
+    }
+
+    #[test]
+    fn suggest_context_targets_matches_golden_fixture() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/a.rs"), "one\n").unwrap();
+        repo.snapshot(Some("add a".to_string()), None).unwrap();
+
+        fs::write(dir.path().join("src/b.rs"), "one\n").unwrap();
+        repo.snapshot(Some("add b".to_string()), None).unwrap();
+
+        fs::write(dir.path().join("src/a.rs"), "two\n").unwrap();
+        repo.snapshot(Some("update a".to_string()), None).unwrap();
+
+        fs::write(dir.path().join("src/a.rs"), "three\n").unwrap();
+        let head = repo.snapshot(Some("update a again".to_string()), None).unwrap();
+
+        let suggestions = repo.suggest_context_targets(&head, 10).unwrap();
+
+        assert_eq!(
+            suggestions,
+            vec![ContextSuggestion {
+                path: "src/a.rs".to_string(),
+                score: 84,
+                tier: ContextSuggestionTier::High,
+                reasons: vec![
+                    "3 recent changes across the last 5 states".to_string(),
+                    "no active file guidance exists yet".to_string(),
+                ],
+                recent_changes: 3,
+                distinct_states: 3,
+                distinct_agents: 0,
+                has_context: false,
+                stale_annotations: 0,
+            }]
+        );
     }
 }

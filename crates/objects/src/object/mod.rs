@@ -25,6 +25,7 @@ mod state_review;
 mod state_visibility;
 mod staleness_core;
 mod structured_conflict;
+mod suggestion_core;
 mod timeline;
 mod tree;
 mod tree_diff;
@@ -74,6 +75,11 @@ pub use staleness_core::{
 };
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
+};
+pub use suggestion_core::{
+    ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
+    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
+    SuggestionInputs, SuggestionSignal, score_suggestions,
 };
 pub use timeline::{
     BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
