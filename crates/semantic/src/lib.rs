@@ -13,18 +13,19 @@ mod symbol_extraction;
 pub mod symbol_resolver;
 
 pub use analysis::{
-    AggregateKind, AggregatedChange, AggregationResult, HotEventKind, HotSpot, HotSpotKey,
-    HotSpotKeyValue, HotSpotParams, HotSpotsReport, SimilarityMethod, aggregate_changes,
-    analyze_actor_histogram, analyze_hot_spots, classify_modification,
-    classify_modification_with_confidence, compute_similarity, detect_file_renames,
-    detect_function_changes,
+    AggregateKind, AggregatedChange, AggregationResult, HotEventKind, HotSpot, HotSpotChangeBatch,
+    HotSpotKey, HotSpotKeyValue, HotSpotParams, HotSpotsReport, SimilarityMethod,
+    aggregate_changes, analyze_actor_histogram, analyze_hot_spots, analyze_hot_spots_from_changes,
+    classify_modification, classify_modification_with_confidence, compute_similarity,
+    detect_file_renames, detect_function_changes,
 };
 pub use cache::{SemanticParseCache, SemanticParseCacheStats};
 pub use diff::{
     DiffKind, SemanticBudget, SemanticCheckOnlyResult, SemanticCheckStatus, SemanticDiffOptions,
     SemanticDiffResult, SemanticFallbackReason, SemanticSummaryResult, WorktreeStatus,
-    semantic_check_only, semantic_check_only_worktree, semantic_diff, semantic_diff_summary,
-    semantic_diff_summary_worktree, semantic_diff_worktree,
+    semantic_check_only, semantic_check_only_from_changes, semantic_check_only_worktree,
+    semantic_diff, semantic_diff_from_changes, semantic_diff_summary,
+    semantic_diff_summary_from_changes, semantic_diff_summary_worktree, semantic_diff_worktree,
 };
 pub use merge_driver::{
     MergeStrategy, semantic_three_way_merge, three_way_merge as merge_driver_three_way,

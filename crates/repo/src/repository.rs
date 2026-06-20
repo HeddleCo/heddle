@@ -53,7 +53,6 @@ mod status_untracked_scan;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -73,12 +72,12 @@ use objects::{
     object::{
         Attribution, ChangeId, ContentHash, MarkerName, Principal, Scope, State, ThreadName, Tree,
     },
-    store::{AnyStore, FsStore, LocalObjectStore, ObjectStore, ShallowInfo},
+    store::{AnyStore, FsStore, LocalObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
-use oplog::{OpLog, OpLogBackend, OpRecord};
+use oplog::{LocalOpLogBackend, OpLog, OpRecord};
 pub use refs::RefSummaryIndexInspection;
-use refs::{AsyncRefBackend, Head, RefExpectation, RefManager, RefUpdate};
+use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{OutputFormat, RedactConfig, RemoteLinkConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -277,13 +276,24 @@ pub trait BlobHydrator: Send + Sync {
     fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> Result<()>;
 }
 
-/// Shared repository identity and backend bundle.
+/// A Heddle repository.
 ///
-/// This is intentionally just the common shape: repository roots, capability,
-/// refs, oplog, object store, config, and shallow metadata. Local filesystem
-/// affordances live on [`Repository`]; hosted/cloud-native code should use
-/// [`AsyncRepository`] over this same core with async backends.
-pub struct RepositoryCore<R, O, S> {
+/// Generic over its reference, operation-log, and object-store backends.
+/// The CLI uses the defaults — `Repository<RefManager, OpLog, AnyStore>`
+/// (the on-disk local backends) — so the bare name `Repository` resolves to
+/// the local flavor everywhere.
+///
+/// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
+/// currently selects the local [`FsStore`] variant. The concrete enum keeps
+/// every object access statically dispatched through the enum to the inner
+/// store — no vtable (heddle#283). `S` goes last so existing
+/// `Repository<R, O>` references keep resolving with `S = AnyStore`.
+pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
+where
+    R: RefBackend,
+    O: LocalOpLogBackend,
+    S: LocalObjectStore,
+{
     root: PathBuf,
     heddle_dir: PathBuf,
     capability: RepositoryCapability,
@@ -292,10 +302,30 @@ pub struct RepositoryCore<R, O, S> {
     oplog: O,
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
+    blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
+    git_overlay_repo: RwLock<Option<SleyRepository>>,
 }
 
-impl<R, O, S> RepositoryCore<R, O, S> {
-    /// Construct the shared repository core from already-owned backends.
+impl<R: RefBackend, O: LocalOpLogBackend, S: LocalObjectStore> RepositoryLockExt
+    for Repository<R, O, S>
+{
+    fn locker(&self) -> RepoLock {
+        let lock_root = self.heddle_dir.parent().expect(
+            "heddle_dir has no parent component; cannot determine lock root. This indicates a misconfigured repository.",
+        );
+        RepoLock::new(lock_root)
+    }
+}
+
+impl<R: RefBackend, O: LocalOpLogBackend, S: LocalObjectStore> Repository<R, O, S> {
+    /// Expert-only constructor for callers that already own the repository's
+    /// component backends and invariant state.
+    ///
+    /// Callers must ensure all backends point at the same repository root, the
+    /// `heddle_dir` exists and is canonical for that root, and `shallow` matches
+    /// the on-disk shallow metadata. Prefer [`Repository::init`],
+    /// [`Repository::open`], or [`Repository::open_with_store`] unless a
+    /// cross-crate integration genuinely needs to assemble the pieces manually.
     pub fn from_parts(
         root: PathBuf,
         heddle_dir: PathBuf,
@@ -315,116 +345,6 @@ impl<R, O, S> RepositoryCore<R, O, S> {
             oplog,
             config,
             shallow: RwLock::new(shallow),
-        }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn heddle_dir(&self) -> &Path {
-        &self.heddle_dir
-    }
-
-    pub fn capability(&self) -> RepositoryCapability {
-        self.capability
-    }
-
-    /// The object store backing this repository.
-    pub fn store(&self) -> &S {
-        &self.store
-    }
-
-    /// The reference backend (threads, markers, HEAD).
-    pub fn refs(&self) -> &R {
-        &self.refs
-    }
-
-    /// The operation-log backend.
-    pub fn oplog(&self) -> &O {
-        &self.oplog
-    }
-
-    pub fn repo_config(&self) -> &RepoConfig {
-        &self.config
-    }
-
-    pub fn config(&self) -> &RepoConfig {
-        self.repo_config()
-    }
-
-    pub fn shallow(&self) -> std::sync::RwLockReadGuard<'_, ShallowInfo> {
-        self.shallow.read().unwrap()
-    }
-}
-
-impl<R, O, S> RepositoryLockExt for RepositoryCore<R, O, S> {
-    fn locker(&self) -> RepoLock {
-        let lock_root = self.heddle_dir.parent().expect(
-            "heddle_dir has no parent component; cannot determine lock root. This indicates a misconfigured repository.",
-        );
-        RepoLock::new(lock_root)
-    }
-}
-
-/// A local Heddle repository.
-///
-/// Generic over its reference, operation-log, and object-store backends.
-/// The CLI uses the defaults — `Repository<RefManager, OpLog, AnyStore>`
-/// (the on-disk local backends) — so the bare name `Repository` resolves to
-/// the local flavor everywhere.
-///
-/// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
-/// currently selects the local [`FsStore`] variant. The concrete enum keeps
-/// every object access statically dispatched through the enum to the inner
-/// store — no vtable (heddle#283). `S` goes last so existing
-/// `Repository<R, O>` references keep resolving with `S = AnyStore`.
-pub struct Repository<R = RefManager, O = OpLog, S = AnyStore> {
-    core: RepositoryCore<R, O, S>,
-    blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
-    git_overlay_repo: RwLock<Option<SleyRepository>>,
-}
-
-impl<R, O, S> Deref for Repository<R, O, S> {
-    type Target = RepositoryCore<R, O, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl<R, O, S> DerefMut for Repository<R, O, S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
-
-impl<R, O, S> RepositoryLockExt for Repository<R, O, S> {
-    fn locker(&self) -> RepoLock {
-        self.core.locker()
-    }
-}
-
-impl<R, O, S> Repository<R, O, S> {
-    /// Expert-only constructor for callers that already own the repository's
-    /// component backends and invariant state.
-    ///
-    /// Callers must ensure all backends point at the same repository root, the
-    /// `heddle_dir` exists and is canonical for that root, and `shallow` matches
-    /// the on-disk shallow metadata. Prefer [`Repository::init`],
-    /// [`Repository::open`], or [`Repository::open_with_store`] unless a
-    /// cross-crate integration genuinely needs to assemble the pieces manually.
-    pub fn from_parts(
-        root: PathBuf,
-        heddle_dir: PathBuf,
-        store: S,
-        refs: R,
-        oplog: O,
-        config: RepoConfig,
-        shallow: ShallowInfo,
-    ) -> Self {
-        Self {
-            core: RepositoryCore::from_parts(root, heddle_dir, store, refs, oplog, config, shallow),
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
         }
@@ -443,104 +363,6 @@ impl<R, O, S> Repository<R, O, S> {
     /// The operation-log backend.
     pub fn oplog(&self) -> &O {
         &self.oplog
-    }
-}
-
-/// Async/cloud-native repository facade.
-///
-/// This carries the same component identity as [`Repository`] but constrains
-/// the backends to the async hosted contracts instead of the local filesystem
-/// traits. Local CLI behavior remains on [`Repository`]; hosted callers can use
-/// this type to compose refs, oplog, and object storage without runtime bridges
-/// or local-store shims.
-pub struct AsyncRepository<R, O, S>
-where
-    R: AsyncRefBackend<Error = HeddleError>,
-    O: OpLogBackend,
-    S: ObjectStore,
-{
-    core: RepositoryCore<R, O, S>,
-}
-
-impl<R, O, S> Deref for AsyncRepository<R, O, S>
-where
-    R: AsyncRefBackend<Error = HeddleError>,
-    O: OpLogBackend,
-    S: ObjectStore,
-{
-    type Target = RepositoryCore<R, O, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl<R, O, S> AsyncRepository<R, O, S>
-where
-    R: AsyncRefBackend<Error = HeddleError>,
-    O: OpLogBackend,
-    S: ObjectStore,
-{
-    /// Construct an async repository facade from already-owned backends.
-    pub fn from_parts(
-        root: PathBuf,
-        heddle_dir: PathBuf,
-        store: S,
-        refs: R,
-        oplog: O,
-        config: RepoConfig,
-        shallow: ShallowInfo,
-    ) -> Self {
-        Self {
-            core: RepositoryCore::from_parts(root, heddle_dir, store, refs, oplog, config, shallow),
-        }
-    }
-
-    pub fn root(&self) -> &Path {
-        self.core.root()
-    }
-
-    pub fn heddle_dir(&self) -> &Path {
-        self.core.heddle_dir()
-    }
-
-    pub fn capability(&self) -> RepositoryCapability {
-        self.core.capability()
-    }
-
-    pub fn store(&self) -> &S {
-        self.core.store()
-    }
-
-    pub fn refs(&self) -> &R {
-        self.core.refs()
-    }
-
-    pub fn oplog(&self) -> &O {
-        self.core.oplog()
-    }
-
-    pub fn repo_config(&self) -> &RepoConfig {
-        self.core.repo_config()
-    }
-
-    pub fn config(&self) -> &RepoConfig {
-        self.repo_config()
-    }
-
-    pub fn shallow(&self) -> std::sync::RwLockReadGuard<'_, ShallowInfo> {
-        self.core.shallow()
-    }
-}
-
-impl<R, O, S> RepositoryLockExt for AsyncRepository<R, O, S>
-where
-    R: AsyncRefBackend<Error = HeddleError>,
-    O: OpLogBackend,
-    S: ObjectStore,
-{
-    fn locker(&self) -> RepoLock {
-        self.core.locker()
     }
 }
 

@@ -23,6 +23,6 @@ pub use analysis_imports::{detect_import_changes, detect_import_changes_with_man
 pub use analysis_renames::detect_file_renames;
 pub use analysis_similarity::{SimilarityMethod, compute_similarity};
 pub use hot_spots::{
-    HotEventKind, HotSpot, HotSpotKey, HotSpotKeyValue, HotSpotParams, HotSpotsReport,
-    analyze_actor_histogram, analyze_hot_spots,
+    HotEventKind, HotSpot, HotSpotChangeBatch, HotSpotKey, HotSpotKeyValue, HotSpotParams,
+    HotSpotsReport, analyze_actor_histogram, analyze_hot_spots, analyze_hot_spots_from_changes,
 };

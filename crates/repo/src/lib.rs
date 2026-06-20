@@ -80,12 +80,12 @@ pub use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
     },
     store::{
-        AgentUsageSummary, FsStore, LocalObjectStore, ObjectStore, ShallowInfo,
+        AgentUsageSummary, FsStore, LocalObjectStore, ShallowInfo,
         agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
     },
 };
 pub use repository::{
-    AsyncRepository, BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
+    BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
     ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitOverlayBranchTip,
     GitOverlayImportHint, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
@@ -93,12 +93,12 @@ pub use repository::{
     MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
     PackFilesInspection, PartialFetchInspection, PullPlannerCacheInspection, RedactConfig,
     RefCountsInspection, RefSummaryIndexInspection, RemoteLinkConfig, RepoConfig, Repository,
-    RepositoryCapability, RepositoryCore, RepositoryMaintenanceRunReport,
-    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, ResignOutcome,
-    SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, ThreadCaptureOutcome, TreeBuildProfile,
-    TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
-    WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base,
-    is_major_rewrite, is_synthetic_root,
+    RepositoryCapability, RepositoryMaintenanceRunReport, RepositoryOperationStatus,
+    RepositoryPerformanceInspectionReport, ResignOutcome, SUGGESTION_WINDOW, SnapshotExecution,
+    SnapshotProfile, ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet,
+    UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
+    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
+    is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;

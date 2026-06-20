@@ -2,8 +2,8 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ChangeId, ContentHash, EntryType, State, Tree},
-    store::{LocalObjectStore, ObjectKey, ObjectStore, async_store::collect_stream},
+    object::{ChangeId, ContentHash, EntryType},
+    store::LocalObjectStore,
 };
 use serde::{Deserialize, Serialize};
 
@@ -207,178 +207,6 @@ pub fn enumerate_state_closure_plan_with_options(
     Ok(out)
 }
 
-pub async fn enumerate_state_closure_async<S>(
-    store: &S,
-    state_id: ChangeId,
-) -> Result<Vec<ObjectInfo>>
-where
-    S: ObjectStore + ?Sized,
-{
-    enumerate_state_closure_with_options_async(store, state_id, StateClosureOptions::default())
-        .await
-}
-
-pub async fn enumerate_state_closure_with_options_async<S>(
-    store: &S,
-    state_id: ChangeId,
-    options: StateClosureOptions,
-) -> Result<Vec<ObjectInfo>>
-where
-    S: ObjectStore + ?Sized,
-{
-    let (excluded_states, excluded_hashes) =
-        collect_excluded_async(store, &options.exclude_states).await?;
-
-    let mut out = Vec::new();
-    let mut seen_states: HashSet<ChangeId> = HashSet::new();
-    let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<(ChangeId, u32)> = VecDeque::new();
-    queue.push_back((state_id, 0));
-
-    while let Some((id, depth)) = queue.pop_front() {
-        if excluded_states.contains(&id) {
-            continue;
-        }
-        if !seen_states.insert(id) {
-            continue;
-        }
-
-        let (state, state_size) = load_state_async(store, &id)
-            .await?
-            .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
-
-        out.push(ObjectInfo {
-            id: ObjectId::ChangeId(id),
-            obj_type: ObjectType::State,
-            size: state_size,
-            delta_base: None,
-        });
-        emit_state_visibility_info_async(store, &id, &mut out).await?;
-
-        if options.depth.map(|max| depth < max).unwrap_or(true) {
-            for parent in &state.parents {
-                queue.push_back((*parent, depth + 1));
-            }
-        }
-
-        enumerate_tree_closure_filtered_async(
-            store,
-            state.tree,
-            &excluded_hashes,
-            &mut seen_hashes,
-            &mut out,
-        )
-        .await?;
-        if let Some(provenance_root) = state.provenance {
-            enumerate_tree_closure_filtered_async(
-                store,
-                provenance_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )
-            .await?;
-        }
-        if let Some(context_root) = state.context {
-            enumerate_tree_closure_filtered_async(
-                store,
-                context_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )
-            .await?;
-        }
-    }
-
-    Ok(out)
-}
-
-pub async fn enumerate_state_closure_plan_async<S>(
-    store: &S,
-    state_id: ChangeId,
-) -> Result<Vec<PlannedObject>>
-where
-    S: ObjectStore + ?Sized,
-{
-    enumerate_state_closure_plan_with_options_async(store, state_id, StateClosureOptions::default())
-        .await
-}
-
-pub async fn enumerate_state_closure_plan_with_options_async<S>(
-    store: &S,
-    state_id: ChangeId,
-    options: StateClosureOptions,
-) -> Result<Vec<PlannedObject>>
-where
-    S: ObjectStore + ?Sized,
-{
-    let (excluded_states, excluded_hashes) =
-        collect_excluded_async(store, &options.exclude_states).await?;
-
-    let mut out = Vec::new();
-    let mut seen_states: HashSet<ChangeId> = HashSet::new();
-    let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<(ChangeId, u32)> = VecDeque::new();
-    queue.push_back((state_id, 0));
-
-    while let Some((id, depth)) = queue.pop_front() {
-        if excluded_states.contains(&id) {
-            continue;
-        }
-        if !seen_states.insert(id) {
-            continue;
-        }
-
-        let (state, _) = load_state_async(store, &id)
-            .await?
-            .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
-
-        out.push(PlannedObject {
-            id: ObjectId::ChangeId(id),
-            obj_type: ObjectType::State,
-        });
-        emit_state_visibility_plan_async(store, &id, &mut out).await?;
-
-        if options.depth.map(|max| depth < max).unwrap_or(true) {
-            for parent in &state.parents {
-                queue.push_back((*parent, depth + 1));
-            }
-        }
-
-        enumerate_tree_plan_filtered_async(
-            store,
-            state.tree,
-            &excluded_hashes,
-            &mut seen_hashes,
-            &mut out,
-        )
-        .await?;
-        if let Some(provenance_root) = state.provenance {
-            enumerate_tree_plan_filtered_async(
-                store,
-                provenance_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )
-            .await?;
-        }
-        if let Some(context_root) = state.context {
-            enumerate_tree_plan_filtered_async(
-                store,
-                context_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )
-            .await?;
-        }
-    }
-
-    Ok(out)
-}
-
 fn enumerate_tree_closure_filtered(
     store: &impl LocalObjectStore,
     tree_hash: ContentHash,
@@ -571,337 +399,6 @@ fn emit_redaction_plan(
     Ok(())
 }
 
-async fn load_state_async<S>(store: &S, id: &ChangeId) -> Result<Option<(State, u64)>>
-where
-    S: ObjectStore + ?Sized,
-{
-    let Some(stream) = store.get_object_stream(&ObjectKey::State(*id)).await? else {
-        return Ok(None);
-    };
-    let bytes = collect_stream(stream).await?;
-    let state: State = rmp_serde::from_slice(&bytes)?;
-    if state.change_id != *id {
-        return Err(ProtocolError::InvalidState(format!(
-            "state change_id mismatch: expected {}, found {}",
-            id, state.change_id
-        )));
-    }
-    Ok(Some((state, bytes.len() as u64)))
-}
-
-async fn load_tree_async<S>(store: &S, hash: &ContentHash) -> Result<Option<(Tree, u64)>>
-where
-    S: ObjectStore + ?Sized,
-{
-    let Some(stream) = store.get_object_stream(&ObjectKey::Tree(*hash)).await? else {
-        return Ok(None);
-    };
-    let bytes = collect_stream(stream).await?;
-    let tree: Tree = rmp_serde::from_slice(&bytes)?;
-    tree.validate()
-        .map_err(|error| ProtocolError::InvalidState(format!("invalid tree object: {error}")))?;
-    let found = tree.hash();
-    if found != *hash {
-        return Err(ProtocolError::InvalidState(format!(
-            "tree hash mismatch: expected {}, found {}",
-            hash.to_hex(),
-            found.to_hex()
-        )));
-    }
-    Ok(Some((tree, bytes.len() as u64)))
-}
-
-enum TreeClosureAction {
-    Tree(ContentHash),
-    Blob(ContentHash),
-}
-
-async fn enumerate_tree_closure_filtered_async<S>(
-    store: &S,
-    tree_hash: ContentHash,
-    excluded: &HashSet<ContentHash>,
-    seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<ObjectInfo>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    let mut stack = vec![TreeClosureAction::Tree(tree_hash)];
-
-    while let Some(action) = stack.pop() {
-        match action {
-            TreeClosureAction::Tree(hash) => {
-                if excluded.contains(&hash) {
-                    continue;
-                }
-                if !seen.insert(hash) {
-                    continue;
-                }
-                let (tree, tree_size) = load_tree_async(store, &hash)
-                    .await?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-                out.push(ObjectInfo {
-                    id: ObjectId::Hash(hash),
-                    obj_type: ObjectType::Tree,
-                    size: tree_size,
-                    delta_base: None,
-                });
-
-                for entry in tree.entries().iter().rev() {
-                    match entry.entry_type {
-                        EntryType::Blob | EntryType::Symlink => {
-                            stack.push(TreeClosureAction::Blob(entry.hash));
-                        }
-                        EntryType::Tree => {
-                            stack.push(TreeClosureAction::Tree(entry.hash));
-                        }
-                    }
-                }
-            }
-            TreeClosureAction::Blob(hash) => {
-                if excluded.contains(&hash) {
-                    continue;
-                }
-                if !seen.insert(hash) {
-                    continue;
-                }
-                let size = store
-                    .blob_size_async(&hash)
-                    .await?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-                out.push(ObjectInfo {
-                    id: ObjectId::Hash(hash),
-                    obj_type: ObjectType::Blob,
-                    size,
-                    delta_base: None,
-                });
-                emit_redaction_info_async(store, &hash, out).await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-enum TreePlanAction {
-    Tree(ContentHash),
-    Blob(ContentHash),
-}
-
-async fn enumerate_tree_plan_filtered_async<S>(
-    store: &S,
-    tree_hash: ContentHash,
-    excluded: &HashSet<ContentHash>,
-    seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    let mut stack = vec![TreePlanAction::Tree(tree_hash)];
-
-    while let Some(action) = stack.pop() {
-        match action {
-            TreePlanAction::Tree(hash) => {
-                if excluded.contains(&hash) {
-                    continue;
-                }
-                if !seen.insert(hash) {
-                    continue;
-                }
-                let (tree, _) = load_tree_async(store, &hash)
-                    .await?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-                out.push(PlannedObject {
-                    id: ObjectId::Hash(hash),
-                    obj_type: ObjectType::Tree,
-                });
-
-                for entry in tree.entries().iter().rev() {
-                    match entry.entry_type {
-                        EntryType::Blob | EntryType::Symlink => {
-                            stack.push(TreePlanAction::Blob(entry.hash));
-                        }
-                        EntryType::Tree => {
-                            stack.push(TreePlanAction::Tree(entry.hash));
-                        }
-                    }
-                }
-            }
-            TreePlanAction::Blob(hash) => {
-                if excluded.contains(&hash) {
-                    continue;
-                }
-                if !seen.insert(hash) {
-                    continue;
-                }
-                out.push(PlannedObject {
-                    id: ObjectId::Hash(hash),
-                    obj_type: ObjectType::Blob,
-                });
-                emit_redaction_plan_async(store, &hash, out).await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn emit_state_visibility_info_async<S>(
-    store: &S,
-    state: &ChangeId,
-    out: &mut Vec<ObjectInfo>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    if let Some(bytes) = store
-        .get_state_visibility_bytes_for_state_async(state)
-        .await?
-    {
-        out.push(ObjectInfo {
-            id: ObjectId::ChangeId(*state),
-            obj_type: ObjectType::StateVisibility,
-            size: bytes.len() as u64,
-            delta_base: None,
-        });
-    }
-    Ok(())
-}
-
-async fn emit_state_visibility_plan_async<S>(
-    store: &S,
-    state: &ChangeId,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    if store.has_state_visibility_for_state_async(state).await? {
-        out.push(PlannedObject {
-            id: ObjectId::ChangeId(*state),
-            obj_type: ObjectType::StateVisibility,
-        });
-    }
-    Ok(())
-}
-
-async fn emit_redaction_info_async<S>(
-    store: &S,
-    blob: &ContentHash,
-    out: &mut Vec<ObjectInfo>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    if let Some(bytes) = store.get_redactions_bytes_for_blob_async(blob).await? {
-        out.push(ObjectInfo {
-            id: ObjectId::Hash(*blob),
-            obj_type: ObjectType::Redaction,
-            size: bytes.len() as u64,
-            delta_base: None,
-        });
-    }
-    Ok(())
-}
-
-async fn emit_redaction_plan_async<S>(
-    store: &S,
-    blob: &ContentHash,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    if store.has_redactions_for_blob_async(blob).await? {
-        out.push(PlannedObject {
-            id: ObjectId::Hash(*blob),
-            obj_type: ObjectType::Redaction,
-        });
-    }
-    Ok(())
-}
-
-async fn collect_excluded_async<S>(
-    store: &S,
-    roots: &[ChangeId],
-) -> Result<(HashSet<ChangeId>, HashSet<ContentHash>)>
-where
-    S: ObjectStore + ?Sized,
-{
-    if roots.is_empty() {
-        return Ok((HashSet::new(), HashSet::new()));
-    }
-
-    let mut excluded_states: HashSet<ChangeId> = HashSet::new();
-    let mut excluded_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<ChangeId> = VecDeque::new();
-
-    for id in roots {
-        queue.push_back(*id);
-    }
-
-    while let Some(id) = queue.pop_front() {
-        if !excluded_states.insert(id) {
-            continue;
-        }
-
-        let state = match load_state_async(store, &id).await? {
-            Some((state, _)) => state,
-            None => continue,
-        };
-
-        for parent in &state.parents {
-            queue.push_back(*parent);
-        }
-
-        collect_tree_hashes_async(store, state.tree, &mut excluded_hashes).await?;
-        if let Some(provenance_root) = state.provenance {
-            collect_tree_hashes_async(store, provenance_root, &mut excluded_hashes).await?;
-        }
-        if let Some(context_root) = state.context {
-            collect_tree_hashes_async(store, context_root, &mut excluded_hashes).await?;
-        }
-    }
-
-    Ok((excluded_states, excluded_hashes))
-}
-
-async fn collect_tree_hashes_async<S>(
-    store: &S,
-    tree_hash: ContentHash,
-    excluded: &mut HashSet<ContentHash>,
-) -> Result<()>
-where
-    S: ObjectStore + ?Sized,
-{
-    let mut stack = vec![tree_hash];
-
-    while let Some(hash) = stack.pop() {
-        if !excluded.insert(hash) {
-            continue;
-        }
-
-        let tree = match load_tree_async(store, &hash).await? {
-            Some((tree, _)) => tree,
-            None => continue,
-        };
-
-        for entry in tree.entries() {
-            match entry.entry_type {
-                EntryType::Blob | EntryType::Symlink => {
-                    excluded.insert(entry.hash);
-                }
-                EntryType::Tree => {
-                    stack.push(entry.hash);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn collect_excluded(
     store: &impl LocalObjectStore,
     roots: &[ChangeId],
@@ -1004,47 +501,11 @@ pub fn is_ancestor(
     Ok(false)
 }
 
-pub async fn is_ancestor_async<S>(
-    store: &S,
-    ancestor: ChangeId,
-    descendant: ChangeId,
-) -> Result<bool>
-where
-    S: ObjectStore + ?Sized,
-{
-    if ancestor == descendant {
-        return Ok(true);
-    }
-
-    let mut seen: HashSet<ChangeId> = HashSet::new();
-    let mut queue: VecDeque<ChangeId> = VecDeque::new();
-    queue.push_back(descendant);
-
-    while let Some(id) = queue.pop_front() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let state = match load_state_async(store, &id).await? {
-            Some((state, _)) => state,
-            None => return Ok(false),
-        };
-        for parent in state.parents {
-            if parent == ancestor {
-                return Ok(true);
-            }
-            queue.push_back(parent);
-        }
-    }
-
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use chrono::Utc;
-    use futures::executor::block_on;
     use objects::{
         object::{
             Attribution, Blob, ChangeId, Principal, Redaction, State, StateVisibility, Tree,
@@ -1057,9 +518,7 @@ mod tests {
 
     use super::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
-        enumerate_state_closure_plan_with_options, enumerate_state_closure_plan_with_options_async,
-        enumerate_state_closure_with_options, enumerate_state_closure_with_options_async,
-        is_ancestor_async,
+        enumerate_state_closure_plan_with_options, enumerate_state_closure_with_options,
     };
 
     fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
@@ -1188,59 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn async_closure_helpers_match_blocking_helpers() {
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        let path = temp.path().join("story.txt");
-
-        std::fs::write(&path, "base\n").unwrap();
-        let base = repo.snapshot(Some("base".to_string()), None).unwrap();
-        std::fs::write(&path, "tip\n").unwrap();
-        let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
-
-        let options = StateClosureOptions {
-            depth: Some(1),
-            exclude_states: Vec::new(),
-        };
-        let blocking_full =
-            enumerate_state_closure_with_options(repo.store(), tip.change_id, options.clone())
-                .unwrap();
-        let async_full = block_on(enumerate_state_closure_with_options_async::<_>(
-            repo.store(),
-            tip.change_id,
-            options.clone(),
-        ))
-        .unwrap();
-        assert_eq!(
-            pairs_from_full(&async_full),
-            pairs_from_full(&blocking_full)
-        );
-
-        let blocking_plan =
-            enumerate_state_closure_plan_with_options(repo.store(), tip.change_id, options.clone())
-                .unwrap();
-        let async_plan = block_on(enumerate_state_closure_plan_with_options_async::<_>(
-            repo.store(),
-            tip.change_id,
-            options,
-        ))
-        .unwrap();
-        assert_eq!(
-            pairs_from_plan(&async_plan),
-            pairs_from_plan(&blocking_plan)
-        );
-
-        assert!(
-            block_on(is_ancestor_async::<_>(
-                repo.store(),
-                base.change_id,
-                tip.change_id
-            ))
-            .unwrap()
-        );
-    }
-
-    #[test]
     fn shared_tree_and_blob_references_are_emitted_once() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1352,18 +758,6 @@ mod tests {
             StateClosureOptions::default(),
         )
         .unwrap();
-        let async_full = block_on(enumerate_state_closure_with_options_async::<_>(
-            repo.store(),
-            state.change_id,
-            StateClosureOptions::default(),
-        ))
-        .unwrap();
-        let async_plan = block_on(enumerate_state_closure_plan_with_options_async::<_>(
-            repo.store(),
-            state.change_id,
-            StateClosureOptions::default(),
-        ))
-        .unwrap();
 
         assert!(
             full.iter()
@@ -1375,19 +769,6 @@ mod tests {
             plan.iter()
                 .any(|p| p.obj_type == ObjectType::Redaction && p.id == ObjectId::Hash(blob_hash)),
             "plan closure must include a Redaction entry for the redacted blob"
-        );
-        assert!(
-            async_full
-                .iter()
-                .any(|info| info.obj_type == ObjectType::Redaction
-                    && info.id == ObjectId::Hash(blob_hash)),
-            "async full closure must include a Redaction entry for the redacted blob"
-        );
-        assert!(
-            async_plan
-                .iter()
-                .any(|p| p.obj_type == ObjectType::Redaction && p.id == ObjectId::Hash(blob_hash)),
-            "async plan closure must include a Redaction entry for the redacted blob"
         );
     }
 
@@ -1426,18 +807,6 @@ mod tests {
             StateClosureOptions::default(),
         )
         .unwrap();
-        let async_full = block_on(enumerate_state_closure_with_options_async::<_>(
-            repo.store(),
-            state.change_id,
-            StateClosureOptions::default(),
-        ))
-        .unwrap();
-        let async_plan = block_on(enumerate_state_closure_plan_with_options_async::<_>(
-            repo.store(),
-            state.change_id,
-            StateClosureOptions::default(),
-        ))
-        .unwrap();
 
         assert!(
             full.iter()
@@ -1450,20 +819,6 @@ mod tests {
                 .any(|p| p.obj_type == ObjectType::StateVisibility
                     && p.id == ObjectId::ChangeId(state.change_id)),
             "plan closure must include a StateVisibility entry for the visible state"
-        );
-        assert!(
-            async_full
-                .iter()
-                .any(|info| info.obj_type == ObjectType::StateVisibility
-                    && info.id == ObjectId::ChangeId(state.change_id)),
-            "async full closure must include a StateVisibility entry for the visible state"
-        );
-        assert!(
-            async_plan
-                .iter()
-                .any(|p| p.obj_type == ObjectType::StateVisibility
-                    && p.id == ObjectId::ChangeId(state.change_id)),
-            "async plan closure must include a StateVisibility entry for the visible state"
         );
     }
 }

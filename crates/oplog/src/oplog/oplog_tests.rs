@@ -8,10 +8,7 @@ use std::{
 use objects::object::{ChangeId, ContentHash, MarkerName, Scope, ThreadName, TransactionId};
 use tempfile::TempDir;
 
-use super::{
-    LocalOpLogRecorder, OpLog, OpRecord,
-    oplog_backend::{LocalOpLogBackend, OpLogBackend},
-};
+use super::{LocalOpLogRecorder, OpLog, OpRecord, oplog_backend::LocalOpLogBackend};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -335,60 +332,6 @@ fn committed_batch_records_uses_rebuilt_index_for_non_adjacent_coalesced_batch()
         .collect::<Vec<_>>();
     assert_eq!(middle, committed[0] + 2, "precondition: non-adjacent batch");
     assert_eq!(recovered, vec![committed_state, later_state]);
-}
-
-#[test]
-fn test_oplogbackend_trait_async_methods_dispatch() {
-    // The CLI calls OpLog's inherent (sync) batch methods; the generic
-    // backend plumbing and the hosted server reach the async trait
-    // surface. Drive the trait methods explicitly so the
-    // `impl LocalOpLogBackend for OpLog` async helpers and the non-scoped
-    // trait defaults that delegate to them are covered.
-    let (_temp, oplog) = create_oplog();
-    let state1 = ChangeId::generate();
-    let state2 = ChangeId::generate();
-    oplog
-        .record_snapshot(&state1, None, None, Some(&scope("lane-a")))
-        .unwrap();
-    oplog
-        .record_snapshot(&state2, Some(&state1), None, Some(&scope("lane-a")))
-        .unwrap();
-
-    // Non-scoped trait defaults delegate to the *_scoped overrides.
-    let recent = pollster::block_on(OpLogBackend::recent_batches_async(&oplog, 2)).unwrap();
-    assert_eq!(recent.len(), 2);
-    let undo = pollster::block_on(OpLogBackend::undo_batches_async(&oplog, 2)).unwrap();
-    assert_eq!(undo.len(), 2);
-    oplog.mark_batch_undone(&undo[0]).unwrap();
-    let redo = pollster::block_on(OpLogBackend::redo_batches_async(&oplog, 2)).unwrap();
-    assert_eq!(redo.len(), 1);
-
-    // OpLog's override of the dedup'd transaction commit: first append
-    // records, the second call with the same transaction id is deduped.
-    let tx_op = || {
-        vec![OpRecord::TransactionCommit {
-            transaction_id: "tx-1".into(),
-            op_count: 0,
-        }]
-    };
-    let first = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction_async(
-        &oplog,
-        tx_op(),
-        Some(&scope("lane-a")),
-        &transaction_id("tx-1"),
-        16,
-    ))
-    .unwrap();
-    assert!(first.is_some());
-    let dup = pollster::block_on(OpLogBackend::record_batch_scoped_if_no_transaction_async(
-        &oplog,
-        tx_op(),
-        Some(&scope("lane-a")),
-        &transaction_id("tx-1"),
-        16,
-    ))
-    .unwrap();
-    assert!(dup.is_none());
 }
 
 /// The unbounded `record_batch_exactly_once` dedups a retry even after far

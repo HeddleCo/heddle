@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::{
-    object::ActionId,
-    store::{LocalObjectStore, ObjectKey, ObjectStore},
-};
+use objects::store::LocalObjectStore;
 
-use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result};
+use crate::{ObjectId, ObjectInfo, ObjectType, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectAvailabilityPlan {
@@ -37,16 +34,6 @@ pub fn has_object(store: &impl LocalObjectStore, info: &ObjectInfo) -> Result<bo
     }
 }
 
-pub async fn has_object_async<S>(store: &S, info: &ObjectInfo) -> Result<bool>
-where
-    S: ObjectStore + ?Sized,
-{
-    let Some(key) = object_key_for_availability(info) else {
-        return Ok(false);
-    };
-    Ok(store.has_object(&key).await?)
-}
-
 pub fn plan_object_availability(
     store: &impl LocalObjectStore,
     objects: &[ObjectInfo],
@@ -64,63 +51,6 @@ pub fn plan_object_availability(
     }
 
     Ok(plan)
-}
-
-pub async fn plan_object_availability_async<S>(
-    store: &S,
-    objects: &[ObjectInfo],
-) -> Result<ObjectAvailabilityPlan>
-where
-    S: ObjectStore + ?Sized,
-{
-    let mut plan = ObjectAvailabilityPlan::default();
-    let keyed: Vec<_> = objects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, info)| object_key_for_availability(info).map(|key| (index, key)))
-        .collect();
-    let keys: Vec<_> = keyed.iter().map(|(_, key)| key.clone()).collect();
-    let presence = store.has_many(&keys).await?;
-    if presence.len() != keyed.len() {
-        return Err(ProtocolError::InvalidState(format!(
-            "object store returned {} availability results for {} requested objects",
-            presence.len(),
-            keyed.len()
-        )));
-    }
-
-    let mut present = vec![false; objects.len()];
-    for ((index, _key), result) in keyed.into_iter().zip(presence) {
-        present[index] = result.present;
-    }
-
-    for (info, is_present) in objects.iter().zip(present) {
-        if is_present {
-            plan.have_objects.push(info.id.clone());
-            plan.present_objects.push(info.id.clone());
-        } else {
-            plan.want_objects.push(info.id.clone());
-            plan.missing_objects.push(info.id.clone());
-        }
-    }
-
-    Ok(plan)
-}
-
-fn object_key_for_availability(info: &ObjectInfo) -> Option<ObjectKey> {
-    match (&info.id, info.obj_type) {
-        (ObjectId::Hash(hash), ObjectType::Blob) => Some(ObjectKey::Blob(*hash)),
-        (ObjectId::Hash(hash), ObjectType::Tree) => Some(ObjectKey::Tree(*hash)),
-        (ObjectId::Hash(hash), ObjectType::Action) => {
-            Some(ObjectKey::Action(ActionId::from_hash(*hash)))
-        }
-        (ObjectId::ChangeId(id), ObjectType::State) => Some(ObjectKey::State(*id)),
-        // Sidecars are merge/dedupe records. Keep the existing conservative
-        // sync semantics: fetch them and validate at the repository boundary.
-        (ObjectId::Hash(_), ObjectType::Redaction)
-        | (ObjectId::ChangeId(_), ObjectType::StateVisibility) => None,
-        _ => None,
-    }
 }
 
 impl ObjectAvailabilityPlan {

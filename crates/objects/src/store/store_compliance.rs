@@ -4,16 +4,10 @@
 //! Call [`run_compliance_tests`] from any `#[test]` or `#[tokio::test]` that
 //! has a concrete [`LocalObjectStore`] to verify it satisfies the full contract.
 
-use bytes::Bytes;
-use futures::{StreamExt, executor::block_on, stream};
-
 use crate::{
     error::StorageErrorKind,
     object::{Attribution, Blob, ContentHash, Principal, State, Tree},
-    store::{
-        AsyncFromLocalRef, ByteStream, LocalObjectStore, ObjectBytes, ObjectCollection, ObjectKey,
-        ObjectStore, PageRequest, PageToken,
-    },
+    store::{LocalObjectStore, PageRequest, PageToken},
 };
 
 fn attribution() -> Attribution {
@@ -30,7 +24,6 @@ pub fn run_compliance_tests<S: LocalObjectStore>(store: &S) {
     blob_has(store);
     blob_list(store);
     blob_list_paginates(store);
-    async_object_adapter_batches_and_streams(store);
     storage_error_kinds_are_machine_readable(store);
     tree_round_trip(store);
     tree_missing_returns_none(store);
@@ -128,76 +121,6 @@ fn blob_list_paginates<S: LocalObjectStore>(store: &S) {
         })
         .expect_err("invalid local page token must fail");
     assert_eq!(err.storage_kind(), StorageErrorKind::Invalid);
-}
-
-fn async_object_adapter_batches_and_streams<S: LocalObjectStore>(store: &S) {
-    let async_store = AsyncFromLocalRef::new(store);
-    let first = Bytes::from_static(b"compliance: async put_many blob");
-    let first_hash = Blob::from_slice(&first).hash();
-    let outcomes = block_on(ObjectStore::put_many(
-        &async_store,
-        vec![ObjectBytes::new(ObjectKey::Blob(first_hash), first.clone())],
-    ))
-    .expect("async put_many failed");
-    assert_eq!(outcomes.len(), 1);
-    assert!(outcomes[0].written);
-
-    let missing_hash = Blob::from("compliance: async missing blob").hash();
-    let presence = block_on(ObjectStore::has_many(
-        &async_store,
-        &[ObjectKey::Blob(first_hash), ObjectKey::Blob(missing_hash)],
-    ))
-    .expect("async has_many failed");
-    assert_eq!(
-        presence.iter().map(|p| p.present).collect::<Vec<_>>(),
-        vec![true, false]
-    );
-
-    let stream_hash = Blob::from_slice(b"compliance: async streamed blob").hash();
-    let stream_key = ObjectKey::Blob(stream_hash);
-    let source: ByteStream = Box::pin(stream::iter([
-        Ok(Bytes::from_static(b"compliance: async ")),
-        Ok(Bytes::from_static(b"streamed blob")),
-    ]));
-    let outcome = block_on(ObjectStore::put_object_stream(
-        &async_store,
-        stream_key.clone(),
-        source,
-    ))
-    .expect("async put_object_stream failed");
-    assert!(outcome.written);
-
-    let streamed = block_on(async {
-        let mut source = ObjectStore::get_object_stream(&async_store, &stream_key)
-            .await
-            .expect("async get_object_stream failed")
-            .expect("streamed blob missing");
-        let mut out = Vec::new();
-        while let Some(chunk) = source.next().await {
-            out.extend_from_slice(&chunk.expect("stream chunk failed"));
-        }
-        out
-    });
-    assert_eq!(streamed, b"compliance: async streamed blob");
-
-    let size = block_on(ObjectStore::blob_size_async(&async_store, &stream_hash))
-        .expect("async blob_size failed")
-        .expect("streamed blob missing for async blob_size");
-    assert_eq!(size, b"compliance: async streamed blob".len() as u64);
-
-    let page = block_on(ObjectStore::list_page(
-        &async_store,
-        ObjectCollection::Blobs,
-        PageRequest::first(1),
-    ))
-    .expect("async list_page failed");
-    assert!(page.items.len() <= 1);
-    assert!(
-        page.items
-            .iter()
-            .all(|key| matches!(key, ObjectKey::Blob(_))),
-        "async blob listing returned a non-blob key"
-    );
 }
 
 fn storage_error_kinds_are_machine_readable<S: LocalObjectStore>(store: &S) {

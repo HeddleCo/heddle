@@ -34,6 +34,7 @@
 //! shared across pairs so tree-sitter parses don't get redone.
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     path::{Path, PathBuf},
     time::Instant,
@@ -207,6 +208,55 @@ pub struct HotSpotsReport {
     pub total_events: usize,
 }
 
+/// Precomputed semantic changes for one walked state-pair.
+///
+/// This is the storage-free input shape for hosted callers: Weft can perform
+/// its own async state walk, tree diff, and blob loading, then feed the
+/// resulting semantic changes into Heddle's shared hot-spot scoring logic.
+/// Batches are expected newest-to-oldest, matching [`analyze_hot_spots`].
+#[derive(Clone, Debug)]
+pub struct HotSpotChangeBatch<'a> {
+    pub state_id: ChangeId,
+    pub actor: Option<Cow<'a, str>>,
+    pub changes: &'a [SemanticChange],
+}
+
+impl<'a> HotSpotChangeBatch<'a> {
+    pub fn new(state_id: ChangeId, changes: &'a [SemanticChange]) -> Self {
+        Self {
+            state_id,
+            actor: None,
+            changes,
+        }
+    }
+
+    pub fn with_actor(
+        state_id: ChangeId,
+        actor: impl Into<Cow<'a, str>>,
+        changes: &'a [SemanticChange],
+    ) -> Self {
+        Self {
+            state_id,
+            actor: Some(actor.into()),
+            changes,
+        }
+    }
+}
+
+/// Aggregate already-computed semantic-change batches into a ranked hot-spot
+/// report without reading from an object store.
+pub fn analyze_hot_spots_from_changes<'a>(
+    batches: impl IntoIterator<Item = HotSpotChangeBatch<'a>>,
+    params: &HotSpotParams,
+) -> HotSpotsReport {
+    let mut accumulator = HotSpotAccumulator::new(params);
+    let limit = params.limit_states.unwrap_or(usize::MAX);
+    for batch in batches.into_iter().take(limit) {
+        accumulator.record_batch(batch.state_id, batch.actor.as_deref(), batch.changes);
+    }
+    accumulator.finish()
+}
+
 /// Walk `walk_from` backwards through `first_parent()` chains and
 /// aggregate semantic-change events into hot-spots according to
 /// `params`.
@@ -223,11 +273,7 @@ pub fn analyze_hot_spots(
     let cache = SemanticParseCache::shared();
     let limit = params.limit_states.unwrap_or(usize::MAX);
 
-    // Slot bookkeeping. We maintain one map keyed on `HotSpotKeyValue`
-    // and update it for every event we see.
-    let mut slots: BTreeMap<HotSpotKeyValue, SlotAccumulator> = BTreeMap::new();
-    let mut total_events = 0usize;
-    let mut states_walked = 0usize;
+    let mut accumulator = HotSpotAccumulator::new(params);
 
     let mut current_id = walk_from;
     let mut current = match store.get_state(&current_id)? {
@@ -235,7 +281,7 @@ pub fn analyze_hot_spots(
         None => return Ok(HotSpotsReport::default()),
     };
 
-    while states_walked < limit {
+    while accumulator.states_walked < limit {
         let Some(parent_id) = current.first_parent().copied() else {
             break;
         };
@@ -262,6 +308,39 @@ pub fn analyze_hot_spots(
             None
         };
 
+        accumulator.record_batch(current_id, actor_label.as_deref(), &diff.changes);
+        current_id = parent_id;
+        current = parent;
+    }
+
+    let _ = started; // surface elapsed_ms in a future field if needed
+
+    Ok(accumulator.finish())
+}
+
+struct HotSpotAccumulator<'a> {
+    params: &'a HotSpotParams,
+    slots: BTreeMap<HotSpotKeyValue, SlotAccumulator>,
+    total_events: usize,
+    states_walked: usize,
+}
+
+impl<'a> HotSpotAccumulator<'a> {
+    fn new(params: &'a HotSpotParams) -> Self {
+        Self {
+            params,
+            slots: BTreeMap::new(),
+            total_events: 0,
+            states_walked: 0,
+        }
+    }
+
+    fn record_batch(
+        &mut self,
+        state_id: ChangeId,
+        actor: Option<&str>,
+        changes: &[SemanticChange],
+    ) {
         // Track which slots were touched by this state, so we increment
         // `state_count` once per state regardless of how many events
         // contribute. Event volume is `event_count`; state volume is
@@ -269,17 +348,17 @@ pub fn analyze_hot_spots(
         let mut touched_this_state: std::collections::BTreeSet<HotSpotKeyValue> =
             Default::default();
 
-        for change in &diff.changes {
+        for change in changes {
             let Some(kind) = HotEventKind::classify(change) else {
                 continue;
             };
-            if !params.include_kinds.is_empty() && !params.include_kinds.contains(&kind) {
+            if !self.params.include_kinds.is_empty() && !self.params.include_kinds.contains(&kind) {
                 continue;
             }
             // Function-keyed aggregation requires a function-bearing
             // event; file-only events are silently skipped under
             // `HotSpotKey::Function`.
-            let key = match (params.group_by, change_to_key(change)) {
+            let key = match (self.params.group_by, change_to_key(change)) {
                 (HotSpotKey::File, Some((path, _))) => HotSpotKeyValue::File { path },
                 (HotSpotKey::Function, Some((path, Some(name)))) => {
                     HotSpotKeyValue::Function { path, name }
@@ -287,67 +366,72 @@ pub fn analyze_hot_spots(
                 _ => continue,
             };
 
-            if !path_passes_filter(key.path(), &params.include_paths, &params.exclude_paths) {
+            if !path_passes_filter(
+                key.path(),
+                &self.params.include_paths,
+                &self.params.exclude_paths,
+            ) {
                 continue;
             }
 
-            total_events += 1;
+            self.total_events += 1;
 
-            let slot = slots
+            let slot = self
+                .slots
                 .entry(key.clone())
-                .or_insert_with(|| SlotAccumulator::new(current_id));
+                .or_insert_with(|| SlotAccumulator::new(state_id));
             slot.event_count += 1;
-            slot.last_seen = current_id;
+            slot.last_seen = state_id;
             *slot.by_kind.entry(kind).or_insert(0) += 1;
-            if let Some(actor) = &actor_label {
+            if self.params.include_actors
+                && let Some(actor) = actor
+            {
                 let by_actor = slot.by_actor.get_or_insert_with(BTreeMap::new);
-                *by_actor.entry(actor.clone()).or_insert(0) += 1;
+                *by_actor.entry(actor.to_string()).or_insert(0) += 1;
             }
             touched_this_state.insert(key);
         }
         for key in touched_this_state {
-            if let Some(slot) = slots.get_mut(&key) {
+            if let Some(slot) = self.slots.get_mut(&key) {
                 slot.state_count += 1;
             }
         }
 
-        states_walked += 1;
-        current_id = parent_id;
-        current = parent;
+        self.states_walked += 1;
     }
 
-    let _ = started; // surface elapsed_ms in a future field if needed
+    fn finish(self) -> HotSpotsReport {
+        // Rank by event_count desc, then state_count desc, then key for
+        // determinism. Ties on event count broken by "this keeps coming
+        // up across many states" rather than alphabetical.
+        let mut ranked: Vec<(HotSpotKeyValue, SlotAccumulator)> = self.slots.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.event_count
+                .cmp(&a.1.event_count)
+                .then(b.1.state_count.cmp(&a.1.state_count))
+                .then(a.0.cmp(&b.0))
+        });
 
-    // Rank by event_count desc, then state_count desc, then key for
-    // determinism. Ties on event count broken by "this keeps coming
-    // up across many states" rather than alphabetical.
-    let mut ranked: Vec<(HotSpotKeyValue, SlotAccumulator)> = slots.into_iter().collect();
-    ranked.sort_by(|a, b| {
-        b.1.event_count
-            .cmp(&a.1.event_count)
-            .then(b.1.state_count.cmp(&a.1.state_count))
-            .then(a.0.cmp(&b.0))
-    });
+        let spots = ranked
+            .into_iter()
+            .take(self.params.top_n)
+            .map(|(key, slot)| HotSpot {
+                key,
+                event_count: slot.event_count,
+                state_count: slot.state_count,
+                first_seen: slot.first_seen,
+                last_seen: slot.last_seen,
+                by_kind: slot.by_kind,
+                by_actor: slot.by_actor,
+            })
+            .collect();
 
-    let spots = ranked
-        .into_iter()
-        .take(params.top_n)
-        .map(|(key, slot)| HotSpot {
-            key,
-            event_count: slot.event_count,
-            state_count: slot.state_count,
-            first_seen: slot.first_seen,
-            last_seen: slot.last_seen,
-            by_kind: slot.by_kind,
-            by_actor: slot.by_actor,
-        })
-        .collect();
-
-    Ok(HotSpotsReport {
-        spots,
-        states_walked,
-        total_events,
-    })
+        HotSpotsReport {
+            spots,
+            states_walked: self.states_walked,
+            total_events: self.total_events,
+        }
+    }
 }
 
 /// Internal accumulator — flattened into [`HotSpot`] at the end.
@@ -474,7 +558,7 @@ fn _state_anchor(_: &State) {}
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Attribution, ChangeId, Principal, State, Tree, TreeEntry},
+        object::{Attribution, ChangeId, Principal, SemanticChange, State, Tree, TreeEntry},
         store::InMemoryStore,
     };
 
@@ -640,6 +724,49 @@ mod tests {
         // since each commit had a different principal in the fixture.
         assert_eq!(hist.values().sum::<usize>(), 3);
         assert_eq!(hist.len(), 3);
+    }
+
+    #[test]
+    fn aggregates_precomputed_changes_without_store() {
+        let first = ChangeId::from_bytes([1; 16]);
+        let second = ChangeId::from_bytes([2; 16]);
+        let first_changes = vec![SemanticChange::FunctionModified {
+            file: "src/lib.rs".into(),
+            name: "run".to_string(),
+            importance: None,
+        }];
+        let second_changes = vec![SemanticChange::FunctionModified {
+            file: "src/lib.rs".into(),
+            name: "run".to_string(),
+            importance: None,
+        }];
+        let params = HotSpotParams {
+            group_by: HotSpotKey::Function,
+            include_actors: true,
+            ..HotSpotParams::default()
+        };
+
+        let report = analyze_hot_spots_from_changes(
+            [
+                HotSpotChangeBatch::with_actor(first, "alice", &first_changes),
+                HotSpotChangeBatch::with_actor(second, "bob", &second_changes),
+            ],
+            &params,
+        );
+
+        assert_eq!(report.states_walked, 2);
+        assert_eq!(report.total_events, 2);
+        let spot = report.spots.first().expect("expected a hot spot");
+        assert_eq!(spot.event_count, 2);
+        assert_eq!(spot.state_count, 2);
+        assert!(matches!(&spot.key, HotSpotKeyValue::Function { path, name }
+                if path == std::path::Path::new("src/lib.rs") && name == "run"));
+        let actors = spot
+            .by_actor
+            .as_ref()
+            .expect("include_actors should record actor histogram");
+        assert_eq!(actors.get("alice"), Some(&1));
+        assert_eq!(actors.get("bob"), Some(&1));
     }
 
     #[test]

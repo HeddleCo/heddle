@@ -12,6 +12,7 @@ pub mod compression;
 pub mod fs;
 pub mod liveness;
 pub mod local_ext;
+pub mod local_store;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
 pub mod pack;
@@ -24,12 +25,14 @@ pub use agent_registry::{
     ReserveOutcome, generate_agent_id,
 };
 pub use async_store::{
-    AsyncFromLocal, AsyncFromLocalRef, ByteStream, LocalObjectStore, ObjectStore, file_byte_stream,
+    ByteStream, ObjectStore, collect_optional_stream, collect_stream, file_byte_stream,
+    single_chunk_stream,
 };
 pub use compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use fs::FsStore;
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
 pub use local_ext::{LocalObjectStoreExt, PackMaintenanceStoreExt};
+pub use local_store::LocalObjectStore;
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};

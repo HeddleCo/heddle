@@ -18,6 +18,117 @@ use crate::{
     },
 };
 
+/// Perform a cheap semantic no-op check over caller-provided file changes and
+/// content loaders.
+pub fn semantic_check_only_from_changes<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+) -> Result<SemanticCheckOnlyResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    semantic_check_only_from_changes_with_cache(
+        file_changes,
+        load_old,
+        load_new,
+        options,
+        SemanticParseCache::shared(),
+    )
+}
+
+/// Perform a cheap semantic no-op check over caller-provided file changes and
+/// content loaders using an injected cache.
+pub fn semantic_check_only_from_changes_with_cache<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+    cache: &SemanticParseCache,
+) -> Result<SemanticCheckOnlyResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    SemanticEngine::new(file_changes, load_old, load_new, options, cache).check_only()
+}
+
+/// Perform semantic summary analysis over caller-provided file changes and
+/// content loaders.
+pub fn semantic_diff_summary_from_changes<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+) -> Result<SemanticSummaryResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    semantic_diff_summary_from_changes_with_cache(
+        file_changes,
+        load_old,
+        load_new,
+        options,
+        SemanticParseCache::shared(),
+    )
+}
+
+/// Perform semantic summary analysis over caller-provided file changes and
+/// content loaders using an injected cache.
+pub fn semantic_diff_summary_from_changes_with_cache<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+    cache: &SemanticParseCache,
+) -> Result<SemanticSummaryResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    SemanticEngine::new(file_changes, load_old, load_new, options, cache).summary()
+}
+
+/// Perform semantic diff analysis over caller-provided file changes and content
+/// loaders.
+pub fn semantic_diff_from_changes<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+) -> Result<SemanticDiffResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    semantic_diff_from_changes_with_cache(
+        file_changes,
+        load_old,
+        load_new,
+        options,
+        SemanticParseCache::shared(),
+    )
+}
+
+/// Perform semantic diff analysis over caller-provided file changes and content
+/// loaders using an injected cache.
+pub fn semantic_diff_from_changes_with_cache<F, G>(
+    file_changes: FileChangeSet,
+    load_old: F,
+    load_new: G,
+    options: &SemanticDiffOptions,
+    cache: &SemanticParseCache,
+) -> Result<SemanticDiffResult, anyhow::Error>
+where
+    F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+    G: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
+{
+    SemanticEngine::new(file_changes, load_old, load_new, options, cache).full()
+}
+
 /// Perform a cheap semantic no-op check between two trees.
 pub fn semantic_check_only<S: LocalObjectStore + ?Sized>(
     store: &S,
@@ -266,5 +377,38 @@ fn load_worktree_blob_content(
         Ok(content) => Ok(Some(content)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use objects::object::{DiffKind, FileChangeSet, SemanticChange};
+
+    use super::*;
+
+    #[test]
+    fn semantic_diff_from_changes_uses_caller_loaders() {
+        let file_changes = FileChangeSet::from(vec![("lib.rs".to_string(), DiffKind::Modified)]);
+
+        let result = semantic_diff_from_changes(
+            file_changes,
+            |path| {
+                assert_eq!(path, Path::new("lib.rs"));
+                Ok(Some("fn run() -> i32 { 1 }\n".to_string()))
+            },
+            |path| {
+                assert_eq!(path, Path::new("lib.rs"));
+                Ok(Some("fn run() -> i32 { 2 }\n".to_string()))
+            },
+            &SemanticDiffOptions::default(),
+        )
+        .expect("semantic diff should succeed");
+
+        assert!(result.changes.iter().any(|change| {
+            matches!(change, SemanticChange::FunctionModified { file, name, .. }
+                if file == Path::new("lib.rs") && name == "run")
+        }));
     }
 }

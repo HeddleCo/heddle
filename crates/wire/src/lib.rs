@@ -43,30 +43,21 @@ pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, Refs
 pub use message_status::{Error, ErrorCode, Status, StatusCode};
 pub use native_pack::{
     NativePackBundle, NativePackFiles, NativePackMappedFile, PackChunkState, build_native_pack,
-    build_native_pack_async, build_native_pack_to_paths, build_native_pack_to_paths_async,
-    install_received_pack, install_received_pack_async, install_received_pack_from_paths,
-    install_received_pack_from_paths_async, install_received_pack_stream,
+    build_native_pack_to_paths, install_received_pack, install_received_pack_from_paths,
     is_native_packable_object_type, map_pack_file, native_pack_excluded_object_types,
     next_pack_chunk, next_pack_chunk_bytes, next_pack_file_chunk, next_pack_mapped_file_chunk,
     receive_pack_chunk,
 };
-pub use object_availability::{
-    ObjectAvailabilityPlan, has_object, has_object_async, plan_object_availability,
-    plan_object_availability_async,
-};
+pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 pub use object_graph::{
     ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions, enumerate_state_closure,
-    enumerate_state_closure_async, enumerate_state_closure_plan,
-    enumerate_state_closure_plan_async, enumerate_state_closure_plan_with_options,
-    enumerate_state_closure_plan_with_options_async, enumerate_state_closure_with_options,
-    enumerate_state_closure_with_options_async, is_ancestor, is_ancestor_async,
+    enumerate_state_closure_plan, enumerate_state_closure_plan_with_options,
+    enumerate_state_closure_with_options, is_ancestor,
 };
 pub use object_transfer::{
     MAX_PULL_DECODE_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
     MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, check_received_transfer_blob_size, chunk_bounds,
-    chunk_count, chunk_offset, load_object_data, load_object_data_async, load_object_stream_async,
-    load_requested_object, load_requested_object_async, store_received_object,
-    store_received_object_async,
+    chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
 pub use scope_match::scope_contains;
 

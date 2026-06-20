@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{collections::HashMap, fs, sync::Mutex};
+use std::fs;
 
 use objects::{
-    object::{Blob, ChangeId, MarkerName, ThreadName, Tree, TreeEntry},
-    store::{ByteStream, LocalObjectStore, ObjectKey, ObjectPutOutcome, ObjectStore, ShallowInfo},
+    object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
+    store::LocalObjectStore,
     util::symlink_target_bytes,
 };
-use oplog::{LocalOpLogBackend, OpLogBackend, OpRecord};
-use refs::{AsyncRefBackend, Head, RefExpectation, RefUpdate};
+use oplog::{LocalOpLogBackend, OpRecord};
+use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -16,187 +16,14 @@ use super::{
     repository_snapshot::{SnapshotFault, with_snapshot_fault},
 };
 use crate::{
-    AsyncRepository, ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository,
-    RepositoryCapability, RepositoryCore, ThreadFreshness, ThreadManager, WorktreeIndex,
+    ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
+    ThreadFreshness, ThreadManager, WorktreeIndex,
 };
 
 fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
-}
-
-struct AsyncOnlyObjectStore;
-
-impl ObjectStore for AsyncOnlyObjectStore {
-    async fn get_object_stream(
-        &self,
-        _key: &ObjectKey,
-    ) -> objects::error::Result<Option<ByteStream>> {
-        Ok(None)
-    }
-
-    async fn put_object_stream_sized(
-        &self,
-        key: ObjectKey,
-        _stream: ByteStream,
-        _size: Option<u64>,
-    ) -> objects::error::Result<ObjectPutOutcome> {
-        Ok(ObjectPutOutcome { key, written: true })
-    }
-}
-
-struct AsyncOnlyOpLog;
-
-impl OpLogBackend for AsyncOnlyOpLog {}
-
-#[derive(Default)]
-struct AsyncOnlyRefs {
-    head: Mutex<Option<Head>>,
-    threads: Mutex<HashMap<String, ChangeId>>,
-    markers: Mutex<HashMap<String, ChangeId>>,
-}
-
-impl AsyncRefBackend for AsyncOnlyRefs {
-    type Error = HeddleError;
-
-    async fn read_head_async(&self) -> Result<Head, HeddleError> {
-        self.head
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| HeddleError::Config("no head".to_string()))
-    }
-
-    async fn write_head_async(&self, head: &Head) -> Result<(), HeddleError> {
-        *self.head.lock().unwrap() = Some(head.clone());
-        Ok(())
-    }
-
-    async fn write_head_cas_async(
-        &self,
-        _expected: RefExpectation<Head>,
-        head: &Head,
-    ) -> Result<(), HeddleError> {
-        self.write_head_async(head).await
-    }
-
-    async fn get_thread_async(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
-        Ok(self.threads.lock().unwrap().get(name.as_str()).copied())
-    }
-
-    async fn set_thread_async(
-        &self,
-        name: &ThreadName,
-        state: &ChangeId,
-    ) -> Result<(), HeddleError> {
-        self.threads
-            .lock()
-            .unwrap()
-            .insert(name.as_str().to_string(), *state);
-        Ok(())
-    }
-
-    async fn set_thread_cas_async(
-        &self,
-        name: &ThreadName,
-        _expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
-    ) -> Result<(), HeddleError> {
-        self.set_thread_async(name, state).await
-    }
-
-    async fn delete_thread_async(
-        &self,
-        name: &ThreadName,
-    ) -> Result<Option<ChangeId>, HeddleError> {
-        Ok(self.threads.lock().unwrap().remove(name.as_str()))
-    }
-
-    async fn delete_thread_cas_async(
-        &self,
-        _name: &ThreadName,
-        _expected: RefExpectation<ChangeId>,
-    ) -> Result<(), HeddleError> {
-        Ok(())
-    }
-
-    async fn list_threads_async(&self) -> Result<Vec<ThreadName>, HeddleError> {
-        Ok(self
-            .threads
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|name| ThreadName::new(name.as_str()))
-            .collect())
-    }
-
-    async fn get_marker_async(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
-        Ok(self.markers.lock().unwrap().get(name.as_str()).copied())
-    }
-
-    async fn create_marker_async(
-        &self,
-        name: &MarkerName,
-        state: &ChangeId,
-    ) -> Result<(), HeddleError> {
-        self.markers
-            .lock()
-            .unwrap()
-            .insert(name.as_str().to_string(), *state);
-        Ok(())
-    }
-
-    async fn set_marker_cas_async(
-        &self,
-        name: &MarkerName,
-        _expected: RefExpectation<ChangeId>,
-        state: &ChangeId,
-    ) -> Result<(), HeddleError> {
-        self.markers
-            .lock()
-            .unwrap()
-            .insert(name.as_str().to_string(), *state);
-        Ok(())
-    }
-
-    async fn delete_marker_async(
-        &self,
-        name: &MarkerName,
-    ) -> Result<Option<ChangeId>, HeddleError> {
-        Ok(self.markers.lock().unwrap().remove(name.as_str()))
-    }
-
-    async fn delete_marker_cas_async(
-        &self,
-        _name: &MarkerName,
-        _expected: RefExpectation<ChangeId>,
-    ) -> Result<(), HeddleError> {
-        Ok(())
-    }
-
-    async fn list_markers_async(&self) -> Result<Vec<MarkerName>, HeddleError> {
-        Ok(self
-            .markers
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|name| MarkerName::new(name.as_str()))
-            .collect())
-    }
-
-    async fn update_refs_async(&self, _updates: &[RefUpdate]) -> Result<(), HeddleError> {
-        Ok(())
-    }
-}
-
-fn async_parts() -> (TempDir, std::path::PathBuf, std::path::PathBuf, ShallowInfo) {
-    let temp_dir = TempDir::new().unwrap();
-    let root = temp_dir.path().to_path_buf();
-    let heddle_dir = root.join(".heddle");
-    fs::create_dir_all(&heddle_dir).unwrap();
-    let shallow = ShallowInfo::load(&heddle_dir).unwrap();
-    (temp_dir, root, heddle_dir, shallow)
 }
 
 #[cfg(unix)]
@@ -249,66 +76,6 @@ fn test_open_with_store_threads_a_custom_object_store() {
         repo.store().get_blob(&hash).unwrap().unwrap().content(),
         blob.content()
     );
-}
-
-#[test]
-fn repository_from_parts_accepts_async_only_backend_components() {
-    let (_temp, root, heddle_dir, shallow) = async_parts();
-    let repo = Repository::from_parts(
-        root,
-        heddle_dir,
-        AsyncOnlyObjectStore,
-        AsyncOnlyRefs::default(),
-        AsyncOnlyOpLog,
-        RepoConfig::default(),
-        shallow,
-    );
-
-    let _ = repo.store();
-    let _ = repo.refs();
-    let _ = repo.oplog();
-}
-
-#[test]
-fn repository_core_accepts_async_only_backend_components() {
-    let (_temp, root, heddle_dir, shallow) = async_parts();
-    let core = RepositoryCore::from_parts(
-        root.clone(),
-        heddle_dir.clone(),
-        AsyncOnlyObjectStore,
-        AsyncOnlyRefs::default(),
-        AsyncOnlyOpLog,
-        RepoConfig::default(),
-        shallow,
-    );
-
-    assert_eq!(core.root(), root.as_path());
-    assert_eq!(core.heddle_dir(), heddle_dir.as_path());
-    assert_eq!(core.capability(), RepositoryCapability::NativeHeddle);
-    let _ = core.store();
-    let _ = core.refs();
-    let _ = core.oplog();
-}
-
-#[test]
-fn async_repository_facade_accepts_async_only_backends() {
-    let (_temp, root, heddle_dir, shallow) = async_parts();
-    let repo = AsyncRepository::from_parts(
-        root.clone(),
-        heddle_dir.clone(),
-        AsyncOnlyObjectStore,
-        AsyncOnlyRefs::default(),
-        AsyncOnlyOpLog,
-        RepoConfig::default(),
-        shallow,
-    );
-
-    assert_eq!(repo.root(), root.as_path());
-    assert_eq!(repo.heddle_dir(), heddle_dir.as_path());
-    assert_eq!(repo.capability(), RepositoryCapability::NativeHeddle);
-    let _ = repo.store();
-    let _ = repo.refs();
-    let _ = repo.oplog();
 }
 
 #[test]

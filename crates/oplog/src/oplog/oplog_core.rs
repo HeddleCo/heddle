@@ -14,7 +14,7 @@ use objects::{
 };
 
 use super::{
-    oplog_backend::{LocalOpLogBackend, sealed},
+    oplog_backend::LocalOpLogBackend,
     oplog_types::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
@@ -28,8 +28,6 @@ pub struct OpLog {
     cached: Mutex<Option<PackedOpLogIndex>>,
     actor: Arc<Principal>,
 }
-
-impl sealed::HeddleLocalAsyncOptIn for OpLog {}
 
 impl OpLog {
     pub fn new(heddle_dir: impl AsRef<Path>, actor: Principal) -> Self {

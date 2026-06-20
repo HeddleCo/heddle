@@ -8,15 +8,11 @@ use std::{
 use bytes::Bytes;
 use memmap2::Mmap;
 use objects::store::{
-    ByteStream, CompressionConfig, LocalObjectStore, ObjectStore, PackStats,
-    async_store::single_chunk_stream,
+    CompressionConfig, LocalObjectStore, PackStats,
     pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
 };
 
-use crate::{
-    ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object_data,
-    load_object_data_async,
-};
+use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object_data};
 
 /// Maximum hosted native-pack body accepted by the receive primitive.
 ///
@@ -127,31 +123,6 @@ pub fn build_native_pack(
     })
 }
 
-pub async fn build_native_pack_async<S>(
-    store: &S,
-    objects: &[ObjectInfo],
-) -> Result<NativePackBundle>
-where
-    S: ObjectStore + ?Sized,
-{
-    let mut builder = PackBuilder::new(sync_pack_compression());
-
-    for info in objects {
-        if !is_native_packable_object_type(info.obj_type) {
-            continue;
-        }
-        let object = load_object_data_async(store, &info.id, info.obj_type).await?;
-        let pack_id = to_pack_object_id(&object.id);
-        builder.add_id(pack_id, to_pack_object_type(object.obj_type)?, object.data);
-    }
-
-    let (pack_data, index_data, _) = builder.build()?;
-    Ok(NativePackBundle {
-        pack_data,
-        index_data,
-    })
-}
-
 pub fn build_native_pack_to_paths(
     store: &impl LocalObjectStore,
     objects: &[ObjectInfo],
@@ -166,44 +137,6 @@ pub fn build_native_pack_to_paths(
         let object = load_object_data(store, &info.id, info.obj_type)?;
         Ok(object.data.into())
     })
-}
-
-pub async fn build_native_pack_to_paths_async<S>(
-    store: &S,
-    objects: &[ObjectInfo],
-    pack_path: impl AsRef<Path>,
-    index_path: impl AsRef<Path>,
-    bucket_dir: impl AsRef<Path>,
-) -> Result<NativePackFiles>
-where
-    S: ObjectStore + ?Sized,
-{
-    let pack_path = pack_path.as_ref().to_path_buf();
-    let index_path = index_path.as_ref().to_path_buf();
-    let bucket_dir = bucket_dir.as_ref().to_path_buf();
-    prepare_output_paths(&pack_path, &index_path, &bucket_dir)?;
-    let pack_file = create_pack_output(&pack_path)?;
-    let mut builder = StreamingPackBuilder::new(
-        pack_file,
-        index_path.clone(),
-        sync_pack_compression(),
-        bucket_dir,
-    )?;
-
-    for info in objects {
-        if !is_native_packable_object_type(info.obj_type) {
-            continue;
-        }
-        let object = load_object_data_async(store, &info.id, info.obj_type).await?;
-        let pack_id = to_pack_object_id(&object.id);
-        builder.add_bytes(
-            pack_id,
-            to_pack_object_type(object.obj_type)?,
-            object.data.into(),
-        )?;
-    }
-
-    finish_native_pack_files(builder, pack_path, index_path)
 }
 
 fn build_native_pack_to_paths_with_loader(
@@ -298,50 +231,6 @@ pub fn install_received_pack_from_paths(
 ) -> Result<Vec<PackObjectId>> {
     store
         .install_pack_from_paths(pack_path, index_path)
-        .map_err(ProtocolError::from)
-}
-
-pub async fn install_received_pack_async<S>(
-    store: &S,
-    pack_data: &[u8],
-    index_data: &[u8],
-) -> Result<Vec<PackObjectId>>
-where
-    S: ObjectStore + ?Sized,
-{
-    install_received_pack_stream(
-        store,
-        single_chunk_stream(pack_data.to_vec().into()),
-        single_chunk_stream(index_data.to_vec().into()),
-    )
-    .await
-}
-
-pub async fn install_received_pack_from_paths_async<S>(
-    store: &S,
-    pack_path: &Path,
-    index_path: &Path,
-) -> Result<Vec<PackObjectId>>
-where
-    S: ObjectStore + ?Sized,
-{
-    store
-        .install_pack_from_paths(pack_path, index_path)
-        .await
-        .map_err(ProtocolError::from)
-}
-
-pub async fn install_received_pack_stream<S>(
-    store: &S,
-    pack_stream: ByteStream,
-    index_stream: ByteStream,
-) -> Result<Vec<PackObjectId>>
-where
-    S: ObjectStore + ?Sized,
-{
-    store
-        .install_pack_stream(pack_stream, index_stream)
-        .await
         .map_err(ProtocolError::from)
 }
 

@@ -12,8 +12,11 @@ mod diff_types;
 mod diff_tests;
 
 pub use diff_core::{
-    semantic_check_only, semantic_check_only_with_cache, semantic_check_only_worktree,
-    semantic_check_only_worktree_with_cache, semantic_diff, semantic_diff_summary,
+    semantic_check_only, semantic_check_only_from_changes,
+    semantic_check_only_from_changes_with_cache, semantic_check_only_with_cache,
+    semantic_check_only_worktree, semantic_check_only_worktree_with_cache, semantic_diff,
+    semantic_diff_from_changes, semantic_diff_from_changes_with_cache, semantic_diff_summary,
+    semantic_diff_summary_from_changes, semantic_diff_summary_from_changes_with_cache,
     semantic_diff_summary_with_cache, semantic_diff_summary_worktree,
     semantic_diff_summary_worktree_with_cache, semantic_diff_with_cache, semantic_diff_worktree,
     semantic_diff_worktree_with_cache,
