@@ -76,8 +76,8 @@ reqwest = { version = "0.13.2", default-features = false, features = ["json", "r
 rmp-serde = "1"
 rsa = { version = "0.9", features = ["pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-s3s = "0.13.0"
-s3s-fs = "0.13.0"
+s3s = "0.14.0-alpha.1"
+s3s-fs = "0.14.0-alpha.1"
 schemars = { version = "1.2", features = ["chrono04"] }
 sec1 = { version = "0.8", features = ["pem"] }
 serde = { version = "1", features = ["derive", "rc"] }
