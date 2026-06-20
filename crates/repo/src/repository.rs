@@ -59,6 +59,8 @@ use std::{
 
 use chrono::Utc;
 pub use commit_graph::{CommitGraphIndex, find_merge_base};
+#[cfg(feature = "async-source")]
+pub use commit_graph::{find_merge_base_async, is_ancestor_async};
 pub use context_suggestions::{
     ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
@@ -85,9 +87,9 @@ pub use repo_config::{
     PatternDeviationToml, ReviewConfig, ReviewSignalsToml, SelfFlaggedToml, SignalEnableToml,
     SignalModuleToml, TestReachabilityToml,
 };
-pub use repository_history::{ChangedPathFilter, ChangedPathFilters, HistoryQuery};
 #[cfg(feature = "async-source")]
 pub use repository_history::query_history_async;
+pub use repository_history::{ChangedPathFilter, ChangedPathFilters, HistoryQuery};
 pub use repository_maintenance::{
     ChangeMonitorInspection, CommitGraphInspection, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
