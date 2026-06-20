@@ -3,7 +3,7 @@
 //!
 //! Call [`run_compliance_tests`] from any `#[test]` or `#[tokio::test]` that
 //! has a concrete [`ObjectStore`] to verify it satisfies the full contract.
-//! Both [`InMemoryStore`] and [`S3Store`] are validated this way.
+//! `InMemoryStore` is validated this way.
 
 use crate::{
     object::{Attribution, Blob, ContentHash, Principal, State, Tree},
@@ -17,8 +17,7 @@ fn attribution() -> Attribution {
 /// Run the full ObjectStore compliance suite against `store`.
 ///
 /// Panics on the first assertion failure. Designed to be called from unit or
-/// integration tests — including from `spawn_blocking` when testing async
-/// backends like [`S3Store`].
+/// integration tests.
 pub fn run_compliance_tests<S: ObjectStore>(store: &S) {
     blob_round_trip(store);
     blob_missing_returns_none(store);
