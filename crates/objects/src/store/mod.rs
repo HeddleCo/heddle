@@ -15,6 +15,7 @@ pub mod liveness;
 pub mod memory;
 pub mod pack;
 pub mod shallow;
+pub mod source;
 pub mod store_compliance;
 
 #[cfg(feature = "s3")]
@@ -33,6 +34,9 @@ pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};
 #[cfg(feature = "s3")]
 pub use s3::{S3Store, S3StoreBuilder};
 pub use shallow::ShallowInfo;
+#[cfg(feature = "async-source")]
+pub use source::AsyncObjectSource;
+pub use source::ObjectSource;
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
@@ -77,13 +81,21 @@ macro_rules! any_store_dispatch {
 
 impl ObjectStore for AnyStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        any_store_dispatch!(self, get_blob(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_blob(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_blob(inner, hash),
+        }
     }
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
         any_store_dispatch!(self, put_blob(blob))
     }
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
-        any_store_dispatch!(self, get_blob_bytes(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_blob_bytes(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_blob_bytes(inner, hash),
+        }
     }
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         any_store_dispatch!(self, blob_size(hash))
@@ -104,7 +116,11 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, has_blob(hash))
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        any_store_dispatch!(self, get_tree(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_tree(inner, hash),
+        }
     }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         any_store_dispatch!(self, put_tree(tree))
@@ -113,7 +129,11 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, has_tree(hash))
     }
     fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
-        any_store_dispatch!(self, get_state(id))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_state(inner, id),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_state(inner, id),
+        }
     }
     fn put_state(&self, state: &State) -> Result<()> {
         any_store_dispatch!(self, put_state(state))
