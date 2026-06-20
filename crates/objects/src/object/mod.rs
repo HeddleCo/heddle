@@ -23,6 +23,7 @@ mod state_core;
 mod state_provenance;
 mod state_review;
 mod state_visibility;
+mod staleness_core;
 mod structured_conflict;
 mod timeline;
 mod tree;
@@ -66,6 +67,10 @@ pub use state_review::{
 pub use state_visibility::{
     STATE_VISIBILITY_SIGNING_PAYLOAD_VERSION_TAG, StateVisibility, StateVisibilityBlob,
     StateVisibilityError,
+};
+pub use staleness_core::{
+    StalenessStatus, annotation_status_for_source,
+    annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
 };
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
