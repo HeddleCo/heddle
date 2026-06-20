@@ -55,6 +55,7 @@ impl CommitGraphCache for FsCommitGraphCache {
     }
 }
 
+#[cfg_attr(not(feature = "async-source"), allow(dead_code))]
 pub(crate) struct NullCommitGraphCache;
 
 impl CommitGraphCache for NullCommitGraphCache {
