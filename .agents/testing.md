@@ -16,9 +16,8 @@ cargo test -- --nocapture
 cargo test --test comprehensive
 cargo test --test production_features
 
-# Feature-gated backends
+# Feature-gated backend coverage
 cargo test --features postgres
-cargo check --features postgres,s3
 
 # With zstd compression (required for full pack/delta coverage)
 cargo test --features zstd

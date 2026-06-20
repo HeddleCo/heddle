@@ -285,10 +285,9 @@ pub trait BlobHydrator: Send + Sync {
 /// `Repository<PgRefBackend, PgOpLogBackend, …>` via [`Repository::from_parts`].
 ///
 /// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
-/// selects `FsStore` vs `S3Store` at *runtime* from config (`build_store`),
-/// but the choice is a concrete enum variant rather than a `Box<dyn>`, so
-/// every object access is static-dispatched through the enum to the inner
-/// store — no vtable (heddle#283). `S` goes last so existing
+/// wraps the local [`FsStore`] in a concrete enum variant rather than a
+/// `Box<dyn>`, so every object access is static-dispatched through the enum
+/// to the inner store — no vtable (heddle#283). `S` goes last so existing
 /// `Repository<R, O>` references keep resolving with `S = AnyStore`.
 pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
 where
@@ -494,61 +493,11 @@ impl Repository {
 
     /// Build an object store from the repository configuration.
     ///
-    /// Returns an [`S3Store`] when `[storage.s3]` is configured and the `s3`
-    /// feature is enabled, otherwise falls back to [`FsStore`] — wrapped in
-    /// the [`AnyStore`] enum so the runtime choice stays statically dispatched.
+    /// Returns the local [`FsStore`] wrapped in the [`AnyStore`] enum so object
+    /// access stays statically dispatched.
     fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<AnyStore> {
-        #[cfg(feature = "s3")]
-        {
-            if let Some(s3) = &config.storage.s3 {
-                return Self::build_s3_store(s3);
-            }
-        }
-        let _ = config; // suppress unused warning when s3 feature is off
+        let _ = config;
         Ok(AnyStore::Fs(FsStore::new(heddle_dir)))
-    }
-
-    /// Construct an [`S3Store`] from the repository's S3 storage configuration.
-    #[cfg(feature = "s3")]
-    fn build_s3_store(s3: &repo_config::S3StorageConfig) -> Result<AnyStore> {
-        use objects::store::S3StoreBuilder;
-
-        let mut builder = S3StoreBuilder::new().bucket(&s3.bucket);
-        if let Some(ref region) = s3.region {
-            builder = builder.region(region);
-        }
-        if let Some(ref prefix) = s3.prefix {
-            builder = builder.prefix(prefix);
-        }
-        if let Some(ref url) = s3.endpoint_url {
-            builder = builder.endpoint_url(url);
-        }
-        if let Some(ref key) = s3.access_key_id {
-            builder = builder.access_key_id(key);
-        }
-        if let Some(ref secret) = s3.secret_access_key {
-            builder = builder.secret_access_key(secret);
-        }
-        if let Some(ref token) = s3.session_token {
-            builder = builder.session_token(token);
-        }
-        if s3.force_path_style {
-            builder = builder.force_path_style(true);
-        }
-
-        // `S3StoreBuilder::build` is async. The previous design here was
-        // `Handle::try_current().or_else(Runtime::new()).block_on(builder.build())`
-        // — that nested `block_on` panicked with "Cannot start a runtime
-        // from within a runtime" whenever `Repository::open` was called
-        // from inside a Tokio runtime (`#[tokio::main]`, `#[tokio::test]`,
-        // a daemon worker). `build_blocking` routes the async `build()`
-        // through a short-lived worker-thread runtime, so the caller's
-        // runtime is never re-entered — mirrors the heddle#60 fix for the
-        // `ObjectStore` impl on `S3Store`.
-        let store = builder
-            .build_blocking()
-            .map_err(|e| HeddleError::Config(format!("S3 store initialization failed: {e}")))?;
-        Ok(AnyStore::S3(store))
     }
 
     /// Initialize a new bare repository at the given path.

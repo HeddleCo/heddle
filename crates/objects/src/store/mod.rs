@@ -18,9 +18,6 @@ pub mod shallow;
 pub mod source;
 pub mod store_compliance;
 
-#[cfg(feature = "s3")]
-mod s3;
-
 pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
     ReserveOutcome, generate_agent_id,
@@ -31,8 +28,6 @@ pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
 pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};
-#[cfg(feature = "s3")]
-pub use s3::{S3Store, S3StoreBuilder};
 pub use shallow::ShallowInfo;
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
@@ -49,19 +44,16 @@ impl From<CompressionError> for HeddleError {
 /// Static-dispatch enum over the concrete object stores Heddle ships.
 ///
 /// This is the default `S` for [`Repository`](crate) so the store backend
-/// can be chosen at *runtime* (from `[storage.s3]` config in
-/// `Repository::build_store`) while remaining a compile-time-monomorphized
-/// type — no vtable. Each [`ObjectStore`] method `match`-dispatches to the
-/// inner variant, so the compiler inlines through the enum to the concrete
-/// backend's implementation (including its overridden default methods).
+/// remains compile-time-monomorphized — no vtable. Each [`ObjectStore`] method
+/// `match`-dispatches to the inner variant, so the compiler inlines through
+/// the enum to the concrete backend's implementation (including its overridden
+/// default methods).
 ///
 /// Sealed by construction: only the variants enumerated here are valid
 /// stores. Heddle is the sole implementer (heddle#259 / #283) — `AnyStore`
 /// is not a public extension point.
 pub enum AnyStore {
     Fs(FsStore),
-    #[cfg(feature = "s3")]
-    S3(S3Store),
 }
 
 /// Forward an [`ObjectStore`] call to the active [`AnyStore`] variant.
@@ -73,8 +65,6 @@ macro_rules! any_store_dispatch {
     ($self:ident, $method:ident ( $($arg:expr),* )) => {
         match $self {
             AnyStore::Fs(inner) => inner.$method($($arg),*),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => inner.$method($($arg),*),
         }
     };
 }
@@ -83,8 +73,6 @@ impl ObjectStore for AnyStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_blob(inner, hash),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => ObjectStore::get_blob(inner, hash),
         }
     }
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
@@ -93,8 +81,6 @@ impl ObjectStore for AnyStore {
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_blob_bytes(inner, hash),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => ObjectStore::get_blob_bytes(inner, hash),
         }
     }
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
@@ -118,8 +104,6 @@ impl ObjectStore for AnyStore {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => ObjectStore::get_tree(inner, hash),
         }
     }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
@@ -131,8 +115,6 @@ impl ObjectStore for AnyStore {
     fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_state(inner, id),
-            #[cfg(feature = "s3")]
-            AnyStore::S3(inner) => ObjectStore::get_state(inner, id),
         }
     }
     fn put_state(&self, state: &State) -> Result<()> {
@@ -277,9 +259,9 @@ pub trait ObjectStore: Send + Sync {
     /// Returns `None` when the blob is missing, is only available via
     /// a packfile, is stored compressed (the on-disk bytes wouldn't
     /// match what a worktree consumer needs to read), or the backend
-    /// doesn't expose stable filesystem paths (e.g. `InMemoryStore`,
-    /// `S3Store`). The default impl returns `None` so non-`FsStore`
-    /// backends silently fall through to the bytes path.
+    /// doesn't expose stable filesystem paths (e.g. `InMemoryStore`). The
+    /// default impl returns `None` so non-`FsStore` backends silently fall
+    /// through to the bytes path.
     fn loose_blob_path(&self, _hash: &ContentHash) -> Option<PathBuf> {
         None
     }
@@ -318,9 +300,8 @@ pub trait ObjectStore: Send + Sync {
     /// happened), `Ok(false)` when it was a no-op (blob was already
     /// loose+uncompressed), and `Err` when the blob isn't in the
     /// store at all. The default impl returns `Ok(false)` for
-    /// backends that don't expose loose paths (`InMemoryStore`,
-    /// `S3Store`), since the hardlink path is fundamentally
-    /// inapplicable there.
+    /// backends that don't expose loose paths (`InMemoryStore`), since the
+    /// hardlink path is fundamentally inapplicable there.
     fn promote_to_loose_uncompressed(&self, _hash: &ContentHash) -> Result<bool> {
         Ok(false)
     }

@@ -11,7 +11,7 @@
 //!
 //! Heddle has several `ObjectStore` / `OpLogBackend` / `RefBackend`
 //! implementations whose trait surface is synchronous but whose underlying
-//! I/O is async (`aws-sdk-s3`, `sqlx`, etc.). A naive bridge —
+//! I/O is async (`sqlx`, hosted service clients, etc.). A naive bridge —
 //! `Handle::current().block_on(...)` or
 //! `tokio::task::block_in_place(|| Handle::current().block_on(...))` —
 //! breaks in caller-flavor-dependent ways:

@@ -31,7 +31,6 @@ serde_json.workspace = true
 sley.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, optional = true }
 toml.workspace = true
 tracing.workspace = true
 
@@ -62,7 +61,6 @@ native = []
 # protocol). Default-on so a plain `cargo build` keeps compression;
 # turn off with `--no-default-features` for raw packs.
 zstd = ["objects/zstd", "wire/zstd"]
-s3 = ["objects/s3", "dep:tokio"]
 # Symbol resolution. The implementation lives in `semantic`;
 # enabling the feature here pulls in the dep with the parsers our
 # resolver supports. `semantic`'s `common-languages` covers Rust,

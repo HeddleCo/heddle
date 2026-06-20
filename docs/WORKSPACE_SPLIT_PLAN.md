@@ -147,8 +147,6 @@ Keep only dependencies needed for core functionality:
   - `base64`
 - optional storage/compression crates as needed:
   - `zstd`
-  - `aws-config`
-  - `aws-sdk-s3`
   - `async-trait`
 - possibly `gix` if Git bridge remains in core
 

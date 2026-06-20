@@ -18,16 +18,6 @@ ignore = [
     # apply. Revisit when rsa 0.10 (constant-time) ships.
     "RUSTSEC-2023-0071",
 
-    # The next three are all the same transitive chain:
-    #   aws-sdk-s3 → aws-smithy-http-client → hyper-rustls 0.24 → rustls 0.21
-    #     → rustls-webpki 0.101 / rustls-pemfile 2
-    # Unblocks when aws-sdk-s3 1.135 can land, which is itself gated on
-    # s3s cutting a release that uses stable sha2/sha1 (currently pinned to
-    # 0.11.0-rc.5 in s3s 0.13.0). Tracked in the deps-upgrade follow-up.
-    "RUSTSEC-2026-0098", # rustls-webpki: URI name constraint accepted
-    "RUSTSEC-2026-0099", # rustls-webpki: wildcard SAN constraint bypass
-    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic on malformed CRL
-
     # proc-macro-error2 unmaintained — transitive build-time proc-macro via
     # biscuit-quote → biscuit-auth 6.0 (heddle-client). No runtime exposure,
     # no CVE. Remove when biscuit-auth drops it. (Mirrors deny.toml.)

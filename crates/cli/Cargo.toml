@@ -152,7 +152,6 @@ client = ["dep:heddle-client", "dep:tokio-tungstenite"]
 # but the dependency is always present so no legacy bridge importer is
 # compiled as a fallback.
 ingest = []
-s3 = ["repo/s3"]
 semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
 semantic-extended = ["semantic", "semantic?/extended-languages"]
 observability = [
