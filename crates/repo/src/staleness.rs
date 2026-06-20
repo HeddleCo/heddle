@@ -287,19 +287,10 @@ mod tests {
 
     #[cfg(feature = "async-source")]
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::{
-            sync::Arc,
-            task::{Context, Poll, Wake, Waker},
-        };
+        use std::task::{Context, Poll, Waker};
 
-        struct NoopWaker;
-
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut context = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
         let mut future = std::pin::pin!(future);
 
         loop {
