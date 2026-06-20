@@ -22,7 +22,7 @@ use self::helpers::{
 };
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
-    store::{ObjectStore, Result, StoreError, s3::S3Store},
+    store::{CompressionConfig, ObjectStore, Result, StoreError, codec, s3::S3Store},
     util::{RetryPolicy, retry_with},
 };
 
@@ -48,11 +48,7 @@ impl ObjectStore for S3Store {
                                 )))
                             })?;
                             let bytes = data.into_bytes();
-                            let content = if crate::store::compression::is_compressed(&bytes) {
-                                crate::store::compression::decompress(&bytes)?
-                            } else {
-                                bytes.to_vec()
-                            };
+                            let content = codec::decode_blob_content(&bytes)?;
                             let blob = Blob::new(content);
                             if blob.hash() != hash {
                                 return Err(StoreError::Corruption {
@@ -108,9 +104,8 @@ impl ObjectStore for S3Store {
                             }
                         }
                     }
-                    let compression_config = crate::store::CompressionConfig::default();
-                    let data = crate::store::compression::compress(&content, &compression_config)?
-                        .unwrap_or(content.clone());
+                    let compression_config = CompressionConfig::default();
+                    let data = codec::encode_blob_content(&content, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
@@ -204,12 +199,7 @@ impl ObjectStore for S3Store {
                                 )))
                             })?;
                             let bytes = data.into_bytes();
-                            let decoded = if crate::store::compression::is_compressed(&bytes) {
-                                crate::store::compression::decompress(&bytes)?
-                            } else {
-                                bytes.to_vec()
-                            };
-                            let tree = validate_loaded_tree(rmp_serde::from_slice(&decoded)?)?;
+                            let tree = validate_loaded_tree(codec::decode_tree(&bytes)?)?;
                             if tree.hash() != hash {
                                 return Err(StoreError::Corruption {
                                     expected: hash,
@@ -241,7 +231,7 @@ impl ObjectStore for S3Store {
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
         let key = self.tree_key(&hash);
-        let serialized = rmp_serde::to_vec(tree)?;
+        let tree = tree.clone();
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -264,10 +254,8 @@ impl ObjectStore for S3Store {
                             }
                         }
                     }
-                    let compression_config = crate::store::CompressionConfig::default();
-                    let data =
-                        crate::store::compression::compress(&serialized, &compression_config)?
-                            .unwrap_or(serialized.clone());
+                    let compression_config = CompressionConfig::default();
+                    let (_, data) = codec::encode_tree(&tree, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
@@ -361,13 +349,7 @@ impl ObjectStore for S3Store {
                                 )))
                             })?;
                             let bytes = data.into_bytes();
-                            let decoded = if crate::store::compression::is_compressed(&bytes) {
-                                crate::store::compression::decompress(&bytes)?
-                            } else {
-                                bytes.to_vec()
-                            };
-                            let state =
-                                validate_loaded_state(&id, rmp_serde::from_slice(&decoded)?)?;
+                            let state = validate_loaded_state(&id, codec::decode_state(&bytes)?)?;
                             Ok(Some(state))
                         }
                         Err(e) => {
@@ -392,7 +374,7 @@ impl ObjectStore for S3Store {
 
     fn put_state(&self, state: &State) -> Result<()> {
         let key = self.state_key(&state.change_id);
-        let serialized = rmp_serde::to_vec(state)?;
+        let state = state.clone();
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -400,10 +382,8 @@ impl ObjectStore for S3Store {
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    let compression_config = crate::store::CompressionConfig::default();
-                    let data =
-                        crate::store::compression::compress(&serialized, &compression_config)?
-                            .unwrap_or(serialized.clone());
+                    let compression_config = CompressionConfig::default();
+                    let data = codec::encode_state(&state, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
@@ -497,13 +477,8 @@ impl ObjectStore for S3Store {
                                 )))
                             })?;
                             let bytes = data.into_bytes();
-                            let decoded = if crate::store::compression::is_compressed(&bytes) {
-                                crate::store::compression::decompress(&bytes)?
-                            } else {
-                                bytes.to_vec()
-                            };
                             let action =
-                                validate_loaded_action(&id, rmp_serde::from_slice(&decoded)?)?;
+                                validate_loaded_action(&id, codec::decode_action(&bytes)?)?;
                             Ok(Some(action))
                         }
                         Err(e) => {
@@ -529,32 +504,36 @@ impl ObjectStore for S3Store {
     fn put_action(&self, action: &mut Action) -> Result<ActionId> {
         let id = action.id();
         let key = self.action_key(&id);
-        let serialized = rmp_serde::to_vec(action)?;
+        let action = action.clone();
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
-                || async {
-                    let compression_config = crate::store::CompressionConfig::default();
-                    let data =
-                        crate::store::compression::compress(&serialized, &compression_config)?
-                            .unwrap_or(serialized.clone());
-                    client
-                        .put_object()
-                        .bucket(&bucket)
-                        .key(&key)
-                        .body(ByteStream::from(data))
-                        .send()
-                        .await
-                        .map_err(|e| {
-                            StoreError::Io(std::io::Error::other(format!(
-                                "S3 put_object failed: {}",
-                                e
-                            )))
-                        })?;
-                    Ok(id)
+                || {
+                    let client = Arc::clone(&client);
+                    let bucket = bucket.clone();
+                    let key = key.clone();
+                    let mut action = action.clone();
+                    async move {
+                        let compression_config = CompressionConfig::default();
+                        let (_, data) = codec::encode_action(&mut action, &compression_config)?;
+                        client
+                            .put_object()
+                            .bucket(&bucket)
+                            .key(&key)
+                            .body(ByteStream::from(data))
+                            .send()
+                            .await
+                            .map_err(|e| {
+                                StoreError::Io(std::io::Error::other(format!(
+                                    "S3 put_object failed: {}",
+                                    e
+                                )))
+                            })?;
+                        Ok(id)
+                    }
                 },
             )
             .await

@@ -34,12 +34,6 @@ impl FileBytes {
         }
     }
 
-    pub(super) fn into_vec(self) -> Vec<u8> {
-        match self {
-            FileBytes::Vec(data) => data,
-            FileBytes::Mmap(data) => data.to_vec(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

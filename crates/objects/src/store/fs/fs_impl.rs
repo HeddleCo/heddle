@@ -19,8 +19,8 @@ use super::{
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{
-        HeddleError, ObjectStore, Result,
-        compression::{compress, decompress, header_uncompressed_size, is_compressed},
+        HeddleError, ObjectStore, Result, codec,
+        compression::{header_uncompressed_size, is_compressed},
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -176,11 +176,7 @@ impl FsStore {
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Blob data read");
-                let content = if is_compressed(data.as_slice()) {
-                    decompress(data.as_slice())?
-                } else {
-                    data.into_vec()
-                };
+                let content = codec::decode_blob_content(data.as_slice())?;
                 let blob = Blob::new(content);
                 // Loose blobs are bare bytes on disk: a half-written
                 // file or bit-rot inside the payload would slip past
@@ -295,12 +291,7 @@ impl FsStore {
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Tree data read");
-                let decoded = if is_compressed(data.as_slice()) {
-                    decompress(data.as_slice())?
-                } else {
-                    data.into_vec()
-                };
-                let tree = validate_loaded_tree(rmp_serde::from_slice(&decoded)?)?;
+                let tree = validate_loaded_tree(codec::decode_tree(data.as_slice())?)?;
                 if tree.hash() != *hash {
                     return Err(HeddleError::Corruption {
                         expected: *hash,
@@ -353,12 +344,7 @@ impl FsStore {
                 size = data.as_slice().len(),
                 "State read from loose object (shadows any packed copy)"
             );
-            let decoded = if is_compressed(data.as_slice()) {
-                decompress(data.as_slice())?
-            } else {
-                data.into_vec()
-            };
-            let state = validate_loaded_state(id, rmp_serde::from_slice(&decoded)?)?;
+            let state = validate_loaded_state(id, codec::decode_state(data.as_slice())?)?;
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());
             }
@@ -433,8 +419,7 @@ impl ObjectStore for FsStore {
         let path = hash_path(&blobs_dir(&self.root), &hash);
 
         if !path.exists() {
-            let content = blob.content();
-            let data = compress(content, &self.compression)?.unwrap_or_else(|| content.to_vec());
+            let data = codec::encode_blob_content(blob.content(), &self.compression)?;
             trace!(compressed_size = data.len(), "Writing blob");
             self.write_loose_object_atomic(&path, &data)?;
         } else {
@@ -459,8 +444,7 @@ impl ObjectStore for FsStore {
         let path = hash_path(&blobs_dir(&self.root), &hash);
 
         if !path.exists() {
-            let content = blob.content();
-            let data = compress(content, &self.compression)?.unwrap_or_else(|| content.to_vec());
+            let data = codec::encode_blob_content(blob.content(), &self.compression)?;
             trace!(
                 compressed_size = data.len(),
                 "Writing blob with precomputed hash"
@@ -656,8 +640,7 @@ impl ObjectStore for FsStore {
         let path = hash_path(&trees_dir(&self.root), &hash);
 
         if !path.exists() {
-            let serialized = rmp_serde::to_vec(tree)?;
-            let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
+            let (_, data) = codec::encode_tree(tree, &self.compression)?;
             trace!(compressed_size = data.len(), "Writing tree");
             self.write_loose_object_atomic(&path, &data)?;
         } else {
@@ -714,8 +697,7 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self, state), fields(id = %state.change_id.short()))]
     fn put_state(&self, state: &State) -> Result<()> {
         let path = state_path(&self.root, &state.change_id);
-        let serialized = rmp_serde::to_vec(state)?;
-        let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
+        let data = codec::encode_state(state, &self.compression)?;
         trace!(compressed_size = data.len(), "Writing state");
         self.write_loose_object_atomic(&path, &data)?;
         if let Ok(mut cache) = self.recent_states.write() {
@@ -795,12 +777,7 @@ impl ObjectStore for FsStore {
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Action data read");
-                let decoded = if is_compressed(data.as_slice()) {
-                    decompress(data.as_slice())?
-                } else {
-                    data.into_vec()
-                };
-                let action = validate_loaded_action(id, rmp_serde::from_slice(&decoded)?)?;
+                let action = validate_loaded_action(id, codec::decode_action(data.as_slice())?)?;
                 Ok(Some(action))
             }
             None => {
@@ -816,8 +793,7 @@ impl ObjectStore for FsStore {
         let path = action_path(&self.root, &id);
 
         if !path.exists() {
-            let serialized = rmp_serde::to_vec(action)?;
-            let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
+            let (_, data) = codec::encode_action(action, &self.compression)?;
             trace!(id = %id, compressed_size = data.len(), "Writing action");
             self.write_loose_object_atomic(&path, &data)?;
         }
