@@ -22,18 +22,15 @@ The substrate needed for a no-local-FS surface is already present.
 
 - `ObjectStore` is backend-neutral (`crates/objects/src/store/mod.rs:310-358`)
   and has Heddle-owned implementations for local files, memory tests, shared
-  dynamic dispatch, and S3. `AnyStore` is sealed by construction and dispatches
+  dynamic dispatch. `AnyStore` is sealed by construction and dispatches
   only to Heddle's concrete stores (`crates/objects/src/store/mod.rs:153-186`).
 - `Repository` is generic over refs, oplog, and object store. The default CLI
   shape is `Repository<RefManager, OpLog, AnyStore>`, while hosted can assemble
   `Repository<PgRefBackend, PgOpLogBackend, ...>` via `from_parts`
   (`crates/repo/src/repository.rs:259-345`).
-- `Repository::build_store` already selects `S3Store` from repo config when
-  available and falls back to `FsStore` otherwise
-  (`crates/repo/src/repository.rs:458-515`). `S3Store` implements the same sync
-  `ObjectStore` trait by routing async S3 work through a runtime bridge
-  (`crates/objects/src/store/s3/s3_store.rs:65-109`,
-  `crates/objects/src/store/s3/s3_impl/mod.rs:29-132`).
+- `Repository::build_store` constructs the local `FsStore` wrapped in
+  `AnyStore`. The hosted server owns remote object-store backends outside this
+  workspace.
 - The current hosted proto has auth/control-plane RPCs, native push/pull, and a
   partial content surface. `ContentService` already exposes refs, states, trees,
   blobs, compare, and diff (`crates/grpc/proto/heddle/v1/service.proto:165-185`,

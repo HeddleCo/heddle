@@ -369,42 +369,12 @@ pub struct DisplayConfig {
 pub struct StorageConfig {
     #[serde(default)]
     pub filesystem: Option<FilesystemStorageConfig>,
-    #[cfg(feature = "s3")]
-    #[serde(default)]
-    pub s3: Option<S3StorageConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemStorageConfig {
     /// Path to the storage directory (relative to .heddle or absolute)
     pub path: Option<String>,
-}
-
-/// S3-compatible object storage configuration.
-///
-/// When present in `.heddle/config.toml`, the repository stores blobs, trees,
-/// states, and actions in the specified S3 bucket instead of the local
-/// filesystem.
-#[cfg(feature = "s3")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct S3StorageConfig {
-    pub bucket: String,
-    #[serde(default)]
-    pub region: Option<String>,
-    #[serde(default)]
-    pub prefix: Option<String>,
-    #[serde(default)]
-    pub endpoint_url: Option<String>,
-    #[serde(default)]
-    pub access_key_id: Option<String>,
-    #[serde(default)]
-    pub secret_access_key: Option<String>,
-    #[serde(default)]
-    pub session_token: Option<String>,
-    /// Use path-style addressing (`endpoint/bucket/key`).
-    /// Required for MinIO and other non-AWS S3-compatible services.
-    #[serde(default)]
-    pub force_path_style: bool,
 }
 
 fn default_hash_length() -> usize {
