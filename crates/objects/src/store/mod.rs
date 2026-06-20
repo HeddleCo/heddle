@@ -655,12 +655,18 @@ mod any_store_tests {
         let blob = Blob::from("any-store dispatch blob");
         let blob_hash = store.put_blob(&blob).unwrap();
         assert_eq!(
-            store.get_blob(&blob_hash).unwrap().unwrap().content(),
+            ObjectStore::get_blob(&store, &blob_hash)
+                .unwrap()
+                .unwrap()
+                .content(),
             blob.content()
         );
         assert!(store.has_blob(&blob_hash).unwrap());
         assert_eq!(
-            store.get_blob_bytes(&blob_hash).unwrap().unwrap().as_ref(),
+            ObjectStore::get_blob_bytes(&store, &blob_hash)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
             blob.content()
         );
         assert_eq!(
@@ -689,7 +695,7 @@ mod any_store_tests {
         // ── Trees ──
         let tree = Tree::new();
         let tree_hash = store.put_tree(&tree).unwrap();
-        assert!(store.get_tree(&tree_hash).unwrap().is_some());
+        assert!(ObjectStore::get_tree(&store, &tree_hash).unwrap().is_some());
         assert!(store.has_tree(&tree_hash).unwrap());
         assert!(store.list_trees().unwrap().contains(&tree_hash));
         let tree2 = Tree::new();
@@ -707,7 +713,7 @@ mod any_store_tests {
         let state = State::new(tree_hash, vec![], attribution.clone());
         let change_id = state.change_id;
         store.put_state(&state).unwrap();
-        assert!(store.get_state(&change_id).unwrap().is_some());
+        assert!(ObjectStore::get_state(&store, &change_id).unwrap().is_some());
         assert!(store.has_state(&change_id).unwrap());
         assert!(store.list_states().unwrap().contains(&change_id));
         let state2 = State::new(tree2.hash(), vec![], attribution.clone());
