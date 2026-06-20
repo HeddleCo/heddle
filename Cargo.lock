@@ -2245,6 +2245,7 @@ dependencies = [
  "criterion",
  "heddle-objects",
  "heddle-runtime-bridge",
+ "heddle-schema",
  "pollster",
  "rmp-serde",
  "serde",
@@ -2330,6 +2331,16 @@ name = "heddle-runtime-bridge"
 version = "0.4.0"
 dependencies = [
  "tokio",
+]
+
+[[package]]
+name = "heddle-schema"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "heddle-objects",
+ "rmp-serde",
+ "serde",
 ]
 
 [[package]]

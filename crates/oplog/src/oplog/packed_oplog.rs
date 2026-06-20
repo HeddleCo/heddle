@@ -19,14 +19,12 @@ use objects::{
     fs_atomic::{sync_directory, temp_path, write_file_atomic},
 };
 
-use super::{
-    op_record_codec::{
-        LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
-        decode_versioned_record, encode_latest_record, schema_version_from_u32,
-    },
-    oplog_types::{OpBatch, OpEntry, OpRecord},
+use heddle_schema::op_record::{
+    LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
+    decode_versioned_record, encode_latest_record, schema_version_from_u32,
 };
 
+use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 const MAGIC: &[u8; 8] = b"LMOPLOG\0";
 const INDEX_MAGIC: &[u8; 8] = b"LMOPIDX\0";
 const INDEX_VERSION: u32 = 1;
@@ -2532,8 +2530,9 @@ mod tests {
     use objects::object::ChangeId;
     use tempfile::TempDir;
 
+    use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
+
     use super::{
-        super::op_record_codec::tests_support::{encode_atomic_no_head, encode_pre_atomic},
         *,
     };
 

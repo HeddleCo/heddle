@@ -30,9 +30,9 @@ use objects::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::oplog_types::{OpRecord, ThreadUpdateSnapshots};
+use super::{OpRecord, ThreadUpdateSnapshots};
 
-pub(crate) const LATEST_RECORD_SCHEMA_VERSION: u32 = LatestOpRecordSchema::VERSION;
+pub const LATEST_RECORD_SCHEMA_VERSION: u32 = LatestOpRecordSchema::VERSION;
 
 mod sealed {
     pub trait Sealed {}
@@ -85,14 +85,14 @@ impl VersionedOpRecordSchema for CurrentOpRecordSchema {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpRecordSchemaVersion {
+pub enum OpRecordSchemaVersion {
     PreAtomic,
     AtomicNoHead,
     Current,
 }
 
 impl OpRecordSchemaVersion {
-    pub(crate) fn number(self) -> u32 {
+    pub fn number(self) -> u32 {
         match self {
             Self::PreAtomic => PreAtomicOpRecordSchema::VERSION,
             Self::AtomicNoHead => AtomicNoHeadOpRecordSchema::VERSION,
@@ -100,7 +100,7 @@ impl OpRecordSchemaVersion {
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::PreAtomic => PreAtomicOpRecordSchema::NAME,
             Self::AtomicNoHead => AtomicNoHeadOpRecordSchema::NAME,
@@ -109,7 +109,7 @@ impl OpRecordSchemaVersion {
     }
 }
 
-pub(crate) fn schema_version_from_u32(version: u32) -> Result<OpRecordSchemaVersion> {
+pub fn schema_version_from_u32(version: u32) -> Result<OpRecordSchemaVersion> {
     match version {
         PreAtomicOpRecordSchema::VERSION => Ok(OpRecordSchemaVersion::PreAtomic),
         AtomicNoHeadOpRecordSchema::VERSION => Ok(OpRecordSchemaVersion::AtomicNoHead),
@@ -120,7 +120,7 @@ pub(crate) fn schema_version_from_u32(version: u32) -> Result<OpRecordSchemaVers
     }
 }
 
-pub(crate) fn decode_versioned_record(
+pub fn decode_versioned_record(
     bytes: &[u8],
     version: OpRecordSchemaVersion,
 ) -> Result<OpRecord> {
@@ -131,11 +131,11 @@ pub(crate) fn decode_versioned_record(
     }
 }
 
-pub(crate) fn encode_latest_record(record: &OpRecord) -> Result<Vec<u8>> {
+pub fn encode_latest_record(record: &OpRecord) -> Result<Vec<u8>> {
     rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
 }
 
-pub(crate) fn candidate_versions_newest_first() -> [OpRecordSchemaVersion; 3] {
+pub fn candidate_versions_newest_first() -> [OpRecordSchemaVersion; 3] {
     [
         OpRecordSchemaVersion::Current,
         OpRecordSchemaVersion::AtomicNoHead,
@@ -1465,16 +1465,16 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests_support {
+#[doc(hidden)]
+pub mod tests_support {
     use super::*;
 
-    pub(crate) fn encode_pre_atomic(record: &OpRecord) -> Result<Vec<u8>> {
+    pub fn encode_pre_atomic(record: &OpRecord) -> Result<Vec<u8>> {
         let legacy = PreAtomicOpRecord::from_current_fixture(record);
         rmp_serde::to_vec(&legacy).map_err(|e| HeddleError::Serialization(e.to_string()))
     }
 
-    pub(crate) fn encode_atomic_no_head(record: &OpRecord) -> Result<Vec<u8>> {
+    pub fn encode_atomic_no_head(record: &OpRecord) -> Result<Vec<u8>> {
         let legacy = AtomicNoHeadOpRecord::from_current_fixture(record);
         rmp_serde::to_vec(&legacy).map_err(|e| HeddleError::Serialization(e.to_string()))
     }

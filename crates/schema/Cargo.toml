@@ -1,0 +1,20 @@
+[package]
+name = "heddle-schema"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+rmp-serde.workspace = true
+serde.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_schema"
