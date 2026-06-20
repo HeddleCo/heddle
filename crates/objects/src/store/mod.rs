@@ -15,6 +15,7 @@ pub mod liveness;
 pub mod memory;
 pub mod pack;
 pub mod shallow;
+pub mod source;
 pub mod store_compliance;
 
 #[cfg(feature = "s3")]
@@ -33,6 +34,9 @@ pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};
 #[cfg(feature = "s3")]
 pub use s3::{S3Store, S3StoreBuilder};
 pub use shallow::ShallowInfo;
+#[cfg(feature = "async-source")]
+pub use source::AsyncObjectSource;
+pub use source::ObjectSource;
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
@@ -77,13 +81,21 @@ macro_rules! any_store_dispatch {
 
 impl ObjectStore for AnyStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        any_store_dispatch!(self, get_blob(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_blob(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_blob(inner, hash),
+        }
     }
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
         any_store_dispatch!(self, put_blob(blob))
     }
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
-        any_store_dispatch!(self, get_blob_bytes(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_blob_bytes(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_blob_bytes(inner, hash),
+        }
     }
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         any_store_dispatch!(self, blob_size(hash))
@@ -104,7 +116,11 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, has_blob(hash))
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        any_store_dispatch!(self, get_tree(hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_tree(inner, hash),
+        }
     }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         any_store_dispatch!(self, put_tree(tree))
@@ -113,7 +129,11 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, has_tree(hash))
     }
     fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
-        any_store_dispatch!(self, get_state(id))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_state(inner, id),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => ObjectStore::get_state(inner, id),
+        }
     }
     fn put_state(&self, state: &State) -> Result<()> {
         any_store_dispatch!(self, put_state(state))
@@ -635,12 +655,18 @@ mod any_store_tests {
         let blob = Blob::from("any-store dispatch blob");
         let blob_hash = store.put_blob(&blob).unwrap();
         assert_eq!(
-            store.get_blob(&blob_hash).unwrap().unwrap().content(),
+            ObjectStore::get_blob(&store, &blob_hash)
+                .unwrap()
+                .unwrap()
+                .content(),
             blob.content()
         );
         assert!(store.has_blob(&blob_hash).unwrap());
         assert_eq!(
-            store.get_blob_bytes(&blob_hash).unwrap().unwrap().as_ref(),
+            ObjectStore::get_blob_bytes(&store, &blob_hash)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
             blob.content()
         );
         assert_eq!(
@@ -669,7 +695,7 @@ mod any_store_tests {
         // ── Trees ──
         let tree = Tree::new();
         let tree_hash = store.put_tree(&tree).unwrap();
-        assert!(store.get_tree(&tree_hash).unwrap().is_some());
+        assert!(ObjectStore::get_tree(&store, &tree_hash).unwrap().is_some());
         assert!(store.has_tree(&tree_hash).unwrap());
         assert!(store.list_trees().unwrap().contains(&tree_hash));
         let tree2 = Tree::new();
@@ -687,7 +713,7 @@ mod any_store_tests {
         let state = State::new(tree_hash, vec![], attribution.clone());
         let change_id = state.change_id;
         store.put_state(&state).unwrap();
-        assert!(store.get_state(&change_id).unwrap().is_some());
+        assert!(ObjectStore::get_state(&store, &change_id).unwrap().is_some());
         assert!(store.has_state(&change_id).unwrap());
         assert!(store.list_states().unwrap().contains(&change_id));
         let state2 = State::new(tree2.hash(), vec![], attribution.clone());

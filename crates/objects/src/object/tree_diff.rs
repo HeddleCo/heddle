@@ -9,8 +9,11 @@ use std::ops::ControlFlow;
 use super::FileChangeSet;
 use crate::{
     object::{DiffKind, EntryType, FileChange, Tree, TreeEntry},
-    store::ObjectStore,
+    store::ObjectSource,
 };
+
+#[cfg(feature = "async-source")]
+use crate::store::AsyncObjectSource;
 
 /// Collect all file changes between two trees.
 ///
@@ -18,7 +21,7 @@ use crate::{
 /// [`diff_trees_visit`] and collects every [`FileChange`] into a
 /// [`FileChangeSet`]. Streaming or early-exit consumers should prefer
 /// [`diff_trees_visit`], which avoids allocating the full change list.
-pub fn diff_trees<S: ObjectStore + ?Sized>(
+pub fn diff_trees<S: ObjectSource + ?Sized>(
     store: &S,
     from: &crate::object::ContentHash,
     to: &crate::object::ContentHash,
@@ -54,7 +57,7 @@ pub fn diff_trees_visit<S, V, B>(
     mut visitor: V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     if from == to {
@@ -78,7 +81,7 @@ fn diff_trees_recursive<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
@@ -156,7 +159,7 @@ fn visit_added_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     // Symmetric with the delete branch below: if the added entry is itself a
@@ -177,13 +180,181 @@ fn visit_deleted_entry<S, V, B>(
     visitor: &mut V,
 ) -> Result<ControlFlow<B>, anyhow::Error>
 where
-    S: ObjectStore + ?Sized,
+    S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
     let path = child_path(prefix, &from_entry.name);
     if from_entry.entry_type == EntryType::Tree {
         let from_subtree = store.get_tree(&from_entry.hash)?;
         diff_trees_recursive(store, &from_subtree, &None, &path, visitor)
+    } else {
+        Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
+    }
+}
+
+#[cfg(feature = "async-source")]
+pub async fn diff_trees_visit_async<S, V, B>(
+    store: &S,
+    from: &crate::object::ContentHash,
+    to: &crate::object::ContentHash,
+    mut visitor: V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B> + Send,
+    B: Send,
+{
+    if from == to {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let from_tree = store.get_tree(from).await?;
+    let to_tree = store.get_tree(to).await?;
+    diff_trees_recursive_async(store, &from_tree, &to_tree, "", &mut visitor).await
+}
+
+#[cfg(feature = "async-source")]
+async fn diff_trees_recursive_async<S, V, B>(
+    store: &S,
+    from: &Option<Tree>,
+    to: &Option<Tree>,
+    prefix: &str,
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B> + Send,
+    B: Send,
+{
+    let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
+    let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
+
+    let mut from_index = 0;
+    let mut to_index = 0;
+
+    while let (Some(from_entry), Some(to_entry)) =
+        (from_entries.get(from_index), to_entries.get(to_index))
+    {
+        match from_entry.name.cmp(&to_entry.name) {
+            std::cmp::Ordering::Less => {
+                if let ControlFlow::Break(b) =
+                    visit_deleted_entry_async(store, prefix, from_entry, visitor).await?
+                {
+                    return Ok(ControlFlow::Break(b));
+                }
+                from_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                if let ControlFlow::Break(b) =
+                    visit_added_entry_async(store, prefix, to_entry, visitor).await?
+                {
+                    return Ok(ControlFlow::Break(b));
+                }
+                to_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if from_entry.hash != to_entry.hash {
+                    if from_entry.entry_type == EntryType::Tree
+                        && to_entry.entry_type == EntryType::Tree
+                    {
+                        let from_subtree = store.get_tree(&from_entry.hash).await?;
+                        let to_subtree = store.get_tree(&to_entry.hash).await?;
+                        let path = child_path(prefix, &to_entry.name);
+                        if let ControlFlow::Break(b) = Box::pin(diff_trees_recursive_async(
+                            store,
+                            &from_subtree,
+                            &to_subtree,
+                            &path,
+                            visitor,
+                        ))
+                        .await?
+                        {
+                            return Ok(ControlFlow::Break(b));
+                        }
+                    } else {
+                        let path = child_path(prefix, &to_entry.name);
+                        if let ControlFlow::Break(b) =
+                            visitor(FileChange::new(path, DiffKind::Modified))
+                        {
+                            return Ok(ControlFlow::Break(b));
+                        }
+                    }
+                }
+                from_index += 1;
+                to_index += 1;
+            }
+        }
+    }
+
+    for from_entry in &from_entries[from_index..] {
+        if let ControlFlow::Break(b) =
+            visit_deleted_entry_async(store, prefix, from_entry, visitor).await?
+        {
+            return Ok(ControlFlow::Break(b));
+        }
+    }
+
+    for to_entry in &to_entries[to_index..] {
+        if let ControlFlow::Break(b) =
+            visit_added_entry_async(store, prefix, to_entry, visitor).await?
+        {
+            return Ok(ControlFlow::Break(b));
+        }
+    }
+
+    Ok(ControlFlow::Continue(()))
+}
+
+#[cfg(feature = "async-source")]
+async fn visit_added_entry_async<S, V, B>(
+    store: &S,
+    prefix: &str,
+    to_entry: &TreeEntry,
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B> + Send,
+    B: Send,
+{
+    let path = child_path(prefix, &to_entry.name);
+    if to_entry.entry_type == EntryType::Tree {
+        let to_subtree = store.get_tree(&to_entry.hash).await?;
+        Box::pin(diff_trees_recursive_async(
+            store,
+            &None,
+            &to_subtree,
+            &path,
+            visitor,
+        ))
+        .await
+    } else {
+        Ok(visitor(FileChange::new(path, DiffKind::Added)))
+    }
+}
+
+#[cfg(feature = "async-source")]
+async fn visit_deleted_entry_async<S, V, B>(
+    store: &S,
+    prefix: &str,
+    from_entry: &TreeEntry,
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B> + Send,
+    B: Send,
+{
+    let path = child_path(prefix, &from_entry.name);
+    if from_entry.entry_type == EntryType::Tree {
+        let from_subtree = store.get_tree(&from_entry.hash).await?;
+        Box::pin(diff_trees_recursive_async(
+            store,
+            &from_subtree,
+            &None,
+            &path,
+            visitor,
+        ))
+        .await
     } else {
         Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
     }
@@ -206,7 +377,7 @@ mod tests {
     use super::*;
     use crate::{
         object::{Blob, ContentHash, FileMode, Tree, TreeEntry},
-        store::InMemoryStore,
+        store::{InMemoryStore, ObjectStore},
     };
 
     fn create_blob(store: &InMemoryStore, content: &str) -> ContentHash {

@@ -73,9 +73,11 @@ tree-sitter-symbols = ["dep:semantic", "semantic/lang-go", "dep:state_review"]
 # declared with the `dep:` prefix, so Cargo does not auto-create an
 # implicit `semantic` feature; this line makes it explicit.
 semantic = ["tree-sitter-symbols"]
+async-source = ["objects/async-source"]
 
 [dev-dependencies]
 hex.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.4", features = ["async-source", "memory-backend"] }
 tempfile.workspace = true
 
 [lib]

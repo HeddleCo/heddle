@@ -11,8 +11,11 @@ use objects::{
         Annotation, Blob, ContextTarget, State, Tree,
         annotation_status_for_source_with_symbol_resolver,
     },
-    store::ObjectStore,
+    store::ObjectSource,
 };
+
+#[cfg(feature = "async-source")]
+use objects::store::AsyncObjectSource;
 
 use crate::Repository;
 
@@ -152,7 +155,7 @@ fn resolve_current_symbol_for_repo(
 
 /// Resolve a blob at a file path within a tree by walking the tree hierarchy.
 fn get_blob_at_path(
-    store: &impl ObjectStore,
+    store: &impl ObjectSource,
     tree: &Tree,
     path: &str,
 ) -> Result<Option<Blob>, anyhow::Error> {
@@ -161,7 +164,7 @@ fn get_blob_at_path(
 }
 
 fn get_blob_recursive(
-    store: &impl ObjectStore,
+    store: &impl ObjectSource,
     tree: &Tree,
     parts: &[&str],
 ) -> Result<Option<Blob>, anyhow::Error> {
@@ -188,10 +191,68 @@ fn get_blob_recursive(
     Ok(None)
 }
 
+/// Resolve a blob at a file path within a tree by walking the tree hierarchy.
+#[cfg(feature = "async-source")]
+pub async fn get_blob_at_path_async<S>(
+    store: &S,
+    tree: &Tree,
+    path: &str,
+) -> Result<Option<Blob>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    let parts: Vec<&str> = path.split('/').collect();
+    get_blob_recursive_async(store, tree, &parts).await
+}
+
+#[cfg(feature = "async-source")]
+async fn get_blob_recursive_async<S>(
+    store: &S,
+    tree: &Tree,
+    parts: &[&str],
+) -> Result<Option<Blob>, anyhow::Error>
+where
+    S: AsyncObjectSource + Sync + ?Sized,
+{
+    if parts.is_empty() {
+        return Ok(None);
+    }
+
+    let name = parts[0];
+    let entry = match tree.get(name) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    if parts.len() == 1 {
+        if entry.is_blob() {
+            return Ok(store.get_blob(&entry.hash).await?);
+        }
+    } else if entry.is_tree()
+        && let Some(subtree) = store.get_tree(&entry.hash).await?
+    {
+        return Box::pin(get_blob_recursive_async(store, &subtree, &parts[1..])).await;
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objects::object::{AnnotationScope, ContentHash};
+    use objects::{
+        object::{AnnotationScope, ContentHash},
+        store::ObjectStore,
+    };
+
+    #[cfg(feature = "async-source")]
+    use objects::{
+        object::{
+            Blob, ChangeId, DiffKind, EntryType, FileChange, FileMode, TreeEntry,
+            diff_trees_visit, diff_trees_visit_async,
+        },
+        store::{AsyncObjectSource, InMemoryStore},
+    };
 
     fn make_annotation(scope: AnnotationScope, source_hash: Option<ContentHash>) -> Annotation {
         Annotation::new(
@@ -204,6 +265,173 @@ mod tests {
             source_hash,
             None,
         )
+    }
+
+    #[cfg(feature = "async-source")]
+    struct AsyncInMemorySource<'a>(&'a InMemoryStore);
+
+    #[cfg(feature = "async-source")]
+    impl AsyncObjectSource for AsyncInMemorySource<'_> {
+        async fn get_tree(&self, hash: &ContentHash) -> objects::error::Result<Option<Tree>> {
+            ObjectStore::get_tree(self.0, hash)
+        }
+
+        async fn get_state(&self, id: &ChangeId) -> objects::error::Result<Option<State>> {
+            ObjectStore::get_state(self.0, id)
+        }
+
+        async fn get_blob(&self, hash: &ContentHash) -> objects::error::Result<Option<Blob>> {
+            ObjectStore::get_blob(self.0, hash)
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[cfg(feature = "async-source")]
+    fn create_blob(store: &InMemoryStore, content: &[u8]) -> ContentHash {
+        ObjectStore::put_blob(store, &Blob::from_slice(content)).unwrap()
+    }
+
+    #[cfg(feature = "async-source")]
+    fn create_tree(
+        store: &InMemoryStore,
+        entries: Vec<(&str, ContentHash, EntryType)>,
+    ) -> ContentHash {
+        let entries = entries
+            .into_iter()
+            .map(|(name, hash, entry_type)| TreeEntry {
+                name: name.to_string(),
+                mode: FileMode::Normal,
+                hash,
+                entry_type,
+            })
+            .collect();
+        ObjectStore::put_tree(store, &Tree::from_entries(entries)).unwrap()
+    }
+
+    #[cfg(feature = "async-source")]
+    fn blob_content(blob: Option<Blob>) -> Option<Vec<u8>> {
+        blob.map(Blob::into_content)
+    }
+
+    #[cfg(feature = "async-source")]
+    #[test]
+    fn async_source_golden_vectors_match_sync_walkers() {
+        let store = InMemoryStore::new();
+        let async_store = AsyncInMemorySource(&store);
+
+        let from_nested = create_blob(&store, b"old nested");
+        let from_nested_tree = create_tree(
+            &store,
+            vec![("c.txt", from_nested, EntryType::Blob)],
+        );
+        let to_nested = create_blob(&store, b"new nested");
+        let to_nested_tree = create_tree(&store, vec![("b.txt", to_nested, EntryType::Blob)]);
+
+        let from_hash = create_tree(
+            &store,
+            vec![
+                (
+                    "a.txt",
+                    create_blob(&store, b"old a"),
+                    EntryType::Blob,
+                ),
+                ("dir", from_nested_tree, EntryType::Tree),
+                (
+                    "same.txt",
+                    create_blob(&store, b"same"),
+                    EntryType::Blob,
+                ),
+                (
+                    "z.txt",
+                    create_blob(&store, b"old z"),
+                    EntryType::Blob,
+                ),
+            ],
+        );
+        let to_hash = create_tree(
+            &store,
+            vec![
+                (
+                    "b.txt",
+                    create_blob(&store, b"new b"),
+                    EntryType::Blob,
+                ),
+                ("dir", to_nested_tree, EntryType::Tree),
+                (
+                    "same.txt",
+                    create_blob(&store, b"same"),
+                    EntryType::Blob,
+                ),
+                (
+                    "z.txt",
+                    create_blob(&store, b"new z"),
+                    EntryType::Blob,
+                ),
+            ],
+        );
+
+        let expected_changes = vec![
+            ("a.txt".to_string(), DiffKind::Deleted),
+            ("b.txt".to_string(), DiffKind::Added),
+            ("dir/b.txt".to_string(), DiffKind::Added),
+            ("dir/c.txt".to_string(), DiffKind::Deleted),
+            ("z.txt".to_string(), DiffKind::Modified),
+        ];
+
+        let mut sync_changes = Vec::new();
+        let _ = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+            sync_changes.push(FileChange::into_tuple(change));
+            std::ops::ControlFlow::<()>::Continue(())
+        })
+        .unwrap();
+
+        let mut async_changes = Vec::new();
+        let _ = block_on(diff_trees_visit_async(
+            &async_store,
+            &from_hash,
+            &to_hash,
+            |change| {
+                async_changes.push(FileChange::into_tuple(change));
+                std::ops::ControlFlow::<()>::Continue(())
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(sync_changes, expected_changes);
+        assert_eq!(async_changes, expected_changes);
+        assert_eq!(async_changes, sync_changes);
+
+        let to_tree = ObjectStore::get_tree(&store, &to_hash).unwrap().unwrap();
+        let path_vectors = [
+            ("b.txt", Some(b"new b".to_vec())),
+            ("dir/b.txt", Some(b"new nested".to_vec())),
+            ("dir/c.txt", None),
+        ];
+
+        for (path, expected_blob) in path_vectors {
+            let sync_blob = blob_content(get_blob_at_path(&store, &to_tree, path).unwrap());
+            let async_blob = blob_content(
+                block_on(get_blob_at_path_async(&async_store, &to_tree, path)).unwrap(),
+            );
+            assert_eq!(sync_blob, expected_blob, "sync path {path}");
+            assert_eq!(async_blob, expected_blob, "async path {path}");
+            assert_eq!(async_blob, sync_blob, "dual path {path}");
+        }
     }
 
     #[test]

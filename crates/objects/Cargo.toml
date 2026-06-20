@@ -41,6 +41,7 @@ aws-smithy-async = { workspace = true, optional = true }
 runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
 
 [features]
+async-source = []
 bench = ["heddle-format/bench"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
