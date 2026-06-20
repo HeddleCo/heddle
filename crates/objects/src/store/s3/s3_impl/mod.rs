@@ -82,6 +82,8 @@ impl ObjectStore for S3Store {
         let hash = blob.hash();
         let key = self.blob_key(&hash);
         let content = blob.content().to_vec();
+        let compression_config = CompressionConfig::default();
+        let data = codec::encode_blob_content(&content, &compression_config)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -104,13 +106,11 @@ impl ObjectStore for S3Store {
                             }
                         }
                     }
-                    let compression_config = CompressionConfig::default();
-                    let data = codec::encode_blob_content(&content, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
                         .key(&key)
-                        .body(ByteStream::from(data))
+                        .body(ByteStream::from(data.clone()))
                         .send()
                         .await
                         .map_err(|e| {
@@ -232,6 +232,8 @@ impl ObjectStore for S3Store {
         let hash = tree.hash();
         let key = self.tree_key(&hash);
         let tree = tree.clone();
+        let compression_config = CompressionConfig::default();
+        let (_, data) = codec::encode_tree(&tree, &compression_config)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -254,13 +256,11 @@ impl ObjectStore for S3Store {
                             }
                         }
                     }
-                    let compression_config = CompressionConfig::default();
-                    let (_, data) = codec::encode_tree(&tree, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
                         .key(&key)
-                        .body(ByteStream::from(data))
+                        .body(ByteStream::from(data.clone()))
                         .send()
                         .await
                         .map_err(|e| {
@@ -375,6 +375,8 @@ impl ObjectStore for S3Store {
     fn put_state(&self, state: &State) -> Result<()> {
         let key = self.state_key(&state.change_id);
         let state = state.clone();
+        let compression_config = CompressionConfig::default();
+        let data = codec::encode_state(&state, &compression_config)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -382,13 +384,11 @@ impl ObjectStore for S3Store {
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    let compression_config = CompressionConfig::default();
-                    let data = codec::encode_state(&state, &compression_config)?;
                     client
                         .put_object()
                         .bucket(&bucket)
                         .key(&key)
-                        .body(ByteStream::from(data))
+                        .body(ByteStream::from(data.clone()))
                         .send()
                         .await
                         .map_err(|e| {
@@ -504,7 +504,9 @@ impl ObjectStore for S3Store {
     fn put_action(&self, action: &mut Action) -> Result<ActionId> {
         let id = action.id();
         let key = self.action_key(&id);
-        let action = action.clone();
+        let mut action = action.clone();
+        let compression_config = CompressionConfig::default();
+        let (_, data) = codec::encode_action(&mut action, &compression_config)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
         self.block(async move {
@@ -515,10 +517,8 @@ impl ObjectStore for S3Store {
                     let client = Arc::clone(&client);
                     let bucket = bucket.clone();
                     let key = key.clone();
-                    let mut action = action.clone();
+                    let data = data.clone();
                     async move {
-                        let compression_config = CompressionConfig::default();
-                        let (_, data) = codec::encode_action(&mut action, &compression_config)?;
                         client
                             .put_object()
                             .bucket(&bucket)
