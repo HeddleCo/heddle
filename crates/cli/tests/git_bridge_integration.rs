@@ -35,6 +35,7 @@ use objects::{
         Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
     },
     store::ObjectStore,
+    util::gitlink_blob_content,
 };
 use repo::Repository;
 use sley::{
@@ -434,6 +435,56 @@ fn init_gitlink_repo() -> (TempDir, SleyRepository) {
     (git_temp, git_repo)
 }
 
+fn git_output(path: &std::path::Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().expect("git cmd");
+    if let Some(stdin) = stdin {
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(stdin)
+            .expect("write stdin");
+    }
+    let output = child.wait_with_output().expect("git output");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn init_invalid_utf8_name_repo() -> TempDir {
+    let temp = TempDir::new().expect("temp dir");
+    git_output(temp.path(), &["init", "-q", "--initial-branch=main"], None);
+
+    let blob = git_output(temp.path(), &["hash-object", "-w", "--stdin"], Some(b"hello\n"));
+    let mut tree_input = Vec::new();
+    write!(&mut tree_input, "100644 blob {blob}\t").expect("tree record");
+    tree_input.extend_from_slice(b"bad\xffname\0");
+    let tree = git_output(temp.path(), &["mktree", "-z"], Some(&tree_input));
+    let commit = git_output(temp.path(), &["commit-tree", &tree, "-m", "invalid name"], None);
+    git_output(temp.path(), &["update-ref", "refs/heads/main", &commit], None);
+
+    temp
+}
+
 struct GitDaemon {
     child: Child,
     port: u16,
@@ -795,7 +846,7 @@ fn export_tree_writes_submodule_entries() {
     let submodule_oid: ObjectId = "0303030303030303030303030303030303030303"
         .parse()
         .expect("oid");
-    let blob = Blob::new(format!("heddle-submodule: {}", submodule_oid).into_bytes());
+    let blob = Blob::new(gitlink_blob_content(submodule_oid));
     let blob_hash = repo.store().put_blob(&blob).expect("blob");
 
     let tree = Tree::from_entries(vec![TreeEntry {
@@ -916,39 +967,45 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
 }
 
 #[test]
-fn import_all_rejects_gitlink_by_default_and_lossy_reports_drop() {
+fn import_all_imports_gitlink_losslessly_and_exports_gitlink() {
     let (_git_temp, git_repo) = init_gitlink_repo();
 
-    let default_heddle = TempDir::new().expect("heddle temp");
-    let default_repo = Repository::init(default_heddle.path()).expect("init heddle");
-    let mut default_bridge = GitBridge::new(&default_repo);
-    let err = import_all(
-        &mut default_bridge,
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+    let stats = import_all(
+        &mut bridge,
         Some(git_repo.workdir().expect("workdir").as_path()),
     )
-    .expect_err("default import must fail on gitlink");
-    let message = err.to_string();
-    assert!(message.contains("vendor"), "error names entry: {message}");
-    assert!(message.contains("--lossy"), "error names opt-in: {message}");
-
-    let lossy_heddle = TempDir::new().expect("heddle temp");
-    let lossy_repo = Repository::init(lossy_heddle.path()).expect("init heddle");
-    let mut lossy_bridge = GitBridge::new(&lossy_repo);
-    let stats = import_all_with_options(
-        &mut lossy_bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
-        ingest::ImportOptions { lossy: true },
-    )
-    .expect("lossy import accepts gitlink drop");
+    .expect("default import accepts gitlink");
 
     assert_eq!(stats.states_created, 1);
-    assert_eq!(stats.lossy_entries.len(), 1);
-    assert_eq!(stats.lossy_entries[0].path, "vendor");
-    assert!(stats.lossy_entries[0].summary_line().contains("dropped"));
+    assert!(stats.lossy_entries.is_empty());
+
+    let state_id = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .expect("main thread lookup")
+        .expect("main thread");
+    let state = repo
+        .store()
+        .get_state(&state_id)
+        .expect("get state")
+        .expect("state present");
+    assert!(!state.git_lossy, "gitlink import must not set git_lossy");
+
+    let exported_tree = export_tree(&repo, &git_repo, &state.tree).expect("export tree");
+    let git_tree = git_repo.find_tree(exported_tree).expect("exported tree");
+    let entry = git_tree.find_entry("vendor").expect("vendor entry");
+    let expected_oid: ObjectId = "0505050505050505050505050505050505050505"
+        .parse()
+        .expect("oid");
+    assert_eq!(entry.mode().kind(), EntryKind::Commit);
+    assert_eq!(entry.object_id(), expected_oid);
 }
 
 #[test]
-fn import_all_lossy_reports_cached_shared_subtree_entries_without_mapping_sidecar() {
+fn import_all_reuses_shared_gitlink_subtree_without_lossy_entries() {
     let (_git_temp, git_repo) = init_git_repo();
     let shared_tree = gitlink_tree(&git_repo, "vendor");
 
@@ -979,39 +1036,32 @@ fn import_all_lossy_reports_cached_shared_subtree_entries_without_mapping_sideca
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let mut bridge = GitBridge::new(&repo);
-    let stats = import_all_with_options(
+    let stats = import_all(
         &mut bridge,
         Some(&git_repo.workdir().expect("workdir")),
-        ingest::ImportOptions { lossy: true },
     )
-    .expect("lossy import accepts shared gitlink subtree");
+    .expect("default import accepts shared gitlink subtree");
 
     assert_eq!(stats.states_created, 2);
-    assert_eq!(
-        stats.lossy_entries.len(),
-        2,
-        "runtime stats should include both the original and cached ingest lossy entries"
-    );
-    assert_eq!(stats.lossy_entries[0].path, "shared/vendor");
-    assert_eq!(stats.lossy_entries[1].path, "shared/vendor");
+    assert!(stats.lossy_entries.is_empty());
 
     assert!(
         !test_support::mapping_path(&bridge).exists(),
-        "bridge import must not publish lossy entries through the served mapping cache"
+        "bridge import must not publish ingest-only mappings through the served mapping cache"
     );
 }
 
 #[test]
 fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
-    let (_git_temp, git_repo) = init_gitlink_repo();
-    let git_path = git_repo.workdir().expect("workdir");
+    let git_temp = init_invalid_utf8_name_repo();
+    let git_path = git_temp.path();
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
 
     let mut first_bridge = GitBridge::new(&repo);
     let first = import_all_with_options(
         &mut first_bridge,
-        Some(git_path.as_path()),
+        Some(git_path),
         ingest::ImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
@@ -1023,22 +1073,22 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     );
 
     let mut rerun_bridge = GitBridge::new(&repo);
-    let err = import_all(&mut rerun_bridge, Some(git_path.as_path()))
+    let err = import_all(&mut rerun_bridge, Some(git_path))
         .expect_err("default bridge import must not reuse cached lossy state silently");
     assert_lossy_default_rerun_error("bridge", &err.to_string());
 }
 
 #[test]
 fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
-    let (_git_temp, git_repo) = init_gitlink_repo();
-    let git_path = git_repo.workdir().expect("workdir");
+    let git_temp = init_invalid_utf8_name_repo();
+    let git_path = git_temp.path();
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
 
     let mut first_bridge = GitBridge::new(&repo);
     import_all_with_options(
         &mut first_bridge,
-        Some(git_path.as_path()),
+        Some(git_path),
         ingest::ImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
@@ -1046,15 +1096,15 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     let mut rerun_bridge = GitBridge::new(&repo);
     let second = import_all_with_options(
         &mut rerun_bridge,
-        Some(git_path.as_path()),
+        Some(git_path),
         ingest::ImportOptions { lossy: true },
     )
     .expect("lossy bridge rerun reports ingest-cached lossy entries");
 
     assert_eq!(second.states_created, 0);
     assert_eq!(second.lossy_entries.len(), 1);
-    assert_eq!(second.lossy_entries[0].path, "vendor");
-    assert!(second.lossy_entries[0].summary_line().contains("dropped"));
+    assert_eq!(second.lossy_entries[0].path, "bad\u{fffd}name");
+    assert!(second.lossy_entries[0].summary_line().contains("converted"));
 }
 
 #[cfg(feature = "ingest")]
@@ -1076,11 +1126,11 @@ impl ImportEngine {
 
 fn assert_lossy_default_rerun_error(engine: &str, message: &str) {
     assert!(
-        message.contains("vendor"),
+        message.contains("bad"),
         "{engine} error names entry: {message}"
     );
     assert!(
-        message.contains("losslessly"),
+        message.contains("not valid UTF-8"),
         "{engine} error explains policy: {message}"
     );
     assert!(
@@ -1091,15 +1141,15 @@ fn assert_lossy_default_rerun_error(engine: &str, message: &str) {
 
 #[cfg(feature = "ingest")]
 fn run_lossy_then_default_rerun(engine: ImportEngine) {
-    let (_git_temp, git_repo) = init_gitlink_repo();
-    let git_path = git_repo.workdir().expect("workdir");
+    let git_temp = init_invalid_utf8_name_repo();
+    let git_path = git_temp.path();
     let message = match engine {
         ImportEngine::Ingest => {
             use ingest::{ImportOptions, import_git_into, import_git_into_with_options};
 
             let heddle_temp = TempDir::new().expect("heddle temp");
             let (first, map) = import_git_into_with_options(
-                &git_path,
+                git_path,
                 heddle_temp.path(),
                 ImportOptions { lossy: true },
             )
@@ -1117,14 +1167,14 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
             let mut first_bridge = GitBridge::new(&repo);
             let first = import_all_with_options(
                 &mut first_bridge,
-                Some(git_path.as_path()),
+                Some(git_path),
                 ingest::ImportOptions { lossy: true },
             )
             .expect("initial lossy bridge import succeeds");
             assert_eq!(first.lossy_entries.len(), 1);
 
             let mut rerun_bridge = GitBridge::new(&repo);
-            import_all(&mut rerun_bridge, Some(git_path.as_path()))
+            import_all(&mut rerun_bridge, Some(git_path))
                 .expect_err("default bridge import must fail on cached lossy commit")
                 .to_string()
         }
@@ -1161,7 +1211,7 @@ fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     assert!(stats.lossy_entries.is_empty());
 }
 
-/// The single imported gitlink state must carry git-fidelity (`raw_message`) —
+/// The single imported lossy state must carry git-fidelity (`raw_message`) —
 /// the signal that opts a commit INTO reconstruct-from-state — yet be flagged
 /// `git_lossy`, so the #567 export guard keeps it OFF that path. Asserted for
 /// both lossy population surfaces so they converge on ONE canonical marker.
@@ -1173,7 +1223,7 @@ fn assert_only_state_is_lossy_with_fidelity(repo: &Repository, surface: &str) {
         .iter()
         .filter_map(|id| repo.store().get_state(id).expect("get state"))
         .collect();
-    assert_eq!(states.len(), 1, "{surface}: single gitlink commit imported");
+    assert_eq!(states.len(), 1, "{surface}: single lossy commit imported");
     let state = &states[0];
     assert!(
         state.raw_message.is_some(),
@@ -1187,25 +1237,22 @@ fn assert_only_state_is_lossy_with_fidelity(repo: &Repository, surface: &str) {
     );
 }
 
-/// `bridge git import --lossy` records the canonical `git_lossy` marker.
+/// `bridge git import --lossy` records the canonical `git_lossy` marker for
+/// genuinely unrepresentable tree entries.
 #[test]
 fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_git_temp, git_repo) = init_gitlink_repo();
+    let git_temp = init_invalid_utf8_name_repo();
 
     let mut bridge = GitBridge::new(&repo);
     let stats = import_all_with_options(
         &mut bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
+        Some(git_temp.path()),
         ingest::ImportOptions { lossy: true },
     )
     .expect("lossy bridge import succeeds");
-    assert_eq!(
-        stats.lossy_entries.len(),
-        1,
-        "gitlink is the one lossy entry"
-    );
+    assert_eq!(stats.lossy_entries.len(), 1);
 
     assert_only_state_is_lossy_with_fidelity(&repo, "bridge import --lossy");
 }
@@ -1221,19 +1268,15 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
 fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
     use ingest::{ImportOptions, import_git_into_with_options};
 
-    let (_git_temp, git_repo) = init_gitlink_repo();
-    let git_path = git_repo.workdir().expect("workdir");
+    let git_temp = init_invalid_utf8_name_repo();
+    let git_path = git_temp.path();
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let (stats, map) =
         import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
             .expect("lossy ingest succeeds");
     drop(map);
-    assert_eq!(
-        stats.lossy_entries.len(),
-        1,
-        "gitlink is the one lossy entry"
-    );
+    assert_eq!(stats.lossy_entries.len(), 1);
 
     let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
     assert_only_state_is_lossy_with_fidelity(&repo, "ingest-backed lossy import");
@@ -1253,19 +1296,15 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
 fn export_mints_lossy_ingest_state_from_raw_metadata() {
     use ingest::{ImportOptions, import_git_into_with_options};
 
-    let (_git_temp, git_repo) = init_gitlink_repo();
-    let git_path = git_repo.workdir().expect("workdir");
+    let git_temp = init_invalid_utf8_name_repo();
+    let git_path = git_temp.path();
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let (stats, map) =
         import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
             .expect("lossy ingest succeeds");
     drop(map);
-    assert_eq!(
-        stats.lossy_entries.len(),
-        1,
-        "gitlink is the one lossy entry"
-    );
+    assert_eq!(stats.lossy_entries.len(), 1);
 
     let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
     let state = {

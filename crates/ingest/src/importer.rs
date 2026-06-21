@@ -27,7 +27,10 @@ use objects::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
-    util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
+    util::{
+        GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name,
+        gitlink_blob_content,
+    },
 };
 use oplog::oplog::{OpLog, OpLogBackend};
 use refs::refs::RefBackend;
@@ -642,13 +645,11 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
                 ))
             }
             TreeChildKind::Gitlink => {
-                let entry = LossyImportEntry::dropped(
-                    join_tree_path(path_prefix, &name),
-                    Some(child.sha.clone()),
-                    "gitlink/submodule entries have no Heddle tree equivalent",
-                );
-                self.record_lossy(entry)?;
-                Ok(None)
+                let hash = self.write_synthetic_blob(gitlink_blob_content(&child.sha))?;
+                Ok(Some(
+                    TreeEntry::file(name, hash, false)
+                        .map_err(|e| IngestError::Heddle(e.into()))?,
+                ))
             }
         }
     }
@@ -677,6 +678,15 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.map
             .insert_blob(git_blob_sha, hash)
             .map_err(IngestError::from)?;
+        Ok(hash)
+    }
+
+    fn write_synthetic_blob(&mut self, bytes: Vec<u8>) -> crate::Result<ContentHash> {
+        let blob = Blob::new(bytes.clone());
+        let hash = blob.hash();
+        self.builder.add(hash, PackObjectType::Blob, bytes)?;
+        self.stats.object_count += 1;
+        self.stats.blobs += 1;
         Ok(hash)
     }
 
@@ -840,7 +850,10 @@ pub fn import_git_into_scoped_with_options_and_progress(
 mod tests {
     use std::{io::Write, path::Path, process::Command};
 
-    use objects::{object::ThreadName, store::InMemoryStore};
+    use objects::{
+        object::{EntryType, FileMode, ThreadName},
+        store::InMemoryStore,
+    };
     use refs::refs::RefManager;
     use tempfile::TempDir;
 
@@ -1086,36 +1099,47 @@ mod tests {
     }
 
     #[test]
-    fn import_git_into_rejects_gitlink_by_default() {
+    fn import_git_into_represents_gitlink_as_submodule_blob() {
         let gitdir = TempDir::new().unwrap();
         let heddledir = TempDir::new().unwrap();
         seed_gitlink_repo(gitdir.path());
 
-        let err = import_git_into(gitdir.path(), heddledir.path())
-            .expect_err("gitlink import must fail without --lossy");
-        let message = err.to_string();
-
-        assert!(message.contains("vendor"), "error names entry: {message}");
-        assert!(message.contains("--lossy"), "error names opt-in: {message}");
-    }
-
-    #[test]
-    fn import_git_into_lossy_drops_gitlink_and_summarizes() {
-        let gitdir = TempDir::new().unwrap();
-        let heddledir = TempDir::new().unwrap();
-        seed_gitlink_repo(gitdir.path());
-
-        let (stats, _map) = import_git_into_with_options(
-            gitdir.path(),
-            heddledir.path(),
-            ImportOptions { lossy: true },
-        )
-        .expect("lossy import succeeds");
+        let (stats, _map) =
+            import_git_into(gitdir.path(), heddledir.path()).expect("gitlink import succeeds");
 
         assert!(stats.commits_imported >= 2);
-        assert_eq!(stats.lossy_entries.len(), 1);
-        assert_eq!(stats.lossy_entries[0].path, "vendor");
-        assert!(stats.lossy_entries[0].summary_line().contains("dropped"));
+        assert!(stats.lossy_entries.is_empty());
+
+        let repo = repo::Repository::open(heddledir.path()).unwrap();
+        let main_cid = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("main thread");
+        let state = repo
+            .store()
+            .get_state(&main_cid)
+            .unwrap()
+            .expect("main state");
+        assert!(!state.git_lossy, "gitlink import must remain byte-faithful");
+        let tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .expect("root tree");
+        let entry = tree.get("vendor").expect("vendor gitlink entry");
+
+        assert_eq!(entry.entry_type, EntryType::Blob);
+        assert_eq!(entry.mode, FileMode::Normal);
+        let blob = repo
+            .store()
+            .get_blob(&entry.hash)
+            .unwrap()
+            .expect("submodule blob");
+        assert_eq!(
+            blob.content(),
+            gitlink_blob_content("0808080808080808080808080808080808080808")
+        );
     }
 
     #[test]

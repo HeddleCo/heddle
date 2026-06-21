@@ -7,6 +7,7 @@ use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
     store::ObjectStore,
+    util::SUBMODULE_PREFIX,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use sley::{
@@ -26,8 +27,6 @@ use crate::bridge::{
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef},
 };
-
-const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
 /// Whether `state` carries a captured original git commit to reconstruct
 /// byte-exactly (the #565 de-lossy fidelity fields). When true, export
