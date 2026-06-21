@@ -25,7 +25,6 @@ pub mod client;
 pub mod exit;
 pub mod extensions;
 pub mod harness;
-pub mod logging;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
@@ -36,7 +35,10 @@ pub mod util;
 // Shared types now live in cli-shared (so heddle-client can depend on
 // them without a cli ↔ heddle-client cycle). Re-export under the
 // historical paths so internal code keeps working.
-pub use cli_shared::{config, remote};
+pub use cli_shared::{
+    LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging,
+    init_logging_default, is_enabled, logging, log_operation, log_repo_event, remote,
+};
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,

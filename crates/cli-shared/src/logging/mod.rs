@@ -256,7 +256,7 @@ impl OtelConfig {
 /// # Example
 ///
 /// ```rust
-/// use cli::logging::{LoggingConfig, init_logging};
+/// use cli_shared::logging::{LoggingConfig, init_logging};
 ///
 /// fn main() {
 ///     init_logging(LoggingConfig::from_env());

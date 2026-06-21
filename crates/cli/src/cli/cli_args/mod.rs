@@ -24,7 +24,8 @@ mod commands_stash;
 mod commands_thread;
 mod commands_visibility;
 
-pub use cli_base::{Cli, OutputMode};
+pub use cli_base::Cli;
+pub use cli_shared::OutputMode;
 pub use commands_advanced::{
     CheckpointArgs, TransactionAbortArgs, TransactionBeginArgs, TransactionCommands,
     TransactionIdArgs,

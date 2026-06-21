@@ -11,12 +11,27 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
 wire = { path = "../wire", package = "heddle-wire", version = "0.4", default-features = false }
 repo = { path = "../repo", package = "heddle-repo", version = "0.4", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+tracing.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber.workspace = true
+
+[features]
+observability = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+]
 
 [lib]
 path = "src/lib.rs"

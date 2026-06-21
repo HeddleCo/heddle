@@ -155,6 +155,7 @@ ingest = []
 semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
 semantic-extended = ["semantic", "semantic?/extended-languages"]
 observability = [
+    "cli-shared/observability",
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",

@@ -1559,12 +1559,19 @@ name = "heddle-cli-shared"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "clap",
  "heddle-objects",
  "heddle-repo",
  "heddle-wire",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "serde",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
