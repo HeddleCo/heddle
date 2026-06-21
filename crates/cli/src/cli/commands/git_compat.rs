@@ -14,6 +14,7 @@ use objects::{
         TreeEntry,
     },
     store::ObjectStore,
+    util::gitlink_blob_content,
     worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -932,7 +933,7 @@ fn import_index_blob(
 }
 
 fn import_index_gitlink(repo: &Repository, oid: ObjectId) -> Result<ContentHash> {
-    let blob = Blob::new(format!("heddle-submodule: {oid}").into_bytes());
+    let blob = Blob::new(gitlink_blob_content(oid));
     Ok(repo.store().put_blob(&blob)?)
 }
 

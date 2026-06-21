@@ -130,11 +130,9 @@ fn assert_roundtrip_fidelity(case: &str, source: &Path) {
 }
 
 /// As [`assert_roundtrip_fidelity`], but `lossy` opts into the explicit
-/// `--lossy` import surface. Gitlinks (submodules) are the one tree-entry
-/// kind heddle refuses to import silently — it converts them to a
-/// `heddle-submodule` blob only under the opt-in, then export reconstitutes
-/// the gitlink. The fidelity bar is unchanged: the round-trip must still be
-/// byte-identical.
+/// `--lossy` import surface for fixtures that intentionally exercise
+/// unrepresentable git tree data. The fidelity bar is unchanged: the
+/// round-trip must still be byte-identical whenever the source is representable.
 fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
     // git fsck the source first: a corrupt fixture would make the whole
     // comparison meaningless.
@@ -385,9 +383,9 @@ fn roundtrip_submodule_gitlink() {
         ls.contains("160000 commit"),
         "expected a 160000 gitlink tree entry, got: {ls}"
     );
-    // Gitlinks are heddle's one opt-in lossy tree-entry kind; the round-trip
-    // must still reproduce the gitlink (and thus the tree/commit SHA) exactly.
-    assert_roundtrip_fidelity_opts("submodule-gitlink", dir, true);
+    // Gitlinks import losslessly via the heddle-submodule blob convention and
+    // export back to mode 160000, so no --lossy opt-in is required.
+    assert_roundtrip_fidelity("submodule-gitlink", dir);
 }
 
 #[test]
