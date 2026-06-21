@@ -1,0 +1,155 @@
+name: Unwrap Inventory
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unwrap-inventory:
+    name: unwrap-inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: unwrap-inventory-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Count production unwrap/expect/panic call sites
+        continue-on-error: true
+        run: |
+          set +e
+          cargo metadata --format-version 1 --no-deps > cargo-metadata.json
+          metadata_status=$?
+          cargo clippy --locked --message-format=json --workspace --all-targets -- \
+            -W clippy::unwrap_used \
+            -W clippy::expect_used \
+            -W clippy::panic \
+            > clippy-inventory.json 2> clippy-inventory.stderr
+          clippy_status=$?
+
+          if [ -s clippy-inventory.stderr ]; then
+            echo "::group::cargo clippy stderr"
+            cat clippy-inventory.stderr
+            echo "::endgroup::"
+          fi
+
+          if [ "$metadata_status" -ne 0 ]; then
+            {
+              echo "## unwrap-inventory"
+              echo
+              echo "cargo metadata failed with status $metadata_status; no inventory table was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          python3 <<'PY'
+          import json
+          import os
+          from collections import defaultdict
+
+          lint_names = {
+              "clippy::unwrap_used": "unwrap_used",
+              "clippy::expect_used": "expect_used",
+              "clippy::panic": "panic",
+          }
+
+          with open("cargo-metadata.json", encoding="utf-8") as handle:
+              metadata = json.load(handle)
+
+          packages = {package["id"]: package for package in metadata["packages"]}
+          workspace_crates = sorted(
+              packages[package_id]["name"] for package_id in metadata["workspace_members"]
+          )
+          counts = defaultdict(set)
+
+          with open("clippy-inventory.json", encoding="utf-8") as handle:
+              for line in handle:
+                  try:
+                      message = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if message.get("reason") != "compiler-message":
+                      continue
+                  diagnostic = message.get("message", {})
+                  code = (diagnostic.get("code") or {}).get("code")
+                  if code not in lint_names:
+                      continue
+
+                  package = packages.get(message.get("package_id"))
+                  if package is None:
+                      continue
+                  target_kind = set(message.get("target", {}).get("kind", []))
+                  if target_kind.intersection({"test", "bench"}):
+                      continue
+
+                  primary_spans = [
+                      span for span in diagnostic.get("spans", []) if span.get("is_primary")
+                  ]
+                  if not primary_spans:
+                      primary_spans = diagnostic.get("spans", [])[:1]
+
+                  for span in primary_spans:
+                      path = span.get("file_name", "")
+                      path_parts = set(path.split("/"))
+                      if path_parts.intersection({"tests", "benches"}):
+                          continue
+                      key = (
+                          path,
+                          span.get("line_start"),
+                          span.get("column_start"),
+                          code,
+                      )
+                      counts[(package["name"], lint_names[code])].add(key)
+
+          lines = [
+              "## unwrap-inventory",
+              "",
+              "Unique primary clippy diagnostics in non-test/non-bench targets.",
+              "",
+              "| crate | unwrap_used | expect_used | panic |",
+              "|---|---:|---:|---:|",
+          ]
+          for crate in workspace_crates:
+              lines.append(
+                  "| {crate} | {unwrap} | {expect} | {panic} |".format(
+                      crate=crate,
+                      unwrap=len(counts[(crate, "unwrap_used")]),
+                      expect=len(counts[(crate, "expect_used")]),
+                      panic=len(counts[(crate, "panic")]),
+                  )
+              )
+
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines))
+              summary.write("\n")
+          PY
+
+          if [ "$clippy_status" -ne 0 ]; then
+            {
+              echo
+              echo "cargo clippy exited with status $clippy_status; the table above may be partial."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          exit 0

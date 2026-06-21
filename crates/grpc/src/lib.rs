@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 //! Generated gRPC surface for the hosted transport rewrite.
 
 pub mod heddle {
