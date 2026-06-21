@@ -61,26 +61,50 @@ fn git_status_porcelain(path: &std::path::Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-fn seed_gitlink_repo(path: &std::path::Path) {
-    init_colocated_git_repo(path);
-    std::fs::write(path.join("README.md"), "root\n").unwrap();
-    git_commit_all_in(path, "initial");
-
-    let submodule_oid = "0606060606060606060606060606060606060606";
-    let status = Command::new("git")
-        .args(["update-index", "--add", "--cacheinfo"])
-        .arg(format!("160000,{submodule_oid},vendor"))
+fn git_output_in(path: &std::path::Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+    let mut command = Command::new("git");
+    command
+        .args(args)
         .current_dir(path)
-        .status()
-        .expect("git update-index should run");
-    assert!(status.success(), "git update-index should succeed");
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("GIT_AUTHOR_NAME", "Heddle Test")
+        .env("GIT_AUTHOR_EMAIL", "heddle@example.com")
+        .env("GIT_COMMITTER_NAME", "Heddle Test")
+        .env("GIT_COMMITTER_EMAIL", "heddle@example.com")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
+    if stdin.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+    let mut child = command.spawn().expect("git command should run");
+    if let Some(stdin) = stdin {
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin should be piped")
+            .write_all(stdin)
+            .expect("write git stdin");
+    }
+    let output = child.wait_with_output().expect("git command output");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
 
-    let status = Command::new("git")
-        .args(["commit", "-m", "add gitlink"])
-        .current_dir(path)
-        .status()
-        .expect("git commit should run");
-    assert!(status.success(), "git commit should succeed");
+fn seed_unrepresentable_tree_name_repo(path: &std::path::Path) {
+    git_output_in(path, &["init", "-q", "--initial-branch=main"], None);
+
+    let blob = git_output_in(path, &["hash-object", "-w", "--stdin"], Some(b"hello\n"));
+    let mut tree_input = Vec::new();
+    write!(&mut tree_input, "100644 blob {blob}\t").expect("tree record");
+    tree_input.extend_from_slice(b"bad\\\xffname\0");
+    let tree = git_output_in(path, &["mktree", "-z"], Some(&tree_input));
+    let commit = git_output_in(path, &["commit-tree", &tree, "-m", "invalid name"], None);
+    git_output_in(path, &["update-ref", "refs/heads/main", &commit], None);
 }
 
 /// The empty-blob object id (SHA-1). An intent-to-add index entry points
@@ -89,9 +113,9 @@ fn seed_gitlink_repo(path: &std::path::Path) {
 const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 #[test]
-fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
+fn bridge_git_import_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes() {
     let source = TempDir::new().unwrap();
-    seed_gitlink_repo(source.path());
+    seed_unrepresentable_tree_name_repo(source.path());
 
     let default_target = TempDir::new().unwrap();
     heddle(&["init"], Some(default_target.path())).expect("init default target");
@@ -108,11 +132,11 @@ fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
     .expect("run default import");
     assert!(
         !default_output.status.success(),
-        "default git import must fail on gitlink"
+        "default git import must fail on unrepresentable tree name"
     );
     let default_stderr = String::from_utf8_lossy(&default_output.stderr);
     assert!(
-        default_stderr.contains("vendor"),
+        default_stderr.contains("bad") && default_stderr.contains("name"),
         "error should name the offending entry: {default_stderr}"
     );
     assert!(
@@ -139,7 +163,10 @@ fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
         lossy.contains("lossy import accepted"),
         "lossy import should emit an end-of-run summary: {lossy}"
     );
-    assert!(lossy.contains("vendor"), "summary names entry: {lossy}");
+    assert!(
+        lossy.contains("bad") && lossy.contains("name"),
+        "summary names entry: {lossy}"
+    );
     assert!(lossy.contains("dropped"), "summary names action: {lossy}");
 }
 
