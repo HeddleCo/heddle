@@ -13,6 +13,27 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.5.0 - 2026-06-21
+### Changed
+- **Breaking (crate surface):** storage-seam refactor. Extracted pure
+  `heddle-format` + `heddle-schema` crates and decoupled history /
+  commit-graph reads onto an `ObjectSource` seam (sync + async); the
+  commit-graph index is now an optional read accelerator rather than a
+  required backend. Hosted async object storage moves out of heddle into
+  the hosted server. (#761, #762, #763, #764, #766)
+### Removed
+- **Breaking:** removed the in-tree S3 object backend and its `aws-*`
+  dependency chain. Hosted S3 object storage now lives entirely in the
+  hosted server (weft); the OSS CLI no longer carries the S3 backend or
+  the AWS SDK. (#765, #760)
+### Added
+- Async commit-graph ancestry walkers (`is_ancestor` / merge-base) for
+  callers driving heddle over an async `ObjectSource`. (#766)
+### Fixed
+- `adopt` / git-import now represents gitlink (submodule) tree entries
+  losslessly as `heddle-submodule:<oid>` blobs instead of failing with
+  "gitlink/submodule entries have no Heddle tree equivalent". (#768)
+
 ## 0.4.0 - 2026-06-19
 
 ### Changed
