@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 //! Trait surface separating the OSS Heddle CLI from the closed
 //! heddle-client implementation.
 //!
