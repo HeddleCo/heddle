@@ -30,7 +30,8 @@
 //! keep working. Add a new short alias only when the letter is already
 //! reserved for that semantic in the table above.
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+use cli_shared::OutputMode;
 
 use super::Commands;
 
@@ -99,17 +100,4 @@ impl Cli {
         };
         repo::Repository::open(repo_path).context("open Heddle repository")
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum OutputMode {
-    Json,
-    // JSON, but only the decision-surface fields (heddle#470). Renders as
-    // `--output json-compact` on the CLI. Deliberately NOT a doc comment:
-    // a per-value help string forces clap's spaced long-help layout onto
-    // every command (the value list is rendered with the global --output
-    // arg), re-bloating all 100+ helps; the format semantics live in
-    // `heddle help output-formats` instead (heddle#652).
-    JsonCompact,
-    Text,
 }

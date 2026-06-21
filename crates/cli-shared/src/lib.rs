@@ -10,8 +10,14 @@
 
 pub mod client_config;
 pub mod config;
+pub mod logging;
+pub mod output;
 pub mod remote;
 
 pub use client_config::ClientConfig;
 pub use config::UserConfig;
+pub use logging::{
+    LogFormat, LoggingConfig, LoggingGuard, init_logging, init_logging_default, is_enabled,
+};
+pub use output::OutputMode;
 pub use remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key};
