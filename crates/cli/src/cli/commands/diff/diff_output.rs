@@ -3,7 +3,7 @@
 
 use std::{
     collections::BTreeMap,
-    io::{IsTerminal, Write},
+    io::{self, BufWriter, IsTerminal, Write},
     process::{Command, Stdio},
 };
 
@@ -105,7 +105,7 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 ///   usual `--- a/old / +++ b/new` + hunk body.
 /// * **Symlinks** (`120000`) carry their target bytes as the hunk body —
 ///   a symlink's git blob is exactly its raw target. Every symlink change
-///   (add/delete/edit/rename) is rendered by `render_symlink_change`
+///   (add/delete/edit/rename) is rendered by `write_symlink_change`
 ///   straight from `change.symlink`, never through `change.lines` (which a
 ///   non-UTF-8 target cannot populate) and never as a binary marker (which
 ///   `git apply` rejects for a `120000` entry), so a non-UTF-8 link target
@@ -127,21 +127,24 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// synthesized tail hunk (see `unified_hunks`) and is rendered, and a
 /// mode-only modify (chmod) emits a header-only `diff --git` +
 /// `old mode`/`new mode` block so the permission change round-trips.
-pub(crate) fn render_diff_patch_bytes(output: &DiffOutput) -> Vec<u8> {
-    let mut buf: Vec<u8> = Vec::new();
+pub(crate) fn write_diff_patch<W: Write>(output: &DiffOutput, writer: &mut W) -> io::Result<()> {
     for change in &output.changes {
         // A symlink change carries its raw target bytes in `change.symlink`,
         // which on Unix need not be valid UTF-8. Render it byte-exact so a
         // non-UTF-8 link target round-trips through `git apply`; every other
         // change is UTF-8 text and is appended as its bytes.
         if change.symlink.is_some() {
-            render_symlink_change(change, &mut buf);
+            write_symlink_change(change, writer)?;
         } else {
-            let mut text = String::new();
-            render_text_change(change, &mut text);
-            buf.extend_from_slice(text.as_bytes());
+            write_text_change(change, writer)?;
         }
     }
+    Ok(())
+}
+
+pub(crate) fn render_diff_patch_bytes(output: &DiffOutput) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    write_diff_patch(output, &mut buf).expect("writing diff patch to Vec cannot fail");
     buf
 }
 
@@ -156,12 +159,12 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
     String::from_utf8_lossy(&render_diff_patch_bytes(output)).into_owned()
 }
 
-/// Render one non-symlink change as unified-diff text into `buf`. Symlink
-/// changes never reach here — `render_diff_patch_bytes` routes them to
-/// `render_symlink_change`, which preserves a non-UTF-8 target — so a symlink
+/// Render one non-symlink change as unified-diff text into `writer`. Symlink
+/// changes never reach here — `write_diff_patch` routes them to
+/// `write_symlink_change`, which preserves a non-UTF-8 target — so a symlink
 /// target is never forced through `change.lines` (which a non-UTF-8 target
-/// cannot populate) or `render_binary_change`.
-fn render_text_change(change: &FileChange, buf: &mut String) {
+/// cannot populate) or `write_binary_change`.
+fn write_text_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Result<()> {
     let lines_ref = change.lines.as_deref();
     let has_hunk_body = lines_ref.is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
     let old_path = change.old_path.as_deref().unwrap_or(&change.path);
@@ -198,8 +201,8 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
     // readers short-circuit it to an empty text body), so this only
     // fires on a real binary content change, never a chmod.
     if change.binary && !is_rename {
-        render_binary_change(change, is_added, is_deleted, mode_changed, buf);
-        return;
+        write_binary_change(change, is_added, is_deleted, mode_changed, writer)?;
+        return Ok(());
     }
 
     // Decide whether this change emits anything at all:
@@ -220,15 +223,16 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
         has_hunk_body || mode_changed
     };
     if !should_render {
-        return;
+        return Ok(());
     }
 
     if is_rename {
-        buf.push_str(&format!(
-            "diff --git {} {}\n",
+        writeln!(
+            writer,
+            "diff --git {} {}",
             quote_path_for_patch("a/", old_path),
             quote_path_for_patch("b/", &change.path)
-        ));
+        )?;
         // A rename paired with a chmod/type change (`old.sh` renamed
         // to `new.sh` and made executable) carries both modes; emit
         // the `old mode`/`new mode` pair before `similarity index`,
@@ -237,50 +241,55 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
         if let (Some(old), Some(new)) = (change.old_mode, change.mode)
             && old != new
         {
-            buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
-            buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+            writeln!(writer, "old mode {}", mode_str(change.old_mode))?;
+            writeln!(writer, "new mode {}", mode_str(change.mode))?;
         }
         let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
-        buf.push_str(&format!("similarity index {pct}%\n"));
-        buf.push_str(&format!(
-            "rename from {}\n",
+        writeln!(writer, "similarity index {pct}%")?;
+        writeln!(
+            writer,
+            "rename from {}",
             quote_path_for_patch("", old_path)
-        ));
-        buf.push_str(&format!(
-            "rename to {}\n",
+        )?;
+        writeln!(
+            writer,
+            "rename to {}",
             quote_path_for_patch("", &change.path)
-        ));
+        )?;
         // Pure rename — extended headers alone suffice; emitting
         // `--- a/old / +++ b/new` without hunks would tell git to
         // apply an empty patch and warn about a stray header.
         if !has_hunk_body {
-            return;
+            return Ok(());
         }
     } else if is_added {
-        buf.push_str(&format!(
-            "diff --git {} {}\n",
+        writeln!(
+            writer,
+            "diff --git {} {}",
             quote_path_for_patch("a/", &change.path),
             quote_path_for_patch("b/", &change.path)
-        ));
-        buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
+        )?;
+        writeln!(writer, "new file mode {}", mode_str(change.mode))?;
     } else if is_deleted {
-        buf.push_str(&format!(
-            "diff --git {} {}\n",
+        writeln!(
+            writer,
+            "diff --git {} {}",
             quote_path_for_patch("a/", &change.path),
             quote_path_for_patch("b/", &change.path)
-        ));
-        buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
+        )?;
+        writeln!(writer, "deleted file mode {}", mode_str(change.mode))?;
     } else if mode_changed {
         // A modify whose mode changed (with or without a content
         // hunk). Emit the `diff --git` + `old mode`/`new mode`
         // header pair.
-        buf.push_str(&format!(
-            "diff --git {} {}\n",
+        writeln!(
+            writer,
+            "diff --git {} {}",
             quote_path_for_patch("a/", &change.path),
             quote_path_for_patch("b/", &change.path)
-        ));
-        buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
-        buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+        )?;
+        writeln!(writer, "old mode {}", mode_str(change.old_mode))?;
+        writeln!(writer, "new mode {}", mode_str(change.mode))?;
     } else {
         // A plain content modify. Emit the `diff --git` header so
         // every file stanza is self-delimiting. A bare `--- a/<path>`
@@ -291,11 +300,12 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
         // file's `---` as the prior file's source side, corrupting the
         // patch ("expected /dev/null"). The explicit header closes the
         // prior stanza and opens this one. (cid 3319484717 ordering.)
-        buf.push_str(&format!(
-            "diff --git {} {}\n",
+        writeln!(
+            writer,
+            "diff --git {} {}",
             quote_path_for_patch("a/", &change.path),
             quote_path_for_patch("b/", &change.path)
-        ));
+        )?;
     }
 
     // An empty-file add/delete (text side present but zero lines)
@@ -304,32 +314,34 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
     // path — emitting `--- /+++/@@` with no `@@` body would be a
     // malformed hunk, so we stop here too.
     if (is_added || is_deleted) && !has_hunk_body {
-        return;
+        return Ok(());
     }
     // A mode-only modify carries no content hunk: the `old mode`/
     // `new mode` header pair is the entire patch, so stop before the
     // `--- /+++` line-diff headers (which would be a malformed
     // empty hunk).
     if is_modified && !has_hunk_body {
-        return;
+        return Ok(());
     }
 
     if is_added {
-        buf.push_str("--- /dev/null\n");
+        writer.write_all(b"--- /dev/null\n")?;
     } else {
-        buf.push_str(&format!("--- {}\n", quote_path_for_patch("a/", old_path)));
+        writeln!(writer, "--- {}", quote_path_for_patch("a/", old_path))?;
     }
     if is_deleted {
-        buf.push_str("+++ /dev/null\n");
+        writer.write_all(b"+++ /dev/null\n")?;
     } else {
-        buf.push_str(&format!(
-            "+++ {}\n",
+        writeln!(
+            writer,
+            "+++ {}",
             quote_path_for_patch("b/", &change.path)
-        ));
+        )?;
     }
     if let Some(lines) = lines_ref {
-        render_patch_hunks(change, lines, buf);
+        write_patch_hunks(change, lines, writer)?;
     }
+    Ok(())
 }
 
 /// Render a symlink change (add / delete / target-edit / rename) byte-exact.
@@ -341,14 +353,13 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
 /// (the old behaviour) emitted a placeholder-binary stanza that `git apply`
 /// rejects for a `120000` entry; emitting the target as a text hunk is what
 /// git itself does and round-trips. The extended headers mirror
-/// `render_text_change`'s (add/delete/rename), and the mode is always
+/// `write_text_change`'s (add/delete/rename), and the mode is always
 /// `120000` so a rename never needs an `old mode`/`new mode` pair unless the
 /// two sides genuinely differ.
-fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
+fn write_symlink_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Result<()> {
     let Some(sym) = change.symlink.as_ref() else {
-        return;
+        return Ok(());
     };
-    let push = |buf: &mut Vec<u8>, text: &str| buf.extend_from_slice(text.as_bytes());
     let old_path = change.old_path.as_deref().unwrap_or(&change.path);
     let is_rename = change
         .old_path
@@ -358,103 +369,69 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
     let is_deleted = change.kind == "deleted";
 
     if is_rename {
-        push(
-            buf,
-            &format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", old_path),
-                quote_path_for_patch("b/", &change.path)
-            ),
-        );
+        writeln!(
+            writer,
+            "diff --git {} {}",
+            quote_path_for_patch("a/", old_path),
+            quote_path_for_patch("b/", &change.path)
+        )?;
         if let (Some(old), Some(new)) = (change.old_mode, change.mode)
             && old != new
         {
-            push(buf, &format!("old mode {}\n", mode_str(change.old_mode)));
-            push(buf, &format!("new mode {}\n", mode_str(change.mode)));
+            writeln!(writer, "old mode {}", mode_str(change.old_mode))?;
+            writeln!(writer, "new mode {}", mode_str(change.mode))?;
         }
         let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
-        push(buf, &format!("similarity index {pct}%\n"));
-        push(
-            buf,
-            &format!("rename from {}\n", quote_path_for_patch("", old_path)),
-        );
-        push(
-            buf,
-            &format!("rename to {}\n", quote_path_for_patch("", &change.path)),
-        );
+        writeln!(writer, "similarity index {pct}%")?;
+        writeln!(writer, "rename from {}", quote_path_for_patch("", old_path))?;
+        writeln!(writer, "rename to {}", quote_path_for_patch("", &change.path))?;
         // Pure rename (identical target) — the extended headers alone carry
         // the move, exactly like a text rename with no hunk body.
         if sym.old == sym.new {
-            return;
+            return Ok(());
         }
-        push(
-            buf,
-            &format!("--- {}\n", quote_path_for_patch("a/", old_path)),
-        );
-        push(
-            buf,
-            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
-        );
+        writeln!(writer, "--- {}", quote_path_for_patch("a/", old_path))?;
+        writeln!(writer, "+++ {}", quote_path_for_patch("b/", &change.path))?;
     } else if is_added {
-        push(
-            buf,
-            &format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ),
-        );
-        push(buf, &format!("new file mode {}\n", mode_str(change.mode)));
-        push(buf, "--- /dev/null\n");
-        push(
-            buf,
-            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
-        );
+        writeln!(
+            writer,
+            "diff --git {} {}",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        )?;
+        writeln!(writer, "new file mode {}", mode_str(change.mode))?;
+        writer.write_all(b"--- /dev/null\n")?;
+        writeln!(writer, "+++ {}", quote_path_for_patch("b/", &change.path))?;
     } else if is_deleted {
-        push(
-            buf,
-            &format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ),
-        );
-        push(
-            buf,
-            &format!("deleted file mode {}\n", mode_str(change.mode)),
-        );
-        push(
-            buf,
-            &format!("--- {}\n", quote_path_for_patch("a/", &change.path)),
-        );
-        push(buf, "+++ /dev/null\n");
+        writeln!(
+            writer,
+            "diff --git {} {}",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        )?;
+        writeln!(writer, "deleted file mode {}", mode_str(change.mode))?;
+        writeln!(writer, "--- {}", quote_path_for_patch("a/", &change.path))?;
+        writer.write_all(b"+++ /dev/null\n")?;
     } else {
         // A symlink target-edit. The mode is unchanged (`120000` → `120000`),
         // so no `old mode`/`new mode` block — just the file header. An
         // identical target would be a no-op and is never emitted by the diff
         // backends, but guard it so an accidental empty hunk can't form.
         if sym.old == sym.new {
-            return;
+            return Ok(());
         }
-        push(
-            buf,
-            &format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ),
-        );
-        push(
-            buf,
-            &format!("--- {}\n", quote_path_for_patch("a/", &change.path)),
-        );
-        push(
-            buf,
-            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
-        );
+        writeln!(
+            writer,
+            "diff --git {} {}",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        )?;
+        writeln!(writer, "--- {}", quote_path_for_patch("a/", &change.path))?;
+        writeln!(writer, "+++ {}", quote_path_for_patch("b/", &change.path))?;
     }
 
-    render_symlink_hunk(sym.old.as_deref(), sym.new.as_deref(), buf);
+    write_symlink_hunk(sym.old.as_deref(), sym.new.as_deref(), writer)?;
+    Ok(())
 }
 
 /// Emit the unified-diff hunk for a symlink's target bytes. A symlink's git
@@ -463,34 +440,40 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
 /// embeds a `\n` (pathological but representable) splits into multiple lines.
 /// The `@@` header mirrors `unified_hunks`'s `@@ -s,c +s,c @@` shape (counts
 /// always written, even `,1`), which `git apply` accepts.
-fn render_symlink_hunk(old: Option<&[u8]>, new: Option<&[u8]>, buf: &mut Vec<u8>) {
+fn write_symlink_hunk<W: Write>(
+    old: Option<&[u8]>,
+    new: Option<&[u8]>,
+    writer: &mut W,
+) -> io::Result<()> {
     let old_lines = split_target_lines(old);
     let new_lines = split_target_lines(new);
     let old_count = old_lines.len();
     let new_count = new_lines.len();
     let old_start = if old_count == 0 { 0 } else { 1 };
     let new_start = if new_count == 0 { 0 } else { 1 };
-    buf.extend_from_slice(
-        format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@\n").as_bytes(),
-    );
+    writeln!(
+        writer,
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+    )?;
     let old_no_eol = !target_has_trailing_newline(old);
     let new_no_eol = !target_has_trailing_newline(new);
     for (idx, line) in old_lines.iter().enumerate() {
-        buf.push(b'-');
-        buf.extend_from_slice(line);
-        buf.push(b'\n');
+        writer.write_all(b"-")?;
+        writer.write_all(line)?;
+        writer.write_all(b"\n")?;
         if old_no_eol && idx + 1 == old_count {
-            buf.extend_from_slice(NO_NEWLINE_MARKER.as_bytes());
+            writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
         }
     }
     for (idx, line) in new_lines.iter().enumerate() {
-        buf.push(b'+');
-        buf.extend_from_slice(line);
-        buf.push(b'\n');
+        writer.write_all(b"+")?;
+        writer.write_all(line)?;
+        writer.write_all(b"\n")?;
         if new_no_eol && idx + 1 == new_count {
-            buf.extend_from_slice(NO_NEWLINE_MARKER.as_bytes());
+            writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
         }
     }
+    Ok(())
 }
 
 /// Split a symlink target's raw bytes into unified-diff lines. An absent side
@@ -529,36 +512,38 @@ fn target_has_trailing_newline(target: Option<&[u8]>) -> bool {
 /// index line") rather than ignoring it. That refusal is the correct
 /// outcome: heddle has no delta to apply, so the honest result is a hard
 /// failure, never a false round-trip.
-fn render_binary_change(
+fn write_binary_change<W: Write>(
     change: &FileChange,
     is_added: bool,
     is_deleted: bool,
     mode_changed: bool,
-    buf: &mut String,
-) {
+    writer: &mut W,
+) -> io::Result<()> {
     let path = &change.path;
-    buf.push_str(&format!(
-        "diff --git {} {}\n",
+    writeln!(
+        writer,
+        "diff --git {} {}",
         quote_path_for_patch("a/", path),
         quote_path_for_patch("b/", path)
-    ));
+    )?;
     if is_added {
-        buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
-        buf.push_str("index 0000000..0000000\n");
+        writeln!(writer, "new file mode {}", mode_str(change.mode))?;
+        writer.write_all(b"index 0000000..0000000\n")?;
     } else if is_deleted {
-        buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
-        buf.push_str("index 0000000..0000000\n");
+        writeln!(writer, "deleted file mode {}", mode_str(change.mode))?;
+        writer.write_all(b"index 0000000..0000000\n")?;
     } else if mode_changed {
-        buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
-        buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
-        buf.push_str("index 0000000..0000000\n");
+        writeln!(writer, "old mode {}", mode_str(change.old_mode))?;
+        writeln!(writer, "new mode {}", mode_str(change.mode))?;
+        writer.write_all(b"index 0000000..0000000\n")?;
     } else {
         // Plain binary modify: git stamps the mode at the end of the
         // index line (`index <old>..<new> 100644`).
-        buf.push_str(&format!(
-            "index 0000000..0000000 {}\n",
+        writeln!(
+            writer,
+            "index 0000000..0000000 {}",
             mode_str(change.mode)
-        ));
+        )?;
     }
     let (a, b) = if is_added {
         ("/dev/null".to_string(), quote_path_for_patch("b/", path))
@@ -570,7 +555,8 @@ fn render_binary_change(
             quote_path_for_patch("b/", path),
         )
     };
-    buf.push_str(&format!("Binary files {a} and {b} differ\n"));
+    writeln!(writer, "Binary files {a} and {b} differ")?;
+    Ok(())
 }
 
 /// Map a tracked file mode to the git unified-diff mode string. `None`
@@ -647,9 +633,13 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 /// `git diff`'s output (which `git apply --check` accepts), a context
 /// line that sits on the no-newline side's tail has to be split into
 /// a `-` + `+` pair, with the marker attached to the side that lacks
-/// the terminator. The 4-case matrix is in `render_patch_hunks`'s
+/// the terminator. The 4-case matrix is in `write_patch_hunks`'s
 /// context-line branch.
-fn render_patch_hunks(change: &FileChange, lines: &[LineDiff], buf: &mut String) {
+fn write_patch_hunks<W: Write>(
+    change: &FileChange,
+    lines: &[LineDiff],
+    writer: &mut W,
+) -> io::Result<()> {
     let old_no_eol = !change.eol.old_has_final_newline;
     let new_no_eol = !change.eol.new_has_final_newline;
     let old_tail_idx = if old_no_eol && change.eol.old_line_count > 0 {
@@ -674,37 +664,38 @@ fn render_patch_hunks(change: &FileChange, lines: &[LineDiff], buf: &mut String)
                 // Both sides' tail lands on this context line and both
                 // lack a trailing newline — emit the line once, then
                 // a single marker that applies to both sides.
-                emit_line(buf, line);
-                buf.push_str(NO_NEWLINE_MARKER);
+                write_patch_line(writer, line)?;
+                writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
             } else {
                 // Mixed state: at least one side needs the marker and
                 // the other shouldn't be tagged. Split the context
                 // line into a `-content` / `+content` pair so each
                 // side's marker (or its absence) is unambiguous.
-                buf.push('-');
-                buf.push_str(&line.content);
-                buf.push('\n');
+                writer.write_all(b"-")?;
+                writer.write_all(line.content.as_bytes())?;
+                writer.write_all(b"\n")?;
                 if needs_old_marker {
-                    buf.push_str(NO_NEWLINE_MARKER);
+                    writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
                 }
-                buf.push('+');
-                buf.push_str(&line.content);
-                buf.push('\n');
+                writer.write_all(b"+")?;
+                writer.write_all(line.content.as_bytes())?;
+                writer.write_all(b"\n")?;
                 if needs_new_marker {
-                    buf.push_str(NO_NEWLINE_MARKER);
+                    writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
                 }
             }
             continue;
         }
 
-        emit_line(buf, line);
+        write_patch_line(writer, line)?;
         if needs_old_marker && line.prefix == "-" {
-            buf.push_str(NO_NEWLINE_MARKER);
+            writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
         }
         if needs_new_marker && line.prefix == "+" {
-            buf.push_str(NO_NEWLINE_MARKER);
+            writer.write_all(NO_NEWLINE_MARKER.as_bytes())?;
         }
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -727,10 +718,10 @@ fn find_side_tail_idx(lines: &[LineDiff], side: Side, target: usize) -> Option<u
     })
 }
 
-fn emit_line(buf: &mut String, line: &LineDiff) {
-    buf.push_str(&line.prefix);
-    buf.push_str(&line.content);
-    buf.push('\n');
+fn write_patch_line<W: Write>(writer: &mut W, line: &LineDiff) -> io::Result<()> {
+    writer.write_all(line.prefix.as_bytes())?;
+    writer.write_all(line.content.as_bytes())?;
+    writer.write_all(b"\n")
 }
 
 pub(crate) fn print_diff_patch(output: &DiffOutput) {
@@ -739,25 +730,43 @@ pub(crate) fn print_diff_patch(output: &DiffOutput) {
     // (`heddle diff --patch | git apply`) must carry those bytes verbatim.
     // `output.patch` exists only to feed the JSON `.patch` field, where bytes
     // can't live; rendering bytes fresh here keeps stdout byte-exact.
-    let rendered = render_diff_patch_bytes(output);
-    let _ = std::io::stdout().write_all(&rendered);
+    let stdout = io::stdout();
+    let lock = stdout.lock();
+    let mut writer = BufWriter::new(lock);
+    let _ = write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
 }
 
 pub(crate) fn print_diff(output: &DiffOutput) {
-    let mut rendered = String::new();
+    if should_page(display_line_count(output))
+        && let Ok(mut child) = pager_command().stdin(Stdio::piped()).spawn()
+    {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = write_diff_human(output, stdin).and_then(|_| stdin.flush());
+        }
+        let _ = child.wait();
+        return;
+    }
+
+    let stdout = io::stdout();
+    let lock = stdout.lock();
+    let mut writer = BufWriter::new(lock);
+    let _ = write_diff_human(output, &mut writer).and_then(|_| writer.flush());
+}
+
+fn write_diff_human<W: Write>(output: &DiffOutput, writer: &mut W) -> io::Result<()> {
     for change in &output.changes {
         // File-header rows: `--- a/...` / `+++ b/...` are dim;
         // they're navigation, not data.
         let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-        rendered.push_str(&style::dim(&format!("--- a/{old_path}")));
-        rendered.push('\n');
-        rendered.push_str(&style::dim(&format!("+++ b/{}", change.path)));
-        rendered.push('\n');
+        writeln!(writer, "{}", style::dim(&format!("--- a/{old_path}")))?;
+        writeln!(writer, "{}", style::dim(&format!("+++ b/{}", change.path)))?;
         if change.kind == "renamed" {
-            rendered.push_str(&style::dim(&format!("rename from {old_path}")));
-            rendered.push('\n');
-            rendered.push_str(&style::dim(&format!("rename to {}", change.path)));
-            rendered.push('\n');
+            writeln!(writer, "{}", style::dim(&format!("rename from {old_path}")))?;
+            writeln!(
+                writer,
+                "{}",
+                style::dim(&format!("rename to {}", change.path))
+            )?;
         }
 
         if let Some(lines) = &change.lines {
@@ -776,20 +785,16 @@ pub(crate) fn print_diff(output: &DiffOutput) {
                     if style::color_enabled()
                         && should_render_modified_pair(&line.content, &next.content)
                     {
-                        rendered.push_str(&paint_modified_pair(line, next));
-                        rendered.push('\n');
+                        writeln!(writer, "{}", paint_modified_pair(line, next))?;
                     } else {
-                        rendered.push_str(&paint_line(line));
-                        rendered.push('\n');
-                        rendered.push_str(&paint_line(next));
-                        rendered.push('\n');
+                        writeln!(writer, "{}", paint_line(line))?;
+                        writeln!(writer, "{}", paint_line(next))?;
                     }
                     index += 2;
                     continue;
                 }
 
-                rendered.push_str(&paint_line(line));
-                rendered.push('\n');
+                writeln!(writer, "{}", paint_line(line))?;
                 index += 1;
             }
         } else {
@@ -798,13 +803,52 @@ pub(crate) fn print_diff(output: &DiffOutput) {
             } else {
                 format!("File changed; line diff unavailable: {}", change.path)
             };
-            rendered.push_str(&style::dim(&summary));
-            rendered.push('\n');
+            writeln!(writer, "{}", style::dim(&summary))?;
         }
 
-        rendered.push('\n');
+        writeln!(writer)?;
     }
-    write_diff_text(&rendered);
+    Ok(())
+}
+
+fn display_line_count(output: &DiffOutput) -> usize {
+    let mut count = 0;
+    for change in &output.changes {
+        count += 2;
+        if change.kind == "renamed" {
+            count += 2;
+        }
+
+        if let Some(lines) = &change.lines {
+            let lines = trim_added_decorations_for_display(lines);
+            let mut index = 0;
+            while index < lines.len() {
+                let line = &lines[index];
+                if line.prefix == "-"
+                    && let Some(next) = lines.get(index + 1)
+                    && next.prefix == "+"
+                {
+                    if style::color_enabled()
+                        && should_render_modified_pair(&line.content, &next.content)
+                    {
+                        count += 1;
+                    } else {
+                        count += 2;
+                    }
+                    index += 2;
+                    continue;
+                }
+
+                count += 1;
+                index += 1;
+            }
+        } else {
+            count += 1;
+        }
+
+        count += 1;
+    }
+    count
 }
 
 fn paint_line(line: &LineDiff) -> String {
@@ -812,24 +856,10 @@ fn paint_line(line: &LineDiff) -> String {
     format!("{}{}", number_gutter(line.old_line, line.new_line), body)
 }
 
-fn write_diff_text(rendered: &str) {
-    if should_page(rendered)
-        && let Ok(mut child) = pager_command().stdin(Stdio::piped()).spawn()
-    {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(rendered.as_bytes());
-        }
-        let _ = child.wait();
-        return;
-    }
-
-    print!("{rendered}");
-}
-
-fn should_page(rendered: &str) -> bool {
+fn should_page(line_count: usize) -> bool {
     std::io::stdout().is_terminal()
         && std::env::var_os("HEDDLE_NO_PAGER").is_none()
-        && rendered.lines().count() > PAGER_LINE_THRESHOLD
+        && line_count > PAGER_LINE_THRESHOLD
 }
 
 fn pager_command() -> Command {
