@@ -24,151 +24,322 @@
 //! heddle-ingest reason --git /path/to/repo --heddle /path/to/repo
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
 use ingest::{
-    GitSource, ImportOptions, ImportScope, ReasoningPipeline, ReasoningPipelineParams, Result,
-    ShaMap, TranscriptRoots, import_git_into_scoped_with_options, load_transcripts,
-    pipeline_default_commits,
+    import_git_into_scoped_with_options, load_transcripts, pipeline_default_commits, GitSource,
+    ImportOptions, ImportScope, IngestError, ReasoningPipeline, ReasoningPipelineParams, Result,
+    ShaMap, TranscriptRoots,
 };
 use tracing::info;
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "heddle-ingest",
-    about = "Import git history into a Heddle repository",
-    version
-)]
+#[derive(Debug)]
 struct Cli {
-    #[command(subcommand)]
     command: Command,
-    /// Increase log verbosity (-v info, -vv debug, -vvv trace).
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum Command {
-    /// Inspect or query the SHA map sidecar.
     Map {
-        /// Path to the sidecar SQLite file (usually `<heddle_dir>/ingest/sha_map.sqlite`).
         path: PathBuf,
-        #[command(subcommand)]
         action: MapAction,
     },
-    /// Run the mechanical import (commits → states, refs → threads,
-    /// reflog → oplog).
     Import {
-        /// Path to the source git repository.
-        #[arg(long)]
         git: PathBuf,
-        /// Path to the target Heddle worktree root (the directory that will
-        /// contain `.heddle`). A trailing `.heddle` component is tolerated for
-        /// backwards compatibility with older help text.
-        #[arg(long)]
         heddle: PathBuf,
-        /// Accept git tree entries Heddle cannot represent losslessly.
-        ///
-        /// By default import fails on the first unrepresentable tree entry.
-        /// With this flag, import restores the historical drop behavior and
-        /// prints an end-of-run summary of every affected entry.
-        #[arg(long)]
         lossy: bool,
-        /// Import only this Git ref. Repeat to import multiple refs.
-        ///
-        /// Accepts full refs (`refs/heads/main`) or short names (`main`,
-        /// `v0.1`, `origin/main`). When omitted, all local branches, tags,
-        /// and remote-tracking branches are imported.
-        #[arg(long = "ref", value_name = "REF")]
         refs: Vec<String>,
     },
-    /// Mine agent chat transcripts for reasoning annotations and attach
-    /// them to the matching imported states. Requires `import` to have
-    /// already been run (needs the SHA map).
     Reason {
-        /// Path to the git repository the transcripts are about.
-        #[arg(long)]
         git: PathBuf,
-        /// Path to the Heddle worktree root produced by `heddle-ingest import`
-        /// (the directory that contains `.heddle`). A trailing `.heddle`
-        /// component is tolerated for backwards compatibility.
-        #[arg(long)]
         heddle: PathBuf,
-        /// Only process this commit SHA. Repeat to process a small
-        /// explicit set. When omitted, every commit currently in the
-        /// SHA map is considered (optionally narrowed by `--since` /
-        /// `--limit`).
-        #[arg(long = "commit", value_name = "SHA")]
         commits: Vec<String>,
-        /// Cap the number of commits processed. Applied *after*
-        /// `--since`. Useful for iterating on extraction knobs without
-        /// paying for a whole-repo pass.
-        #[arg(long)]
         limit: Option<usize>,
-        /// Skip commits authored before this ISO-8601 timestamp
-        /// (e.g. `2024-01-01T00:00:00Z`). Useful for incremental runs
-        /// that already know their last-seen baseline.
-        #[arg(long)]
         since: Option<DateTime<Utc>>,
-        /// Override the Claude transcript store. Default: `$HOME/.claude`.
-        /// Set to an empty string to disable Claude discovery entirely.
-        #[arg(long = "claude-home", value_name = "PATH")]
         claude_home: Option<String>,
-        /// Override the Codex transcript store. Default: `$HOME/.codex`.
-        /// Set to an empty string to disable Codex discovery entirely.
-        #[arg(long = "codex-home", value_name = "PATH")]
         codex_home: Option<String>,
-        /// Override the OpenCode data directory (the one that holds
-        /// `opencode.db`). Default: `$HOME/.local/share/opencode`.
-        /// Set to an empty string to disable OpenCode discovery entirely.
-        #[arg(long = "opencode-home", value_name = "PATH")]
         opencode_home: Option<String>,
-        /// Only load Codex rollouts authored after this ISO-8601
-        /// timestamp. The Codex store is date-sharded and often large;
-        /// pinning this narrows the scan cost.
-        #[arg(long)]
         codex_since: Option<DateTime<Utc>>,
-        /// Matcher cap: mine only the top-N transcript sessions per
-        /// commit after ranking. Higher = more coverage at the cost of
-        /// more cross-attribution noise. Defaults to `5`, which on a
-        /// dogfooded Heddle-sized repo (~400 commits, ~600 sessions)
-        /// produced ~1k notecards across ~50 states. Lower this to `2`
-        /// for tighter precision; raise to `10` only on a narrowly
-        /// scoped commit list.
-        #[arg(long, default_value_t = 5)]
         max_sessions_per_commit: usize,
-        /// Matcher floor: drop sessions whose confidence falls below
-        /// this before extraction runs. Confidence combines file overlap
-        /// (0.65 weight), time fit (0.25), and Co-Authored-By hint (0.10) —
-        /// see `crates/heddle-ingest/src/transcript/matcher.rs`. The
-        /// previous default of `0.40` was tuned for "no false positives
-        /// ever" and produced zero matches on a typical real-world repo.
-        /// `0.20` lets borderline-but-correct matches through; tighten
-        /// to `0.40` if mis-attribution becomes a problem.
-        #[arg(long, default_value_t = 0.20)]
         min_match_confidence: f32,
-        /// Report what would happen without writing any annotations.
-        #[arg(long)]
         dry_run: bool,
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum MapAction {
-    /// Print summary statistics.
     Stats,
-    /// Resolve a git SHA to its Heddle identifier.
     LookupGit { sha: String },
-    /// Resolve a Heddle identifier back to its git SHA.
     LookupHeddle { heddle: String },
+}
+
+impl Cli {
+    fn parse() -> Result<Self> {
+        let mut verbose = 0u8;
+        let mut args = VecDeque::new();
+
+        for arg in env::args_os().skip(1) {
+            if arg == "-h" || arg == "--help" {
+                print_usage();
+                std::process::exit(0);
+            }
+            if let Some(count) = verbose_count(&arg) {
+                verbose = verbose.saturating_add(count);
+            } else {
+                args.push_back(arg);
+            }
+        }
+
+        let command = parse_command(&mut args)?;
+        if let Some(extra) = args.pop_front() {
+            return Err(parse_error(format!(
+                "unexpected argument '{}'",
+                display_arg(&extra)
+            )));
+        }
+
+        Ok(Self { command, verbose })
+    }
+}
+
+fn parse_command(args: &mut VecDeque<OsString>) -> Result<Command> {
+    let command = next_string(args, "command")?;
+    match command.as_str() {
+        "map" => parse_map(args),
+        "import" => parse_import(args),
+        "reason" => parse_reason(args),
+        other => Err(parse_error(format!("unknown command '{other}'"))),
+    }
+}
+
+fn parse_map(args: &mut VecDeque<OsString>) -> Result<Command> {
+    let path = next_path(args, "map path")?;
+    let action = next_string(args, "map action")?;
+    let action = match action.as_str() {
+        "stats" => MapAction::Stats,
+        "lookup-git" => MapAction::LookupGit {
+            sha: next_string(args, "git sha")?,
+        },
+        "lookup-heddle" => MapAction::LookupHeddle {
+            heddle: next_string(args, "heddle id")?,
+        },
+        other => return Err(parse_error(format!("unknown map action '{other}'"))),
+    };
+    Ok(Command::Map { path, action })
+}
+
+fn parse_import(args: &mut VecDeque<OsString>) -> Result<Command> {
+    let mut git = None;
+    let mut heddle = None;
+    let mut lossy = false;
+    let mut refs = Vec::new();
+
+    while let Some(arg) = args.pop_front() {
+        let Some(arg_str) = arg.to_str() else {
+            return Err(parse_error(format!(
+                "option name must be valid UTF-8: '{}'",
+                display_arg(&arg)
+            )));
+        };
+        match option_name(arg_str) {
+            "--git" => git = Some(option_path(args, arg_str, "--git")?),
+            "--heddle" => heddle = Some(option_path(args, arg_str, "--heddle")?),
+            "--lossy" => lossy = true,
+            "--ref" => refs.push(option_string(args, arg_str, "--ref")?),
+            _ => return Err(parse_error(format!("unknown import option '{arg_str}'"))),
+        }
+    }
+
+    Ok(Command::Import {
+        git: git.ok_or_else(|| parse_error("missing required option --git"))?,
+        heddle: heddle.ok_or_else(|| parse_error("missing required option --heddle"))?,
+        lossy,
+        refs,
+    })
+}
+
+fn parse_reason(args: &mut VecDeque<OsString>) -> Result<Command> {
+    let mut git = None;
+    let mut heddle = None;
+    let mut commits = Vec::new();
+    let mut limit = None;
+    let mut since = None;
+    let mut claude_home = None;
+    let mut codex_home = None;
+    let mut opencode_home = None;
+    let mut codex_since = None;
+    let mut max_sessions_per_commit = 5;
+    let mut min_match_confidence = 0.20;
+    let mut dry_run = false;
+
+    while let Some(arg) = args.pop_front() {
+        let Some(arg_str) = arg.to_str() else {
+            return Err(parse_error(format!(
+                "option name must be valid UTF-8: '{}'",
+                display_arg(&arg)
+            )));
+        };
+        match option_name(arg_str) {
+            "--git" => git = Some(option_path(args, arg_str, "--git")?),
+            "--heddle" => heddle = Some(option_path(args, arg_str, "--heddle")?),
+            "--commit" => commits.push(option_string(args, arg_str, "--commit")?),
+            "--limit" => {
+                limit = Some(parse_value(
+                    "--limit",
+                    option_string(args, arg_str, "--limit")?,
+                )?)
+            }
+            "--since" => {
+                since = Some(parse_value(
+                    "--since",
+                    option_string(args, arg_str, "--since")?,
+                )?)
+            }
+            "--claude-home" => claude_home = Some(option_string(args, arg_str, "--claude-home")?),
+            "--codex-home" => codex_home = Some(option_string(args, arg_str, "--codex-home")?),
+            "--opencode-home" => {
+                opencode_home = Some(option_string(args, arg_str, "--opencode-home")?)
+            }
+            "--codex-since" => {
+                codex_since = Some(parse_value(
+                    "--codex-since",
+                    option_string(args, arg_str, "--codex-since")?,
+                )?)
+            }
+            "--max-sessions-per-commit" => {
+                max_sessions_per_commit = parse_value(
+                    "--max-sessions-per-commit",
+                    option_string(args, arg_str, "--max-sessions-per-commit")?,
+                )?
+            }
+            "--min-match-confidence" => {
+                min_match_confidence = parse_value(
+                    "--min-match-confidence",
+                    option_string(args, arg_str, "--min-match-confidence")?,
+                )?
+            }
+            "--dry-run" => dry_run = true,
+            _ => return Err(parse_error(format!("unknown reason option '{arg_str}'"))),
+        }
+    }
+
+    Ok(Command::Reason {
+        git: git.ok_or_else(|| parse_error("missing required option --git"))?,
+        heddle: heddle.ok_or_else(|| parse_error("missing required option --heddle"))?,
+        commits,
+        limit,
+        since,
+        claude_home,
+        codex_home,
+        opencode_home,
+        codex_since,
+        max_sessions_per_commit,
+        min_match_confidence,
+        dry_run,
+    })
+}
+
+fn verbose_count(arg: &OsString) -> Option<u8> {
+    let arg = arg.to_str()?;
+    if arg == "--verbose" {
+        return Some(1);
+    }
+    if arg.len() > 1 && arg.starts_with('-') && arg[1..].chars().all(|c| c == 'v') {
+        return Some((arg.len() - 1).try_into().unwrap_or(u8::MAX));
+    }
+    None
+}
+
+fn option_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(name, _)| name)
+}
+
+fn option_path(args: &mut VecDeque<OsString>, arg: &str, name: &str) -> Result<PathBuf> {
+    if let Some((_, value)) = arg.split_once('=') {
+        return Ok(PathBuf::from(value));
+    }
+    Ok(PathBuf::from(next_os(args, name)?))
+}
+
+fn option_string(args: &mut VecDeque<OsString>, arg: &str, name: &str) -> Result<String> {
+    if let Some((_, value)) = arg.split_once('=') {
+        return Ok(value.to_string());
+    }
+    next_string(args, name)
+}
+
+fn next_path(args: &mut VecDeque<OsString>, label: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(next_os(args, label)?))
+}
+
+fn next_os(args: &mut VecDeque<OsString>, label: &str) -> Result<OsString> {
+    args.pop_front()
+        .ok_or_else(|| parse_error(format!("missing {label}")))
+}
+
+fn next_string(args: &mut VecDeque<OsString>, label: &str) -> Result<String> {
+    let value = next_os(args, label)?;
+    value.into_string().map_err(|value| {
+        parse_error(format!(
+            "{label} must be valid UTF-8: '{}'",
+            display_arg(&value)
+        ))
+    })
+}
+
+fn parse_value<T>(name: &str, value: String) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|err| parse_error(format!("invalid value for {name}: {err}")))
+}
+
+fn display_arg(arg: &OsString) -> String {
+    arg.to_string_lossy().into_owned()
+}
+
+fn parse_error(message: impl Into<String>) -> IngestError {
+    IngestError::Other(message.into())
+}
+
+fn print_usage() {
+    println!(
+        "\
+heddle-ingest
+
+Usage:
+  heddle-ingest [-v|-vv|--verbose] map <path> <stats|lookup-git|lookup-heddle> [value]
+  heddle-ingest [-v|-vv|--verbose] import --git <path> --heddle <path> [--lossy] [--ref <ref>]...
+  heddle-ingest [-v|-vv|--verbose] reason --git <path> --heddle <path> [options]
+
+Reason options:
+  --commit <sha>...
+  --limit <n>
+  --since <timestamp>
+  --claude-home <path>
+  --codex-home <path>
+  --opencode-home <path>
+  --codex-since <timestamp>
+  --max-sessions-per-commit <n>
+  --min-match-confidence <float>
+  --dry-run"
+    );
 }
 
 fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse()?;
     init_tracing(cli.verbose);
 
     match cli.command {
