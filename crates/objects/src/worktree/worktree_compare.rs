@@ -35,18 +35,18 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
     ignore_patterns: &[String],
     status: &mut WorktreeStatus,
 ) -> Result<()> {
-    let tree_entries: HashMap<String, &TreeEntry> = tree
-        .map(|t| t.entries().iter().map(|e| (e.name.clone(), e)).collect())
+    let tree_entries: HashMap<&str, &TreeEntry> = tree
+        .map(|t| t.entries().iter().map(|e| (e.name.as_str(), e)).collect())
         .unwrap_or_default();
 
-    let mut seen_entries: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_entries: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     if dir.exists() {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
+                Some(n) => n,
                 None => continue,
             };
 
@@ -56,7 +56,9 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                 continue;
             }
 
-            seen_entries.insert(name.clone());
+            if let Some((tree_name, _)) = tree_entries.get_key_value(name) {
+                seen_entries.insert(*tree_name);
+            }
 
             if path.is_symlink() {
                 let target = fs::read_link(&path)?;
