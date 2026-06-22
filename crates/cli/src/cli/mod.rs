@@ -37,6 +37,7 @@ pub use cli_args::{AuthCommands, SupportCommands};
 pub use cli_args::{BridgeCommands, GitCommands};
 #[cfg(feature = "semantic")]
 pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
+use heddle_core::{ExecutionContext, NoopProgress, NoopWarnings, Verbosity};
 use repo::{Config, OutputFormat};
 
 use crate::config::UserConfig;
@@ -63,6 +64,31 @@ pub fn user_config_or_exit() -> &'static UserConfig {
 
 pub fn load_user_config_or_exit() -> UserConfig {
     user_config_or_exit().clone()
+}
+
+/// Build the embeddable facade context from parsed CLI globals.
+///
+/// This glue stays in `cli`: `heddle-core` receives an already-opened
+/// repository and semantic execution settings, but never learns about clap,
+/// cwd probing, output mode, or terminal rendering.
+pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<ExecutionContext> {
+    let repo = cli.open_repo()?;
+    let mut builder = ExecutionContext::builder()
+        .repo(repo)
+        .config(load_user_config_or_exit())
+        .verbosity(if cli.quiet {
+            Verbosity::Quiet
+        } else if cli.verbose > 0 {
+            Verbosity::Verbose
+        } else {
+            Verbosity::Normal
+        })
+        .progress(std::sync::Arc::new(NoopProgress))
+        .warnings(std::sync::Arc::new(NoopWarnings));
+    if let Some(op_id) = cli.op_id.as_deref() {
+        builder = builder.op_id(op_id);
+    }
+    Ok(builder.build())
 }
 
 /// Determine if output should be JSON.
