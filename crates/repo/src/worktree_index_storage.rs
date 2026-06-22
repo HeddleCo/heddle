@@ -22,10 +22,27 @@ const MAX_JOURNAL_OPS_BEFORE_COMPACT: usize = super::MAX_JOURNAL_OPS_BEFORE_COMP
 const MAX_JOURNAL_BYTES_BEFORE_COMPACT: u64 = super::MAX_JOURNAL_BYTES_BEFORE_COMPACT;
 
 fn read_u32_be(bytes: &[u8], context: &str) -> Result<u32, IndexError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| IndexError::InvalidFormat(format!("truncated {context}")))?;
+    let array = read_be_at::<4>(bytes, context)?;
     Ok(u32::from_be_bytes(array))
+}
+
+fn read_u64_be(bytes: &[u8], context: &str) -> Result<u64, IndexError> {
+    let array = read_be_at::<8>(bytes, context)?;
+    Ok(u64::from_be_bytes(array))
+}
+
+fn read_i64_be(bytes: &[u8], context: &str) -> Result<i64, IndexError> {
+    let array = read_be_at::<8>(bytes, context)?;
+    Ok(i64::from_be_bytes(array))
+}
+
+fn read_be_at<const N: usize>(bytes: &[u8], context: &str) -> Result<[u8; N], IndexError> {
+    if bytes.len() < N {
+        return Err(IndexError::InvalidFormat(format!("truncated {context}")));
+    }
+    let mut array = [0u8; N];
+    array.copy_from_slice(&bytes[..N]);
+    Ok(array)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,7 +317,7 @@ fn load_v1(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
             return Err(IndexError::InvalidFormat("truncated entry".to_string()));
         }
 
-        let path_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let path_len = read_u32_be(&data[offset..], "legacy index path length")? as usize;
         offset += 4;
 
         if offset + path_len + 32 + 8 + 8 + 4 + 1 + 1 > data.len() {
@@ -318,13 +335,13 @@ fn load_v1(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
         let hash = ContentHash::from_bytes(hash_bytes);
         offset += 32;
 
-        let size = u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+        let size = read_u64_be(&data[offset..], "legacy index file size")?;
         offset += 8;
 
-        let modified_sec = i64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+        let modified_sec = read_i64_be(&data[offset..], "legacy index file mtime seconds")?;
         offset += 8;
 
-        let modified_nsec = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        let modified_nsec = read_u32_be(&data[offset..], "legacy index file mtime nanos")?;
         offset += 4;
 
         let executable = data[offset] != 0;
@@ -684,7 +701,7 @@ fn read_file_entry(
         return Err(IndexError::InvalidFormat("truncated path len".to_string()));
     }
 
-    let path_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let path_len = read_u32_be(&data[offset..], "journal file path length")? as usize;
     offset += 4;
 
     if offset + path_len + 32 + 8 + 8 + 4 + 1 + 1 > data.len() {
@@ -702,13 +719,13 @@ fn read_file_entry(
     let hash = ContentHash::from_bytes(hash_bytes);
     offset += 32;
 
-    let size = u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+    let size = read_u64_be(&data[offset..], "journal file size")?;
     offset += 8;
 
-    let modified_sec = i64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+    let modified_sec = read_i64_be(&data[offset..], "journal file modified seconds")?;
     offset += 8;
 
-    let modified_nsec = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+    let modified_nsec = read_u32_be(&data[offset..], "journal file modified nanos")?;
     offset += 4;
 
     let executable = data[offset] != 0;
@@ -742,7 +759,7 @@ fn read_legacy_directory_entry(
         return Err(IndexError::InvalidFormat("truncated path len".to_string()));
     }
 
-    let path_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let path_len = read_u32_be(&data[offset..], "compact index path length")? as usize;
     offset += 4;
 
     let hash_bytes_len = if has_clean_tree_hash { 1 + 32 } else { 0 };
@@ -756,13 +773,13 @@ fn read_legacy_directory_entry(
         .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
     offset += path_len;
 
-    let mtime_sec = i64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+    let mtime_sec = read_i64_be(&data[offset..], "compact directory mtime seconds")?;
     offset += 8;
 
-    let mtime_nsec = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+    let mtime_nsec = read_u32_be(&data[offset..], "compact directory mtime nanos")?;
     offset += 4;
 
-    let child_count = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+    let child_count = read_u32_be(&data[offset..], "compact directory child count")?;
     offset += 4;
 
     let clean_tree_hash = if has_clean_tree_hash {
@@ -781,7 +798,7 @@ fn read_legacy_directory_entry(
         None
     };
 
-    let children_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let children_len = read_u32_be(&data[offset..], "compact untracked children len")? as usize;
     offset += 4;
 
     if offset + children_len > data.len() {
@@ -833,7 +850,7 @@ fn read_compact_directory_entry(
         return Err(IndexError::InvalidFormat("truncated path len".to_string()));
     }
 
-    let path_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let path_len = read_u32_be(&data[offset..], "compact file path length")? as usize;
     offset += 4;
 
     if offset + path_len + 8 + 4 + 4 + 32 + 1 + 32 > data.len() {
@@ -846,11 +863,11 @@ fn read_compact_directory_entry(
         .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
     offset += path_len;
 
-    let mtime_sec = i64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
+    let mtime_sec = read_i64_be(&data[offset..], "compact file mtime seconds")?;
     offset += 8;
-    let mtime_nsec = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+    let mtime_nsec = read_u32_be(&data[offset..], "compact file mtime nanos")?;
     offset += 4;
-    let child_count = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+    let child_count = read_u32_be(&data[offset..], "compact file child count")?;
     offset += 4;
 
     let mut child_digest_bytes = [0u8; 32];
@@ -891,7 +908,7 @@ fn read_untracked_directory_entry(
     if offset + 4 > data.len() {
         return Err(IndexError::InvalidFormat("truncated path len".to_string()));
     }
-    let path_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let path_len = read_u32_be(&data[offset..], "legacy index path length")? as usize;
     offset += 4;
 
     if offset + path_len + 8 + 4 + 4 + 32 + 32 + 4 > data.len() {
@@ -1107,7 +1124,7 @@ fn read_string(data: &[u8], offset: &mut usize) -> Result<String, IndexError> {
             "truncated string len".to_string(),
         ));
     }
-    let path_len = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap()) as usize;
+    let path_len = read_u32_be(&data[*offset..], "journal string length")? as usize;
     *offset += 4;
     if *offset + path_len > data.len() {
         return Err(IndexError::InvalidFormat(
@@ -1139,11 +1156,11 @@ fn read_file_entry_payload(data: &[u8], offset: &mut usize) -> Result<IndexEntry
     let mut hash_bytes = [0u8; 32];
     hash_bytes.copy_from_slice(&data[*offset..*offset + 32]);
     *offset += 32;
-    let size = u64::from_be_bytes(data[*offset..*offset + 8].try_into().unwrap());
+    let size = read_u64_be(&data[*offset..], "journal file size")?;
     *offset += 8;
-    let modified_sec = i64::from_be_bytes(data[*offset..*offset + 8].try_into().unwrap());
+    let modified_sec = read_i64_be(&data[*offset..], "journal file modified seconds")?;
     *offset += 8;
-    let modified_nsec = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let modified_nsec = read_u32_be(&data[*offset..], "journal file modified nanos")?;
     *offset += 4;
     let executable = data[*offset] != 0;
     *offset += 1;
@@ -1187,11 +1204,11 @@ fn read_directory_entry_payload(
             "truncated directory journal payload".to_string(),
         ));
     }
-    let mtime_sec = i64::from_be_bytes(data[*offset..*offset + 8].try_into().unwrap());
+    let mtime_sec = read_i64_be(&data[*offset..], "journal directory mtime seconds")?;
     *offset += 8;
-    let mtime_nsec = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let mtime_nsec = read_u32_be(&data[*offset..], "journal directory mtime nanos")?;
     *offset += 4;
-    let child_count = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let child_count = read_u32_be(&data[*offset..], "journal directory child count")?;
     *offset += 4;
     let mut child_digest_bytes = [0u8; 32];
     child_digest_bytes.copy_from_slice(&data[*offset..*offset + 32]);
@@ -1241,11 +1258,11 @@ fn read_untracked_directory_entry_payload(
             "truncated untracked directory payload".to_string(),
         ));
     }
-    let mtime_sec = i64::from_be_bytes(data[*offset..*offset + 8].try_into().unwrap());
+    let mtime_sec = read_i64_be(&data[*offset..], "journal untracked directory mtime seconds")?;
     *offset += 8;
-    let mtime_nsec = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let mtime_nsec = read_u32_be(&data[*offset..], "journal untracked directory mtime nanos")?;
     *offset += 4;
-    let child_count = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let child_count = read_u32_be(&data[*offset..], "journal untracked directory child count")?;
     *offset += 4;
     let mut child_digest_bytes = [0u8; 32];
     child_digest_bytes.copy_from_slice(&data[*offset..*offset + 32]);
@@ -1255,7 +1272,7 @@ fn read_untracked_directory_entry_payload(
     ignore_fingerprint_bytes.copy_from_slice(&data[*offset..*offset + 32]);
     *offset += 32;
     let ignore_fingerprint = ContentHash::from_bytes(ignore_fingerprint_bytes);
-    let added_path_count = u32::from_be_bytes(data[*offset..*offset + 4].try_into().unwrap());
+    let added_path_count = read_u32_be(&data[*offset..], "journal added path count")?;
     *offset += 4;
     let mut added_paths = Vec::with_capacity(added_path_count as usize);
     for _ in 0..added_path_count {
@@ -1510,6 +1527,20 @@ mod tests {
         assert!(
             matches!(err, IndexError::InvalidFormat(message) if message.contains("expected file entry"))
         );
+    }
+
+    #[test]
+    fn load_profiled_rejects_truncated_compact_file_entry_payload() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("index.bin");
+
+        write_raw_v5_snapshot(&path, 1, 0, 0, &[IndexEntryType::File.to_u8()]);
+
+        let err = load_profiled(&path).unwrap_err();
+        assert!(matches!(err, IndexError::InvalidFormat(message)
+            if message.contains("truncated path len")
+                || message.contains("truncated compact file path length")
+                || message.contains("truncated journal file path length")));
     }
 
     #[test]
