@@ -1613,6 +1613,7 @@ dependencies = [
  "heddle-cli-shared",
  "heddle-crypto",
  "heddle-objects",
+ "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
  "rmp-serde",

@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::cli::{cli_args::Cli, should_output_json};
 
 pub mod fsck;
+pub mod query;
 
 /// Treat the harness "unknown" placeholder and empty/whitespace strings
 /// as absent so renderers don't surface them as literal text. Mirrors

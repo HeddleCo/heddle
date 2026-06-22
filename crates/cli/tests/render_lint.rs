@@ -59,7 +59,11 @@ use std::{
 // is purely scope-shape: those println sites already lived inside
 // helpers, they just needed the function name to match the
 // lint-exempt prefix.
-const RENDER_VIOLATION_BASELINE: usize = 846;
+//
+// Dropped from 846 → 840 in the query facade exemplar:
+// `query.rs` now returns a `QueryReport` from `heddle_core` and routes
+// human/JSON output through `cli/render/query.rs`.
+const RENDER_VIOLATION_BASELINE: usize = 840;
 
 #[test]
 fn cli_commands_render_via_render_or_write_functions() {
