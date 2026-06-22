@@ -17,6 +17,7 @@ use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash, ThreadName},
     store::ObjectStore,
+    sync::LockExt,
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};
@@ -1487,7 +1488,7 @@ impl GitOverlayBlobHydrator {
     /// Pre-seed the blake3 → git OID mapping. Called by the importer
     /// (or by tests) as missing blobs are discovered.
     pub fn record_blob_oid(&self, hash: ContentHash, oid: ObjectId) {
-        self.blob_oid_map.lock().unwrap().insert(hash, oid);
+        self.blob_oid_map.lock_or_poisoned().insert(hash, oid);
     }
 }
 
@@ -1495,8 +1496,7 @@ impl BlobHydrator for GitOverlayBlobHydrator {
     fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> HeddleResult<()> {
         let oid = self
             .blob_oid_map
-            .lock()
-            .unwrap()
+            .lock_or_poisoned()
             .get(hash)
             .copied()
             .ok_or_else(|| {
