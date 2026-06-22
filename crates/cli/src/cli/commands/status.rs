@@ -10,6 +10,7 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
+use heddle_core::{ExecutionContext, StatusOptions};
 use objects::worktree::WorktreeStatus;
 use repo::{
     AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
@@ -48,7 +49,7 @@ use super::{
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
-    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
+    cli::{Cli, execution_context_from_cli, output_is_compact, should_output_json, style},
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
@@ -341,20 +342,33 @@ pub async fn cmd_status(
         render_plain_git_status(cli, &output, short)?;
         return Ok(());
     }
-    let output = build_status_output(cli, short)?;
+    let ctx = execution_context_from_cli(cli)?;
+    let opts = StatusOptions {
+        short,
+        render_json: should_output_json(cli, Some(ctx.require_repo()?.config())),
+        verbose: cli.verbose > 0,
+    };
+    let output = build_status_output(&ctx, opts)?;
     render_status(cli, &output, short)?;
     Ok(())
 }
 
 pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
-    let Ok(output) = build_status_output(cli, true) else {
+    let Ok(ctx) = execution_context_from_cli(cli) else {
         return Ok(None);
     };
-    let repo = cli.open_repo().ok();
-    let current_lane = repo
-        .as_ref()
-        .and_then(|repo| repo.current_lane().ok())
-        .flatten();
+    let Ok(repo) = ctx.require_repo() else {
+        return Ok(None);
+    };
+    let opts = StatusOptions {
+        short: true,
+        render_json: should_output_json(cli, Some(repo.config())),
+        verbose: cli.verbose > 0,
+    };
+    let Ok(output) = build_status_output(&ctx, opts) else {
+        return Ok(None);
+    };
+    let current_lane = repo.current_lane().ok().flatten();
     let subject = output
         .thread
         .as_deref()
@@ -473,13 +487,15 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
     Ok(())
 }
 
-pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput> {
-    let repo_open_start = Instant::now();
-    let repo = cli.open_repo()?;
-    let repo_open_ms = repo_open_start.elapsed().as_millis();
+pub(crate) fn build_status_output(
+    ctx: &ExecutionContext,
+    opts: StatusOptions,
+) -> Result<StatusOutput> {
+    let repo_open_ms = 0;
+    let repo = ctx.require_repo()?;
     let body_start = Instant::now();
-    let as_json = should_output_json(cli, Some(repo.config()));
-    let short_text = short && !as_json;
+    let as_json = opts.render_json;
+    let short_text = opts.short && !as_json;
 
     let current_state_start = Instant::now();
     let current_state = repo.current_state()?;
@@ -491,7 +507,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     // Single gating predicate for the slower "walk every thread /
     // inspect remote tracking / populate cross-thread relations" path.
     // JSON and `-v` text actually display the data; default text doesn't.
-    let needs_full_walk = cli.verbose > 0 || as_json;
+    let needs_full_walk = opts.verbose || as_json;
     let needs_remote_tracking = needs_full_walk || short_text;
     let remote_tracking_start = Instant::now();
     let remote_tracking = if needs_remote_tracking {
@@ -524,12 +540,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
-    let status_options = worktree_status_options(Some(repo.config()));
+    let status_options = ctx.config().worktree_status_options(Some(repo.config()));
     let git_worktree_status = git_worktree_status_result.unwrap_or(None);
     let git_index_start = Instant::now();
     let git_index = git_index_plan_for_repo(&repo)?;
     let git_index_ms = git_index_start.elapsed().as_millis();
-    let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
+    let identity_notice =
+        first_capture_identity_notice(&repo, ctx.config(), current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(
         trust.status.as_str(),
         "needs_import" | "needs_reconcile" | "git_branch_advanced"
@@ -1230,7 +1247,13 @@ async fn watch_status(
     let mut hosted_watch = HostedPresenceWatch::connect_if_configured(cli).await;
 
     loop {
-        let output = build_status_output(cli, short)?;
+        let ctx = execution_context_from_cli(cli)?;
+        let opts = StatusOptions {
+            short,
+            render_json: should_output_json(cli, Some(ctx.require_repo()?.config())),
+            verbose: cli.verbose > 0,
+        };
+        let output = build_status_output(&ctx, opts)?;
         let redraw = watch_iterations.is_none() && io::stdout().is_terminal();
         if !output.render_json && redraw {
             print!("\x1B[2J\x1B[H");
@@ -2014,13 +2037,13 @@ fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo>
 
 fn first_capture_identity_notice(
     repo: &Repository,
+    user_config: &UserConfig,
     current_state: Option<&objects::object::State>,
 ) -> Result<Option<String>> {
     if !current_state.map(is_synthetic_root).unwrap_or(true) {
         return Ok(None);
     }
-    let user_config = UserConfig::load_default().unwrap_or_default();
-    let principal = resolve_principal(repo, &user_config)?;
+    let principal = resolve_principal(repo, user_config)?;
     if principal_is_default_unknown(&principal) {
         return Ok(Some(
             "no principal configured; the first capture/checkpoint would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
@@ -2555,7 +2578,16 @@ mod tests {
 
     fn status_json(repo_dir: &std::path::Path) -> Value {
         let cli = status_cli(repo_dir);
-        let output = build_status_output(&cli, false).expect("build status output");
+        let ctx = execution_context_from_cli(&cli).expect("execution context");
+        let output = build_status_output(
+            &ctx,
+            StatusOptions {
+                short: false,
+                render_json: true,
+                verbose: false,
+            },
+        )
+        .expect("build status output");
         serde_json::to_value(&output).expect("serialize status")
     }
 
@@ -2613,7 +2645,16 @@ mod tests {
         .await
         .expect("spawn attached actor");
 
-        let mut output = build_status_output(&cli, false).expect("build status output");
+        let ctx = execution_context_from_cli(&cli).expect("execution context");
+        let mut output = build_status_output(
+            &ctx,
+            StatusOptions {
+                short: false,
+                render_json: true,
+                verbose: false,
+            },
+        )
+        .expect("build status output");
         output.path = Some(repo_dir.path().display().to_string());
         output.execution_path = Some(repo_dir.path().display().to_string());
         output.heddle_session_id = Some("heddle-session-1".to_string());
