@@ -56,83 +56,83 @@ use crate::{
 
 #[derive(Serialize)]
 pub(crate) struct StatusOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
+    pub(crate) output_kind: &'static str,
+    pub(crate) repository_capability: String,
+    pub(crate) repository_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    storage_model: String,
-    hosted_enabled: bool,
+    pub(crate) repository_context: Option<crate::cli::render::RepositoryContextInfo>,
+    pub(crate) storage_model: String,
+    pub(crate) hosted_enabled: bool,
     #[serde(skip)]
-    render_json: bool,
+    pub(crate) render_json: bool,
     #[serde(skip)]
-    validation_capability: RepositoryCapability,
-    operation: Option<RepositoryOperationStatus>,
-    remote_tracking: Option<GitRemoteTrackingStatus>,
+    pub(crate) validation_capability: RepositoryCapability,
+    pub(crate) operation: Option<RepositoryOperationStatus>,
+    pub(crate) remote_tracking: Option<GitRemoteTrackingStatus>,
     #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    git_index: Option<GitIndexPlan>,
+    pub(crate) trust: RepositoryVerificationState,
+    pub(crate) git_index: Option<GitIndexPlan>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
     /// `heddle bridge git status --output json` instead, which is the
     /// command whose subject is the bridge.
     #[serde(skip)]
-    git_overlay_import_hint: Option<GitOverlayImportHintOutput>,
-    git_overlay_health: GitOverlayHealth,
-    thread: Option<String>,
-    base_state: Option<String>,
-    base_root: Option<String>,
-    current_state: Option<String>,
+    pub(crate) git_overlay_import_hint: Option<GitOverlayImportHintOutput>,
+    pub(crate) git_overlay_health: GitOverlayHealth,
+    pub(crate) thread: Option<String>,
+    pub(crate) base_state: Option<String>,
+    pub(crate) base_root: Option<String>,
+    pub(crate) current_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
+    pub(crate) path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution_path: Option<String>,
+    pub(crate) execution_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heddle_session_id: Option<String>,
+    pub(crate) heddle_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<ActorInfo>,
+    pub(crate) actor: Option<ActorInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
+    pub(crate) harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
+    pub(crate) thinking_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage_summary: Option<AgentUsageSummary>,
+    pub(crate) usage_summary: Option<AgentUsageSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_progress_at: Option<String>,
+    pub(crate) last_progress_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    report_flush_state: Option<String>,
+    pub(crate) report_flush_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    attach_reason: Option<String>,
-    thread_mode: Option<ThreadMode>,
-    thread_state: Option<ThreadState>,
-    freshness: Option<ThreadFreshness>,
+    pub(crate) attach_reason: Option<String>,
+    pub(crate) thread_mode: Option<ThreadMode>,
+    pub(crate) thread_state: Option<ThreadState>,
+    pub(crate) freshness: Option<ThreadFreshness>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    target_thread: Option<String>,
+    pub(crate) target_thread: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parent_thread: Option<String>,
-    child_threads: Vec<String>,
+    pub(crate) parent_thread: Option<String>,
+    pub(crate) child_threads: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<String>,
-    promotion_suggested: bool,
-    impact_categories: Vec<ThreadImpactCategory>,
-    heavy_impact_paths: Vec<String>,
+    pub(crate) task: Option<String>,
+    pub(crate) promotion_suggested: bool,
+    pub(crate) impact_categories: Vec<ThreadImpactCategory>,
+    pub(crate) heavy_impact_paths: Vec<String>,
     #[serde(skip)]
-    changed_paths: Vec<String>,
-    changed_path_count: usize,
-    worktree_changed_path_count: usize,
-    thread_changed_path_count: usize,
-    blockers: Vec<String>,
+    pub(crate) changed_paths: Vec<String>,
+    pub(crate) changed_path_count: usize,
+    pub(crate) worktree_changed_path_count: usize,
+    pub(crate) thread_changed_path_count: usize,
+    pub(crate) blockers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    identity_notice: Option<String>,
+    pub(crate) identity_notice: Option<String>,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
-    thread_health: String,
-    coordination_status: CoordinationStatus,
+    pub(crate) recommended_action: String,
+    pub(crate) recommended_action_template: Option<super::command_catalog::ActionTemplate>,
+    pub(crate) recovery_commands: Vec<String>,
+    pub(crate) recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
+    pub(crate) thread_health: String,
+    pub(crate) coordination_status: CoordinationStatus,
     /// Provenance of a `coordination_status == Blocked`: `true` when the
     /// Blocked is the trust/health re-encoding (the status builder forces
     /// `coordination_status = Blocked` to surface a dirty / uncaptured /
@@ -145,12 +145,12 @@ pub(crate) struct StatusOutput {
     /// inter-thread block can co-exist with a dirty worktree and must
     /// still surface. Render-only; excluded from the JSON contract.
     #[serde(skip)]
-    coordination_blocked_by_trust: bool,
-    is_isolated: bool,
-    parallel_threads: Vec<ParallelThreadInfo>,
-    state: Option<StateInfo>,
-    git_checkpoint: Option<GitCheckpointInfo>,
-    changes: ChangesInfo,
+    pub(crate) coordination_blocked_by_trust: bool,
+    pub(crate) is_isolated: bool,
+    pub(crate) parallel_threads: Vec<ParallelThreadInfo>,
+    pub(crate) state: Option<StateInfo>,
+    pub(crate) git_checkpoint: Option<GitCheckpointInfo>,
+    pub(crate) changes: ChangesInfo,
     /// Inventory of clonefile-backed thread worktrees discovered on
     /// disk. Read-only diagnostic. Included in JSON always (as `[]`
     /// when no threads are materialized — the JSON contract is "the
@@ -162,64 +162,64 @@ pub(crate) struct StatusOutput {
     /// want to act (re-materialize or re-capture). Healthy
     /// materialized threads stay invisible.
     #[serde(default)]
-    materialized_threads: Vec<MaterializedThreadInfo>,
+    pub(crate) materialized_threads: Vec<MaterializedThreadInfo>,
 }
 
 #[derive(Serialize, Default)]
-struct MaterializedThreadInfo {
-    name: String,
-    state_id: String,
-    tree_hash_short: String,
-    file_count: usize,
+pub(crate) struct MaterializedThreadInfo {
+    pub(crate) name: String,
+    pub(crate) state_id: String,
+    pub(crate) tree_hash_short: String,
+    pub(crate) file_count: usize,
     /// `true` when the thread ref has advanced beyond what the
     /// manifest recorded. The on-disk worktree may not reflect the
     /// thread's latest content; users may want `heddle thread
     /// switch <name>` to re-materialize or `heddle capture` to
     /// fast-forward the manifest.
-    stale: bool,
+    pub(crate) stale: bool,
 }
 
 #[derive(Serialize)]
-struct ActorInfo {
+pub(crate) struct ActorInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
+    pub(crate) provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Serialize)]
-struct ParallelThreadInfo {
-    name: String,
-    coordination_status: CoordinationStatus,
-    current_state: Option<String>,
+pub(crate) struct ParallelThreadInfo {
+    pub(crate) name: String,
+    pub(crate) coordination_status: CoordinationStatus,
+    pub(crate) current_state: Option<String>,
 }
 
 #[derive(Serialize)]
-struct StateInfo {
-    change_id: String,
-    content_hash: String,
-    intent: Option<String>,
+pub(crate) struct StateInfo {
+    pub(crate) change_id: String,
+    pub(crate) content_hash: String,
+    pub(crate) intent: Option<String>,
 }
 
 #[derive(Serialize)]
-struct GitCheckpointInfo {
-    git_commit: String,
-    committed_at: String,
+pub(crate) struct GitCheckpointInfo {
+    pub(crate) git_commit: String,
+    pub(crate) committed_at: String,
 }
 
 #[derive(Serialize, Default)]
-struct ChangesInfo {
-    modified: Vec<String>,
-    added: Vec<String>,
-    deleted: Vec<String>,
+pub(crate) struct ChangesInfo {
+    pub(crate) modified: Vec<String>,
+    pub(crate) added: Vec<String>,
+    pub(crate) deleted: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct GitOverlayImportHintOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
+pub(crate) struct GitOverlayImportHintOutput {
+    pub(crate) current_branch: String,
+    pub(crate) missing_branch_count: usize,
+    pub(crate) missing_branches: Vec<String>,
+    pub(crate) recommended_command: String,
 }
 
 #[derive(Serialize)]
@@ -349,7 +349,11 @@ pub async fn cmd_status(
         verbose: cli.verbose > 0,
     };
     let output = build_status_output(&ctx, opts)?;
-    render_status(cli, &output, short)?;
+    if output.render_json {
+        crate::cli::render::status::status_json(cli, &output)?;
+    } else {
+        crate::cli::render::status::status_text(cli, &output, short)?;
+    }
     Ok(())
 }
 
@@ -1276,7 +1280,11 @@ async fn watch_status(
                 ))
             );
         }
-        render_status(cli, &output, short)?;
+        if output.render_json {
+            crate::cli::render::status::status_json(cli, &output)?;
+        } else {
+            crate::cli::render::status::status_text(cli, &output, short)?;
+        }
         iterations += 1;
         if watch_iterations.is_some_and(|limit| iterations >= limit) {
             break;

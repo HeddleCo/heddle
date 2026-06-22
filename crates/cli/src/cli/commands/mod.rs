@@ -75,7 +75,7 @@ pub(crate) mod snapshot;
 mod start_atomic;
 mod stash;
 mod stash_ops;
-mod status;
+pub(crate) mod status;
 mod thread;
 #[cfg(feature = "client")]
 mod thread_approval;
