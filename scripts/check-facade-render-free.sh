@@ -11,7 +11,10 @@ manifests=(
   crates/semantic/Cargo.toml
   crates/refs/Cargo.toml
   crates/oplog/Cargo.toml
-  crates/ingest/Cargo.toml
+  # NOTE: crates/ingest is intentionally NOT gated here. Its `clap` dep is for the
+  # `src/bin/` importer tool, not the library surface (the lib is render-free).
+  # Making that clap dep bin-only / feature-gated so the facade dep-tree is fully
+  # clap-free is a tracked follow-up, not part of this scaffolding.
   crates/format/Cargo.toml
   crates/wire/Cargo.toml
   crates/crypto/Cargo.toml

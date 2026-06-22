@@ -27,6 +27,7 @@ semantic = { path = "../semantic", package = "heddle-semantic", version = "0.4" 
 
 anyhow.workspace = true
 chrono.workspace = true
+clap.workspace = true
 # `bundled` vendors the SQLite C source so ingest doesn't depend on a
 # system libsqlite3 version. OpenCode's SQLite is read-only to us.
 rusqlite.workspace = true
