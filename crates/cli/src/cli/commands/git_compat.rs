@@ -47,8 +47,11 @@ use super::{
     },
     thread_cmd::cmd_thread,
 };
+use heddle_core::bridge::git_core::{
+    git_config_identity_with_global_fallback, principal_is_default_unknown,
+};
+
 use crate::{
-    bridge::git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
     cli::{
         Cli, CommitArgs, SwitchArgs, ThreadCommands, should_output_json, style,
         worktree_status_options,

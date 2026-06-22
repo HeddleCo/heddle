@@ -34,7 +34,7 @@ use super::{
     thread_landing::{land_local_command, switch_thread_command},
     worktree_safety::ensure_worktree_clean,
 };
-use crate::bridge::GitBridge;
+use heddle_core::bridge::GitBridge;
 use crate::{
     cli::{
         Cli,

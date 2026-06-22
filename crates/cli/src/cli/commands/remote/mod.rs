@@ -24,11 +24,12 @@ use super::{
 };
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
+use heddle_core::bridge::{
+    GitBridge,
+    git_core::{GitPushScope, set_reference},
+};
+
 use crate::{
-    bridge::{
-        GitBridge,
-        git_core::{GitPushScope, set_reference},
-    },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
@@ -465,7 +466,7 @@ fn render_mirror_outcome(
     cli: &Cli,
     repo: &Repository,
     mirror_remote: &str,
-    outcome: crate::bridge::GitResult<Vec<String>>,
+    outcome: heddle_core::bridge::GitResult<Vec<String>>,
 ) {
     let json = should_output_json(cli, Some(repo.config()));
     match outcome {

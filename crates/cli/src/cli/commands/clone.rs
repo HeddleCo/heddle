@@ -35,12 +35,13 @@ use super::{
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
+use heddle_core::bridge::{
+    GitBridge,
+    git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference},
+    git_ingest::import_git_history,
+};
+
 use crate::{
-    bridge::{
-        GitBridge,
-        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference},
-        git_ingest::import_git_history,
-    },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     remote::{Remote, RemoteConfig, RemoteTarget},

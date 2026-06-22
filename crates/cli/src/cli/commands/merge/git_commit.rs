@@ -22,7 +22,7 @@ use sley::{
 };
 
 use super::super::advice::RecoveryAdvice;
-use crate::bridge::{git_core::LocalGitIdentity, git_export};
+use heddle_core::bridge::{git_core::LocalGitIdentity, git_export};
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -216,7 +216,7 @@ pub(super) fn write_git_commit(
         .store()
         .get_state(state_id)?
         .ok_or_else(|| anyhow!("merge state {} was not found", state_id.short()))?;
-    let identity = crate::bridge::git_core::resolve_git_commit_identity(
+    let identity = heddle_core::bridge::git_core::resolve_git_commit_identity(
         repo_root,
         &state.attribution.principal,
     )?;

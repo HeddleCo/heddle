@@ -854,12 +854,12 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn from_git_bridge_error(
-        error: &crate::bridge::git_core::GitBridgeError,
+        error: &heddle_core::bridge::git_core::GitBridgeError,
     ) -> Option<Self> {
-        use crate::bridge::git_core::GitBridgeError;
+        use heddle_core::bridge::git_core::GitBridgeError;
         match error {
             GitBridgeError::NonFastForwardRef { name, .. }
-                if name == crate::bridge::git_notes::NOTES_REF =>
+                if name == heddle_core::bridge::git_notes::NOTES_REF =>
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
@@ -1440,7 +1440,7 @@ impl Error for RecoveryAdvice {}
 #[cfg(test)]
 mod tests {
     use super::RecoveryAdvice;
-    use crate::bridge::git_core::GitBridgeError;
+    use heddle_core::bridge::git_core::GitBridgeError;
 
     #[test]
     fn git_bridge_mapping_conflict_returns_typed_advice() {

@@ -25,11 +25,12 @@ use super::{
         placeholder_principal_warning,
     },
 };
+use heddle_core::bridge::{
+    GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
+    git_ingest::import_git_history,
+};
+
 use crate::{
-    bridge::{
-        GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
-        git_ingest::import_git_history,
-    },
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };

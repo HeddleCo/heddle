@@ -33,9 +33,10 @@ use super::{
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
 };
+use heddle_core::bridge::GitBridge;
+
 use crate::{
     attribution::clean_attribution_value,
-    bridge::GitBridge,
     cli::{Cli, output_is_compact, should_output_json, style},
     config::UserConfig,
 };

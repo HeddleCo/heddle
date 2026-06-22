@@ -46,8 +46,9 @@ use super::{
         thread_recovery_action_is_primary,
     },
 };
+use heddle_core::bridge::git_core::principal_is_default_unknown;
+
 use crate::{
-    bridge::git_core::principal_is_default_unknown,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},

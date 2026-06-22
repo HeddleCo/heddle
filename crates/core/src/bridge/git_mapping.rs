@@ -208,7 +208,7 @@ impl<'a> GitBridge<'a> {
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
+    pub fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
         let repo = self.open_git_repo()?;
         self.mapping = self.read_mapping_cache_from_disk()?;
         let reachable: HashSet<_> = collect_commit_oids(&repo)?.into_iter().collect();

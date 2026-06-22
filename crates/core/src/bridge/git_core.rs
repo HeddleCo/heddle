@@ -457,9 +457,9 @@ pub enum WriteThroughOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocalGitIdentity {
-    pub(crate) name: String,
-    pub(crate) email: String,
+pub struct LocalGitIdentity {
+    pub name: String,
+    pub email: String,
 }
 
 impl LocalGitIdentity {
@@ -474,7 +474,7 @@ impl LocalGitIdentity {
         format!("{} <{}> {} +0000", self.name, self.email, seconds).into_bytes()
     }
 
-    pub(crate) fn to_signature(&self, seconds: i64) -> Signature {
+    pub fn to_signature(&self, seconds: i64) -> Signature {
         let ident = self.to_ident_line(seconds);
         Signature {
             name: GitByteString::new(self.name.as_bytes().to_vec()),
@@ -635,7 +635,7 @@ impl SyncMapping {
 
 /// Git bridge for Heddle repository.
 pub struct GitBridge<'a> {
-    pub(crate) heddle_repo: &'a HeddleRepository,
+    pub heddle_repo: &'a HeddleRepository,
     pub(crate) git_repo_path: Option<PathBuf>,
     pub(crate) mapping: SyncMapping,
     pub(crate) commit_message_overrides: HashMap<ChangeId, String>,
@@ -1115,7 +1115,7 @@ impl<'a> GitBridge<'a> {
     /// -> Heddle state identity. Ingest reads directly from the checkout, so
     /// it only needs `refs/notes/heddle` hydrated in the checkout's own object
     /// database before `GitSource` opens the repository.
-    pub(crate) fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
+    pub fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
         if checkout_note_ref_exists(root).unwrap_or(false) {
             return true;
         }
@@ -1604,7 +1604,7 @@ impl<'a> GitBridge<'a> {
         self.write_thread_checkout_from_existing_mirror(thread)
     }
 
-    pub(crate) fn write_current_checkout_from_existing_mirror(
+    pub fn write_current_checkout_from_existing_mirror(
         &mut self,
     ) -> GitResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
@@ -2387,7 +2387,7 @@ pub(crate) fn thread_is_unclaimed_bootstrap(
     Ok(tree == Tree::new())
 }
 
-pub(crate) fn open_repo(path: &Path) -> GitResult<SleyRepository> {
+pub fn open_repo(path: &Path) -> GitResult<SleyRepository> {
     match SleyRepository::discover(path) {
         Ok(repo) => Ok(repo),
         Err(_) => SleyRepository::open(path).map_err(git_err),
@@ -2454,7 +2454,7 @@ fn delete_reference(
     }
 }
 
-pub(crate) fn set_reference(
+pub fn set_reference(
     repo: &SleyRepository,
     name: &str,
     target: ObjectId,
@@ -2559,7 +2559,7 @@ fn checkout_git_head_is_detached(root: &Path) -> GitResult<bool> {
     Ok(repo.head().map(|head| head.is_detached()).unwrap_or(false))
 }
 
-pub(crate) fn resolve_git_commit_identity(
+pub fn resolve_git_commit_identity(
     repo_root: &Path,
     fallback: &Principal,
 ) -> GitResult<LocalGitIdentity> {
@@ -2575,7 +2575,7 @@ pub(crate) fn resolve_git_commit_identity(
     ))
 }
 
-pub(crate) fn git_config_identity_with_global_fallback(
+pub fn git_config_identity_with_global_fallback(
     repo_root: &Path,
 ) -> GitResult<Option<LocalGitIdentity>> {
     let name = git_config_value_with_global_fallback(repo_root, "user.name")?;
@@ -2589,7 +2589,7 @@ pub(crate) fn git_config_identity_with_global_fallback(
     Ok(None)
 }
 
-pub(crate) fn principal_is_default_unknown(principal: &Principal) -> bool {
+pub fn principal_is_default_unknown(principal: &Principal) -> bool {
     principal.name.trim().is_empty()
         || principal.email.trim().is_empty()
         || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")

@@ -21,10 +21,11 @@ use super::{
 };
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedGrpcClient};
+use heddle_core::bridge::GitBridge;
+
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
 use crate::{
-    bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     remote::{RemoteTarget, resolve_remote_with_key},

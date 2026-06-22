@@ -17,10 +17,9 @@ use super::{
     workflow::cmd_sync,
     worktree_safety::ensure_worktree_clean,
 };
-use crate::{
-    bridge::GitBridge,
-    cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
-};
+use heddle_core::bridge::GitBridge;
+
+use crate::cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style};
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let current_dir = std::env::current_dir()?;

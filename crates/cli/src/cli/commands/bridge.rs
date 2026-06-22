@@ -27,13 +27,12 @@ use super::{
     next_action::{NextActionValidationContext, write_full_command_json},
     remote::resolve_default_remote_name,
 };
-use crate::{
-    bridge::{
-        GitBridge, git_core::clone_url_to_bare, git_export::export_all,
-        git_ingest::import_git_history, git_util::ExportedRef,
-    },
-    cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style},
+use heddle_core::bridge::{
+    GitBridge, git_core::clone_url_to_bare, git_export::export_all,
+    git_ingest::import_git_history, git_util::ExportedRef,
 };
+
+use crate::cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style};
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
 /// scratch directory whose `Drop` cleans up the cloned bare repo after
@@ -1011,7 +1010,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         repo.goto_without_record(&state)?;
                         repo.refs().write_head(&Head::Attached { thread: tn })?;
                         match bridge.write_through_current_checkout()? {
-                            crate::bridge::WriteThroughOutcome::Wrote(git_oid) => {
+                            heddle_core::bridge::WriteThroughOutcome::Wrote(git_oid) => {
                                 let trust = build_repository_verification_state(&repo);
                                 let output = BridgeGitReconcileOutput {
                                     output_kind: "bridge_git_reconcile",
@@ -1040,7 +1039,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                 render_bridge_git_reconcile(cli, &repo, &output)?;
                                 return Ok(());
                             }
-                            crate::bridge::WriteThroughOutcome::Skipped(reason) => {
+                            heddle_core::bridge::WriteThroughOutcome::Skipped(reason) => {
                                 return Err(anyhow!(reconcile_write_through_skipped_advice(
                                     &ref_name,
                                     reason.to_string(),

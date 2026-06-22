@@ -16,7 +16,7 @@ use objects::store::ObjectStore;
 use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]
-use crate::bridge::GitBridge;
+use heddle_core::bridge::GitBridge;
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
 
 #[derive(Serialize, Default)]

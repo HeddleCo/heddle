@@ -31,11 +31,12 @@ use super::{
     snapshot::ensure_current_state,
     worktree_safety::dirty_worktree_advice,
 };
+use heddle_core::bridge::{
+    GitBridge, WriteThroughOutcome,
+    git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
+};
+
 use crate::{
-    bridge::{
-        GitBridge, WriteThroughOutcome,
-        git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
-    },
     cli::{CheckpointArgs, Cli, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };

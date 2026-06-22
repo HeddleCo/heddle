@@ -2795,10 +2795,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::bridge::GitBridge::new(repo);
+            let mut bridge = heddle_core::bridge::GitBridge::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::bridge::WriteThroughOutcome::Wrote(_) => {}
-                crate::bridge::WriteThroughOutcome::Skipped(reason) => {
+                heddle_core::bridge::WriteThroughOutcome::Wrote(_) => {}
+                heddle_core::bridge::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()

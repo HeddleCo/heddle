@@ -38,8 +38,9 @@ use super::super::{
 };
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
+use heddle_core::bridge::{GitBridge, git_core::GitPullOutcome};
+
 use crate::{
-    bridge::{GitBridge, git_core::GitPullOutcome},
     cli::{Cli, RemoteCommands, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
