@@ -1,40 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle query` handler — structured query over the operation log.
 
-use std::sync::Arc;
-
-use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, TimeZone, Utc};
-use daemon::grpc_local_impl::{GrpcLocalService, LocalOperationLogQueryService};
-use grpc::heddle::v1::{
-    QueryOperationsRequest, operation_log_query_service_server::OperationLogQueryService,
-};
-use repo::{Repository, operation_dedup::OperationDedupStore};
-use serde::Serialize;
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use heddle_core::{QueryRequest, query};
 
 use crate::cli::{
     cli_args::{Cli, QueryArgs},
-    should_output_json,
+    execution_context_from_cli, render, should_output_json,
 };
-
-#[derive(Serialize)]
-struct QueryOutput {
-    output_kind: &'static str,
-    hits: Vec<HitView>,
-}
-
-#[derive(Serialize)]
-struct HitView {
-    seq: u64,
-    timestamp_secs: i64,
-    verb: String,
-    actor_email: String,
-    operation_id: Option<String>,
-    thread: Option<String>,
-    symbols: Vec<String>,
-    signal_kinds: Vec<String>,
-    change_id: Option<String>,
-}
 
 pub async fn run(cli: &Cli, args: &QueryArgs) -> Result<()> {
     if let Some(file) = &args.attribution {
@@ -46,75 +20,28 @@ pub async fn run(cli: &Cli, args: &QueryArgs) -> Result<()> {
         );
     }
 
-    let svc = open_service()?;
-    let req = QueryOperationsRequest {
-        repo_path: String::new(),
-        actor: args.actor.clone().unwrap_or_default(),
-        symbol: args.symbol.clone().unwrap_or_default(),
-        signal_kind: args.signal.clone().unwrap_or_default(),
-        thread: args.thread.clone().unwrap_or_default(),
-        verbs: args.verbs.clone(),
-        since_secs: parse_timestamp(args.since.as_deref())?,
-        until_secs: parse_timestamp(args.until.as_deref())?,
-        limit: args.limit,
-        include_checkpoints: args.include_checkpoints,
-    };
-    let resp = svc
-        .query_operations(tonic::Request::new(req))
-        .await
-        .map_err(status_to_anyhow)?
-        .into_inner();
-    let output = QueryOutput {
-        output_kind: "query",
-        hits: resp
-            .hits
-            .iter()
-            .map(|h| HitView {
-                seq: h.seq,
-                timestamp_secs: h.timestamp_secs,
-                verb: h.verb.clone(),
-                actor_email: h.actor_email.clone(),
-                operation_id: opt_string(h.operation_id.clone()),
-                thread: opt_string(h.thread.clone()),
-                symbols: h.symbols.clone(),
-                signal_kinds: h.signal_kinds.clone(),
-                change_id: opt_change_id(&h.change_id),
-            })
-            .collect(),
-    };
+    let ctx = execution_context_from_cli(cli)?;
+    let report = query(
+        &ctx,
+        QueryRequest {
+            actor: args.actor.clone().unwrap_or_default(),
+            symbol: args.symbol.clone().unwrap_or_default(),
+            signal_kind: args.signal.clone().unwrap_or_default(),
+            thread: args.thread.clone().unwrap_or_default(),
+            verbs: args.verbs.clone(),
+            since_secs: parse_timestamp(args.since.as_deref())?,
+            until_secs: parse_timestamp(args.until.as_deref())?,
+            limit: args.limit,
+            include_checkpoints: args.include_checkpoints,
+        },
+    )?;
+
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(&output).context("serialize query output")?
-        );
-    } else if output.hits.is_empty() {
-        println!("(no matches)");
+        render::query::query_json(&report)?;
     } else {
-        for hit in &output.hits {
-            let ts = Utc
-                .timestamp_opt(hit.timestamp_secs, 0)
-                .single()
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| hit.timestamp_secs.to_string());
-            print!("#{} {} {} <{}>", hit.seq, ts, hit.verb, hit.actor_email);
-            if let Some(thread) = &hit.thread {
-                print!(" thread={thread}");
-            }
-            if let Some(change_id) = &hit.change_id {
-                print!(" -> {change_id}");
-            }
-            println!();
-        }
+        render::query::query_text(&report)?;
     }
     Ok(())
-}
-
-fn open_service() -> Result<LocalOperationLogQueryService> {
-    let cwd = std::env::current_dir().context("get current working directory")?;
-    let repo = Repository::open(&cwd).context("open Heddle repository")?;
-    let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
-    let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
-    Ok(LocalOperationLogQueryService::new(inner))
 }
 
 fn parse_timestamp(value: Option<&str>) -> Result<i64> {
@@ -152,23 +79,6 @@ fn parse_relative(s: &str) -> Option<i64> {
         _ => return None,
     };
     Some(secs)
-}
-
-fn opt_string(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
-}
-
-fn opt_change_id(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
-    }
-    objects::object::ChangeId::try_from_slice(bytes)
-        .ok()
-        .map(|id| id.to_string_full())
-}
-
-fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {
-    anyhow!("{}: {}", status.code(), status.message())
 }
 
 #[cfg(test)]
