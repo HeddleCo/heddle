@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared CLI output mode values.
 
-use clap::ValueEnum;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum OutputMode {
     Json,
     // JSON, but only the decision-surface fields (heddle#470). Renders as

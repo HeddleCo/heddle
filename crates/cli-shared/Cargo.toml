@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -26,6 +26,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 
 [features]
+cli = ["dep:clap"]
 observability = [
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",
