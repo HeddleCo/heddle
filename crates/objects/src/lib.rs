@@ -11,6 +11,7 @@ pub mod lock;
 pub mod object;
 pub mod observe;
 pub mod store;
+pub mod sync;
 pub mod util;
 pub mod worktree;
 
@@ -19,3 +20,4 @@ pub use observe::{
     CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,
     WarningSink,
 };
+pub use sync::{LockExt, RwLockExt};

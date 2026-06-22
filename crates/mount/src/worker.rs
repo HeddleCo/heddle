@@ -99,6 +99,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use objects::sync::LockExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -640,7 +641,7 @@ impl Supervisor {
     pub fn unmount(&self) -> Result<()> {
         // `take()` the IPC stream so a concurrent caller (or a
         // re-entry via Drop) sees the supervisor as already shut.
-        let ipc_opt = self.ipc.lock().expect("supervisor ipc lock").take();
+        let ipc_opt = self.ipc.lock_or_poisoned().take();
         let Some(mut ipc) = ipc_opt else {
             // Already shut down; still try to join the watcher.
             self.join_watcher();
@@ -680,7 +681,7 @@ impl Supervisor {
     }
 
     fn join_watcher(&self) {
-        if let Some(handle) = self.watcher.lock().expect("watcher lock").take() {
+        if let Some(handle) = self.watcher.lock_or_poisoned().take() {
             let _ = handle.join();
         }
     }
@@ -699,7 +700,7 @@ impl Supervisor {
     /// roundtrip as exclusive. Returns the worker's reported pid +
     /// mount path.
     pub fn status(&self) -> Result<(u32, PathBuf)> {
-        let mut guard = self.ipc.lock().expect("supervisor ipc lock");
+        let mut guard = self.ipc.lock_or_poisoned();
         let Some(ipc) = guard.as_mut() else {
             bail!("supervisor already shut down");
         };
@@ -811,7 +812,7 @@ fn supervise_watcher_spawn(
     match spawn_result {
         Ok(handle) => Ok(handle),
         Err(e) => {
-            if let Some(mut child) = child_slot.lock().expect("watcher child slot lock").take() {
+            if let Some(mut child) = child_slot.lock_or_poisoned().take() {
                 // `kill` may fail with ESRCH if the worker raced
                 // us and already exited; either way `wait` reaps
                 // the entry so we don't leave a zombie behind.
@@ -971,7 +972,7 @@ mod tests {
         assert!(result.is_err(), "helper must propagate the spawn error");
 
         assert!(
-            slot.lock().expect("slot lock").is_none(),
+            slot.lock_or_poisoned().is_none(),
             "child must be taken out of the slot so it can be reaped"
         );
 

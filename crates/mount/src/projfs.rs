@@ -50,6 +50,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use objects::sync::LockExt;
 use tracing::warn;
 use windows::{
     Win32::{
@@ -865,7 +866,7 @@ unsafe fn start_dir_enum_impl(
     // populates it from `shell.enumerate`. Doing the enumerate-walk
     // here would needlessly call into the shell when ProjFS only
     // wants to know whether to *allow* the open (which we always do).
-    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    let mut guard = instance.enumerations.lock_or_poisoned();
     guard.insert(key, EnumState::empty());
     S_OK
 }
@@ -893,7 +894,7 @@ unsafe fn end_dir_enum_impl(
         return S_OK;
     }
     let key = EnumKey::from_guid(unsafe { &*enumeration_id });
-    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    let mut guard = instance.enumerations.lock_or_poisoned();
     guard.remove(&key);
     S_OK
 }
@@ -946,7 +947,7 @@ unsafe fn get_dir_enum_impl(
     let key = EnumKey::from_guid(unsafe { &*enumeration_id });
     let restart = (data.Flags.0 & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN.0) != 0;
 
-    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    let mut guard = instance.enumerations.lock_or_poisoned();
     // Defensive: `get` without a prior `start` (unusual but observed
     // in some ProjFS versions on the first call after mount) — insert
     // an empty state so the populate path below runs.
