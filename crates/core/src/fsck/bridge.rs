@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Fork note: this module mirrors the bridge note/mapping logic from
+//! `crates/cli/src/bridge/git_notes.rs` and
+//! `crates/cli/src/bridge/git_mapping.rs`. Until GitBridge is fully extracted
+//! into `heddle-core`, we keep the behavior aligned (notably required note
+//! fields and skip-on-deserialization-failure semantics).
 use std::{
     collections::HashMap,
     fs,
@@ -352,4 +357,115 @@ fn notes_ref() -> sley::notes::NotesRef {
 #[derive(Debug, Clone, Deserialize)]
 struct HeddleNote {
     change_id: String,
+    #[allow(dead_code)]
+    status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::{
+        object::{Attribution, Principal, State, Tree},
+        store::ObjectStore,
+    };
+    use tempfile::TempDir;
+
+    fn write_bridge_mapping(
+        repo: &Repository,
+        change_id: &str,
+        git_oid: &sley::ObjectId,
+    ) {
+        let mapping_path = repo.heddle_dir().join("git-bridge").join("bridge-mapping.json");
+        let mapping_parent = mapping_path.parent().expect("mapping path has parent");
+        fs::create_dir_all(mapping_parent).expect("create bridge mapping directory");
+        let contents = format!(
+            r#"{{"entries":[{{"change_id":"{change_id}","git_oid":"{git_oid}"}}]}}"#
+        );
+        std::fs::write(&mapping_path, contents).expect("write bridge mapping");
+    }
+
+    fn write_bridge_note(
+        mirror: &SleyRepository,
+        target: sley::ObjectId,
+        body: &str,
+    ) {
+        let refs = mirror.references();
+        let notes_ref = notes_ref();
+        let expected_ref = sley::notes::notes_ref_expected(&refs, &notes_ref)
+            .expect("get notes ref expected");
+        let identity = sley::notes::NotesCommitIdentity {
+            author: b"heddle test <test@localhost> 0 +0000".to_vec(),
+            committer: b"heddle test <test@localhost> 0 +0000".to_vec(),
+        };
+        sley::notes::upsert_note_bytes_for(
+            mirror.git_dir(),
+            mirror.object_format(),
+            &refs,
+            &notes_ref,
+            &target,
+            body.as_bytes(),
+            "heddle: test note",
+            &identity,
+            expected_ref,
+        )
+        .expect("write bridge note");
+    }
+
+    #[test]
+    fn test_bridge_skips_foreign_note_without_status() {
+        let temp = TempDir::new().expect("create temp dir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+
+        let state_change_id = objects::object::ChangeId::generate();
+        let tree = repo
+            .store()
+            .put_tree(&Tree::new())
+            .expect("write tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Test User", "test@example.com")),
+        )
+        .with_change_id(state_change_id);
+        let state_change_id = state.change_id.to_string_full();
+        repo.store().put_state(&state).expect("store state");
+
+        let mirror_path = repo.heddle_dir().join("git");
+        let mirror = SleyRepository::init_bare(&mirror_path).expect("init mirror");
+        let foreign_note_target = mirror
+            .write_blob("foreign-note")
+            .expect("write foreign note blob");
+        let valid_note_target = mirror
+            .write_blob("valid-note")
+            .expect("write valid note blob");
+        let foreign_note = format!(r#"{{"change_id":"{}"}}"#, objects::object::ChangeId::generate());
+        let valid_note = format!(
+            r#"{{"change_id":"{}","status":"published"}}"#,
+            state_change_id
+        );
+        write_bridge_mapping(&repo, &state_change_id, &valid_note_target);
+        write_bridge_note(&mirror, foreign_note_target, &foreign_note);
+        write_bridge_note(&mirror, valid_note_target, &valid_note);
+
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        let mut objects_checked = 0;
+        check_bridge(&repo, &mut errors, &mut warnings, &mut objects_checked)
+            .expect("run bridge check");
+
+        assert!(warnings.is_empty());
+        let expected_objects_checked = repo.refs().list_threads().expect("list threads").len() + 2;
+        assert!(
+            !errors.iter().any(|error| error.kind == "bridge-notes"),
+            "unexpected bridge-notes errors: {errors:?}",
+        );
+        assert!(
+            !errors.iter().any(|error| error.kind == "bridge-mapping"),
+            "unexpected bridge-mapping errors: {errors:?}",
+        );
+        assert_eq!(
+            objects_checked, expected_objects_checked,
+            "expected mapping + valid note + one check per thread to be counted, got {objects_checked}",
+        );
+    }
 }
