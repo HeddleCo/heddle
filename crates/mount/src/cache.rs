@@ -32,7 +32,7 @@ use std::sync::{
 
 use bytes::Bytes;
 use lru::LruCache;
-use objects::object::ContentHash;
+use objects::{object::ContentHash, sync::LockExt};
 
 /// Default cap. Picked so a typical agent workspace fits in memory
 /// without the cache dominating RSS — for daemon deployments the
@@ -88,7 +88,7 @@ impl BlobCachePool {
     /// Look up a blob. Returns `Some(Arc::clone)` on hit, `None` on
     /// miss. Bumps the entry to MRU.
     pub(crate) fn get(&self, hash: &ContentHash) -> Option<Bytes> {
-        let mut guard = self.inner.lock().expect("blob cache lock");
+        let mut guard = self.inner.lock_or_poisoned();
         match guard.lru.get(hash).cloned() {
             Some(bytes) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -110,7 +110,7 @@ impl BlobCachePool {
         if size > self.cap_bytes {
             return;
         }
-        let mut guard = self.inner.lock().expect("blob cache lock");
+        let mut guard = self.inner.lock_or_poisoned();
         if let Some(prev) = guard.lru.put(hash, bytes) {
             guard.bytes = guard.bytes.saturating_sub(prev.len());
         }
@@ -127,7 +127,7 @@ impl BlobCachePool {
     /// Drop every cached entry. Used by benchmarks that need to
     /// measure the true cold path.
     pub fn clear(&self) {
-        let mut guard = self.inner.lock().expect("blob cache lock");
+        let mut guard = self.inner.lock_or_poisoned();
         guard.lru.clear();
         guard.bytes = 0;
     }
@@ -141,13 +141,13 @@ impl BlobCachePool {
     /// acquire) but not free — meant for diagnostics, not hot-path
     /// budgeting.
     pub fn resident_bytes(&self) -> usize {
-        self.inner.lock().expect("blob cache lock").bytes
+        self.inner.lock_or_poisoned().bytes
     }
 
     /// Number of distinct blobs currently cached. Same caveat as
     /// `resident_bytes`.
     pub fn entry_count(&self) -> usize {
-        self.inner.lock().expect("blob cache lock").lru.len()
+        self.inner.lock_or_poisoned().lru.len()
     }
 
     /// Cumulative hit / miss / insert counters since the pool was

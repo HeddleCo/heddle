@@ -71,6 +71,7 @@ use objects::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
     },
     store::{AnyStore, ObjectStore},
+    sync::{LockExt, RwLockExt},
 };
 use oplog::OpLog;
 use refs::RefManager;
@@ -761,14 +762,14 @@ impl SweepShutdown {
     }
 
     fn signal(&self) {
-        *self.shutdown.lock().expect("sweep shutdown lock") = true;
+        *self.shutdown.lock_or_poisoned() = true;
         self.cv.notify_all();
     }
 
     /// Park the calling thread for up to `dur`, returning early if
     /// `shutdown` flips. Returns `true` when shutdown was requested.
     fn wait(&self, dur: Duration) -> bool {
-        let guard = self.shutdown.lock().expect("sweep shutdown lock");
+        let guard = self.shutdown.lock_or_poisoned();
         let (guard, _timeout) = self
             .cv
             .wait_timeout_while(guard, dur, |s| !*s)
@@ -899,7 +900,7 @@ fn prewarm_run<S: ObjectStore + 'static>(
     // cache) so we just do it on the coordinator thread.
     let mut stats = PrewarmStats::default();
     let mut hashes: Vec<ContentHash> = Vec::new();
-    let root_tree = inner.state.read().expect("mount state lock").tree;
+    let root_tree = inner.state.read_or_poisoned().tree;
     let mut queue: VecDeque<ContentHash> = VecDeque::from([root_tree]);
     let mut seen_trees: std::collections::HashSet<ContentHash> = std::collections::HashSet::new();
     while let Some(tree_hash) = queue.pop_front() {
@@ -1019,7 +1020,7 @@ impl<S: ObjectStore + 'static> Drop for ContentAddressedMount<S> {
         // Signal the worker before dropping the Arc<MountInner> so
         // it observes the shutdown promptly rather than waiting for
         // a Weak::upgrade failure on the next tick.
-        if let Some(mut handle) = self.sweeper.lock().expect("sweeper lock").take() {
+        if let Some(mut handle) = self.sweeper.lock_or_poisoned().take() {
             handle.signal_and_join();
         }
     }
@@ -1107,15 +1108,15 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     pub fn with_promotion_policy(self, policy: PromotionPolicy) -> Self {
         // Terminate any pre-existing worker before mutating policy
         // so we never have two workers racing on `pending`.
-        if let Some(mut handle) = self.sweeper.lock().expect("sweeper lock").take() {
+        if let Some(mut handle) = self.sweeper.lock_or_poisoned().take() {
             handle.signal_and_join();
         }
         // Swap the active policy in-place. The worker has been
         // joined above, so there's no concurrent reader.
-        *self.inner.promotion.write().expect("promotion lock") = policy;
+        *self.inner.promotion.write_or_poisoned() = policy;
         // Spawn a fresh worker matching the new policy.
         let sweeper = spawn_sweep_worker(&self.inner);
-        *self.sweeper.lock().expect("sweeper lock") = sweeper;
+        *self.sweeper.lock_or_poisoned() = sweeper;
         self
     }
 
@@ -1124,7 +1125,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// should drop the mount and recreate.
     pub fn refresh(&self) -> Result<()> {
         let next = resolve_thread(&self.inner.repo, &self.inner.thread)?;
-        *self.inner.state.write().expect("mount state lock") = next;
+        *self.inner.state.write_or_poisoned() = next;
         Ok(())
     }
 
@@ -1135,7 +1136,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
 
     /// The change id this mount currently points at.
     pub fn current_change_id(&self) -> ChangeId {
-        self.inner.state.read().expect("mount state lock").change_id
+        self.inner.state.read_or_poisoned().change_id
     }
 
     fn store(&self) -> &S {
@@ -1211,7 +1212,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     }
 
     fn intern(&self, record: NodeRecord) -> NodeId {
-        self.inner.inodes.lock().expect("inode lock").intern(record)
+        self.inner.inodes.lock_or_poisoned().intern(record)
     }
 
     /// Resolve a mount-relative path to a [`NodeId`]. Used by tests
@@ -1413,7 +1414,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// still holds across a re-lookup race); we bump its refcount so
     /// the final release fires correctly.
     pub fn on_open(&self, node: NodeId) -> Result<()> {
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         let next = match pending.state.get(&node.0).copied() {
             None => NodeState::Live { open_count: 1 },
             Some(NodeState::Live { open_count }) => NodeState::Live {
@@ -1442,10 +1443,10 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // Resolve path → NodeId via the inode registry so we can drop
         // the per-NodeId warm/hot bytes.
         let bound_id = {
-            let inodes = self.inner.inodes.lock().expect("inode lock");
+            let inodes = self.inner.inodes.lock_or_poisoned();
             inodes.by_path.get(&path).copied()
         };
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         if let Some(node_id) = pending.hot_by_path.remove(&path) {
             pending.hot.remove(&node_id);
             pending.warm.remove(&node_id);
@@ -1460,7 +1461,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         pending.tombstones.insert(path.clone());
         drop(pending);
         if bound_id.is_some() {
-            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            let mut inodes = self.inner.inodes.lock_or_poisoned();
             inodes.by_path.remove(&path);
         }
         Ok(())
@@ -1518,7 +1519,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // exclusivity check (O_EXCL or rename-noreplace) lands its
         // existence-test and its mutation under the same write-side
         // critical section.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
         let name_str = validate_entry_name(name)?;
         if let Some(existing) = self.lookup(parent, name)? {
             if exclusive {
@@ -1533,7 +1534,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let child_path = join_child(&parent_path, name_str);
 
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             // A prior unlink left a tombstone — clear it; the file
             // exists again.
             pending.tombstones.remove(&child_path);
@@ -1551,7 +1552,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // Mirrors what userspace expects from `open(O_CREAT)`: the
         // file exists at length 0 immediately on return.
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             pending.hot.insert(
                 node.0,
                 HotBuffer {
@@ -1578,7 +1579,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// lookup/enumerate even when no child has been written yet.
     pub fn make_dir(&self, parent: NodeId, name: &OsStr) -> Result<Entry> {
         // R8: serialize with other write-side mutations.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
         let name_str = validate_entry_name(name)?;
         if self.lookup(parent, name)?.is_some() {
             return Err(MountError::AlreadyExists(name_str.to_string()));
@@ -1590,7 +1591,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let child_path = join_child(&parent_path, name_str);
 
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             // A rmdir of this exact path now reverts to "present".
             pending.dir_tombstones.remove(&child_path);
             // Clear any colliding file tombstone too.
@@ -1622,7 +1623,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// both steps go away.
     pub fn unlink_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
         // R8: serialize with other write-side mutations.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
         let name_str = validate_entry_name(name)?;
         let entry = self
             .lookup(parent, name)?
@@ -1638,7 +1639,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let node_id = entry.node.0;
 
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             // Detach the path-level hot binding. The bytes follow the
             // NodeId, so `hot[node_id]` / `warm[node_id]` stay put —
             // the surviving fd reads them via the orphan branches in
@@ -1675,7 +1676,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // a replacement at the same path). The `by_id` record stays so
         // any still-open kernel handle keeps resolving until `forget`.
         {
-            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            let mut inodes = self.inner.inodes.lock_or_poisoned();
             inodes.by_path.remove(&child_path);
         }
         Ok(())
@@ -1685,7 +1686,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// `ENOTEMPTY` if any child resolves through the mount.
     pub fn rmdir_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
         // R8: serialize with other write-side mutations.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
         let name_str = validate_entry_name(name)?;
         let entry = self
             .lookup(parent, name)?
@@ -1706,7 +1707,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let child_path = join_child(&parent_path, name_str);
 
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             pending.explicit_dirs.remove(&child_path);
             pending.dir_tombstones.insert(child_path.clone());
         }
@@ -1719,7 +1720,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // record stays so any kernel handle the FS still holds keeps
         // resolving until `forget`.
         {
-            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            let mut inodes = self.inner.inodes.lock_or_poisoned();
             inodes.by_path.remove(&child_path);
         }
         Ok(())
@@ -1767,7 +1768,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // that could install the destination (create_file, make_dir,
         // create_symlink, another rename) — that's the atomicity the
         // POSIX NOREPLACE flag promises.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
 
         let old_name_str = validate_entry_name(old_name)?;
         let new_name_str = validate_entry_name(new_name)?;
@@ -1833,7 +1834,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // (which the kernel will issue `forget` for) gets dropped
         // from `by_path` so the next lookup mints a fresh id.
         {
-            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            let mut inodes = self.inner.inodes.lock_or_poisoned();
             // Detach the destination's path mapping. The inode record
             // stays in `by_id` so any kernel handle the FS still holds
             // for the replaced file keeps resolving (the kernel cleans
@@ -1913,7 +1914,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             //     instead of the rebased path overlay. The companion
             //     orphan branch in `flush_node` drops any preserved
             //     buffer without warm-promoting.
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             if let Some(src_id) = rebased_src
                 && let Some(buf) = pending.hot.get_mut(&src_id)
             {
@@ -1989,7 +1990,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // resolve src_id via the path → inode reverse-index (or via
         // the captured-tree walk for a captured-only source).
         let src_id = {
-            let inodes = self.inner.inodes.lock().expect("inode lock");
+            let inodes = self.inner.inodes.lock_or_poisoned();
             inodes.by_path.get(old_path).copied()
         };
         let needs_synth = match src_id {
@@ -2010,7 +2011,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             None
         };
 
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         // Detach the destination's path-keyed hot binding. The
         // displaced inode's bytes are keyed by NodeId — they stay put
         // for the surviving fd. POSIX rename-over: open destination
@@ -2057,7 +2058,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // captured-tree blob — symlinks are path-keyed (not openable
         // for IO; no orphan story applies).
         let target_bytes = {
-            let pending = self.inner.pending.lock().expect("pending lock");
+            let pending = self.inner.pending.lock_or_poisoned();
             pending.symlinks.get(old_path).cloned()
         };
         let target_bytes = match target_bytes {
@@ -2067,7 +2068,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 (*self.load_blob_bytes(&blob)?).to_vec()
             }
         };
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         // Detach the displaced destination's path-keyed hot binding.
         // Its NodeId-keyed bytes stay put for the surviving fd; the
         // caller's NodeState transition handles the orphan tracking.
@@ -2095,7 +2096,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 new_path.display()
             )));
         }
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         // Path-keyed structures under `old_path/` need to be rebased
         // to `new_path/`. Warm bytes follow the NodeId (unified shape)
         // so warm[id] is unaffected by this rewrite — descendant
@@ -2240,7 +2241,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // same shape (touches `hot_by_path[path]` / `warm[id]` derived
         // from `inodes.by_path[path]`), so we hold the lock for the
         // whole mutating prologue.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
 
         // Mode mutation: only meaningful for file-kind records.
         if let Some(raw_mode) = update.mode {
@@ -2256,7 +2257,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             } else {
                 FileMode::Normal
             };
-            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            let mut inodes = self.inner.inodes.lock_or_poisoned();
             if let Some(NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. }) =
                 inodes.by_id.get_mut(&node.0)
             {
@@ -2271,7 +2272,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 _ => None,
             } {
                 let path = path.clone();
-                let mut pending = self.inner.pending.lock().expect("pending lock");
+                let mut pending = self.inner.pending.lock_or_poisoned();
                 // Always flip the per-NodeId buffer's mode — that's
                 // the orphan's own bookkeeping when fd-based, and
                 // the live buffer for non-orphan callers.
@@ -2297,7 +2298,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                     // Warm is NodeId-keyed: rebind via inodes if the
                     // path still resolves Live to a tracked NodeId.
                     let warm_id = {
-                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        let inodes = self.inner.inodes.lock_or_poisoned();
                         inodes.by_path.get(&path).copied()
                     };
                     if let Some(id) = warm_id
@@ -2357,10 +2358,10 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             // NodeId-keyed, and the Live owner of `path` is the
             // sibling we'd seed from when no per-inode buffer exists.
             let path_owner = {
-                let inodes = self.inner.inodes.lock().expect("inode lock");
+                let inodes = self.inner.inodes.lock_or_poisoned();
                 inodes.by_path.get(&path).copied()
             };
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             let orphan = pending.is_orphan(node.0);
             let id = if pending.hot.contains_key(&node.0) {
                 Some(node.0)
@@ -2406,7 +2407,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             None => Vec::new(),
         };
         bytes.resize(new_size as usize, 0);
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         if orphan {
             // Per-NodeId buffer only. Skip the tombstone-clear and
             // the `hot_by_path` rebind — the directory entry must
@@ -2444,7 +2445,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// blob and emits a `Symlink` tree entry.
     pub fn create_symlink(&self, parent: NodeId, name: &OsStr, target: &Path) -> Result<Entry> {
         // R8: serialize with other write-side mutations.
-        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+        let _write_guard = self.inner.write_mu.lock_or_poisoned();
         let name_str = validate_entry_name(name)?;
         if self.lookup(parent, name)?.is_some() {
             return Err(MountError::AlreadyExists(name_str.to_string()));
@@ -2458,7 +2459,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let target_len = target_bytes.len() as u64;
 
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             pending.tombstones.remove(&child_path);
             pending.symlinks.insert(child_path.clone(), target_bytes);
         }
@@ -2488,7 +2489,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let record = self.record_for(node)?;
         match record {
             NodeRecord::PendingSymlink { path } => {
-                let pending = self.inner.pending.lock().expect("pending lock");
+                let pending = self.inner.pending.lock_or_poisoned();
                 let bytes = pending
                     .symlinks
                     .get(&path)
@@ -2531,7 +2532,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// `warm[id]`; the path → id resolution goes through
     /// `inodes.by_path` (lock order: pending ⊐ inodes).
     fn pending_lookup(&self, path: &Path) -> Option<PendingHit> {
-        let pending = self.inner.pending.lock().expect("pending lock");
+        let pending = self.inner.pending.lock_or_poisoned();
         if pending.tombstones.contains(path) {
             return Some(PendingHit::Tombstone);
         }
@@ -2551,7 +2552,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         }
         // Warm needs path → NodeId resolution. Acquire inodes inside
         // the pending lock (lock order: pending ⊐ inodes).
-        let inodes = self.inner.inodes.lock().expect("inode lock");
+        let inodes = self.inner.inodes.lock_or_poisoned();
         let id = *inodes.by_path.get(path)?;
         let entry = pending.warm.get(&id)?;
         Some(PendingHit::Warm {
@@ -2587,7 +2588,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         if dir.as_os_str().is_empty() {
             return false;
         }
-        let pending = self.inner.pending.lock().expect("pending lock");
+        let pending = self.inner.pending.lock_or_poisoned();
         if pending.explicit_dirs.contains(dir) {
             return true;
         }
@@ -2603,7 +2604,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // still carry the pre-orphan path, but bytes are unreachable
         // by path post-T1/T3).
         let warm_under = {
-            let inodes = self.inner.inodes.lock().expect("inode lock");
+            let inodes = self.inner.inodes.lock_or_poisoned();
             pending.warm.keys().any(|id| {
                 if pending.is_orphan(*id) {
                     return false;
@@ -2632,7 +2633,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// path is *under* this dir, e.g. `src/foo.rs` makes `src` an
     /// implicit dir of root). Tombstones suppress paths.
     fn pending_children_at(&self, dir: &Path) -> Vec<(String, PendingChildKind)> {
-        let pending = self.inner.pending.lock().expect("pending lock");
+        let pending = self.inner.pending.lock_or_poisoned();
         let mut out: BTreeMap<String, PendingChildKind> = BTreeMap::new();
 
         let project = |path: &Path| -> Option<(String, bool)> {
@@ -2674,7 +2675,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // Warm is NodeId-keyed; resolve each entry's current path via
         // the inode registry. Skip orphans (no path identity) and
         // skip entries whose path tombstones (deleted overlays).
-        let inodes = self.inner.inodes.lock().expect("inode lock");
+        let inodes = self.inner.inodes.lock_or_poisoned();
         for (id, entry) in pending.warm.iter() {
             if pending.is_orphan(*id) {
                 continue;
@@ -2880,9 +2881,9 @@ impl<S: ObjectStore> MountInner<S> {
     /// `Weak<MountInner>`.
     fn sweep_idle_buffers(&self) -> Result<()> {
         let now = Instant::now();
-        let idle_after = self.promotion.read().expect("promotion lock").idle_after;
+        let idle_after = self.promotion.read_or_poisoned().idle_after;
         let to_promote: Vec<u64> = {
-            let pending = self.pending.lock().expect("pending lock");
+            let pending = self.pending.lock_or_poisoned();
             pending
                 .hot
                 .iter()
@@ -2908,7 +2909,7 @@ impl<S: ObjectStore> MountInner<S> {
     /// last-close-per-FUSE-open — clears the marker.
     fn flush_node(&self, node: NodeId) -> Result<()> {
         let (path, mode, bytes) = {
-            let mut pending = self.pending.lock().expect("pending lock");
+            let mut pending = self.pending.lock_or_poisoned();
             // Orphan: keep the buffer alive across `flush` events.
             // POSIX open-unlinked semantics: bytes persist for the
             // surviving fds; the state survives so subsequent writes
@@ -2939,7 +2940,7 @@ impl<S: ObjectStore> MountInner<S> {
             .put_blob(&blob)
             .map_err(MountError::Store)?;
         debug!(?path, %blob_oid, size, "promoted hot buffer to CAS");
-        let mut pending = self.pending.lock().expect("pending lock");
+        let mut pending = self.pending.lock_or_poisoned();
         // Warm is NodeId-keyed. The path-keyed tombstone clear below
         // is a separate concern (directory-entry level).
         pending.warm.insert(
@@ -2986,7 +2987,7 @@ impl<S: ObjectStore> MountInner<S> {
             MaybeUntrackedNoop,
         }
         let outcome = {
-            let mut pending = self.pending.lock().expect("pending lock");
+            let mut pending = self.pending.lock_or_poisoned();
             match pending.state.get(&node.0).copied() {
                 None => {
                     // Untracked release (no on_open was ever
@@ -3058,7 +3059,7 @@ impl<S: ObjectStore> MountInner<S> {
                         .map_err(MountError::Store)?;
                     debug!(?path, %blob_oid, size, "persisted orphan hot buffer to CAS");
                 }
-                let mut pending = self.pending.lock().expect("pending lock");
+                let mut pending = self.pending.lock_or_poisoned();
                 pending.state.remove(&node.0);
                 pending.hot.remove(&node.0);
                 pending.warm.remove(&node.0);
@@ -3169,7 +3170,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         // Did an ancestor get rmdir'd? Then the captured-tree entry
         // is no longer addressable through this mount.
         {
-            let pending = self.inner.pending.lock().expect("pending lock");
+            let pending = self.inner.pending.lock_or_poisoned();
             if pending.dir_tombstones.contains(&child_path)
                 || self.ancestor_is_dir_tombstoned(&pending, &child_path)
             {
@@ -3215,7 +3216,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         // lock without cloning the whole buffer. Sub-microsecond on
         // small writes; avoids one `Vec::clone` per `read` callback.
         {
-            let pending = self.inner.pending.lock().expect("pending lock");
+            let pending = self.inner.pending.lock_or_poisoned();
             if let Some(hot) = pending.hot.get(&node.0) {
                 return Ok(copy_into(&hot.bytes, offset, buf));
             }
@@ -3232,7 +3233,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 // fallback there is no captured-tier source either,
                 // so the read errors with Stale.
                 let warm_blob = {
-                    let pending = self.inner.pending.lock().expect("pending lock");
+                    let pending = self.inner.pending.lock_or_poisoned();
                     if pending.is_orphan(node.0) {
                         return match pending.warm.get(&node.0).map(|e| e.blob) {
                             Some(blob) => {
@@ -3253,7 +3254,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     }
                     // Warm is NodeId-keyed; resolve path → id via the
                     // inode registry.
-                    let inodes = self.inner.inodes.lock().expect("inode lock");
+                    let inodes = self.inner.inodes.lock_or_poisoned();
                     inodes
                         .by_path
                         .get(path)
@@ -3295,7 +3296,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 // POSIX assigns to the sibling. Fall through to the
                 // captured blob — that's the inode's own data.
                 let overlay = {
-                    let pending = self.inner.pending.lock().expect("pending lock");
+                    let pending = self.inner.pending.lock_or_poisoned();
                     if pending.is_orphan(node.0) {
                         pending
                             .warm
@@ -3308,7 +3309,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     {
                         return Ok(copy_into(&hot.bytes, offset, buf));
                     } else {
-                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        let inodes = self.inner.inodes.lock_or_poisoned();
                         inodes.by_path.get(path).copied().and_then(|id| {
                             pending.warm.get(&id).map(|warm| Overlay::Warm(warm.blob))
                         })
@@ -3386,10 +3387,10 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             // registry — warm bytes for the path live at
             // `warm[live_id]` under the unified shape.
             let path_owner = {
-                let inodes = self.inner.inodes.lock().expect("inode lock");
+                let inodes = self.inner.inodes.lock_or_poisoned();
                 inodes.by_path.get(&path).copied()
             };
-            let pending = self.inner.pending.lock().expect("pending lock");
+            let pending = self.inner.pending.lock_or_poisoned();
             let orphan = pending.is_orphan(node.0);
             if pending.hot.contains_key(&node.0) {
                 // The per-NodeId buffer is always authoritative —
@@ -3443,7 +3444,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         // buffer, apply the write. If a buffer materialized between
         // phases (e.g. a coalesce from another NodeId), prefer the
         // existing buffer's bytes — our `seed_bytes` are stale.
-        let mut pending = self.inner.pending.lock().expect("pending lock");
+        let mut pending = self.inner.pending.lock_or_poisoned();
         // POSIX unlink+open semantics. Two write shapes share this
         // method and must be kept separate:
         //
@@ -3520,7 +3521,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         // child rmdir doesn't affect us — only an ancestor or self
         // tombstone does.)
         {
-            let pending = self.inner.pending.lock().expect("pending lock");
+            let pending = self.inner.pending.lock_or_poisoned();
             if pending.dir_tombstones.contains(&parent_path)
                 || self.ancestor_is_dir_tombstoned(&pending, &parent_path)
             {
@@ -3533,7 +3534,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             let entry_path = join_child(&parent_path, &tree_entry.name);
             // Whole-subtree rmdir on a captured dir entry.
             {
-                let pending = self.inner.pending.lock().expect("pending lock");
+                let pending = self.inner.pending.lock_or_poisoned();
                 if pending.dir_tombstones.contains(&entry_path) {
                     continue;
                 }
@@ -3656,7 +3657,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 // and reports the captured blob's size (or the
                 // per-NodeId hot buffer's length, checked first).
                 let overlay_size = {
-                    let pending = self.inner.pending.lock().expect("pending lock");
+                    let pending = self.inner.pending.lock_or_poisoned();
                     if let Some(buf) = pending.hot.get(&node.0) {
                         Some(Some(buf.bytes.len() as u64))
                     } else if pending.is_orphan(node.0) {
@@ -3677,7 +3678,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     } else {
                         // Warm is NodeId-keyed; resolve path → id via
                         // the inode registry.
-                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        let inodes = self.inner.inodes.lock_or_poisoned();
                         inodes
                             .by_path
                             .get(path)
@@ -3705,7 +3706,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 // otherwise consult the rebound path overlay and
                 // serve the sibling's size.
                 let orphan_size = {
-                    let pending = self.inner.pending.lock().expect("pending lock");
+                    let pending = self.inner.pending.lock_or_poisoned();
                     if pending.is_orphan(node.0) {
                         Some(
                             pending
@@ -3739,7 +3740,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 }
             }
             NodeRecord::PendingSymlink { path } => {
-                let pending = self.inner.pending.lock().expect("pending lock");
+                let pending = self.inner.pending.lock_or_poisoned();
                 let size = pending
                     .symlinks
                     .get(path)
@@ -3793,7 +3794,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         // warm would silently lose the user's committed-in-session
         // data.
         let retire_inode_record = {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             pending.with_brand(|bp| {
                 bp.kernel_forget_inode(node.0)
                     .map(|warm_still_references| !warm_still_references)
@@ -3801,7 +3802,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             })
         };
         if retire_inode_record {
-            self.inner.inodes.lock().expect("inode lock").forget(node);
+            self.inner.inodes.lock_or_poisoned().forget(node);
         }
         Ok(())
     }
@@ -3926,7 +3927,7 @@ impl ContentAddressedMount {
         // the agent's last writes even if it never closed the file.
         self.flush_all()?;
 
-        let state_snapshot = *self.inner.state.read().expect("mount state lock");
+        let state_snapshot = *self.inner.state.read_or_poisoned();
         let parent_tree = self.load_tree(&state_snapshot.tree)?;
 
         // Step 1: build the new root tree. Walks the pending map as
@@ -3935,8 +3936,8 @@ impl ContentAddressedMount {
         // to the store on the way up. Tombstones with empty parent
         // dirs prune naturally.
         let tree_hash = {
-            let pending = self.inner.pending.lock().expect("pending lock");
-            let inodes = self.inner.inodes.lock().expect("inode lock");
+            let pending = self.inner.pending.lock_or_poisoned();
+            let inodes = self.inner.inodes.lock_or_poisoned();
             apply_pending_to_tree(self.store(), &parent_tree, &pending, &inodes)?
         };
 
@@ -4030,10 +4031,10 @@ impl ContentAddressedMount {
         // bytes; the path-keyed overlays clear because every path they
         // covered is now folded into the new tree.
         {
-            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let mut pending = self.inner.pending.lock_or_poisoned();
             pending.drain_for_capture();
         }
-        let mut state_lock = self.inner.state.write().expect("mount state lock");
+        let mut state_lock = self.inner.state.write_or_poisoned();
         *state_lock = MountState {
             change_id,
             tree: tree_hash,
@@ -4041,7 +4042,7 @@ impl ContentAddressedMount {
         // The new state's tree becomes the new root; we don't
         // remap the existing root inode (it's a permanent fixture)
         // but we do refresh its backing tree hash.
-        let mut inodes = self.inner.inodes.lock().expect("inode lock");
+        let mut inodes = self.inner.inodes.lock_or_poisoned();
         if let Some(record) = inodes.by_id.get_mut(&NodeId::ROOT.0) {
             *record = NodeRecord::Root { tree: tree_hash };
         }
@@ -4356,8 +4357,8 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// the unified shape).
     #[cfg(test)]
     pub(crate) fn warm_keys(&self) -> Vec<PathBuf> {
-        let pending = self.inner.pending.lock().expect("pending lock");
-        let inodes = self.inner.inodes.lock().expect("inode lock");
+        let pending = self.inner.pending.lock_or_poisoned();
+        let inodes = self.inner.inodes.lock_or_poisoned();
         pending
             .warm
             .keys()
@@ -4392,7 +4393,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// Test-only accessor: are there any open hot-tier buffers?
     #[cfg(test)]
     pub(crate) fn hot_buffer_count(&self) -> usize {
-        self.inner.pending.lock().expect("pending lock").hot.len()
+        self.inner.pending.lock_or_poisoned().hot.len()
     }
 
     /// Test-only accessor: snapshot of currently tombstoned paths.
