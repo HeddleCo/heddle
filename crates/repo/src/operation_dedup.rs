@@ -31,6 +31,7 @@ use objects::{
     fs_atomic::write_file_atomic,
     lock::{RepoLock, WriteLockGuard},
     object::OperationId,
+    sync::LockExt,
 };
 use oplog::IsolationKey;
 use serde::{Deserialize, Serialize};
@@ -139,13 +140,12 @@ impl ReserveOpIdClaim {
     }
 
     fn set(&self, outcome: DedupOutcome) {
-        *self.outcome.lock().expect("reserve op-id outcome poisoned") = Some(outcome);
+        *self.outcome.lock_or_poisoned() = Some(outcome);
     }
 
     fn into_outcome(self) -> Result<DedupOutcome> {
         self.outcome
-            .lock()
-            .expect("reserve op-id outcome poisoned")
+            .lock_or_poisoned()
             .take()
             .ok_or_else(|| HeddleError::Conflict("eager op-id reserve produced no outcome".into()))
     }
@@ -377,7 +377,7 @@ impl OperationDedupStore {
         request_hash: [u8; 32],
     ) -> Result<DedupOutcome> {
         let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         let _file_guard = self.acquire_file_lock()?;
         self.reload_under_lock(&mut inner)?;
         match inner.entries.get(&key) {
@@ -431,7 +431,7 @@ impl OperationDedupStore {
             created_at_secs: now_secs(),
             pending: false,
         };
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         let _file_guard = self.acquire_file_lock()?;
         self.reload_under_lock(&mut inner)?;
         inner.entries.insert(key, entry);
@@ -444,7 +444,7 @@ impl OperationDedupStore {
     /// has already been finalised by [`Self::record`].
     pub fn cancel(&self, operation_id: OperationId, verb: &str) -> Result<()> {
         let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         let _file_guard = self.acquire_file_lock()?;
         self.reload_under_lock(&mut inner)?;
         if let Some(existing) = inner.entries.get(&key)
@@ -460,7 +460,7 @@ impl OperationDedupStore {
     /// pruned entries.
     pub fn compact(&self, retention_secs: i64) -> Result<usize> {
         let cutoff = now_secs() - retention_secs;
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         let _file_guard = self.acquire_file_lock()?;
         self.reload_under_lock(&mut inner)?;
         let before = inner.entries.len();
@@ -476,7 +476,7 @@ impl OperationDedupStore {
     /// from disk under the file lock so writes from sibling processes are
     /// reflected.
     pub fn len(&self) -> usize {
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         let _file_guard = match self.acquire_file_lock() {
             Ok(guard) => guard,
             Err(_) => return inner.entries.len(),
@@ -498,7 +498,7 @@ impl OperationDedupStore {
         verb: &str,
     ) -> Option<DedupConflictMetadata> {
         let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock_or_poisoned();
         if let Ok(_file_guard) = self.acquire_file_lock() {
             let _ = self.reload_under_lock(&mut inner);
         }

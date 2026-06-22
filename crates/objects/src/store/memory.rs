@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::RwLock};
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{HeddleError, ObjectStore, Result},
+    sync::RwLockExt,
 };
 
 /// A non-persistent, in-memory implementation of [`ObjectStore`].
@@ -49,8 +50,7 @@ impl ObjectStore for InMemoryStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         Ok(self
             .blobs
-            .read()
-            .unwrap()
+            .read_or_poisoned()
             .get(hash)
             .map(|v| Blob::new(v.clone())))
     }
@@ -58,28 +58,31 @@ impl ObjectStore for InMemoryStore {
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
         let hash = blob.hash();
         self.blobs
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(hash, blob.content().to_vec());
         Ok(hash)
     }
 
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
-        Ok(self.blobs.read().unwrap().contains_key(hash))
+        Ok(self.blobs.read_or_poisoned().contains_key(hash))
     }
 
     fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         // InMemoryStore keeps raw uncompressed bytes — the length of
         // the stored buffer is the blob size, no header parsing needed.
-        Ok(self.blobs.read().unwrap().get(hash).map(|v| v.len() as u64))
+        Ok(self
+            .blobs
+            .read_or_poisoned()
+            .get(hash)
+            .map(|v| v.len() as u64))
     }
 
     fn list_blobs(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.blobs.read().unwrap().keys().copied().collect())
+        Ok(self.blobs.read_or_poisoned().keys().copied().collect())
     }
 
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        match self.trees.read().unwrap().get(hash) {
+        match self.trees.read_or_poisoned().get(hash) {
             Some(bytes) => Ok(Some(rmp_serde::from_slice(bytes)?)),
             None => Ok(None),
         }
@@ -88,22 +91,21 @@ impl ObjectStore for InMemoryStore {
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
         self.trees
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(hash, rmp_serde::to_vec(tree)?);
         Ok(hash)
     }
 
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
-        Ok(self.trees.read().unwrap().contains_key(hash))
+        Ok(self.trees.read_or_poisoned().contains_key(hash))
     }
 
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.trees.read().unwrap().keys().copied().collect())
+        Ok(self.trees.read_or_poisoned().keys().copied().collect())
     }
 
     fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
-        match self.states.read().unwrap().get(id) {
+        match self.states.read_or_poisoned().get(id) {
             Some(bytes) => Ok(Some(rmp_serde::from_slice(bytes)?)),
             None => Ok(None),
         }
@@ -111,22 +113,21 @@ impl ObjectStore for InMemoryStore {
 
     fn put_state(&self, state: &State) -> Result<()> {
         self.states
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(state.change_id, rmp_serde::to_vec(state)?);
         Ok(())
     }
 
     fn has_state(&self, id: &ChangeId) -> Result<bool> {
-        Ok(self.states.read().unwrap().contains_key(id))
+        Ok(self.states.read_or_poisoned().contains_key(id))
     }
 
     fn list_states(&self) -> Result<Vec<ChangeId>> {
-        Ok(self.states.read().unwrap().keys().copied().collect())
+        Ok(self.states.read_or_poisoned().keys().copied().collect())
     }
 
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
-        match self.actions.read().unwrap().get(id) {
+        match self.actions.read_or_poisoned().get(id) {
             Some(bytes) => {
                 let action: Action = rmp_serde::from_slice(bytes)?;
                 let found_id = action.compute_id();
@@ -145,48 +146,45 @@ impl ObjectStore for InMemoryStore {
     fn put_action(&self, action: &mut Action) -> Result<ActionId> {
         let id = action.id();
         self.actions
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(id, rmp_serde::to_vec(action)?);
         Ok(id)
     }
 
     fn list_actions(&self) -> Result<Vec<ActionId>> {
-        Ok(self.actions.read().unwrap().keys().copied().collect())
+        Ok(self.actions.read_or_poisoned().keys().copied().collect())
     }
 
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
-        Ok(self.redactions.read().unwrap().contains_key(blob))
+        Ok(self.redactions.read_or_poisoned().contains_key(blob))
     }
 
     fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
-        Ok(self.redactions.read().unwrap().get(blob).cloned())
+        Ok(self.redactions.read_or_poisoned().get(blob).cloned())
     }
 
     fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
         self.redactions
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(*blob, bytes.to_vec());
         Ok(())
     }
 
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.redactions.read().unwrap().keys().copied().collect())
+        Ok(self.redactions.read_or_poisoned().keys().copied().collect())
     }
 
     fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
-        Ok(self.state_visibility.read().unwrap().contains_key(state))
+        Ok(self.state_visibility.read_or_poisoned().contains_key(state))
     }
 
     fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
-        Ok(self.state_visibility.read().unwrap().get(state).cloned())
+        Ok(self.state_visibility.read_or_poisoned().get(state).cloned())
     }
 
     fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
         self.state_visibility
-            .write()
-            .unwrap()
+            .write_or_poisoned()
             .insert(*state, bytes.to_vec());
         Ok(())
     }
@@ -194,8 +192,7 @@ impl ObjectStore for InMemoryStore {
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
         Ok(self
             .state_visibility
-            .read()
-            .unwrap()
+            .read_or_poisoned()
             .keys()
             .copied()
             .collect())

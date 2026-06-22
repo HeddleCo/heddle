@@ -542,6 +542,7 @@ mod chokepoint {
     use objects::{
         error::Result,
         object::{ChangeId, MarkerName, ThreadName},
+        sync::LockExt,
     };
     use tempfile::TempDir;
 
@@ -834,7 +835,7 @@ mod chokepoint {
             .unwrap();
 
         // The committer saw the records (phase 4) and the ref published (phase 5).
-        let seen = committer.seen.lock().unwrap();
+        let seen = committer.seen.lock_or_poisoned();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, records);
         assert_eq!(seen[0].1.as_deref(), Some("lane"));

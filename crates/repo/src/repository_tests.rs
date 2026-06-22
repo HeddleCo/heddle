@@ -1479,6 +1479,7 @@ mod blob_hydrator_callback {
         error::Result,
         object::{Blob, ContentHash},
         store::ObjectStore,
+        sync::LockExt,
     };
 
     use super::create_test_repo;
@@ -1515,14 +1516,14 @@ mod blob_hydrator_callback {
         }
 
         fn hashes_seen(&self) -> Vec<ContentHash> {
-            self.seen.lock().unwrap().clone()
+            self.seen.lock_or_poisoned().clone()
         }
     }
 
     impl BlobHydrator for ScriptedHydrator {
         fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.seen.lock().unwrap().push(*hash);
+            self.seen.lock_or_poisoned().push(*hash);
             match &self.mode {
                 HydratorMode::WritePayload(payload) => {
                     repo.store().put_blob(&Blob::new(payload.clone()))?;

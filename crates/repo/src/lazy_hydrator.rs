@@ -33,6 +33,7 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
+    sync::RwLockExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -201,7 +202,7 @@ fn registry() -> &'static RwLock<HashMap<String, BlobHydratorFactory>> {
 /// registrations of the same factory pointer; new calls override an
 /// existing registration for that kind.
 pub fn register_factory(kind: impl Into<String>, factory: BlobHydratorFactory) {
-    let mut map = registry().write().unwrap();
+    let mut map = registry().write_or_poisoned();
     map.insert(kind.into(), factory);
 }
 
@@ -211,7 +212,7 @@ pub fn register_factory(kind: impl Into<String>, factory: BlobHydratorFactory) {
 /// (e.g. a one-off script that uses `heddle-repo` directly) may
 /// legitimately not need hydration.
 pub fn lookup_factory(kind: &str) -> Option<BlobHydratorFactory> {
-    registry().read().unwrap().get(kind).cloned()
+    registry().read_or_poisoned().get(kind).cloned()
 }
 
 /// Convenience: load the persisted config (if any), look up the
@@ -250,6 +251,7 @@ mod tests {
     use objects::{
         object::{Blob, ContentHash},
         store::ObjectStore,
+        sync::LockExt,
     };
     use tempfile::TempDir;
 
@@ -342,7 +344,7 @@ mod tests {
                         bytes: payload_for_factory.clone(),
                         calls: AtomicUsize::new(0),
                     });
-                    *made_for_factory.lock().unwrap() = Some(Arc::clone(&h));
+                    *made_for_factory.lock_or_poisoned() = Some(Arc::clone(&h));
                     Ok(h)
                 },
             ),
@@ -360,9 +362,9 @@ mod tests {
 
         let hydrator = try_reconstruct(temp.path(), &heddle).unwrap();
         assert!(hydrator.is_some());
-        assert!(made.lock().unwrap().is_some());
+        assert!(made.lock_or_poisoned().is_some());
         // The held reference should match the one the factory built.
-        let kept = made.lock().unwrap().as_ref().map(Arc::clone).unwrap();
+        let kept = made.lock_or_poisoned().as_ref().map(Arc::clone).unwrap();
         assert!(Arc::strong_count(&kept) >= 1);
     }
 

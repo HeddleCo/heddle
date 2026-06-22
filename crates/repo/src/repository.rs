@@ -73,6 +73,7 @@ use objects::{
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
+    sync::RwLockExt,
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
@@ -2369,11 +2370,11 @@ impl Repository {
     }
 
     pub fn is_shallow(&self, id: &ChangeId) -> bool {
-        self.shallow.read().unwrap().is_shallow(id)
+        self.shallow.read_or_poisoned().is_shallow(id)
     }
 
     pub fn set_shallow(&self, state_id: &ChangeId, _parents: &[ChangeId]) -> Result<()> {
-        self.shallow.write().unwrap().add_shallow(*state_id)?;
+        self.shallow.write_or_poisoned().add_shallow(*state_id)?;
         Ok(())
     }
 
@@ -2507,12 +2508,12 @@ impl Repository {
     /// [`crate::lazy_hydrator::try_reconstruct`] to look up the
     /// registered factory and re-install the hydrator automatically.
     pub fn set_blob_hydrator(&self, hydrator: Arc<dyn BlobHydrator>) {
-        *self.blob_hydrator.write().unwrap() = Some(hydrator);
+        *self.blob_hydrator.write_or_poisoned() = Some(hydrator);
     }
 
     /// The currently registered hydrator, if any.
     pub fn blob_hydrator(&self) -> Option<Arc<dyn BlobHydrator>> {
-        self.blob_hydrator.read().unwrap().clone()
+        self.blob_hydrator.read_or_poisoned().clone()
     }
 
     fn partial_fetch_metadata(&self) -> repository_partial_fetch::PartialFetchMetadataManager {
@@ -2520,7 +2521,7 @@ impl Repository {
     }
 
     pub fn shallow(&self) -> std::sync::RwLockReadGuard<'_, ShallowInfo> {
-        self.shallow.read().unwrap()
+        self.shallow.read_or_poisoned()
     }
 }
 

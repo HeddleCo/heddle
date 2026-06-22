@@ -110,6 +110,7 @@ mod tests {
     use objects::{
         error::HeddleError,
         object::{ChangeId, MarkerName, ThreadName},
+        sync::LockExt,
     };
 
     use super::CoreRefBackend;
@@ -130,13 +131,12 @@ mod tests {
 
         fn read_head(&self) -> Result<Head, HeddleError> {
             self.head
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .clone()
                 .ok_or_else(|| HeddleError::Config("no head".to_string()))
         }
         fn write_head(&self, head: &Head) -> Result<(), HeddleError> {
-            *self.head.lock().unwrap() = Some(head.clone());
+            *self.head.lock_or_poisoned() = Some(head.clone());
             Ok(())
         }
         fn write_head_cas(
@@ -147,12 +147,15 @@ mod tests {
             self.write_head(head)
         }
         async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self.threads.lock().unwrap().get(name.as_str()).copied())
+            Ok(self
+                .threads
+                .lock_or_poisoned()
+                .get(name.as_str())
+                .copied())
         }
         fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<(), HeddleError> {
             self.threads
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
             Ok(())
         }
@@ -165,7 +168,7 @@ mod tests {
             self.set_thread(name, state)
         }
         fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self.threads.lock().unwrap().remove(name.as_str()))
+            Ok(self.threads.lock_or_poisoned().remove(name.as_str()))
         }
         fn delete_thread_cas(
             &self,
@@ -177,14 +180,17 @@ mod tests {
         fn list_threads(&self) -> Result<Vec<ThreadName>, HeddleError> {
             Ok(self
                 .threads
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .keys()
                 .map(|k| ThreadName::new(k.as_str()))
                 .collect())
         }
         async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self.markers.lock().unwrap().get(name.as_str()).copied())
+            Ok(self
+                .markers
+                .lock_or_poisoned()
+                .get(name.as_str())
+                .copied())
         }
         async fn create_marker(
             &self,
@@ -192,8 +198,7 @@ mod tests {
             state: &ChangeId,
         ) -> Result<(), HeddleError> {
             self.markers
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
             Ok(())
         }
@@ -204,13 +209,12 @@ mod tests {
             state: &ChangeId,
         ) -> Result<(), HeddleError> {
             self.markers
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
             Ok(())
         }
         fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self.markers.lock().unwrap().remove(name.as_str()))
+            Ok(self.markers.lock_or_poisoned().remove(name.as_str()))
         }
         fn delete_marker_cas(
             &self,
@@ -222,8 +226,7 @@ mod tests {
         fn list_markers(&self) -> Result<Vec<MarkerName>, HeddleError> {
             Ok(self
                 .markers
-                .lock()
-                .unwrap()
+                .lock_or_poisoned()
                 .keys()
                 .map(|k| MarkerName::new(k.as_str()))
                 .collect())

@@ -889,7 +889,7 @@ mod default_backend {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use objects::{error::Result, object::Principal};
+    use objects::{error::Result, object::Principal, sync::LockExt};
 
     use super::{
         super::oplog_types::{OpBatch, OpEntry, OpRecord},
@@ -908,7 +908,7 @@ mod default_backend {
             operations: Vec<OpRecord>,
             scope: Option<&str>,
         ) -> Result<Vec<u64>> {
-            let mut next = self.next_id.lock().unwrap();
+            let mut next = self.next_id.lock_or_poisoned();
             let batch_id = *next + 1;
             let mut ids = Vec::new();
             let mut entries = Vec::new();
@@ -927,7 +927,7 @@ mod default_backend {
                     operation_id: None,
                 });
             }
-            self.batches.lock().unwrap().push(OpBatch {
+            self.batches.lock_or_poisoned().push(OpBatch {
                 id: batch_id,
                 entries,
             });

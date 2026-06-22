@@ -12,6 +12,7 @@ use objects::{
         diff_trees,
     },
     store::{ObjectStore, Result},
+    sync::RwLockExt,
 };
 
 const SIZES: &[usize] = &[1_000, 10_000, 100_000];
@@ -41,31 +42,31 @@ struct BenchStore {
 
 impl ObjectStore for BenchStore {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        Ok(self.blobs.read().unwrap().get(hash).cloned())
+        Ok(self.blobs.read_or_poisoned().get(hash).cloned())
     }
 
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
         let hash = blob.hash();
-        self.blobs.write().unwrap().insert(hash, blob.clone());
+        self.blobs.write_or_poisoned().insert(hash, blob.clone());
         Ok(hash)
     }
 
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
-        Ok(self.blobs.read().unwrap().contains_key(hash))
+        Ok(self.blobs.read_or_poisoned().contains_key(hash))
     }
 
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        Ok(self.trees.read().unwrap().get(hash).cloned())
+        Ok(self.trees.read_or_poisoned().get(hash).cloned())
     }
 
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
-        self.trees.write().unwrap().insert(hash, tree.clone());
+        self.trees.write_or_poisoned().insert(hash, tree.clone());
         Ok(hash)
     }
 
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
-        Ok(self.trees.read().unwrap().contains_key(hash))
+        Ok(self.trees.read_or_poisoned().contains_key(hash))
     }
 
     fn get_state(&self, _id: &ChangeId) -> Result<Option<State>> {
@@ -97,11 +98,11 @@ impl ObjectStore for BenchStore {
     }
 
     fn list_blobs(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.blobs.read().unwrap().keys().copied().collect())
+        Ok(self.blobs.read_or_poisoned().keys().copied().collect())
     }
 
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.trees.read().unwrap().keys().copied().collect())
+        Ok(self.trees.read_or_poisoned().keys().copied().collect())
     }
 }
 
