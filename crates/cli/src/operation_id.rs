@@ -231,7 +231,7 @@ enum JsonDisplayMode {
 }
 
 fn json_display_mode(cli: &Cli) -> Option<JsonDisplayMode> {
-    match cli.output {
+    match cli.output_mode() {
         Some(OutputMode::Json) => Some(JsonDisplayMode::Full),
         Some(OutputMode::JsonCompact) => Some(JsonDisplayMode::Compact),
         _ => None,

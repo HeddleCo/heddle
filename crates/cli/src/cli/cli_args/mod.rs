@@ -7,6 +7,8 @@ mod commands_agent;
 mod commands_args;
 #[cfg(feature = "git-overlay")]
 mod commands_bridge;
+#[cfg(feature = "client")]
+mod commands_client;
 mod commands_context;
 mod commands_discuss;
 mod commands_hook;
@@ -23,6 +25,7 @@ mod commands_shell;
 mod commands_stash;
 mod commands_thread;
 mod commands_visibility;
+mod output_mode;
 
 pub use cli_base::Cli;
 pub use cli_shared::OutputMode;
@@ -47,6 +50,10 @@ pub use commands_args::{
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};
+#[cfg(feature = "client")]
+pub use commands_client::{
+    AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
+};
 pub use commands_context::ContextCommands;
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
@@ -83,7 +90,4 @@ pub use commands_visibility::{
     VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, VisibilityTierArg,
 };
-#[cfg(feature = "client")]
-pub use heddle_client::AuthCommands;
-#[cfg(feature = "client")]
-pub use heddle_client::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};
+pub use output_mode::CliOutputMode;

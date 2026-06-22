@@ -11,6 +11,8 @@ manifests=(
   crates/semantic/Cargo.toml
   crates/refs/Cargo.toml
   crates/oplog/Cargo.toml
+  crates/client/Cargo.toml
+  crates/cli-shared/Cargo.toml
   crates/ingest/Cargo.toml
   crates/format/Cargo.toml
   crates/wire/Cargo.toml
@@ -30,9 +32,6 @@ for manifest in "${manifests[@]}"; do
   while IFS= read -r line; do
     line_without_comment="${line%%#*}"
     if [[ "$line_without_comment" =~ ^[[:space:]]*($forbidden)([[:space:]]*=|[[:space:]]*\.) ]]; then
-      if [[ "$line_without_comment" =~ optional[[:space:]]*=[[:space:]]*true ]]; then
-        continue
-      fi
       dep="${BASH_REMATCH[1]}"
       echo "::error file=${manifest}::forbidden render dependency '${dep}' listed" >&2
       fail=1

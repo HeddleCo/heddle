@@ -17,7 +17,7 @@ use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
     grpc_hosted::{HostedAuthMode, HostedGrpcClient},
-    support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs},
+    support_requests::{SupportCommand, SupportGrant, SupportList, SupportRevoke},
 };
 
 #[derive(Serialize)]
@@ -86,11 +86,11 @@ impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
     }
 }
 
-pub async fn run(ctx: &dyn CliContext, command: SupportCommands) -> Result<()> {
+pub async fn run(ctx: &dyn CliContext, command: SupportCommand) -> Result<()> {
     match command {
-        SupportCommands::Grant(args) => run_grant(ctx, args).await,
-        SupportCommands::List(args) => run_list(ctx, args).await,
-        SupportCommands::Revoke(args) => run_revoke(ctx, args).await,
+        SupportCommand::Grant(args) => run_grant(ctx, args).await,
+        SupportCommand::List(args) => run_list(ctx, args).await,
+        SupportCommand::Revoke(args) => run_revoke(ctx, args).await,
     }
 }
 
@@ -176,7 +176,7 @@ fn parse_ttl(raw: &str) -> Result<u32> {
     Ok(secs)
 }
 
-async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
+async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
         return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
             "support_target_required",
@@ -221,7 +221,7 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_list(ctx: &dyn CliContext, args: SupportListArgs) -> Result<()> {
+async fn run_list(ctx: &dyn CliContext, args: SupportList) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
         return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
             "support_target_required",
@@ -276,7 +276,7 @@ async fn run_list(ctx: &dyn CliContext, args: SupportListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_revoke(ctx: &dyn CliContext, args: SupportRevokeArgs) -> Result<()> {
+async fn run_revoke(ctx: &dyn CliContext, args: SupportRevoke) -> Result<()> {
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
     let op_id = ctx.operation_id_wire();

@@ -30,10 +30,8 @@
 //! keep working. Add a new short alias only when the letter is already
 //! reserved for that semantic in the table above.
 
+use super::{CliOutputMode, Commands};
 use clap::Parser;
-use cli_shared::OutputMode;
-
-use super::Commands;
 
 /// Heddle: An AI-native version control system.
 #[derive(Parser)]
@@ -56,7 +54,7 @@ pub struct Cli {
     // (heddle#652).
     /// Output format: `text` (default), `json`, or `json-compact`. See `heddle help output-formats`
     #[arg(long, global = true, value_enum)]
-    pub output: Option<OutputMode>,
+    pub output: Option<CliOutputMode>,
 
     /// Disable colored output.
     #[arg(long, global = true)]
@@ -85,6 +83,10 @@ pub struct Cli {
 }
 
 impl Cli {
+    pub fn output_mode(&self) -> Option<cli_shared::OutputMode> {
+        self.output.map(Into::into)
+    }
+
     /// Open the Heddle repository the command should act on: the `--repo`
     /// path if given, otherwise the current working directory (resolved
     /// lazily so a supplied `--repo` never touches the cwd).

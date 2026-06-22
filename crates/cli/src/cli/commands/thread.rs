@@ -2575,7 +2575,7 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
     // `thread cd` and emit plain text by default; only honor an
     // *explicit* request for JSON.
     let explicit_json = matches!(
-        cli.output,
+        cli.output_mode(),
         Some(crate::cli::OutputMode::Json | crate::cli::OutputMode::JsonCompact)
     );
     if explicit_json {

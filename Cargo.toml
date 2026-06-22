@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/cli",
-    "crates/cli-macro-poc",
     "crates/cli-shared",
     "crates/client",
     "crates/core",

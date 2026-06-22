@@ -1068,7 +1068,7 @@ fn global_arg_takes_value(arg: &Arg) -> bool {
 
 fn explicit_json_requested(cli: &Cli) -> bool {
     matches!(
-        cli.output,
+        cli.output_mode(),
         Some(cli::cli::OutputMode::Json | cli::cli::OutputMode::JsonCompact)
     )
 }

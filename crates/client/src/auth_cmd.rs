@@ -14,7 +14,7 @@ use tonic::{
 };
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
-use crate::{auth_args::AuthCommands, credentials, credentials::ServerCredential};
+use crate::{auth_requests::AuthCommand, credentials, credentials::ServerCredential};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
 /// reserved for future hosted commands that need repo path / output
@@ -53,12 +53,12 @@ struct ServiceTokenOutput {
     expires_in_days: u32,
 }
 
-pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommands) -> Result<()> {
+pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
-        AuthCommands::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
-        AuthCommands::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
-        AuthCommands::Status { server } => cmd_auth_status(ctx, server.as_deref()),
-        AuthCommands::CreateServiceToken {
+        AuthCommand::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
+        AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
+        AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::CreateServiceToken {
             name,
             namespace,
             server,
