@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use objects::error::HeddleError;
+use objects::{error::HeddleError, sync::LockExt};
 use repo::daemon::{
     EndpointState, HELPER_HOST, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
     MountStatus, mount_daemon_endpoint_path, mount_idle_policy, persist_endpoint, remove_endpoint,
@@ -83,7 +83,7 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
     // `daemon stop` may treat mounts.json-gone as a hard
     // post-condition.
     {
-        let mut guard = registry.lock().expect("mount registry lock");
+        let mut guard = registry.lock_or_poisoned();
         guard.shutdown_all();
     }
     remove_endpoint(&endpoint_path);
@@ -117,7 +117,7 @@ impl DaemonHandler for MountDaemonHandler {
         // in `repo::daemon::mount_idle_policy` so the regression
         // tests can exercise it on every host.
         let shutdown = self.shutdown_requested.load(Ordering::Acquire);
-        let live_count = self.registry.lock().expect("mount registry lock").len();
+        let live_count = self.registry.lock_or_poisoned().len();
         mount_idle_policy(shutdown, live_count, idle_for)
     }
 }
@@ -134,7 +134,7 @@ fn dispatch(
             mount_path,
             repo_root: _,
         } => {
-            let mut guard = registry.lock().expect("mount registry lock");
+            let mut guard = registry.lock_or_poisoned();
             match guard.mount(&thread_id, &mount_path) {
                 Ok(MountOutcome::Created) => MountDaemonResponse::Mount {
                     version: MOUNT_PROTOCOL_VERSION,
@@ -156,7 +156,7 @@ fn dispatch(
             }
         }
         MountDaemonRequest::Unmount { thread_id } => {
-            let mut guard = registry.lock().expect("mount registry lock");
+            let mut guard = registry.lock_or_poisoned();
             match guard.unmount(&thread_id) {
                 Ok(was_mounted) => MountDaemonResponse::Unmount {
                     version: MOUNT_PROTOCOL_VERSION,
@@ -171,14 +171,14 @@ fn dispatch(
             }
         }
         MountDaemonRequest::ListMounts {} => {
-            let guard = registry.lock().expect("mount registry lock");
+            let guard = registry.lock_or_poisoned();
             MountDaemonResponse::ListMounts {
                 version: MOUNT_PROTOCOL_VERSION,
                 mounts: guard.snapshot(),
             }
         }
         MountDaemonRequest::Health {} => {
-            let guard = registry.lock().expect("mount registry lock");
+            let guard = registry.lock_or_poisoned();
             MountDaemonResponse::Health {
                 version: MOUNT_PROTOCOL_VERSION,
                 ok: true,

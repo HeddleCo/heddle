@@ -28,6 +28,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use objects::sync::LockExt;
+
 /// A process-lifetime cache that maps `K → V` and computes each entry on
 /// first access. See module docs for semantics.
 pub struct OnceMap<K, V> {
@@ -55,7 +57,7 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
     where
         F: FnOnce() -> V,
     {
-        let mut guard = self.map().lock().expect("OnceMap mutex poisoned");
+        let mut guard = self.map().lock_or_poisoned();
         if let Some(v) = guard.get(key) {
             return v.clone();
         }
@@ -77,8 +79,7 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
         }
         let v = init().await;
         self.map()
-            .lock()
-            .expect("OnceMap mutex poisoned")
+            .lock_or_poisoned()
             .insert(key.clone(), v.clone());
         v
     }
@@ -86,8 +87,7 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
     /// Read without computing. Returns `None` if the key was never inserted.
     pub fn get(&self, key: &K) -> Option<V> {
         self.map()
-            .lock()
-            .expect("OnceMap mutex poisoned")
+            .lock_or_poisoned()
             .get(key)
             .cloned()
     }
@@ -95,8 +95,7 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
     /// Direct insert. Returns the previous value if any.
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         self.map()
-            .lock()
-            .expect("OnceMap mutex poisoned")
+            .lock_or_poisoned()
             .insert(key, value)
     }
 
@@ -105,8 +104,7 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
     /// registry hands the handle back so the caller can unmount it).
     pub fn remove(&self, key: &K) -> Option<V> {
         self.map()
-            .lock()
-            .expect("OnceMap mutex poisoned")
+            .lock_or_poisoned()
             .remove(key)
     }
 }

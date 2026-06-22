@@ -132,6 +132,8 @@ mod linux {
     use repo::Repository;
     use tracing::warn;
 
+    use objects::sync::LockExt;
+
     use crate::util::OnceMap;
 
     /// Which backend is actually live behind a [`MountHandle`].
@@ -175,7 +177,7 @@ mod linux {
 
     impl MountHandle {
         pub fn unmount(&self) -> Result<()> {
-            let mut guard = self.session.lock().expect("mount session lock");
+            let mut guard = self.session.lock_or_poisoned();
             if let Some(s) = guard.take() {
                 s.unmount()?;
             }
@@ -293,6 +295,8 @@ mod macos {
     use repo::Repository;
     use tracing::{debug, info, warn};
 
+    use objects::sync::LockExt;
+
     use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
 
     const MIN_FSKIT_MACOS_MAJOR: u64 = 26;
@@ -387,7 +391,7 @@ mod macos {
 
     impl MountHandle {
         pub fn unmount(&self) -> Result<()> {
-            let mut guard = self.session.lock().expect("mount session lock");
+            let mut guard = self.session.lock_or_poisoned();
             if let Some(s) = guard.take() {
                 s.unmount()?;
             }
@@ -790,6 +794,8 @@ mod windows {
     use repo::Repository;
     use tracing::warn;
 
+    use objects::sync::LockExt;
+
     use crate::util::OnceMap;
 
     /// Which backend is actually live behind a [`MountHandle`] on
@@ -817,7 +823,7 @@ mod windows {
 
     impl MountHandle {
         pub fn unmount(&self) -> Result<()> {
-            let mut guard = self.session.lock().expect("mount session lock");
+            let mut guard = self.session.lock_or_poisoned();
             if let Some(s) = guard.take() {
                 s.unmount()?;
             }
