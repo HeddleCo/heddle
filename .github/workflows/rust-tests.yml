@@ -38,6 +38,17 @@ env:
   SCCACHE_GHA_ENABLED: "false"
 
 jobs:
+  facade-render-free:
+    name: Facade render-free
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check facade/domain crates
+        run: bash scripts/check-facade-render-free.sh
+
   # Path gate for the heavy Rust jobs. PRs diff against the base branch and
   # pushes diff against the pre-push SHA. Any uncertainty falls back to running
   # the full matrix. Most of the CI bill on this repo is doc/spike PRs (often

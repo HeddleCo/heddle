@@ -9,6 +9,13 @@ pub mod fs_clone;
 pub mod fs_ops;
 pub mod lock;
 pub mod object;
+pub mod observe;
 pub mod store;
 pub mod util;
 pub mod worktree;
+
+pub use error::HeddleError;
+pub use observe::{
+    CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,
+    WarningSink,
+};

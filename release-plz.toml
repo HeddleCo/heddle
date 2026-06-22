@@ -64,6 +64,10 @@ name = "heddle-cli-shared"
 release = true
 
 [[package]]
+name = "heddle-core"
+release = true
+
+[[package]]
 name = "heddle-devtools"
 release = true
 
