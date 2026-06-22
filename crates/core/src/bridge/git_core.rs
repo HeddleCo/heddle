@@ -614,7 +614,6 @@ impl SyncMapping {
         }
     }
 
-    #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
         let retained: Vec<(ChangeId, ObjectId)> = self

@@ -14,7 +14,7 @@ use std::{
 };
 
 use base64::Engine;
-use cli::bridge::{
+use heddle_core::bridge::{
     GitBridge,
     git_core::{
         GitBridgeError, GitPushScope, SyncMapping, clone_url_to_bare, copy_local_repo_to_bare,
@@ -3843,13 +3843,13 @@ fn export_retracts_note_for_retracted_commit() {
     {
         let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
         assert!(
-            cli::bridge::git_notes::read_note(&mirror, oid_a)
+            heddle_core::bridge::git_notes::read_note(&mirror, oid_a)
                 .unwrap()
                 .is_some(),
             "A must carry a note after run 1"
         );
         assert!(
-            cli::bridge::git_notes::read_note(&mirror, oid_b)
+            heddle_core::bridge::git_notes::read_note(&mirror, oid_b)
                 .unwrap()
                 .is_some(),
             "B must carry a note after run 1"
@@ -3878,13 +3878,13 @@ fn export_retracts_note_for_retracted_commit() {
     export_all(&mut bridge).expect("second export");
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert!(
-        cli::bridge::git_notes::read_note(&mirror, oid_b)
+        heddle_core::bridge::git_notes::read_note(&mirror, oid_b)
             .unwrap()
             .is_none(),
         "run 2 must retract the note for the now-embargoed B (no metadata leak)"
     );
     assert!(
-        cli::bridge::git_notes::read_note(&mirror, oid_a)
+        heddle_core::bridge::git_notes::read_note(&mirror, oid_a)
             .unwrap()
             .is_some(),
         "A is still served — its note must survive the retraction"
@@ -3949,7 +3949,7 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     {
         let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
         assert!(
-            cli::bridge::git_notes::read_note(&mirror, oid_x)
+            heddle_core::bridge::git_notes::read_note(&mirror, oid_x)
                 .unwrap()
                 .is_some(),
             "X must carry a note after run 1"
@@ -3980,13 +3980,13 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     export_current_thread(&mut bridge, "other").expect("scoped export");
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert!(
-        cli::bridge::git_notes::read_note(&mirror, oid_x)
+        heddle_core::bridge::git_notes::read_note(&mirror, oid_x)
             .unwrap()
             .is_none(),
         "scoped export must retract X's note (ancestor embargoed) — no notes leak"
     );
     assert!(
-        cli::bridge::git_notes::read_note(&mirror, oid_o)
+        heddle_core::bridge::git_notes::read_note(&mirror, oid_o)
             .unwrap()
             .is_some(),
         "O is served — its note must survive the scoped retraction"
@@ -5718,7 +5718,7 @@ fn export_propagates_tag_and_note_deletion() {
             "destination must have the tag while public"
         );
         assert!(
-            cli::bridge::git_notes::read_note(&dest, oid_r)
+            heddle_core::bridge::git_notes::read_note(&dest, oid_r)
                 .unwrap()
                 .is_some(),
             "destination must carry R's note while public"
@@ -5773,7 +5773,7 @@ fn export_propagates_tag_and_note_deletion() {
         "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
     );
     assert!(
-        cli::bridge::git_notes::read_note(&dest, oid_r)
+        heddle_core::bridge::git_notes::read_note(&dest, oid_r)
             .unwrap()
             .is_none(),
         "the embargoed commit's note must no longer be readable at the destination"
@@ -6209,7 +6209,7 @@ fn foreign_ref_on_url_remote_survives() {
 /// the destination's newer commit survives. Covers local-path AND URL/network.
 #[test]
 fn out_of_band_destination_descendant_not_force_overwritten() {
-    use cli::bridge::git_core::GitBridgeError;
+    use heddle_core::bridge::git_core::GitBridgeError;
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
@@ -7206,7 +7206,7 @@ fn foreign_destination_ref_spared() {
 /// local-path AND URL/network.
 #[test]
 fn out_of_band_destination_tag_not_overwritten() {
-    use cli::bridge::git_core::GitBridgeError;
+    use heddle_core::bridge::git_core::GitBridgeError;
     use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");

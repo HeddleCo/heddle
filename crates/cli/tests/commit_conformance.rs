@@ -37,10 +37,8 @@ use std::{
     process::Command,
 };
 
-use cli::{
-    Repository,
-    bridge::{git_core::GitBridge, git_reconstruct::commit_object_id, test_support},
-};
+use cli::Repository;
+use heddle_core::bridge::{git_core::GitBridge, git_reconstruct::commit_object_id, test_support};
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
 

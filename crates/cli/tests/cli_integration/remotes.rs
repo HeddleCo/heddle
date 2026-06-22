@@ -793,7 +793,7 @@ fn git_overlay_push_defaults_to_current_thread_branch() {
         "default push must not push tags"
     );
     assert!(
-        find_reference(&remote_repo, cli::bridge::git_notes::NOTES_REF).is_ok(),
+        find_reference(&remote_repo, heddle_core::bridge::git_notes::NOTES_REF).is_ok(),
         "default push must carry Heddle notes so clones preserve state identity"
     );
 }
@@ -1876,7 +1876,7 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
     let second_tree = git_tree_with_file(&src, "tracked.txt", b"two\n");
     let second = git_commit_with_tree(&src, Some("refs/heads/main"), second_tree, "two", &[first]);
     git_set_reference(&src, "refs/tags/v2.0", second);
-    git_set_reference(&src, cli::bridge::git_notes::NOTES_REF, second);
+    git_set_reference(&src, heddle_core::bridge::git_notes::NOTES_REF, second);
 
     let fetch_json =
         heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
@@ -1908,11 +1908,11 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
 
     let mirror = open_git(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
     assert!(
-        find_reference(&mirror, cli::bridge::git_notes::NOTES_REF).is_ok(),
+        find_reference(&mirror, heddle_core::bridge::git_notes::NOTES_REF).is_ok(),
         "fetch should carry refs/notes/heddle for Heddle identity metadata"
     );
     assert_eq!(
-        git_stdout_trimmed(&["rev-parse", cli::bridge::git_notes::NOTES_REF], &work),
+        git_stdout_trimmed(&["rev-parse", heddle_core::bridge::git_notes::NOTES_REF], &work),
         second.to_string(),
         "fetch should refresh the checkout's refs/notes/heddle when it reports fetching Heddle notes"
     );

@@ -207,7 +207,6 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
         let repo = self.open_git_repo()?;
         self.mapping = self.read_mapping_cache_from_disk()?;

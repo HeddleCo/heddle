@@ -22,10 +22,8 @@
 
 use std::{collections::BTreeMap, path::Path, process::Command};
 
-use cli::{
-    ObjectStore, Repository,
-    bridge::{git_core::GitBridge, test_support},
-};
+use cli::{ObjectStore, Repository};
+use heddle_core::bridge::{git_core::GitBridge, test_support};
 use tempfile::TempDir;
 
 fn ingest_into_bridge(
