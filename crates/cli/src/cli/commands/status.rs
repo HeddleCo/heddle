@@ -2545,9 +2545,12 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
+    use heddle_core::StatusOptions;
     use repo::{AgentUsageSummary, Repository};
     use serde_json::Value;
     use tempfile::TempDir;
+
+    use crate::cli::execution_context_from_cli;
 
     use super::{
         ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
