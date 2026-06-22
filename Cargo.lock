@@ -1546,21 +1546,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-cli-macro-poc"
-version = "0.0.0"
-dependencies = [
- "clap",
- "schemars",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "heddle-cli-shared"
 version = "0.4.0"
 dependencies = [
  "anyhow",
- "clap",
  "heddle-objects",
  "heddle-repo",
  "heddle-wire",
@@ -1583,7 +1572,6 @@ dependencies = [
  "base64 0.22.1",
  "biscuit-auth",
  "chrono",
- "clap",
  "futures",
  "heddle-cli-shared",
  "heddle-crypto",
@@ -1711,7 +1699,6 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
- "clap",
  "heddle-objects",
  "heddle-oplog",
  "heddle-refs",

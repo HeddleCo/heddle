@@ -39,7 +39,7 @@ impl WeftExtensions for EnabledWeftExtensions {
         command: &(dyn Any + Send + Sync),
     ) -> Result<()> {
         let command = downcast::<AuthCommands>(command, "AuthCommands")?;
-        cmd_auth(ctx, command.clone()).await
+        cmd_auth(ctx, command.clone().into()).await
     }
 
     async fn support(
@@ -48,7 +48,7 @@ impl WeftExtensions for EnabledWeftExtensions {
         command: &(dyn Any + Send + Sync),
     ) -> Result<()> {
         let command = downcast::<SupportCommands>(command, "SupportCommands")?;
-        cmd_support(ctx, command.clone()).await
+        cmd_support(ctx, command.clone().into()).await
     }
 
     async fn presence_publish(

@@ -105,7 +105,7 @@ pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
         .and_then(|cfg| cfg.output.format)
         .unwrap_or(user_config.output.format);
 
-    if let Some(output) = cli.output {
+    if let Some(output) = cli.output_mode() {
         format = match output {
             // `json-compact` is still JSON output — it only narrows
             // *which* fields are emitted (see `output_is_compact`).
@@ -123,7 +123,7 @@ pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
 /// (`output.format` is `json`/`text` only), so the full machine contract
 /// stays the default for piped/configured JSON.
 pub fn output_is_compact(cli: &Cli) -> bool {
-    matches!(cli.output, Some(OutputMode::JsonCompact))
+    matches!(cli.output_mode(), Some(OutputMode::JsonCompact))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +149,10 @@ pub fn json_output_mode_for_kind(
             // Stream-shaped commands (e.g. `watch`) have no compact
             // projection; `json-compact` falls back to the full jsonl
             // stream rather than silently downgrading to text.
-            if matches!(cli.output, Some(OutputMode::Json | OutputMode::JsonCompact)) {
+            if matches!(
+                cli.output_mode(),
+                Some(OutputMode::Json | OutputMode::JsonCompact)
+            ) {
                 JsonOutputMode::Jsonl
             } else {
                 JsonOutputMode::Text

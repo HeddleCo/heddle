@@ -4,17 +4,17 @@
 //! feature is on. The trait surface that cli dispatches through lives
 //! in `weft-client-shim`; this crate provides the real impls.
 
-pub mod auth_args;
 pub mod auth_cmd;
+pub mod auth_requests;
 pub mod credentials;
 pub mod device_flow;
 pub mod grpc_hosted;
 pub mod presence;
 pub mod support;
-pub mod support_args;
+pub mod support_requests;
 
-pub use auth_args::AuthCommands;
 pub use auth_cmd::cmd_auth;
+pub use auth_requests::AuthCommand;
 // Re-export `device_flow` under the historical `auth` module name so
 // callers using `weft_client::auth::{...}` resolve symbols at the
 // same path the cli used internally pre-move.
@@ -24,4 +24,4 @@ pub use presence::{
     PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
 };
 pub use support::run as cmd_support;
-pub use support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};
+pub use support_requests::{SupportCommand, SupportGrant, SupportList, SupportRevoke};
