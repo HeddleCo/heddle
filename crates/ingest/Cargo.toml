@@ -14,6 +14,7 @@ name = "ingest"
 [[bin]]
 name = "heddle-ingest"
 path = "src/bin/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 objects = { path = "../objects", package = "heddle-objects", version = "0.4", features = ["memory-backend"] }
@@ -27,7 +28,7 @@ semantic = { path = "../semantic", package = "heddle-semantic", version = "0.4" 
 
 anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 # `bundled` vendors the SQLite C source so ingest doesn't depend on a
 # system libsqlite3 version. OpenCode's SQLite is read-only to us.
 rusqlite.workspace = true
@@ -53,6 +54,7 @@ tracing-subscriber.workspace = true
 # just bigger packs). On by default; turn off with
 # `--no-default-features` for a slimmer build.
 default = ["zstd"]
+cli = ["dep:clap"]
 zstd = ["objects/zstd", "repo/zstd"]
 
 [dev-dependencies]
