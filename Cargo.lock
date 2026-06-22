@@ -1608,9 +1608,17 @@ dependencies = [
 name = "heddle-core"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "heddle-cli-shared",
+ "heddle-crypto",
  "heddle-objects",
+ "heddle-refs",
  "heddle-repo",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sley",
+ "tempfile",
 ]
 
 [[package]]

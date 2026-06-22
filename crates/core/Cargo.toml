@@ -11,8 +11,18 @@ categories.workspace = true
 
 [dependencies]
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.4" }
+rmp-serde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sley.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
 
 [lib]
 path = "src/lib.rs"
