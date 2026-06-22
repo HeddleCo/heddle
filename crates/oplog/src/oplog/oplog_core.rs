@@ -11,6 +11,7 @@ use objects::{
     error::{HeddleError, Result},
     lock::{RepoLock, WriteLockGuard},
     object::Principal,
+    sync::LockExt,
 };
 
 use super::{
@@ -133,14 +134,14 @@ impl OpLog {
 
     /// Load from cache or disk (for read operations).
     fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
-        let guard = self.cached.lock().unwrap();
+        let guard = self.cached.lock_or_poisoned();
         if guard.is_some() {
             return Ok(guard);
         }
         drop(guard);
 
         self.ensure_current_format()?;
-        let mut guard = self.cached.lock().unwrap();
+        let mut guard = self.cached.lock_or_poisoned();
         if guard.is_none() {
             let path = self.oplog_path();
             *guard = Some(if path.exists() {
@@ -159,7 +160,7 @@ impl OpLog {
     /// 3329711888).
     fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
         self.ensure_current_format()?;
-        let mut guard = self.cached.lock().unwrap();
+        let mut guard = self.cached.lock_or_poisoned();
         let path = self.oplog_path();
         *guard = Some(if path.exists() {
             PackedOpLogIndex::open(&path)?
@@ -204,7 +205,7 @@ impl OpLog {
         let report = recover_oplog_at(&path)?;
         // Drop any cached (now-stale) index view so subsequent reads see the
         // rebuilt oplog.
-        *self.cached.lock().unwrap() = None;
+        *self.cached.lock_or_poisoned() = None;
         Ok(report)
     }
 
@@ -334,7 +335,7 @@ impl OpLog {
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
+        *self.cached.lock_or_poisoned() = Some(updated);
 
         Ok(Some(ids))
     }
@@ -382,7 +383,7 @@ impl OpLog {
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
+        *self.cached.lock_or_poisoned() = Some(updated);
 
         Ok(Some(ids))
     }
@@ -430,7 +431,7 @@ impl OpLog {
         packed.entries = entries;
         packed.head_id = head_id;
         packed.save()?;
-        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
         Ok(())
     }
 
@@ -470,7 +471,7 @@ impl OpLog {
             e.undone = undone;
         }
 
-        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
 
         Ok(OpBatch {
             id: batch.id,
@@ -517,7 +518,7 @@ impl OpLogBackend for OpLog {
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
+        *self.cached.lock_or_poisoned() = Some(updated);
 
         Ok(ids)
     }
@@ -578,7 +579,7 @@ impl OpLogBackend for OpLog {
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
+        *self.cached.lock_or_poisoned() = Some(updated);
 
         Ok(ConditionalCommitOutcome::Committed(ids))
     }
@@ -665,7 +666,7 @@ impl OpLogBackend for OpLog {
             .into_iter()
             .map(|idx| packed.entries[idx].clone())
             .collect::<Vec<_>>();
-        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        *self.cached.lock_or_poisoned() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
 
         Ok(OpBatch {
             id: primary_batch_id,

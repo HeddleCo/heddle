@@ -17,6 +17,7 @@ use crate::{
         compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },
+    sync::RwLockExt,
 };
 
 fn create_test_store() -> (TempDir, FsStore) {
@@ -738,7 +739,7 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     // Drop the in-process verified cache and corrupt the file. This
     // is the post-crash state we're guarding against: cache empty,
     // file's bytes don't match the hash any more.
-    *store.verified_loose_blobs.write().unwrap() =
+    *store.verified_loose_blobs.write_or_poisoned() =
         super::fs_store::RecentObjectCache::with_capacity(65_536);
     std::fs::write(&path, b"torn-write garbage").unwrap();
 
