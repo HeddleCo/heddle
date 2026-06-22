@@ -4,9 +4,9 @@ use std::{
     path::Path,
 };
 
-use anyhow::Result;
 use crypto::StateSigningExt;
 use objects::{
+    error::Result,
     object::{ContentHash, State, Tree},
     store::ObjectStore,
 };
