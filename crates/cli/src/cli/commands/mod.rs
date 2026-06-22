@@ -30,7 +30,6 @@ mod expand;
 mod fetch;
 mod ff_record;
 mod fsck;
-mod fsck_checks;
 mod gc;
 mod git_compat;
 mod git_overlay_health;

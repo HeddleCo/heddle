@@ -1496,6 +1496,7 @@ dependencies = [
  "futures",
  "heddle-cli-shared",
  "heddle-client",
+ "heddle-core",
  "heddle-crypto",
  "heddle-daemon",
  "heddle-grpc",

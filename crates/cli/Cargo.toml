@@ -42,6 +42,7 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.4" }
 merge = { path = "../merge", package = "heddle-merge", version = "0.4" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
+heddle-core = { path = "../core", version = "0.4" }
 heddle-client = { path = "../client", version = "0.4", optional = true }
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.4" }
 async-trait.workspace = true
