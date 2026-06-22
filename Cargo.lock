@@ -1612,14 +1612,19 @@ dependencies = [
  "chrono",
  "heddle-cli-shared",
  "heddle-crypto",
+ "heddle-ingest",
  "heddle-objects",
  "heddle-refs",
  "heddle-repo",
+ "heddle-wire",
+ "hex",
  "rmp-serde",
  "serde",
  "serde_json",
  "sley",
  "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

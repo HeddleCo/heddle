@@ -12,6 +12,8 @@ categories.workspace = true
 [dependencies]
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
+hex.workspace = true
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.4", default-features = false }
 objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.4" }
@@ -19,6 +21,9 @@ rmp-serde.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wire = { path = "../wire", package = "heddle-wire", version = "0.4", default-features = false }
 
 [dev-dependencies]
 chrono.workspace = true

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Embeddable Heddle facade scaffolding.
 
+pub mod bridge;
 pub mod context;
 pub mod fsck;
 
