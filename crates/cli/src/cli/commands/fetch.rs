@@ -270,7 +270,11 @@ async fn fetch_network(
         options.addr,
         options.user_config,
         options.server_key,
-        HostedAuthMode::ConfigToken,
+        // fetch hits the PoP-gated RepoSync transport (like push/pull/clone),
+        // so it needs the credential store's proof key, not a token-only
+        // session. CredentialFallback is identical to ConfigToken when an env
+        // token is set and adds the proof-key fallback otherwise.
+        HostedAuthMode::CredentialFallback,
     )
     .await?;
 

@@ -55,10 +55,20 @@ impl HostedSession {
                 let mut credential_proof_key = None;
                 if token.is_none()
                     && let Some(ref key) = server_key
-                    && let Ok(Some(cred)) = credentials::resolve_credential_for_server(key)
                 {
-                    token = Some(AuthToken::new(cred.token, "credential-store"));
-                    credential_proof_key = cred.private_key_pem;
+                    // Propagate a malformed credentials.toml instead of
+                    // swallowing it: a parse error here (e.g. a missing
+                    // `subject` field) used to fall through to an
+                    // unauthenticated request, which the server rejects with
+                    // the opaque "missing authorization metadata" — hiding the
+                    // real cause. The `?` surfaces the underlying
+                    // "parsing <path>: <toml error>" so the user can fix the
+                    // file. A *missing* file still returns Ok(None) and falls
+                    // back cleanly.
+                    if let Some(cred) = credentials::resolve_credential_for_server(key)? {
+                        token = Some(AuthToken::new(cred.token, "credential-store"));
+                        credential_proof_key = cred.private_key_pem;
+                    }
                 }
                 (token, credential_proof_key)
             }
