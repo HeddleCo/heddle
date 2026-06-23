@@ -11,12 +11,12 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-heddle-schema = { path = "../schema", version = "0.4" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
+heddle-schema = { path = "../schema", version = "0.5" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.5" }
 rmp-serde.workspace = true
 serde.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.4", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.5", optional = true }
 serde_json = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

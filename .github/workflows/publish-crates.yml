@@ -74,27 +74,29 @@ env:
   # `publish = true` in Cargo.toml is invisible at PR review time, and
   # accidentally flipping it would silently expand the public surface.
   PUBLISHABLE_CRATES: |
-    heddle-devtools
-    heddle-grpc
-    heddle-merge
-    heddle-review
-    heddle-runtime-bridge
+    heddle-format
     heddle-objects
     heddle-crypto
+    heddle-runtime-bridge
+    heddle-schema
     heddle-oplog
-    heddle-wire
     heddle-refs
+    heddle-merge
     heddle-semantic
     heddle-state-review
+    heddle-wire
     heddle-repo
     heddle-cli-shared
+    heddle-grpc
+    weft-client-shim
+    heddle-client
     heddle-core
     heddle-daemon
     heddle-ingest
     heddle-mount
-    weft-client-shim
-    heddle-client
     heddle-cli
+    heddle-devtools
+    heddle-review
 
 jobs:
   validate-publish:

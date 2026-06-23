@@ -13,14 +13,14 @@ path = "src/lib.rs"
 name = "ingest"
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.4", features = ["memory-backend"] }
-refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.5", features = ["memory-backend"] }
+refs = { path = "../refs", package = "heddle-refs", version = "0.5" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.5" }
 # `default-features = false` here breaks repo's automatic zstd
 # cascade so this crate's own `zstd` feature controls the chain end-
 # to-end. Re-enabled via the forwarded feature below by default.
-repo = { path = "../repo", package = "heddle-repo", version = "0.4", default-features = false, features = ["git-overlay"] }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.4" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.5", default-features = false, features = ["git-overlay"] }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.5" }
 
 anyhow.workspace = true
 chrono.workspace = true
