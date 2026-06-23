@@ -11,12 +11,12 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.4" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.4" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.4" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.4", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.4" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.4" }
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.5" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.5" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.5" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.5", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.5" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.5" }
 rmp-serde.workspace = true
 serde.workspace = true
 serde_json.workspace = true
