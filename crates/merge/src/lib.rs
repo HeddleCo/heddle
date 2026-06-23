@@ -49,6 +49,7 @@ mod diff3;
 mod lines;
 mod markers;
 mod preflight;
+pub mod rename;
 mod whitespace;
 
 #[cfg(test)]

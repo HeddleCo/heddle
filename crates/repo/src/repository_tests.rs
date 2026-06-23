@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
-    ThreadFreshness, ThreadManager, WorktreeIndex,
+    RepositoryProbeTarget, ThreadFreshness, ThreadManager, WorktreeIndex,
 };
 
 fn create_test_repo() -> (TempDir, Repository) {
@@ -2161,4 +2161,126 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     // The git-overlay branch probe stays inert — the parent branch never leaks.
     assert_eq!(opened.git_overlay_current_branch().unwrap(), None);
     assert_eq!(opened.current_lane().unwrap().as_deref(), Some("feature"));
+}
+
+#[test]
+fn repository_probe_fresh_git_overlay_from_subdir_is_read_only() {
+    let temp_dir = TempDir::new().unwrap();
+    sley::Repository::init(temp_dir.path()).expect("init real git repository");
+    let subdir = temp_dir.path().join("nested").join("child");
+    fs::create_dir_all(&subdir).unwrap();
+
+    let probe = Repository::probe(&subdir).expect("probe git checkout");
+
+    assert_eq!(probe.target(), RepositoryProbeTarget::FreshGitOverlay);
+    assert_eq!(
+        probe.resolved_root(),
+        temp_dir.path().canonicalize().unwrap().as_path()
+    );
+    assert_eq!(probe.capability(), RepositoryCapability::GitOverlay);
+    assert!(probe.git_facts().has_metadata());
+    assert_eq!(
+        probe.git_facts().root().unwrap(),
+        temp_dir.path().canonicalize().unwrap().as_path()
+    );
+    assert!(
+        !temp_dir.path().join(".heddle").exists(),
+        "probing a fresh git overlay must not bootstrap .heddle"
+    );
+}
+
+#[test]
+fn repository_probe_existing_main_repo_returns_config_and_principal_candidate() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let config_path = repo.heddle_dir().join("config.toml");
+    let mut config = RepoConfig::load(&config_path).unwrap();
+    config.set_principal("Ada Lovelace", "ada@example.com");
+    config.save(&config_path).unwrap();
+    let subdir = temp_dir.path().join("src");
+    fs::create_dir_all(&subdir).unwrap();
+
+    let probe = Repository::probe(&subdir).expect("probe existing repo");
+
+    assert_eq!(probe.target(), RepositoryProbeTarget::Existing);
+    assert_eq!(probe.capability(), RepositoryCapability::NativeHeddle);
+    assert_eq!(
+        probe.existing_heddle_dir().unwrap(),
+        repo.heddle_dir().canonicalize().unwrap().as_path()
+    );
+    let existing_config = probe.existing_config().expect("existing config");
+    assert_eq!(
+        existing_config
+            .principal
+            .as_ref()
+            .expect("config principal")
+            .email,
+        "ada@example.com"
+    );
+    let candidate = probe
+        .repo_principal_candidate()
+        .expect("repo principal candidate");
+    assert_eq!(candidate.name, "Ada Lovelace");
+    assert_eq!(candidate.email, "ada@example.com");
+}
+
+#[test]
+fn repository_probe_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
+    let temp_dir = TempDir::new().unwrap();
+    sley::Repository::init(temp_dir.path()).expect("init real git repository");
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let heddle = repo.heddle_dir().to_path_buf();
+    let checkout = repo.managed_checkout_path("feature");
+    let co_heddle = checkout.join(".heddle");
+    fs::create_dir_all(&co_heddle).unwrap();
+    fs::write(
+        co_heddle.join("objectstore"),
+        format!("objectstore: {}\n", heddle.display()),
+    )
+    .unwrap();
+    fs::create_dir_all(co_heddle.join("state")).unwrap();
+    fs::write(co_heddle.join("HEAD"), "ref: feature\n").unwrap();
+    let nested = checkout.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+
+    let probe = Repository::probe(&nested).expect("probe solid checkout");
+
+    assert_eq!(probe.target(), RepositoryProbeTarget::Existing);
+    assert_eq!(
+        probe.resolved_root(),
+        checkout.canonicalize().unwrap().as_path()
+    );
+    assert_eq!(
+        probe.existing_heddle_dir().unwrap(),
+        heddle.canonicalize().unwrap().as_path()
+    );
+    assert_eq!(probe.capability(), RepositoryCapability::NativeHeddle);
+    assert!(
+        !probe.git_facts().has_metadata(),
+        "ancestor git metadata must not leak past the checkout .heddle boundary"
+    );
+}
+
+#[test]
+fn write_main_head_from_isolated_checkout_preserves_local_head() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let checkout = temp_dir.path().join("feature-checkout");
+    Repository::init_worktree(&checkout, repo.heddle_dir()).unwrap();
+    let local_head = checkout.join(".heddle").join("HEAD");
+    fs::write(&local_head, "ref: feature\n").unwrap();
+    let opened = Repository::open(&checkout).unwrap();
+
+    assert!(opened.is_isolated_worktree_checkout());
+    opened
+        .write_main_head(&Head::Attached {
+            thread: ThreadName::new("target"),
+        })
+        .unwrap();
+
+    assert_eq!(fs::read_to_string(&local_head).unwrap(), "ref: feature\n");
+    let reopened_main = Repository::open(temp_dir.path()).unwrap();
+    assert!(
+        matches!(reopened_main.refs().read_head().unwrap(), Head::Attached { thread } if thread == "target")
+    );
 }

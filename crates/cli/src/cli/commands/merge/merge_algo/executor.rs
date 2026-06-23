@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use ::merge::rename::{RenameMatch, flatten_tree};
 use anyhow::{Result, anyhow};
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
@@ -15,9 +16,7 @@ use repo::Repository;
 
 use crate::cli::commands::{
     RecoveryAdvice,
-    merge::{
-        merge_algo::ConflictLabels, merge_renames::MergeRenameMap, rename_matcher::flatten_tree,
-    },
+    merge::{merge_algo::ConflictLabels, merge_renames::MergeRenameMap},
 };
 
 pub(super) fn merge_with_renames(
@@ -83,8 +82,8 @@ pub(super) fn merge_without_renames(
 
 fn apply_renames(
     store: &impl ObjectStore,
-    active_renames: &HashMap<String, crate::cli::commands::merge::rename_matcher::RenameMatch>,
-    opposing_renames: &HashMap<String, crate::cli::commands::merge::rename_matcher::RenameMatch>,
+    active_renames: &HashMap<String, RenameMatch>,
+    opposing_renames: &HashMap<String, RenameMatch>,
     opposing_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
     merged_flat: &mut HashMap<String, ContentHash>,
     conflicts: &mut Vec<String>,

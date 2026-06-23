@@ -24,8 +24,9 @@ use std::sync::Arc;
 
 pub use discussion::LocalDiscussionService;
 pub use hook::LocalHookService;
-pub use hook_events::{EmitWaiter, HookEventBroadcaster, HookResponse};
+pub use hook_events::{EmitWaiter, HookEventBroadcaster};
 pub use operation_log_query::LocalOperationLogQueryService;
+pub use repo::HookResponse;
 use repo::{
     Repository,
     operation_dedup::{OperationDedupStore, reserve_operation_id_eager},

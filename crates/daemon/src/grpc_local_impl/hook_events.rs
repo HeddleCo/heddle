@@ -41,7 +41,7 @@ use std::{
 use grpc::heddle::v1::HookEvent as ProtoHookEvent;
 use objects::object::OperationId;
 use prost_types::Timestamp;
-use serde::{Deserialize, Serialize};
+use repo::HookResponse;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Channel capacity for the in-process broadcast. Each subscriber gets
@@ -50,25 +50,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// `Lagged` error in its `recv` and we close the stream so the hook
 /// can re-subscribe).
 const BROADCAST_CAPACITY: usize = 256;
-
-/// Typed hook response decoded from `RespondToHook`. The universal
-/// veto channel is `abort`; per-event extension fields ride on `extra`
-/// so per-event handlers can pull `extra_signals`, `veto`, etc.
-/// without the universal type having to know every shape.
-///
-/// This type's home will move to `crates/repo/src/hooks.rs` so the
-/// CLI hook runner can decode the same shape from stdout. Until that
-/// lands, the broker carries its own definition; the wire format on
-/// `RespondToHookRequest` decodes into this type and the emit-side
-/// awaits it. Field names match the spec verbatim so the eventual
-/// move to `repo::hooks` is a one-line `pub use`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct HookResponse {
-    #[serde(default)]
-    pub abort: String,
-    #[serde(flatten, default)]
-    pub extra: serde_json::Value,
-}
 
 /// Per-event metadata routed from `emit` to `await_response`. The
 /// channel is single-shot — once a reply lands, the slot is removed.

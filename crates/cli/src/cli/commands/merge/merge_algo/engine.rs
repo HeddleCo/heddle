@@ -8,10 +8,8 @@ use super::{
     ConflictLabels, MergeResult,
     executor::{merge_with_renames, merge_without_renames},
 };
-use crate::cli::commands::merge::{
-    merge_renames::{DEFAULT_RENAME_THRESHOLD, detect_merge_renames},
-    rename_matcher::infer_directory_renames,
-};
+use crate::cli::commands::merge::merge_renames::rename_matcher_config;
+use ::merge::rename::{detect_merge_renames, infer_directory_renames};
 
 pub(crate) fn three_way_merge(
     repo: &Repository,
@@ -40,7 +38,7 @@ pub(crate) fn three_way_merge_with_labels(
         base_tree,
         our_tree,
         their_tree,
-        DEFAULT_RENAME_THRESHOLD,
+        rename_matcher_config(),
     )?;
 
     let (tree, conflicts) =
@@ -66,9 +64,7 @@ pub(crate) fn three_way_merge_with_labels(
     })
 }
 
-fn collect_renames(
-    rename_map: &crate::cli::commands::merge::merge_renames::MergeRenameMap,
-) -> Vec<(String, String, f64)> {
+fn collect_renames(rename_map: &::merge::rename::MergeRenameMap) -> Vec<(String, String, f64)> {
     let mut renames = Vec::new();
 
     for rename in rename_map.our_renames.values() {

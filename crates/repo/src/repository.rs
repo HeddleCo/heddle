@@ -385,7 +385,7 @@ pub(crate) fn compute_op_scope(root: &Path) -> String {
     format!("wt-{}", &digest.to_hex().as_str()[..16])
 }
 
-fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
+pub(crate) fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
     let found = config.repository.version;
     let supported = repo_config::SUPPORTED_REPO_FORMAT;
     if found > supported {
@@ -2284,6 +2284,26 @@ impl Repository {
         Ok(raw)
     }
 
+    /// Whether this repository handle points at an isolated checkout with a
+    /// checkout-local `.heddle` pointer and shared object store/ref root.
+    pub fn is_isolated_worktree_checkout(&self) -> bool {
+        let local_heddle_dir = self.root.join(".heddle");
+        local_heddle_dir != self.heddle_dir && local_heddle_dir.join("objectstore").is_file()
+    }
+
+    /// Write the active/main repository HEAD.
+    ///
+    /// For ordinary repositories this writes the local HEAD. For isolated
+    /// worktree checkouts, the checkout-local HEAD is intentionally left alone
+    /// and the shared/source repository HEAD is updated instead.
+    pub fn write_main_head(&self, head: &Head) -> Result<()> {
+        if self.is_isolated_worktree_checkout() {
+            RefManager::new(&self.heddle_dir).write_head(head)
+        } else {
+            self.refs.write_head(head)
+        }
+    }
+
     /// Resolve the on-disk worktree path for the *active thread*.
     ///
     /// This is the canonical "where does the current thread live on disk"
@@ -2593,7 +2613,7 @@ pub fn is_synthetic_root(state: &State) -> bool {
 /// Parse a `.heddle` pointer file and return the shared object store path.
 ///
 /// The file must contain a line of the form `objectstore: <path>`.
-fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
+pub(crate) fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
     for line in content.lines() {
         if let Some(path) = line.strip_prefix("objectstore:") {
             let path = path.trim();
@@ -2605,7 +2625,7 @@ fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
     None
 }
 
-fn has_git_metadata(path: &Path) -> bool {
+pub(crate) fn has_git_metadata(path: &Path) -> bool {
     let dot_git = path.join(".git");
     if !(dot_git.is_dir() || dot_git.is_file()) {
         return false;
@@ -2627,7 +2647,7 @@ fn has_git_metadata(path: &Path) -> bool {
 /// `thread_manifest::thread_dir` encoding guarantees `<encoded>` is exactly
 /// one path component, so any direct checkout leaf below it has the
 /// unambiguous `<leaf> → <encoded> → threads → .heddle` shape (heddle#572 r2).
-fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
+pub(crate) fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = Some(start_path);
     while let Some(dir) = cur {
         if let Some(thread_dir) = dir.parent()
@@ -2645,7 +2665,7 @@ fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn git_config_principal(root: &Path) -> Option<Principal> {
+pub(crate) fn git_config_principal(root: &Path) -> Option<Principal> {
     let git_repo = SleyRepository::discover(root).ok()?;
     let config = git_repo.config_snapshot().ok()?;
     let name = config.get("user", None, "name")?.to_string();
@@ -2901,7 +2921,7 @@ fn git_remote_tracking_next_action(
     }
 }
 
-fn repository_capability_for_root(root: &Path) -> RepositoryCapability {
+pub(crate) fn repository_capability_for_root(root: &Path) -> RepositoryCapability {
     if has_git_metadata(root) {
         RepositoryCapability::GitOverlay
     } else {

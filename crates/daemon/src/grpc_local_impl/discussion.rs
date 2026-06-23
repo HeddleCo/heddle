@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Local gRPC service for the W2 `DiscussionService`.
 //!
-//! Reads and writes the `DiscussionsBlob` attached to a state via
-//! [`State::with_discussions`]. Open / append / resolve mutations all follow
-//! the same pattern: load the current state, decode (or create fresh) the
-//! existing blob, mutate, encode back to a new [`Blob`], persist a new
-//! `State` with the updated `discussions` content hash.
+//! Converts protobuf requests into pure discussion operations and delegates
+//! legacy state-attached persistence to the repository layer.
 //!
 //! Discovery RPCs (lookup by id, lookup by symbol) currently scan the HEAD
 //! state's blob only. A cross-state index is W2 follow-up work and is
@@ -18,15 +15,11 @@ use grpc::heddle::v1::{
     ListDiscussionsResponse, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
-use objects::{
-    object::{
-        Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
-        Principal, State, SymbolAnchor, VisibilityTier,
-    },
-    store::ObjectStore,
+use objects::object::{
+    ChangeId, Discussion, DiscussionOperation, DiscussionResolution, DiscussionTurn, Principal,
+    SymbolAnchor, VisibilityTier,
 };
 use prost::Message;
-use repo::Repository;
 use tonic::{Request, Response, Status};
 
 use super::{GrpcLocalService, to_status, with_idempotency};
@@ -124,97 +117,18 @@ fn discussion_to_proto(d: &Discussion) -> ProtoDiscussion {
     }
 }
 
-/// Resolve a `state_id` string to a stored `State`, returning the parsed
-/// `ChangeId` and the loaded `State`.
-fn load_state(repo: &Repository, state_id: &[u8]) -> Result<(ChangeId, State), Status> {
-    let id = ChangeId::try_from_slice(state_id)
-        .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))?;
-    let state = repo
-        .store()
-        .get_state(&id)
-        .map_err(to_status)?
-        .ok_or_else(|| Status::not_found(format!("state {} not found", id.to_string_full())))?;
-    Ok((id, state))
-}
-
-/// Decode a state's `DiscussionsBlob`, returning an empty blob when the
-/// state has no discussions attached yet.
-fn decode_blob_for_state(repo: &Repository, state: &State) -> Result<DiscussionsBlob, Status> {
-    let Some(hash) = state.discussions else {
-        return Ok(DiscussionsBlob::new(Vec::new()));
-    };
-    let blob = repo
-        .store()
-        .get_blob(&hash)
-        .map_err(to_status)?
-        .ok_or_else(|| {
-            Status::not_found(format!(
-                "discussions blob {} referenced by state {} is missing",
-                hash,
-                state.change_id.to_string_full()
-            ))
-        })?;
-    DiscussionsBlob::decode(blob.content())
-        .map_err(|err| Status::internal(format!("failed to decode discussions blob: {err}")))
-}
-
-/// Convenience: load both the state and its decoded `DiscussionsBlob`.
-fn load_discussions_blob(
-    repo: &Repository,
-    state_id: &ChangeId,
-) -> Result<(State, DiscussionsBlob), Status> {
-    let state = repo
-        .store()
-        .get_state(state_id)
-        .map_err(to_status)?
-        .ok_or_else(|| {
-            Status::not_found(format!("state {} not found", state_id.to_string_full()))
-        })?;
-    let blob = decode_blob_for_state(repo, &state)?;
-    Ok((state, blob))
-}
-
-/// Encode `blob`, persist it under a fresh `ContentHash`, then build and
-/// store a new `State` with the updated `discussions` pointer.
-fn save_discussions_blob(
-    repo: &Repository,
-    state: &State,
-    blob: &DiscussionsBlob,
-) -> Result<State, Status> {
-    let bytes = blob
-        .encode()
-        .map_err(|err| Status::internal(format!("failed to encode discussions blob: {err}")))?;
-    let hash = repo
-        .store()
-        .put_blob(&Blob::new(bytes))
-        .map_err(to_status)?;
-    let new_state = state.clone().with_discussions(hash);
-    repo.store().put_state(&new_state).map_err(to_status)?;
-    Ok(new_state)
+fn parse_state_id(state_id: &[u8]) -> Result<ChangeId, Status> {
+    ChangeId::try_from_slice(state_id)
+        .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))
 }
 
 /// Resolve the active principal using the repository's identity chain
 /// (env/repo/Git config) and fall back to a placeholder only when that lookup
 /// itself fails. We deliberately don't fail here — discussion authorship
 /// should never block on missing config.
-fn principal_for(repo: &Repository) -> Principal {
+fn principal_for(repo: &repo::Repository) -> Principal {
     repo.get_principal()
         .unwrap_or_else(|_| Principal::new("<unknown>", ""))
-}
-
-/// Resolve the HEAD state. Returns `Status::failed_precondition` when the
-/// repository has no HEAD (a fresh repo before any thread is seeded).
-fn head_state(repo: &Repository) -> Result<State, Status> {
-    let head_id = repo
-        .head()
-        .map_err(to_status)?
-        .ok_or_else(|| Status::failed_precondition("repository has no HEAD"))?;
-    repo.store()
-        .get_state(&head_id)
-        .map_err(to_status)?
-        .ok_or_else(|| {
-            Status::not_found(format!("HEAD state {} not found", head_id.to_string_full()))
-        })
 }
 
 /// Status filter for list_by_state / list_by_symbol. Empty / unknown values
@@ -263,35 +177,22 @@ impl DiscussionService for LocalDiscussionService {
                     if req.body.trim().is_empty() {
                         return Err(Status::invalid_argument("body must be non-empty"));
                     }
-                    let opened_against =
-                        ChangeId::try_from_slice(&req.state_id).map_err(|err| {
-                            Status::invalid_argument(format!("invalid state_id: {err}"))
-                        })?;
-                    let (state, mut blob) = load_discussions_blob(repo, &opened_against)?;
+                    let opened_against = parse_state_id(&req.state_id)?;
                     let now = now_secs();
                     let principal = principal_for(repo);
-                    let discussion = Discussion {
-                        id: ChangeId::generate().to_string_full(),
-                        anchor: SymbolAnchor::new(anchor_proto.file, anchor_proto.symbol),
-                        opened_against_state: opened_against,
-                        opened_at: now,
-                        thread_ref: (!req.thread_ref.is_empty()).then(|| req.thread_ref.clone()),
-                        turns: vec![DiscussionTurn {
+                    let discussion = repo
+                        .apply_legacy_discussion_operation(DiscussionOperation::Open {
+                            id: ChangeId::generate().to_string_full(),
+                            anchor: SymbolAnchor::new(anchor_proto.file, anchor_proto.symbol),
+                            opened_against_state: opened_against,
+                            opened_at: now,
+                            thread_ref: (!req.thread_ref.is_empty())
+                                .then(|| req.thread_ref.clone()),
                             author: principal,
                             body: req.body.clone(),
-                            posted_at: now,
-                        }],
-                        resolution: DiscussionResolution::Open,
-                        body_changed_since_open: false,
-                        orphaned: false,
-                        visibility: parse_visibility(&req.visibility),
-                        resolved_annotation_id: None,
-                    };
-                    discussion
-                        .validate()
-                        .map_err(|err| Status::invalid_argument(err.to_string()))?;
-                    blob.discussions.push(discussion.clone());
-                    save_discussions_blob(repo, &state, &blob)?;
+                            visibility: parse_visibility(&req.visibility),
+                        })
+                        .map_err(to_status)?;
                     Ok(discussion_to_proto(&discussion))
                 }
             },
@@ -326,27 +227,16 @@ impl DiscussionService for LocalDiscussionService {
                     if req.body.trim().is_empty() {
                         return Err(Status::invalid_argument("body must be non-empty"));
                     }
-                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
-                    let head = head_state(repo)?;
-                    let mut blob = decode_blob_for_state(repo, &head)?;
-                    let idx = blob
-                        .discussions
-                        .iter()
-                        .position(|d| d.id == req.discussion_id)
-                        .ok_or_else(|| {
-                            Status::not_found(format!("discussion {} not found", req.discussion_id))
-                        })?;
                     let principal = principal_for(repo);
-                    blob.discussions[idx].turns.push(DiscussionTurn {
-                        author: principal,
-                        body: req.body.clone(),
-                        posted_at: now_secs(),
-                    });
-                    blob.discussions[idx]
-                        .validate()
-                        .map_err(|err| Status::invalid_argument(err.to_string()))?;
-                    let updated = blob.discussions[idx].clone();
-                    save_discussions_blob(repo, &head, &blob)?;
+                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
+                    let updated = repo
+                        .apply_legacy_discussion_operation(DiscussionOperation::AppendTurn {
+                            discussion_id: req.discussion_id.clone(),
+                            author: principal,
+                            body: req.body.clone(),
+                            posted_at: now_secs(),
+                        })
+                        .map_err(to_status)?;
                     Ok(discussion_to_proto(&updated))
                 }
             },
@@ -378,23 +268,12 @@ impl DiscussionService for LocalDiscussionService {
                     if req.discussion_id.is_empty() {
                         return Err(Status::invalid_argument("discussion_id is required"));
                     }
-                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
-                    let head = head_state(repo)?;
-                    let mut blob = decode_blob_for_state(repo, &head)?;
-                    let idx = blob
-                        .discussions
-                        .iter()
-                        .position(|d| d.id == req.discussion_id)
-                        .ok_or_else(|| {
-                            Status::not_found(format!("discussion {} not found", req.discussion_id))
-                        })?;
-
                     use grpc::heddle::v1::resolve_discussion_request::Resolution;
                     let resolution = req
                         .resolution
                         .clone()
                         .ok_or_else(|| Status::invalid_argument("resolution mode is required"))?;
-                    match resolution {
+                    let resolution = match resolution {
                         Resolution::IntoAnnotation(_payload) => {
                             // TODO(W2-followup): R5 wiring will create a real
                             // `Annotation` from the discussion's content,
@@ -403,19 +282,11 @@ impl DiscussionService for LocalDiscussionService {
                             // bidirectional link so the resolution shape is
                             // honest about its terminal state.
                             let annotation_id = ChangeId::generate().to_string_full();
-                            blob.discussions[idx].resolution =
-                                DiscussionResolution::ResolvedIntoAnnotation {
-                                    annotation_id: annotation_id.clone(),
-                                };
-                            blob.discussions[idx].resolved_annotation_id = Some(annotation_id);
+                            DiscussionResolution::ResolvedIntoAnnotation { annotation_id }
                         }
                         Resolution::ByEdit(payload) => {
-                            let state_id =
-                                ChangeId::try_from_slice(&payload.state_id).map_err(|err| {
-                                    Status::invalid_argument(format!("invalid state_id: {err}"))
-                                })?;
-                            blob.discussions[idx].resolution =
-                                DiscussionResolution::ResolvedByEdit { state_id };
+                            let state_id = parse_state_id(&payload.state_id)?;
+                            DiscussionResolution::ResolvedByEdit { state_id }
                         }
                         Resolution::Dismissed(payload) => {
                             if payload.reason.trim().is_empty() {
@@ -423,17 +294,19 @@ impl DiscussionService for LocalDiscussionService {
                                     "dismissal requires a non-empty reason",
                                 ));
                             }
-                            blob.discussions[idx].resolution = DiscussionResolution::Dismissed {
+                            DiscussionResolution::Dismissed {
                                 reason: payload.reason,
-                            };
+                            }
                         }
-                    }
+                    };
 
-                    blob.discussions[idx]
-                        .validate()
-                        .map_err(|err| Status::invalid_argument(err.to_string()))?;
-                    let updated = blob.discussions[idx].clone();
-                    save_discussions_blob(repo, &head, &blob)?;
+                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
+                    let updated = repo
+                        .apply_legacy_discussion_operation(DiscussionOperation::Resolve {
+                            discussion_id: req.discussion_id.clone(),
+                            resolution,
+                        })
+                        .map_err(to_status)?;
                     Ok(discussion_to_proto(&updated))
                 }
             },
@@ -449,8 +322,10 @@ impl DiscussionService for LocalDiscussionService {
     ) -> Result<Response<ListDiscussionsResponse>, Status> {
         let req = request.into_inner();
         let repo = self.inner.repo();
-        let (_, state) = load_state(repo, &req.state_id)?;
-        let blob = decode_blob_for_state(repo, &state)?;
+        let state_id = parse_state_id(&req.state_id)?;
+        let (_, blob) = repo
+            .read_discussions_for_state(&state_id)
+            .map_err(to_status)?;
         let discussions = blob
             .discussions
             .iter()
@@ -476,8 +351,7 @@ impl DiscussionService for LocalDiscussionService {
         // TODO(W2-followup): cross-state symbol index. For now we only
         // surface discussions attached to the HEAD state.
         let repo = self.inner.repo();
-        let head = head_state(repo)?;
-        let blob = decode_blob_for_state(repo, &head)?;
+        let (_, blob) = repo.read_current_discussions().map_err(to_status)?;
         let discussions = blob
             .discussions
             .iter()
@@ -498,8 +372,7 @@ impl DiscussionService for LocalDiscussionService {
         }
         // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
         let repo = self.inner.repo();
-        let head = head_state(repo)?;
-        let blob = decode_blob_for_state(repo, &head)?;
+        let (_, blob) = repo.read_current_discussions().map_err(to_status)?;
         let discussion = blob
             .discussions
             .iter()

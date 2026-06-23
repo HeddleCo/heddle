@@ -24,6 +24,8 @@ pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
+mod repository_discussions;
+mod repository_probe;
 mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
@@ -104,6 +106,7 @@ pub use repository::{
 };
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
+pub use repository_probe::{RepositoryProbe, RepositoryProbeGitFacts, RepositoryProbeTarget};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{

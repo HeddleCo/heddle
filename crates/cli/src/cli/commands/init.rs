@@ -10,9 +10,9 @@ use anyhow::{Result, bail};
 use ingest::ImportOptions;
 use objects::object::{Principal, ThreadName, Tree};
 use refs::Head;
-use repo::{Repository, RepositoryCapability, ThreadId};
+use repo::{Repository, RepositoryCapability, RepositoryProbe, RepositoryProbeTarget, ThreadId};
 use serde::Serialize;
-use sley::{FullName, GitObjectType, ObjectId, ReferenceTarget, Repository as SleyRepository};
+use sley::{FullName, Repository as SleyRepository};
 use tracing::{debug, info};
 
 use super::{
@@ -26,10 +26,7 @@ use super::{
     },
 };
 use crate::{
-    bridge::{
-        GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
-        git_ingest::import_git_history,
-    },
+    bridge::{GitBridge, WriteThroughOutcome, git_ingest::import_git_history},
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
@@ -104,6 +101,7 @@ struct QuickstartPreflight {
     proceed: bool,
     persist_principal: Option<(String, String)>,
     attachment: QuickstartAttachmentPlan,
+    git_has_commits: bool,
     /// Harnesses explicitly selected for connection before any write.
     /// Installed only after the repo is created so scope errors leave the
     /// directory untouched.
@@ -116,6 +114,7 @@ impl Default for QuickstartPreflight {
             proceed: true,
             persist_principal: None,
             attachment: QuickstartAttachmentPlan::SkipUnborn,
+            git_has_commits: false,
             harness_install: Vec::new(),
         }
     }
@@ -141,122 +140,6 @@ enum QuickstartAttachmentDecision {
     Attach,
     SkipUnborn,
     RefuseCollision,
-}
-
-/// The single directory a `--quickstart` operates on, resolved ONCE by
-/// read-only discovery and shared by BOTH the preflight (a read-only viability
-/// probe) and the write path.
-///
-/// THE QUICKSTART INVARIANT (do not let this class regress): the preflight is a
-/// read-only viability probe on a SINGLE resolved root shared with the write
-/// path; every write — `Repository::open`'s HEAD-sync, the repo config, the
-/// capture/checkpoint, and the harness install — happens only AFTER the
-/// confirmation gate, capture-before-install. So no new repo-state / cwd /
-/// config / identity case can pass the preflight and then (a) diverge on WHICH
-/// root it writes to, or (b) mutate before a refusal. Resolving the root here,
-/// once, is what makes (a) impossible; never re-derive it from the raw cwd in
-/// one half and by discovery in the other (the bug that created nested native
-/// repos and misclassified Git overlays on subdirectory invocations).
-enum QuickstartTarget {
-    /// An existing Heddle repo found by ancestor discovery at `root` (the
-    /// read-only half of `Repository::open`'s walk). The write path opens it.
-    /// `git_overlay` mirrors `repository_capability_for_root(root)` — Git
-    /// metadata AT the repo root, so a native repo nested inside an ancestor
-    /// Git checkout stays native, exactly as the opened repo would.
-    Existing { root: PathBuf, git_overlay: bool },
-    /// No Heddle yet, but `root` is a Git checkout root (discovered from a
-    /// possibly-deeper cwd): a fresh Git-overlay bootstrap targets the Git
-    /// ROOT — the same root `Repository::open`'s final fallback bootstraps —
-    /// never the cwd subdirectory.
-    FreshGitOverlay { root: PathBuf },
-    /// Neither Heddle nor Git anywhere up the tree: a fresh native init at the
-    /// cwd.
-    FreshNative { root: PathBuf },
-}
-
-impl QuickstartTarget {
-    fn root(&self) -> &Path {
-        match self {
-            QuickstartTarget::Existing { root, .. }
-            | QuickstartTarget::FreshGitOverlay { root }
-            | QuickstartTarget::FreshNative { root } => root,
-        }
-    }
-
-    /// Whether the resolved repo runs as a Git overlay (and thus imports
-    /// history + writes a Git checkpoint through a branch). Mirrors
-    /// `repository_capability_for_root`.
-    fn is_git_overlay(&self) -> bool {
-        match self {
-            QuickstartTarget::Existing { git_overlay, .. } => *git_overlay,
-            QuickstartTarget::FreshGitOverlay { .. } => true,
-            QuickstartTarget::FreshNative { .. } => false,
-        }
-    }
-}
-
-/// Resolve, by READ-ONLY discovery, the single root a `--quickstart` operates
-/// on. This is the discovery half of [`Repository::open`] WITHOUT its writes
-/// (bootstrap, HEAD-sync) so the preflight can classify the target without
-/// mutating anything — every write is deferred to the post-gate write path,
-/// which consumes this SAME root. See [`QuickstartTarget`] for the invariant.
-fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
-    // Mirror `Repository::open`'s ancestor walk EXACTLY (same loop, same
-    // predicates, minus the writes) so the read-only probe and the eventual
-    // `open` never disagree on which root they target. Track the nearest
-    // enclosing Git checkout going up — `has_git_metadata`'s mirror,
-    // `dir_is_git_root` — so the nested-Git special case below can fire.
-    let mut discovered_git_root: Option<PathBuf> = None;
-    let mut current: Option<&Path> = Some(path);
-    while let Some(dir) = current {
-        if discovered_git_root.is_none() && dir_is_git_root(dir) {
-            discovered_git_root = Some(dir.to_path_buf());
-        }
-        let heddle = dir.join(".heddle");
-        if heddle.is_dir()
-            && (heddle.join("objects").is_dir() || heddle.join("objectstore").is_file())
-        {
-            // `Repository::open`'s nested-Git special case: a Git checkout
-            // BELOW this ancestor `.heddle` (and without its own `.heddle`)
-            // bootstraps the NESTED Git root, not the ancestor — so quickstart
-            // imports the nested Git history rather than writing the thread
-            // into the parent and ignoring the nested repo (cid 3329409822).
-            if let Some(git_root) = discovered_git_root.as_ref()
-                && git_root != dir
-                && git_root.starts_with(dir)
-                && !git_root.join(".heddle").exists()
-            {
-                return Ok(QuickstartTarget::FreshGitOverlay {
-                    root: git_root.clone(),
-                });
-            }
-            return Ok(QuickstartTarget::Existing {
-                root: dir.to_path_buf(),
-                git_overlay: dir_is_git_root(dir),
-            });
-        }
-        current = dir.parent();
-    }
-
-    // No Heddle anywhere above: inside a Git checkout, the fresh bootstrap
-    // targets the Git ROOT (the nearest enclosing checkout discovered by the
-    // walk above), not the cwd subdirectory — the same root `Repository::open`'s
-    // final fallback bootstraps.
-    match discovered_git_root {
-        Some(root) => Ok(QuickstartTarget::FreshGitOverlay { root }),
-        None => Ok(QuickstartTarget::FreshNative {
-            root: path.to_path_buf(),
-        }),
-    }
-}
-
-/// Whether `dir` is itself a Git checkout root — Git metadata AT `dir`, mirroring
-/// the repo crate's `has_git_metadata`/`repository_capability_for_root`. (A
-/// a Git discovery probe would instead walk to an ANCESTOR Git checkout, which
-/// is exactly the misclassification this avoids.)
-fn dir_is_git_root(dir: &Path) -> bool {
-    let dot_git = dir.join(".git");
-    (dot_git.is_dir() || dot_git.is_file()) && SleyRepository::discover(dir).is_ok()
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
@@ -286,11 +169,11 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // usable for snapshot/history/etc.
     let has_git = SleyRepository::discover(&path).is_ok();
 
-    // Resolve the single quickstart root ONCE, by read-only discovery, so the
-    // preflight (a read-only viability probe) and the write path below operate
-    // on the SAME directory — see [`QuickstartTarget`] for the invariant.
-    let target = if args.quickstart {
-        Some(resolve_quickstart_target(&path)?)
+    // Resolve the single quickstart root ONCE, by read-only repository
+    // discovery, so the preflight and write path operate on the SAME
+    // directory without triggering `Repository::open` writes.
+    let probe = if args.quickstart {
+        Some(Repository::probe(&path)?)
     } else {
         None
     };
@@ -300,8 +183,8 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // half-written `.heddle/`. The preflight reads only: it never opens the
     // repo (whose HEAD-sync would write), so a refused/declined quickstart
     // performs zero writes.
-    let preflight = match target.as_ref() {
-        Some(target) => quickstart_preflight(cli, &args, target)?,
+    let preflight = match probe.as_ref() {
+        Some(probe) => quickstart_preflight(cli, &args, probe)?,
         None => QuickstartPreflight::default(),
     };
     if !preflight.proceed {
@@ -312,12 +195,16 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // the SAME root it validated. For quickstart, branch on the resolved
     // target so a subdirectory invocation opens the discovered repo / boots the
     // discovered Git root rather than creating a nested repo at the cwd.
-    let repo = match target.as_ref() {
-        Some(QuickstartTarget::Existing { root, .. }) => Repository::open(root)?,
-        Some(QuickstartTarget::FreshGitOverlay { root }) => {
-            Repository::bootstrap_git_overlay(root)?
+    let repo = match probe.as_ref().map(|probe| probe.target()) {
+        Some(RepositoryProbeTarget::Existing) => {
+            Repository::open(probe.as_ref().unwrap().resolved_root())?
         }
-        Some(QuickstartTarget::FreshNative { root }) => Repository::init_default(root)?,
+        Some(RepositoryProbeTarget::FreshGitOverlay) => {
+            Repository::bootstrap_git_overlay(probe.as_ref().unwrap().resolved_root())?
+        }
+        Some(RepositoryProbeTarget::FreshNative) => {
+            Repository::init_default(probe.as_ref().unwrap().resolved_root())?
+        }
         None if has_git => Repository::bootstrap_git_overlay(&path)?,
         None => Repository::init_default(&path)?,
     };
@@ -373,7 +260,12 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         // content — skipping the `QUICKSTART.md` placeholder and recording
         // integration files as the first state. The install decision was made
         // up front in the preflight; only the write runs here, post-capture.
-        let summary = run_quickstart_actions(&repo, &args, preflight.attachment)?;
+        let summary = run_quickstart_actions(
+            &repo,
+            &args,
+            preflight.attachment,
+            preflight.git_has_commits,
+        )?;
         super::perform_init_install(cli, &repo, &args, &preflight.harness_install)?;
         Some(summary)
     } else {
@@ -611,31 +503,27 @@ fn init_side_effects(has_git: bool, principal_configured: bool) -> Vec<String> {
 fn quickstart_preflight(
     cli: &Cli,
     args: &InitArgs,
-    target: &QuickstartTarget,
+    probe: &RepositoryProbe,
 ) -> Result<QuickstartPreflight> {
     // The quickstart preflight is a READ-ONLY DRY-RUN of the real init/identity
-    // path: every viability decision below shares the SAME predicate the write
-    // path uses — capability from the resolved target (mirroring
-    // `repository_capability_for_root`), identity via the read-only mirror of
-    // `resolve_principal` (`resolve_quickstart_principal`, which follows the
-    // objectstore pointer and the shared-checkout parent Git config exactly as
-    // `Repository::get_principal` does), the thread name via the ref/branch
-    // validators, and the harness scope via the install path's
-    // `IntegrationScope::parse`. It must NOT call `Repository::open`: for a
-    // Git-overlay repo `open` synchronizes `.heddle/HEAD` to Git's HEAD — a
-    // write that would fire before a refusal. The single resolved `target` (see
-    // [`QuickstartTarget`]) means the write path opens that SAME root, so the
-    // read-only probe and the eventual open never disagree on which dir or
-    // whether it is a Git overlay.
-    let root = target.root();
-    let is_git_overlay = target.is_git_overlay();
+    // path: every viability decision below shares the SAME predicates the write
+    // path uses — capability and identity come from `Repository::probe`, the
+    // thread name via the ref/branch validators, and the harness scope via the
+    // install path's `IntegrationScope::parse`. It must NOT call
+    // `Repository::open`: for a Git-overlay repo `open` synchronizes
+    // `.heddle/HEAD` to Git's HEAD — a write that would fire before a refusal.
+    // The single resolved probe target means the write path opens that SAME
+    // root, so the read-only probe and the eventual open never disagree on
+    // which dir or whether it is a Git overlay.
+    let root = probe.resolved_root();
+    let is_git_overlay = probe.capability() == RepositoryCapability::GitOverlay;
+    let git_facts = probe.git_facts();
 
     // Honor the repo's on-disk `[output].format` so a `json`-configured repo
     // never gets a text confirmation prompt before a JSON envelope. Read it
     // off disk (following an objectstore pointer to the shared dir) without
     // opening — `None` for a fresh directory.
-    let repo_config = resolve_existing_repo_config(root);
-    let json = should_output_json(cli, repo_config.as_ref());
+    let json = should_output_json(cli, probe.existing_config());
 
     // A detached Git HEAD has no branch for the checkpoint to advance, and
     // `create_git_checkpoint` refuses it only AFTER the import/capture have
@@ -643,7 +531,7 @@ fn quickstart_preflight(
     // the repo will actually run as a Git overlay. A native repo nested inside
     // an ancestor Git checkout creates no checkpoint, so it must not be refused
     // for the ancestor's detached HEAD.
-    if is_git_overlay && git_head_is_detached(root) {
+    if is_git_overlay && git_facts.head_is_detached() {
         bail!(quickstart_detached_head_advice());
     }
 
@@ -655,7 +543,7 @@ fn quickstart_preflight(
     // overlay AND has history to import (the exact condition under which
     // `run_quickstart_actions` calls `import_all`). Mirrors `import_all`'s own
     // `git_dir()/shallow` probe (cid 3329409826).
-    if is_git_overlay && git_has_commits(root) && git_is_shallow(root) {
+    if is_git_overlay && git_facts.has_commits() && git_facts.is_shallow() {
         bail!(quickstart_shallow_clone_advice());
     }
 
@@ -698,18 +586,19 @@ fn quickstart_preflight(
     // absent or already at that commit; skip for unborn/no-state HEADs so the
     // first capture establishes the thread; refuse divergent target branches
     // before any `.heddle/` writes.
-    let attachment = match quickstart_attachment_decision(root, is_git_overlay, thread) {
-        QuickstartAttachmentDecision::Attach => QuickstartAttachmentPlan::Attach,
-        QuickstartAttachmentDecision::SkipUnborn => QuickstartAttachmentPlan::SkipUnborn,
-        QuickstartAttachmentDecision::RefuseCollision => {
-            bail!(quickstart_thread_branch_collision_advice(thread));
-        }
-    };
+    let git_nonempty = is_git_overlay && git_facts.has_commits();
+    let attachment =
+        match quickstart_attachment_decision(root, is_git_overlay, thread, git_nonempty) {
+            QuickstartAttachmentDecision::Attach => QuickstartAttachmentPlan::Attach,
+            QuickstartAttachmentDecision::SkipUnborn => QuickstartAttachmentPlan::SkipUnborn,
+            QuickstartAttachmentDecision::RefuseCollision => {
+                bail!(quickstart_thread_branch_collision_advice(thread));
+            }
+        };
 
     // Confirmation gate before touching a directory that already holds
     // work. Truly fresh directories skip straight through.
     let heddle_exists = root.join(".heddle").exists();
-    let git_nonempty = is_git_overlay && git_has_commits(root);
     if (heddle_exists || git_nonempty) && !args.yes {
         if !json {
             println!(
@@ -747,7 +636,7 @@ fn quickstart_preflight(
         }
     }
 
-    let persist_principal = resolve_quickstart_identity(cli, args, root, is_git_overlay, json)?;
+    let persist_principal = resolve_quickstart_identity(cli, args, probe, json)?;
     // Resolve explicit harness installs before any write, at the SAME
     // resolved root the install writes to (`repo.root()` in `cmd_init`),
     // not the raw cwd. The install itself runs post-write in `cmd_init`.
@@ -756,6 +645,7 @@ fn quickstart_preflight(
         proceed: true,
         persist_principal,
         attachment,
+        git_has_commits: git_facts.has_commits(),
         harness_install,
     })
 }
@@ -771,7 +661,7 @@ fn quickstart_preflight(
 /// Every path that yields an identity is checked against the SAME sentinel
 /// predicate (`principal_is_unconfigured`) the real capture uses, over the
 /// SAME precedence `resolve_principal` walks — see
-/// [`resolve_quickstart_principal`]. This is the single source of truth:
+/// [`Repository::probe`]. This is the single source of truth:
 /// flags, prompt, repo config, user config, and Git config (and a
 /// higher-precedence sentinel shadowing a lower valid source) are all
 /// caught HERE, before any write, instead of by `build_attribution` after
@@ -781,8 +671,7 @@ fn quickstart_preflight(
 fn resolve_quickstart_identity(
     cli: &Cli,
     args: &InitArgs,
-    root: &Path,
-    is_git_overlay: bool,
+    probe: &RepositoryProbe,
     json: bool,
 ) -> Result<Option<(String, String)>> {
     // `resolve_principal` lets env win OUTRIGHT — it returns the env identity
@@ -797,6 +686,11 @@ fn resolve_quickstart_identity(
         && principal_is_unconfigured(&env_principal)
     {
         bail!(quickstart_identity_required_advice());
+    }
+    if let Some(env_principal) = Principal::from_env()
+        && !principal_is_unconfigured(&env_principal)
+    {
+        return Ok(None);
     }
 
     // Explicit flags become the repo-level `[principal]` — the highest
@@ -825,16 +719,22 @@ fn resolve_quickstart_identity(
         return Ok(Some((name, email)));
     }
 
-    // No flags: ask what the capture would be attributed to, READ-ONLY.
-    // `resolve_quickstart_principal` mirrors `resolve_principal`'s full
-    // precedence off disk — including a shared-dir `[principal]` and a
-    // shared-checkout parent's Git identity (the sources `resolve_principal`
-    // reaches only through `Repository::get_principal`) — so it is faithful to
-    // the capture without opening the repo (whose HEAD-sync would write before
-    // this can still refuse).
-    let resolved = resolve_quickstart_principal(root, is_git_overlay);
-    if !principal_is_unconfigured(&resolved) {
+    // No flags: ask what the capture would be attributed to, READ-ONLY. The
+    // probe mirrors the repository-scoped identity sources; user config remains
+    // outside repository discovery and is checked here.
+    if let Some(resolved) = probe.repo_principal_candidate() {
+        if principal_is_unconfigured(resolved) {
+            bail!(quickstart_identity_required_advice());
+        }
         return Ok(None);
+    }
+    if let Ok(user_config) = UserConfig::load_default()
+        && let Some(config) = &user_config.principal
+    {
+        let principal = Principal::new(&config.name, &config.email);
+        if !principal_is_unconfigured(&principal) {
+            return Ok(None);
+        }
     }
 
     if is_tty() && !cli.quiet && !json {
@@ -852,136 +752,12 @@ fn resolve_quickstart_identity(
     bail!(quickstart_identity_required_advice())
 }
 
-/// Resolve, READ-ONLY (without opening the repository), the ambient principal a
-/// quickstart with no `--principal-*` flags would be attributed to. This is the
-/// faithful mirror of `resolve_principal` (snapshot.rs) → `get_principal`
-/// (repo crate): same order, same STOP-at-first-present semantics, same sources
-/// — resolved off disk so it never triggers `Repository::open`'s HEAD-sync
-/// (a write that must not happen before a refusal). Handles BOTH a fresh
-/// directory and an already-initialized repo (including a materialized
-/// checkout, whose `.heddle/` is just an objectstore pointer). Flag/prompt
-/// identities are validated separately at their source in
-/// `resolve_quickstart_identity`, since they occupy the repo-config slot by
-/// being written there before the capture.
-///
-/// Precedence (identical to `resolve_principal`): env → repo
-/// `.heddle/config.toml` `[principal]` (following the objectstore pointer) →
-/// the repo's own Git config (Git-overlay only, when non-sentinel) → a
-/// materialized checkout's shared-dir parent Git config (when non-sentinel) →
-/// user config → the `Unknown` sentinel. The two Git sources stop only on a
-/// non-sentinel identity, matching `resolve_principal`'s fall-through.
-fn resolve_quickstart_principal(root: &Path, is_git_overlay: bool) -> Principal {
-    // env wins outright — `resolve_principal` returns it unconditionally
-    // (even when it is the sentinel), so mirror that: stop here.
-    if let Some(principal) = Principal::from_env() {
-        return principal;
-    }
-    // Repo-level config slot: stop at the on-disk repo `[principal]` if
-    // present, even the sentinel — `resolve_principal` does. Resolve config the
-    // way `Repository::open` does: in a materialized checkout the local
-    // `.heddle/` is just an objectstore pointer and the real `[principal]`
-    // lives in the SHARED dir it points at, so a local-only probe would
-    // wrongly report "no identity" there.
-    if let Some(repo_config) = resolve_existing_repo_config(root)
-        && let Some(config) = &repo_config.principal
-    {
-        return Principal::new(&config.name, &config.email);
-    }
-    // Git config: `resolve_principal` falls through when Git's identity is the
-    // sentinel, so only a non-sentinel Git identity stops here.
-    if is_git_overlay && let Ok(Some(identity)) = git_config_identity_with_global_fallback(root) {
-        let principal = Principal::new(&identity.name, &identity.email);
-        if !principal_is_unconfigured(&principal) {
-            return principal;
-        }
-    }
-    // Materialized-checkout source: `get_principal` reaches a shared-dir
-    // parent's Git identity via `shared_checkout_parent_git_principal`. Mirror
-    // it read-only so the existing-repo case no longer needs `Repository::open`.
-    if let Some(principal) = quickstart_shared_checkout_parent_principal(root)
-        && !principal_is_unconfigured(&principal)
-    {
-        return principal;
-    }
-    if let Ok(user_config) = UserConfig::load_default()
-        && let Some(config) = &user_config.principal
-    {
-        return Principal::new(&config.name, &config.email);
-    }
-    Principal::new("Unknown", "unknown@example.com")
-}
-
-/// Read-only mirror of `Repository::shared_checkout_parent_git_principal`: in a
-/// materialized checkout the local `.heddle/` is an objectstore pointer to a
-/// SHARED dir; when that shared dir sits inside a Git checkout, a capture can be
-/// attributed through the shared dir's PARENT Git config. Follow the pointer
-/// here (no open, no HEAD-sync) so a quickstart that will refuse writes nothing.
-fn quickstart_shared_checkout_parent_principal(root: &Path) -> Option<Principal> {
-    let pointer = root.join(".heddle").join("objectstore");
-    if !pointer.is_file() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&pointer).ok()?;
-    let shared = parse_objectstore_pointer(&content)?.canonicalize().ok()?;
-    let parent = shared.parent()?;
-    if parent == root {
-        return None;
-    }
-    let identity = git_config_identity_with_global_fallback(parent).ok()??;
-    Some(Principal::new(&identity.name, &identity.email))
-}
-
 fn prompt_line(label: &str) -> Result<String> {
     print!("{label}");
     io::stdout().flush().ok();
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
-}
-
-/// Whether the discovered Git repository at `path` has any commits on ANY
-/// local ref — not just the current HEAD. A repo with commits on another
-/// ref (e.g. after `git switch --orphan scratch`, where the current HEAD is
-/// unborn but `main` still carries history) must be treated as having
-/// existing history so the quickstart confirms AND imports rather than
-/// acting as if the repo were empty (which would leave partial/wrong state).
-fn git_has_commits(path: &Path) -> bool {
-    let Ok(repo) = SleyRepository::discover(path) else {
-        return false;
-    };
-    if repo.head().ok().and_then(|head| head.oid).is_some() {
-        return true;
-    }
-    let Ok(refs) = repo.references().list_refs() else {
-        return false;
-    };
-    for reference in refs {
-        let ReferenceTarget::Direct(oid) = reference.target else {
-            continue;
-        };
-        if object_peels_to_commit(&repo, oid) {
-            return true;
-        }
-    }
-    false
-}
-
-fn object_peels_to_commit(repo: &SleyRepository, mut oid: ObjectId) -> bool {
-    loop {
-        let Ok(object) = repo.read_object(&oid) else {
-            return false;
-        };
-        match object.object_type {
-            GitObjectType::Commit => return true,
-            GitObjectType::Tag => {
-                let Ok(tag) = repo.read_tag(&oid) else {
-                    return false;
-                };
-                oid = tag.object;
-            }
-            _ => return false,
-        }
-    }
 }
 
 /// Read-only decision for the Git-overlay quickstart's pre-capture checkout
@@ -999,8 +775,9 @@ fn quickstart_attachment_decision(
     path: &Path,
     is_git_overlay: bool,
     thread: &str,
+    git_has_commits: bool,
 ) -> QuickstartAttachmentDecision {
-    if !is_git_overlay || !path.join(".git").exists() || !git_has_commits(path) {
+    if !is_git_overlay || !path.join(".git").exists() || !git_has_commits {
         return QuickstartAttachmentDecision::SkipUnborn;
     }
 
@@ -1040,60 +817,6 @@ fn git_branch_name_is_valid(name: &str) -> bool {
     !(name == "HEAD" || name == "@" || name.starts_with('-'))
 }
 
-/// Whether the discovered Git repository at `path` is a shallow checkout — its
-/// `git_dir` holds a `shallow` file. Mirrors the exact probe `import_all` uses
-/// (`repo.git_dir().join("shallow").is_file()`) so the preflight refuses a
-/// shallow clone before any write rather than after `bootstrap_git_overlay`
-/// already created `.heddle/`.
-fn git_is_shallow(path: &Path) -> bool {
-    SleyRepository::discover(path)
-        .ok()
-        .map(|repo| repo.git_dir().join("shallow").is_file())
-        .unwrap_or(false)
-}
-
-/// Whether the discovered Git repository at `path` has a detached HEAD
-/// (HEAD points directly at a commit instead of an attached branch). An
-/// unborn HEAD reads as not-detached.
-fn git_head_is_detached(path: &Path) -> bool {
-    SleyRepository::discover(path)
-        .ok()
-        .and_then(|repo| repo.head().ok().map(|head| head.is_detached()))
-        .unwrap_or(false)
-}
-
-/// Resolve the on-disk repo config the way `Repository::open` does: when the
-/// local `.heddle/` is a worktree pointer (`.heddle/objectstore`), the real
-/// config lives in the shared dir it points at; otherwise it is the local
-/// `.heddle/config.toml`. Returns `None` when there is no readable `.heddle`
-/// config yet (a fresh directory).
-fn resolve_existing_repo_config(path: &Path) -> Option<repo::RepoConfig> {
-    let heddle_dir = path.join(".heddle");
-    if !heddle_dir.is_dir() {
-        return None;
-    }
-    let pointer = heddle_dir.join("objectstore");
-    let config_path = if pointer.is_file() {
-        let content = std::fs::read_to_string(&pointer).ok()?;
-        let shared = parse_objectstore_pointer(&content)?;
-        shared.canonicalize().ok()?.join("config.toml")
-    } else {
-        heddle_dir.join("config.toml")
-    };
-    repo::RepoConfig::load(&config_path).ok()
-}
-
-/// Minimal mirror of the repo crate's objectstore pointer parse: the file
-/// holds a line of the form `objectstore: <absolute path>`.
-fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
-    content.lines().find_map(|line| {
-        line.strip_prefix("objectstore:")
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-    })
-}
-
 /// The write batch of `--quickstart`: start the thread, make one
 /// capture, and (Git-overlay only) one checkpoint. Runs only after the
 /// preflight has confirmed and resolved identity, so every fallible
@@ -1102,12 +825,13 @@ fn run_quickstart_actions(
     repo: &Repository,
     args: &InitArgs,
     attachment: QuickstartAttachmentPlan,
+    git_has_commits: bool,
 ) -> Result<QuickstartSummary> {
     // A Git-overlay repo that already has commits must have that history
     // imported into Heddle before a capture/checkpoint has a base to
     // build on — the same import `heddle adopt` performs. Fresh/empty
     // Git repos (no commits) and native repos skip this.
-    if repo.capability() == RepositoryCapability::GitOverlay && git_has_commits(repo.root()) {
+    if repo.capability() == RepositoryCapability::GitOverlay && git_has_commits {
         let mut bridge = GitBridge::new(repo);
         import_git_history(
             &mut bridge,

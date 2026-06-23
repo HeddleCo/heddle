@@ -1721,7 +1721,10 @@ dependencies = [
 name = "heddle-merge"
 version = "0.5.0"
 dependencies = [
+ "anyhow",
+ "heddle-objects",
  "similar",
+ "tracing",
 ]
 
 [[package]]

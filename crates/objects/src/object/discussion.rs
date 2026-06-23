@@ -38,6 +38,36 @@ versioned_msgpack_blob! {
 /// id scheme the discussion service ends up choosing (likely a UUID).
 pub type DiscussionId = String;
 
+/// Pure discussion mutation semantics.
+///
+/// Adapters generate IDs/timestamps/principals and translate transport errors;
+/// this enum is deliberately free of protobuf, tonic, policy, and storage
+/// concerns so local state-blob persistence and future hosted storage can
+/// share the same operation shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscussionOperation {
+    Open {
+        id: DiscussionId,
+        anchor: SymbolAnchor,
+        opened_against_state: ChangeId,
+        opened_at: i64,
+        thread_ref: Option<String>,
+        author: Principal,
+        body: String,
+        visibility: VisibilityTier,
+    },
+    AppendTurn {
+        discussion_id: DiscussionId,
+        author: Principal,
+        body: String,
+        posted_at: i64,
+    },
+    Resolve {
+        discussion_id: DiscussionId,
+        resolution: DiscussionResolution,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discussion {
     pub id: DiscussionId,
@@ -67,6 +97,91 @@ pub struct Discussion {
     /// produced (and vice versa, via a back-pointer on the annotation).
     #[serde(default)]
     pub resolved_annotation_id: Option<String>,
+}
+
+impl DiscussionsBlob {
+    pub fn apply_operation(
+        &mut self,
+        operation: DiscussionOperation,
+    ) -> Result<Discussion, DiscussionError> {
+        match operation {
+            DiscussionOperation::Open {
+                id,
+                anchor,
+                opened_against_state,
+                opened_at,
+                thread_ref,
+                author,
+                body,
+                visibility,
+            } => {
+                if let Some(existing) = self
+                    .discussions
+                    .iter()
+                    .find(|discussion| discussion.id == id)
+                    .cloned()
+                {
+                    return Ok(existing);
+                }
+                let discussion = Discussion {
+                    id,
+                    anchor,
+                    opened_against_state,
+                    opened_at,
+                    thread_ref,
+                    turns: vec![DiscussionTurn {
+                        author,
+                        body,
+                        posted_at: opened_at,
+                    }],
+                    resolution: DiscussionResolution::Open,
+                    body_changed_since_open: false,
+                    orphaned: false,
+                    visibility,
+                    resolved_annotation_id: None,
+                };
+                discussion.validate()?;
+                self.discussions.push(discussion.clone());
+                Ok(discussion)
+            }
+            DiscussionOperation::AppendTurn {
+                discussion_id,
+                author,
+                body,
+                posted_at,
+            } => {
+                let discussion = self
+                    .discussions
+                    .iter_mut()
+                    .find(|discussion| discussion.id == discussion_id)
+                    .ok_or_else(|| DiscussionError::DiscussionNotFound(discussion_id.clone()))?;
+                discussion.turns.push(DiscussionTurn {
+                    author,
+                    body,
+                    posted_at,
+                });
+                discussion.validate()?;
+                Ok(discussion.clone())
+            }
+            DiscussionOperation::Resolve {
+                discussion_id,
+                resolution,
+            } => {
+                let discussion = self
+                    .discussions
+                    .iter_mut()
+                    .find(|discussion| discussion.id == discussion_id)
+                    .ok_or_else(|| DiscussionError::DiscussionNotFound(discussion_id.clone()))?;
+                if let DiscussionResolution::ResolvedIntoAnnotation { annotation_id } = &resolution
+                {
+                    discussion.resolved_annotation_id = Some(annotation_id.clone());
+                }
+                discussion.resolution = resolution;
+                discussion.validate()?;
+                Ok(discussion.clone())
+            }
+        }
+    }
 }
 
 impl Discussion {
@@ -153,6 +268,8 @@ pub enum DiscussionError {
     EmptyDismissReason,
     #[error("resolved-into-annotation discussion must set resolved_annotation_id")]
     MissingAnnotationLink,
+    #[error("discussion {0} not found")]
+    DiscussionNotFound(String),
     #[error("discussions blob encoding error: {0}")]
     Encoding(String),
 }
@@ -240,5 +357,49 @@ mod tests {
         let bytes = blob.encode().unwrap();
         let decoded = DiscussionsBlob::decode(&bytes).unwrap();
         assert!(decoded.discussions[0].body_changed_since_open);
+    }
+
+    #[test]
+    fn operations_open_append_and_resolve_discussion() {
+        let state_id = ChangeId::from_bytes([9; 16]);
+        let author = sample_principal();
+        let mut blob = DiscussionsBlob::new(Vec::new());
+
+        let opened = blob
+            .apply_operation(DiscussionOperation::Open {
+                id: "disc-op".into(),
+                anchor: SymbolAnchor::new("src/lib.rs", "foo"),
+                opened_against_state: state_id,
+                opened_at: 11,
+                thread_ref: Some("main".into()),
+                author: author.clone(),
+                body: "please explain".into(),
+                visibility: VisibilityTier::default(),
+            })
+            .unwrap();
+        assert_eq!(opened.turns.len(), 1);
+
+        let appended = blob
+            .apply_operation(DiscussionOperation::AppendTurn {
+                discussion_id: "disc-op".into(),
+                author,
+                body: "here is the answer".into(),
+                posted_at: 12,
+            })
+            .unwrap();
+        assert_eq!(appended.turns.len(), 2);
+
+        let resolved = blob
+            .apply_operation(DiscussionOperation::Resolve {
+                discussion_id: "disc-op".into(),
+                resolution: DiscussionResolution::Dismissed {
+                    reason: "answered inline".into(),
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            resolved.resolution,
+            DiscussionResolution::Dismissed { .. }
+        ));
     }
 }

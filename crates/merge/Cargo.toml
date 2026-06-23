@@ -14,4 +14,7 @@ path = "src/lib.rs"
 name = "merge"
 
 [dependencies]
+anyhow.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.5", features = ["memory-backend"] }
 similar.workspace = true
+tracing.workspace = true

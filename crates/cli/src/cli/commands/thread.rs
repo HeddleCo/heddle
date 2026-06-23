@@ -2516,37 +2516,6 @@ pub(crate) fn cmd_thread_create(
     render_thread_op(cli, output)
 }
 
-/// If `repo` was opened against a dedicated thread worktree, open
-/// and return a fresh `Repository` handle rooted at the **main**
-/// repo. Returns `Ok(None)` when `repo` IS the main repo.
-///
-/// Detection signal: in `Repository::open`, when a worktree pointer
-/// (`.heddle/objectstore`) is followed, the resulting Repository
-/// has `root = <worktree_root>` but `heddle_dir = <shared_main_heddle>`.
-/// For the main repo, `heddle_dir == root.join(".heddle")`. So a
-/// mismatch between `repo.root().join(".heddle")` and
-/// `repo.heddle_dir()` is the worktree fingerprint.
-///
-/// Used by `cmd_thread_switch` to route HEAD writes at the main
-/// repo when the user runs the command from inside a worktree —
-/// otherwise `repo.refs().write_head()` lands on the worktree's
-/// local HEAD file (see `RefManager::with_local_head` in
-/// `crates/repo/src/repository.rs::open`) and clobbers the
-/// source worktree's identity.
-fn open_main_repo_from_worktree_if_needed(repo: &Repository) -> Result<Option<Repository>> {
-    let expected_for_main = repo.root().join(".heddle");
-    if expected_for_main == repo.heddle_dir() {
-        return Ok(None);
-    }
-    let main_root = repo.heddle_dir().parent().ok_or_else(|| {
-        anyhow!(
-            "heddle dir {} has no parent (the main repo root); cannot route HEAD write",
-            repo.heddle_dir().display()
-        )
-    })?;
-    Ok(Some(Repository::open(main_root)?))
-}
-
 /// Look up the on-disk path for `name` and print it on stdout. Read-only;
 /// no auto-capture, no state change. Powers the shell hook's
 /// `heddle thread cd` (the function `cd`s into the printed path).
@@ -2754,14 +2723,12 @@ pub(crate) fn cmd_thread_switch(
         // thread name — which (a) loses the source-worktree's
         // identity, and (b) makes the next auto-capture-on-switch
         // think source == target and skip itself. Found in dogfood.
-        // Fix: route the HEAD write to the main repo when we're
-        // inside a worktree.
-        let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
-        let head_repo = head_target_repo.as_ref().unwrap_or(repo);
-        head_repo.refs().write_head(&Head::Attached {
+        // Fix: route the HEAD write through Repository so isolated worktree
+        // checkouts update the main repo HEAD instead of their local HEAD.
+        repo.write_main_head(&Head::Attached {
             thread: ThreadName::new(&name),
         })?;
-    } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
+    } else if repo.is_isolated_worktree_checkout() {
         // Switching to a target thread that has *no* dedicated
         // worktree, from *inside* another thread's dedicated worktree.
         // The legacy `goto` path would materialize the target's tree
@@ -2789,7 +2756,7 @@ pub(crate) fn cmd_thread_switch(
         } else {
             repo.goto(&state)?;
         }
-        repo.refs().write_head(&Head::Attached {
+        repo.write_main_head(&Head::Attached {
             thread: ThreadName::new(&name),
         })?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay

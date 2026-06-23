@@ -46,8 +46,11 @@ pub(crate) mod merge_algo;
 mod merge_plan;
 mod merge_relation;
 mod merge_renames;
-mod rename_matcher;
 
+use ::merge::rename::{
+    RenameMatcherStats, detect_renames, detect_renames_with_stats, flatten_tree,
+    infer_directory_renames,
+};
 use git_commit::{GitCommitInfo, GitCommitPreview};
 pub(crate) use merge_algo::{ConflictLabels, MergeStrategy};
 use merge_algo::{apply_merged_tree, three_way_merge};
@@ -1715,12 +1718,12 @@ pub(crate) fn bench_detect_renames(
     store: &impl ObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
-) -> Result<(usize, rename_matcher::RenameMatcherStats)> {
-    let detection = rename_matcher::detect_renames_with_stats(
+) -> Result<(usize, RenameMatcherStats)> {
+    let detection = detect_renames_with_stats(
         store,
-        &rename_matcher::flatten_tree(store, base_tree, "")?,
-        &rename_matcher::flatten_tree(store, branch_tree, "")?,
-        rename_matcher::RenameMatcherConfig::default(),
+        &flatten_tree(store, base_tree, "")?,
+        &flatten_tree(store, branch_tree, "")?,
+        merge_renames::rename_matcher_config(),
     )?;
     Ok((detection.matches.len(), detection.stats))
 }
@@ -1732,13 +1735,13 @@ fn fast_forward_renames(
 ) -> Result<(Vec<RenameEntry>, Vec<RenameEntry>)> {
     let from_tree = load_state_tree(repo, from)?;
     let to_tree = load_state_tree(repo, to)?;
-    let from_flat = rename_matcher::flatten_tree(repo.store(), &from_tree, "")?;
-    let to_flat = rename_matcher::flatten_tree(repo.store(), &to_tree, "")?;
-    let matches = rename_matcher::detect_renames(
+    let from_flat = flatten_tree(repo.store(), &from_tree, "")?;
+    let to_flat = flatten_tree(repo.store(), &to_tree, "")?;
+    let matches = detect_renames(
         repo.store(),
         &from_flat,
         &to_flat,
-        rename_matcher::RenameMatcherConfig::default(),
+        merge_renames::rename_matcher_config(),
     )?;
 
     let mut renames: Vec<RenameEntry> = matches
@@ -1751,7 +1754,7 @@ fn fast_forward_renames(
         .collect();
     renames.sort_by(|left, right| left.from.cmp(&right.from).then(left.to.cmp(&right.to)));
 
-    let mut directory_renames: Vec<RenameEntry> = rename_matcher::infer_directory_renames(&matches)
+    let mut directory_renames: Vec<RenameEntry> = infer_directory_renames(&matches)
         .into_iter()
         .map(|(from, to)| RenameEntry {
             from,
