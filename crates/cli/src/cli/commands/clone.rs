@@ -1282,7 +1282,14 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(&user_config, server_key, HostedAuthMode::ConfigToken)?;
+    // CredentialFallback (not ConfigToken): clone's RepoSync RPC is gated by
+    // the server's proof-of-possession header. ConfigToken sends only the
+    // bearer token (no proof key), so against a PoP-requiring server clone
+    // fails with "missing x-heddle-proof-ts". CredentialFallback resolves the
+    // per-server credential store's proof key when no env token is set —
+    // matching push/pull, which hit the same gated transport.
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
