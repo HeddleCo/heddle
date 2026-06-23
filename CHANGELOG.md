@@ -13,6 +13,41 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.5.0 - 2026-06-23
+
+Native-git substrate jumps to sley 0.2.0, the storage seam lands, and the
+embeddable `heddle-core` facade takes shape.
+
+### Added
+
+- **`heddle-core` embeddable facade.** New facade crate with an
+  `ExecutionContext` and observability sinks, a query facade lifted out of
+  the CLI, and a compute→render split exemplar (`fsck` computes a
+  `FsckReport`; the CLI renders it). Groundwork for embedding heddle as a
+  library. (#775, #780, #782)
+- **New published crates `heddle-format` and `heddle-schema`**, extracted as
+  pure (behaviour-neutral) cores from `heddle-objects` and now part of the
+  crates.io publish set. (#761)
+
+### Changed
+
+- **Native-git substrate upgraded to sley `0.2.0`** (~24 parity waves since
+  `0.1.0`: multi-pack-index, reftable basics, fetch, gc, blame, worktree,
+  split-index, mergetool, the diff-format crate extraction, and more). (#784)
+- **Storage seam.** Reads now flow through an `ObjectSource` sync/async seam;
+  `query_history`/`CommitGraphIndex` are decoupled onto it with the cache as
+  an optional accelerator; staleness and context-suggestion pure cores moved
+  into `heddle-objects`. (#762, #763, #764)
+- **`clap` confined to the `heddle-cli` crate.** `heddle-ingest` and the
+  library crates no longer pull `clap`, shrinking the embeddable surface.
+  (#781, #783)
+- Faster status scans: borrow entry names instead of cloning. (#774)
+
+### Removed
+
+- The S3 object backend and its AWS dependency chain (a pre-seam leftover).
+  (#765)
+
 ## 0.4.0 - 2026-06-19
 
 ### Changed
