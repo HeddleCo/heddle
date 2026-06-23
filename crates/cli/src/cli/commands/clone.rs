@@ -1340,6 +1340,16 @@ async fn clone_network(
             let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
+        } else if let Some(final_state) = result.final_state.as_ref() {
+            // Full clone: write the working tree from the cloned state.
+            // `clone_local` and the Git-overlay path already materialize their
+            // checkout; the native network path fetched every object into the
+            // local store but never wrote any files to disk, leaving the
+            // worktree empty (`heddle status` reported "checkout health needs
+            // attention"). Materialize it here so a clone yields a usable tree.
+            local_repo
+                .goto_from_materialized_state(final_state, None)
+                .context("clone fetched all objects but failed to materialize the working tree")?;
         }
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
