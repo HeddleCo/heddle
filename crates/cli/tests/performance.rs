@@ -15,9 +15,9 @@ use objects::{
         pack::ObjectType as PackObjectType,
     },
 };
-use wire::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;
 use tempfile::TempDir;
+use wire::{ObjectData, ObjectId, ObjectType};
 
 #[derive(Debug)]
 struct SnapshotProfile {

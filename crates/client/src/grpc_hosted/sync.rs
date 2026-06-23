@@ -14,11 +14,11 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::{ObjectStore, PackObjectId},
 };
-use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
+use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 
 use super::{
     HostedGrpcClient, PullMaterialization,
@@ -1460,9 +1460,9 @@ mod tests {
         },
         store::ObjectStore,
     };
-    use wire::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
     use tonic::{Response, Status, transport::Server};
+    use wire::{ObjectId, ObjectInfo};
 
     use super::*;
 

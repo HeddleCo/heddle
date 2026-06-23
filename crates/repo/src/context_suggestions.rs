@@ -4,9 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
-    object::{
-        ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions,
-    },
+    object::{ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions},
     store::ObjectStore,
 };
 
@@ -165,7 +163,9 @@ mod tests {
         repo.snapshot(Some("update a".to_string()), None).unwrap();
 
         fs::write(dir.path().join("src/a.rs"), "three\n").unwrap();
-        let head = repo.snapshot(Some("update a again".to_string()), None).unwrap();
+        let head = repo
+            .snapshot(Some("update a again".to_string()), None)
+            .unwrap();
 
         let suggestions = repo.suggest_context_targets(&head, 10).unwrap();
 

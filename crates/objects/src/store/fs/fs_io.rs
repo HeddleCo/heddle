@@ -33,7 +33,6 @@ impl FileBytes {
             FileBytes::Mmap(data) => data,
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

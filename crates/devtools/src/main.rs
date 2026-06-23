@@ -732,13 +732,7 @@ fn run_grpc_ts(args: Vec<String>) -> Result<()> {
 
     if check {
         let temp = tempfile::tempdir().context("failed to create temp directory")?;
-        generate_grpc_ts_client(
-            &protoc,
-            &es_plugin,
-            &proto_dir,
-            &proto_files,
-            temp.path(),
-        )?;
+        generate_grpc_ts_client(&protoc, &es_plugin, &proto_dir, &proto_files, temp.path())?;
         assert_tree_matches(temp.path(), &output_root)?;
         assert_package_json_version(&package_json, &grpc_version)?;
         println!(
@@ -756,13 +750,7 @@ fn run_grpc_ts(args: Vec<String>) -> Result<()> {
             )
         })?;
     }
-    generate_grpc_ts_client(
-        &protoc,
-        &es_plugin,
-        &proto_dir,
-        &proto_files,
-        &output_root,
-    )?;
+    generate_grpc_ts_client(&protoc, &es_plugin, &proto_dir, &proto_files, &output_root)?;
     sync_package_json_version(&package_json, &grpc_version)?;
     println!(
         "generated {} from heddle-grpc {}",

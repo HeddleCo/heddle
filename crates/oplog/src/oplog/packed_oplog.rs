@@ -2532,9 +2532,7 @@ mod tests {
 
     use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
 
-    use super::{
-        *,
-    };
+    use super::*;
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
         let state = ChangeId::generate();

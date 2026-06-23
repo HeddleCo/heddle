@@ -6,23 +6,20 @@ use std::{
     path::{Component, Path},
 };
 
+#[cfg(feature = "async-source")]
+use objects::{object::diff_trees_visit_async, store::AsyncObjectSource};
 use objects::{
     object::{ChangeId, ContentHash, State, Tree, diff_trees_visit},
     store::ObjectSource,
 };
-#[cfg(feature = "async-source")]
-use objects::{
-    object::diff_trees_visit_async,
-    store::AsyncObjectSource,
-};
 use tracing::{instrument, trace};
 
+#[cfg(feature = "async-source")]
+use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 use crate::{
     HeddleError, Repository, Result,
     repository::commit_graph_persistence::{CommitGraphCache, FsCommitGraphCache},
 };
-#[cfg(feature = "async-source")]
-use crate::repository::commit_graph_persistence::NullCommitGraphCache;
 
 /// A normalized changed-path filter for history traversal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,11 +145,7 @@ impl Repository {
     /// Walk first-parent history and return states matching the query.
     #[instrument(skip(self, query), fields(limit = query.limit, changed_path_filters = query.changed_paths.len()))]
     pub fn query_history(&self, query: &HistoryQuery) -> Result<Vec<State>> {
-        query_history_with_cache(
-            self.store(),
-            query,
-            FsCommitGraphCache::new(self.root()),
-        )
+        query_history_with_cache(self.store(), query, FsCommitGraphCache::new(self.root()))
     }
 }
 
@@ -494,7 +487,10 @@ mod tests {
 
         let warmed = repo.query_history(&query).unwrap();
         assert_eq!(
-            warmed.iter().map(|state| state.change_id).collect::<Vec<_>>(),
+            warmed
+                .iter()
+                .map(|state| state.change_id)
+                .collect::<Vec<_>>(),
             expected
         );
 
@@ -502,7 +498,8 @@ mod tests {
         assert!(graph_path.exists());
 
         let with_cache = repo.query_history(&query).unwrap();
-        let null_cache = query_history_with_cache(repo.store(), &query, NullCommitGraphCache).unwrap();
+        let null_cache =
+            query_history_with_cache(repo.store(), &query, NullCommitGraphCache).unwrap();
         fs::remove_file(&graph_path).unwrap();
         let without_cache = repo.query_history(&query).unwrap();
 
@@ -595,10 +592,7 @@ mod tests {
     #[cfg(feature = "async-source")]
     fn root_tree(store: &InMemoryStore, src_content: &str, readme: Option<&str>) -> ContentHash {
         let lib = ObjectStore::put_blob(store, &Blob::from_slice(src_content.as_bytes())).unwrap();
-        let src = tree(
-            store,
-            vec![("lib.rs", lib, EntryType::Blob)],
-        );
+        let src = tree(store, vec![("lib.rs", lib, EntryType::Blob)]);
         let mut entries = vec![("src", src, EntryType::Tree)];
         if let Some(readme) = readme {
             let readme =
@@ -609,10 +603,7 @@ mod tests {
     }
 
     #[cfg(feature = "async-source")]
-    fn tree(
-        store: &InMemoryStore,
-        entries: Vec<(&str, ContentHash, EntryType)>,
-    ) -> ContentHash {
+    fn tree(store: &InMemoryStore, entries: Vec<(&str, ContentHash, EntryType)>) -> ContentHash {
         let entries = entries
             .into_iter()
             .map(|(name, hash, entry_type)| TreeEntry {
