@@ -929,6 +929,11 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let has_changes = !output.changes.modified.is_empty()
         || !output.changes.added.is_empty()
         || !output.changes.deleted.is_empty();
+    let git_backed_without_capture = repo.capability() == RepositoryCapability::GitOverlay
+        && current_state.is_none()
+        && thread_summary.as_ref().is_some_and(|thread| {
+            thread.thread_health == "git_backed" && thread.current_state.is_none()
+        });
     let checkpointed_clean = output.git_checkpoint.is_some() && !has_changes;
     let thread_stub = output.thread.as_ref().map(|thread| Thread {
         id: thread.clone(),
@@ -1032,17 +1037,33 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
-    // A freshly-`init`'d native repo whose log is still empty (only the
-    // synthetic root) and whose worktree is clean has nothing to act on
-    // yet — point the user at the first save.
-    let recommended_action = first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
-        .unwrap_or(recommended_action);
+    let recommended_action = if git_backed_without_capture {
+        if has_changes {
+            "heddle commit -m \"...\"".to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        // A freshly-`init`'d native repo whose log is still empty (only the
+        // synthetic root) and whose worktree is clean has nothing to act on
+        // yet — point the user at the first save.
+        first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
+            .unwrap_or(recommended_action)
+    };
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
-        advice
-            .as_ref()
-            .map(|advice| advice.thread_health.clone())
-            .unwrap_or_else(|| "clean".to_string())
+        if git_backed_without_capture {
+            if has_changes {
+                "dirty_worktree".to_string()
+            } else {
+                "clean".to_string()
+            }
+        } else {
+            advice
+                .as_ref()
+                .map(|advice| advice.thread_health.clone())
+                .unwrap_or_else(|| "clean".to_string())
+        }
     } else {
         trust.status.clone()
     };
@@ -1064,9 +1085,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
         trust_blockers.push(format!("Verification: {}", trust.summary));
     }
+    let display_thread_summary = (!git_backed_without_capture)
+        .then_some(thread_summary.as_ref())
+        .flatten();
     let worktree_changed_path_count = changes_path_count(&output.changes);
     let thread_changed_path_count =
-        captured_thread_path_count(thread_summary.as_ref(), &output.changes);
+        captured_thread_path_count(display_thread_summary, &output.changes);
     // Resolve the trust/health override against the PRE-override (genuine,
     // from `build_thread_view`) coordination status. A genuine inter-thread
     // `Blocked` captured here must survive the override and stay surfaceable.
@@ -1101,9 +1125,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         // same thread/instant (heddle#306). The verification/dirty-worktree
         // blocker is a health signal, surfaced via `coordination_status` above.
         thread_state: output.thread_state,
-        changed_paths: changed_paths(thread_summary.as_ref(), &output.changes),
+        changed_paths: changed_paths(display_thread_summary, &output.changes),
         changed_path_count: if trust.verified {
-            changed_path_count(thread_summary.as_ref(), &output.changes)
+            changed_path_count(display_thread_summary, &output.changes)
         } else {
             changes_path_count(&output.changes)
         },
@@ -1497,7 +1521,7 @@ fn render_status_operation(output: &StatusOutput) {
             println!(
                 "Git worktree: {}",
                 style::accent(
-                    "clean; .heddle metadata is present, adoption imports Git history, and the Git worktree stays clean"
+                    "clean; .heddle metadata is present, Git refs stay in Git storage, and the Git worktree stays clean"
                 )
             );
         }

@@ -29,11 +29,11 @@ pub enum Commands {
     /// Initialize a new Heddle repository.
     Init(InitArgs),
 
-    /// Adopt the current Git repository into Heddle.
+    /// Convert Git history into Heddle-native storage.
     ///
-    /// Initializes Heddle sidecar data if needed and imports Git history
-    /// without modifying existing Git worktree changes. Use `--ref` to
-    /// adopt selected branches or tags; omit it to import all local refs.
+    /// Git-overlay repos normally keep Git commits in `.git` and Heddle
+    /// metadata in `.heddle`. Use `adopt` only when you explicitly want a
+    /// Git-backed checkout converted into native Heddle storage.
     #[command(visible_alias = "import")]
     Adopt(AdoptArgs),
 

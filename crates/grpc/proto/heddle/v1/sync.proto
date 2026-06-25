@@ -30,6 +30,11 @@ message UpdateRefRequest {
   string old_value = 5;
   string new_value = 6;
   ThreadMetadata thread_metadata = 7;
+  // Explicit two-lane revision addresses. Native callers should send
+  // `heddle:<change_id>` here; git-overlay callers send `git:<commit_oid>`.
+  // `old_value` / `new_value` remain populated for Heddle-native refs.
+  string old_revision_address = 8;
+  string new_revision_address = 9;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
 }
@@ -38,6 +43,7 @@ message UpdateRefResponse {
   bool success = 1;
   string old_value = 2;
   string error = 3;
+  string old_revision_address = 4;
 }
 
 enum TransportMode {
@@ -88,6 +94,10 @@ message PushRequest {
   PartialFetchStatus partial_fetch_status = 8;
   bool allow_partial_fetch = 9;
   ThreadMetadata thread_metadata = 10;
+  // Explicit revision being published. Native repos use `heddle:<change_id>`;
+  // git-overlay repos use `git:<commit_oid>` and stream Git objects on the Git
+  // lane rather than importing the commit as a Heddle state.
+  string local_revision_address = 11;
   // Idempotency on the stream-opening message. The PushMessage
   // envelope itself isn't the operation — PushRequest is.
   string client_operation_id = 15;
@@ -100,6 +110,7 @@ message PushReady {
   TransferCheckpoint transfer = 4;
   PartialFetchStatus partial_fetch_status = 5;
   repeated ObjectDescriptor missing_objects = 6;
+  string remote_revision_address = 7;
 }
 
 // Legacy object-by-object chunking is no longer used for normal repo sync.
@@ -133,6 +144,7 @@ message PushComplete {
   string new_state = 2;
   string error = 3;
   TransferCheckpoint transfer = 4;
+  string new_revision_address = 5;
 }
 
 // Out-of-pack transport for redaction sidecars. Sidecars live
@@ -188,6 +200,7 @@ message PullRequest {
   PartialFetchStatus partial_fetch_status = 8;
   bool allow_partial_fetch = 9;
   bool fresh_full_pull = 10;
+  string target_revision_address = 11;
   // Idempotency on the stream-opening message. The PullMessage
   // envelope itself isn't the operation — PullRequest is.
   string client_operation_id = 15;
@@ -201,6 +214,7 @@ message PullReady {
   repeated ObjectDescriptor missing_objects = 5;
   bool full_closure_available = 6;
   uint32 object_count = 7;
+  string remote_revision_address = 8;
 }
 
 message WantObjects {
@@ -214,6 +228,7 @@ message PullComplete {
   string new_state = 2;
   string error = 3;
   TransferCheckpoint transfer = 4;
+  string new_revision_address = 5;
 }
 
 message PullMessage {

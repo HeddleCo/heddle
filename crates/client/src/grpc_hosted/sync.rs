@@ -18,7 +18,7 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::{AnyStore, ObjectStore, PackObjectId},
 };
-use repo::{Repository, SyncedThreadMetadata, ThreadManager};
+use repo::{Repository, RevisionAddress, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -155,6 +155,8 @@ impl HostedGrpcClient {
                 .unwrap_or_default(),
             new_value: new_value.to_string_full(),
             thread_metadata: thread_metadata.map(to_proto_thread_metadata),
+            old_revision_address: old_value.map(native_revision_address).unwrap_or_default(),
+            new_revision_address: native_revision_address(new_value),
             client_operation_id: String::new(),
         });
         self.apply_auth(&mut request)?;
@@ -222,6 +224,7 @@ impl HostedGrpcClient {
                 allow_partial_fetch: true,
                 thread_metadata: thread_metadata
                     .map(|metadata| to_proto_thread_metadata(&metadata)),
+                local_revision_address: native_revision_address(local_state),
                 client_operation_id: String::new(),
             })),
         };
@@ -635,6 +638,10 @@ impl HostedGrpcClient {
                 partial_fetch_status: partial_fetch_status_for_repo(repo),
                 allow_partial_fetch,
                 fresh_full_pull,
+                target_revision_address: options
+                    .target_state
+                    .map(native_revision_address)
+                    .unwrap_or_default(),
                 client_operation_id: String::new(),
             })),
         };
@@ -1470,6 +1477,10 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
     )
 }
 
+fn native_revision_address(change_id: ChangeId) -> String {
+    RevisionAddress::heddle(change_id).to_string()
+}
+
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushMessage>,
     repo: &Repository,
@@ -1960,6 +1971,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 1,
+                        remote_revision_address: native_revision_address(state),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -1986,7 +1998,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
@@ -2007,6 +2019,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
+                        new_revision_address: native_revision_address(state),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -2338,6 +2351,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 2,
+                        remote_revision_address: native_revision_address(state),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -2379,7 +2393,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
@@ -2400,6 +2414,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
+                        new_revision_address: native_revision_address(state),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;

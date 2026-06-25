@@ -113,7 +113,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Existing Git: heddle status -> heddle adopt -> heddle verify -> heddle commit -m \"...\" -> heddle push"
+                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push"
             );
             let _ = writeln!(
                 out,
@@ -662,7 +662,7 @@ Everyday loop:
 Existing Git checkout:
 
     heddle status
-    heddle adopt                 # or the exact adopt/import command status prints
+    heddle init                  # create the sidecar; Git commits stay in .git
     heddle verify
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
@@ -915,7 +915,7 @@ behind the bridge/adapter.\n\
 Start in an existing Git checkout:\n\
 \n\
     heddle status\n\
-    heddle adopt --ref <branch>               # use the exact command printed by status\n\
+    heddle init                               # create the sidecar; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Save and sync ordinary work:\n\
@@ -942,7 +942,7 @@ State-specific recovery:\n\
 \n\
     Worktree has unsaved edits: heddle commit -m \"...\"\n\
     Captured in Heddle but not Git: heddle commit -m \"...\"\n\
-    Git refs changed externally: heddle adopt --ref <branch>\n";
+    Convert Git history to native Heddle storage: heddle adopt --ref <branch>\n";
 
 const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
 \n\
@@ -953,7 +953,7 @@ while keeping Git remotes and commits available as interoperability surfaces.\n\
 First run:\n\
 \n\
     heddle status\n\
-    heddle adopt --ref <branch>               # use the exact command printed by status\n\
+    heddle init                               # create the sidecar; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Manual setup, when you want one ref at a time:\n\

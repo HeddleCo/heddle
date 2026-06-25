@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use ingest::ImportOptions;
 use objects::object::{Principal, ThreadName, Tree};
 use refs::Head;
 use repo::{Repository, RepositoryCapability, ThreadId};
@@ -26,10 +25,7 @@ use super::{
     },
 };
 use crate::{
-    bridge::{
-        GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
-        git_ingest::import_git_history,
-    },
+    bridge::{GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback},
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
@@ -1103,21 +1099,6 @@ fn run_quickstart_actions(
     args: &InitArgs,
     attachment: QuickstartAttachmentPlan,
 ) -> Result<QuickstartSummary> {
-    // A Git-overlay repo that already has commits must have that history
-    // imported into Heddle before a capture/checkpoint has a base to
-    // build on — the same import `heddle adopt` performs. Fresh/empty
-    // Git repos (no commits) and native repos skip this.
-    if repo.capability() == RepositoryCapability::GitOverlay && git_has_commits(repo.root()) {
-        let mut bridge = GitBridge::new(repo);
-        import_git_history(
-            &mut bridge,
-            Some(repo.root()),
-            &[],
-            ImportOptions::default(),
-            None,
-        )?;
-    }
-
     let thread = args
         .quickstart_thread
         .clone()
