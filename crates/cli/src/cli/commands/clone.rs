@@ -1325,6 +1325,7 @@ async fn clone_network(
         )
         .await?;
     if result.success {
+        let final_state = result.final_state;
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only
@@ -1340,6 +1341,10 @@ async fn clone_network(
             let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
+        } else if let Some(state) = final_state {
+            local_repo
+                .goto_from_materialized_state(&state, None)
+                .context("failed to materialize hosted clone worktree")?;
         }
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
@@ -1347,7 +1352,7 @@ async fn clone_network(
                 local_path.display().to_string(),
                 track_name.to_string(),
                 None,
-                result.final_state.map(|state| state.to_string()),
+                final_state.map(|state| state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
             );
             crate::cli::render::write_json_stdout(&output)?;
@@ -1360,7 +1365,7 @@ async fn clone_network(
                 style::bold(&local_path.display().to_string()),
                 style::dim(&depth_info)
             );
-            if let Some(state) = result.final_state {
+            if let Some(state) = final_state {
                 println!(
                     "  {}",
                     style::field("state", &style::change_id(&state.to_string()))

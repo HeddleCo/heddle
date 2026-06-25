@@ -15,7 +15,7 @@ use grpc::heddle::v1::{
     ListDiscussionsBySymbolRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
-use repo::{Repository, operation_dedup::OperationDedupStore};
+use repo::operation_dedup::OperationDedupStore;
 use serde::Serialize;
 
 use super::{advice::RecoveryAdvice, history_target::resolve_state_id};
@@ -28,7 +28,7 @@ use crate::cli::{
 };
 
 pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
-    let svc = open_service()?;
+    let svc = open_service(cli)?;
     match command {
         DiscussCommands::Open(args) => run_open(cli, &svc, args).await,
         DiscussCommands::Append(args) => run_append(cli, &svc, args).await,
@@ -86,16 +86,15 @@ struct DiscussionEnvelope<'a> {
     discussion: &'a DiscussionOutput,
 }
 
-fn open_service() -> Result<LocalDiscussionService> {
-    let cwd = std::env::current_dir().context("get current working directory")?;
-    let repo = Repository::open(&cwd).context("open Heddle repository")?;
+fn open_service(cli: &Cli) -> Result<LocalDiscussionService> {
+    let repo = cli.open_repo().context("open Heddle repository")?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalDiscussionService::new(inner))
 }
 
 async fn run_open(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussOpenArgs) -> Result<()> {
-    let state_id = resolve_state(args.state.as_deref())?;
+    let state_id = resolve_state(cli, args.state.as_deref())?;
     let req = OpenDiscussionRequest {
         repo_path: String::new(),
         state_id,
@@ -167,7 +166,7 @@ async fn run_resolve(
             })
         }
         ResolveModeArg::ByEdit => Resolution::ByEdit(ResolveByEdit {
-            state_id: resolve_state(args.state.as_deref())?,
+            state_id: resolve_state(cli, args.state.as_deref())?,
         }),
         ResolveModeArg::Dismiss => Resolution::Dismissed(ResolveDismissed {
             reason: args
@@ -205,7 +204,7 @@ async fn run_list(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussListArg
             .map_err(status_to_anyhow)?;
         resp.into_inner().discussions
     } else {
-        let state_id = resolve_state(args.state.as_deref())?;
+        let state_id = resolve_state(cli, args.state.as_deref())?;
         let req = ListDiscussionsByStateRequest {
             repo_path: String::new(),
             state_id,
@@ -361,9 +360,8 @@ fn opt_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
-    let cwd = std::env::current_dir().context("get current working directory")?;
-    let repo = Repository::open(&cwd).context("open Heddle repository")?;
+fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
+    let repo = cli.open_repo().context("open Heddle repository")?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
         // marker names all work — matches `heddle log --output json` output.
