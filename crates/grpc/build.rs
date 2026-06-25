@@ -46,6 +46,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bytes(".heddle.v1.PackChunk.data")
         .bytes(".heddle.v1.RedactionTransfer.redactions_blob")
         .bytes(".heddle.v1.StateVisibilityTransfer.state_visibility_blob")
+        .bytes(".heddle.v1.GitLooseObjectTransfer.oid")
+        .bytes(".heddle.v1.GitLooseObjectTransfer.object_body")
+        .bytes(".heddle.v1.GitRefUpdateTransfer.target_oid")
+        .bytes(".heddle.v1.GitRefUpdateTransfer.peeled_oid")
+        .bytes(".heddle.v1.GitRefUpdateTransfer.expected_target_oid")
+        .bytes(".heddle.v1.GitCheckpointTransfer.heddle_change_id")
+        .bytes(".heddle.v1.GitCheckpointTransfer.git_commit_oid")
         .build_server(true)
         .build_client(true)
         .compile_protos(&proto_files, &[proto_dir])?;
