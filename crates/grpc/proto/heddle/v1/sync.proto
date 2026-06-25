@@ -178,6 +178,56 @@ message StateVisibilityTransfer {
   bytes state_visibility_blob = 2;
 }
 
+enum GitObjectKind {
+  GIT_OBJECT_KIND_UNSPECIFIED = 0;
+  GIT_OBJECT_KIND_COMMIT = 1;
+  GIT_OBJECT_KIND_TREE = 2;
+  GIT_OBJECT_KIND_BLOB = 3;
+  GIT_OBJECT_KIND_TAG = 4;
+}
+
+enum GitRefKind {
+  GIT_REF_KIND_UNSPECIFIED = 0;
+  GIT_REF_KIND_BRANCH = 1;
+  GIT_REF_KIND_TAG = 2;
+  GIT_REF_KIND_NOTE = 3;
+  GIT_REF_KIND_OTHER = 4;
+}
+
+// Git-lane transport for git-overlay repos. These messages carry Git-shaped
+// data as Git data; they are not Heddle native states/captures.
+message GitLooseObjectTransfer {
+  bytes oid = 1;
+  GitObjectKind kind = 2;
+  uint64 size = 3;
+  bytes object_body = 4;
+}
+
+message GitRefUpdateTransfer {
+  string name = 1;
+  GitRefKind kind = 2;
+  bytes target_oid = 3;
+  bytes peeled_oid = 4;
+  bool expected_missing = 5;
+  bytes expected_target_oid = 6;
+  GitCheckpointTransfer checkpoint = 7;
+}
+
+message GitCheckpointTransfer {
+  bytes heddle_change_id = 1;
+  bytes git_commit_oid = 2;
+  string thread = 3;
+  string metadata_json = 4;
+}
+
+message GitLaneTransfer {
+  oneof body {
+    GitLooseObjectTransfer loose_object = 1;
+    GitRefUpdateTransfer ref_update = 2;
+    GitCheckpointTransfer checkpoint = 3;
+  }
+}
+
 message PushMessage {
   oneof body {
     PushRequest request = 1;
@@ -186,6 +236,7 @@ message PushMessage {
     PushComplete complete = 4;
     RedactionTransfer redaction = 5;
     StateVisibilityTransfer state_visibility = 6;
+    GitLaneTransfer git_lane = 8;
   }
 }
 
@@ -240,5 +291,6 @@ message PullMessage {
     PullComplete complete = 5;
     RedactionTransfer redaction = 6;
     StateVisibilityTransfer state_visibility = 7;
+    GitLaneTransfer git_lane = 8;
   }
 }
