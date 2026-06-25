@@ -9,8 +9,8 @@ use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, ThreadName},
 };
-use wire::ProtocolError;
 use repo::{BlobHydrator, Repository};
+use wire::ProtocolError;
 
 use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
 
