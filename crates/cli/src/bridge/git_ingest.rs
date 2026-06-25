@@ -8,7 +8,7 @@ use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
 
 use super::{
     git_core::{
-        collect_import_source_ref_updates, open_repo, GitBridge, GitBridgeError, GitResult,
+        GitBridge, GitBridgeError, GitResult, collect_import_source_ref_updates, open_repo,
     },
     git_notes,
     git_util::ImportStats,

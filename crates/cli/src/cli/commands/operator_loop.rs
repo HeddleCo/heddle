@@ -4,6 +4,7 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationSta
 
 use super::{
     action_line::print_next_step,
+    auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{
         NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
@@ -20,6 +21,7 @@ use super::{
 use crate::{
     bridge::GitBridge,
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
+    config::UserConfig,
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
@@ -61,6 +63,8 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
             SYNC_OPERATOR_EMISSION,
         );
     }
+    let user_config = UserConfig::load_default().unwrap_or_default();
+    auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Sync)?;
 
     if let Some(remote) = repo.git_remote_tracking_status()? {
         let remote_decision = super::git_overlay_health::remote_drift_decision(&repo, &remote);

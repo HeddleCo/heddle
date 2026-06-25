@@ -1685,8 +1685,18 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
     assert_eq!(preview["heavy_impact_paths"][0], "Cargo.toml");
     assert_eq!(
         preview["recommended_action"].as_str(),
-        None,
-        "merge preview should not recommend a breadcrumb while heavy-impact review is still blocked: {preview}"
+        Some("heddle land --thread feature/deps --no-push"),
+        "merge preview should suggest landing while surfacing heavy-impact review as advisory: {preview}"
+    );
+    assert!(
+        preview["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value
+                .as_str()
+                .is_some_and(|warning| warning.contains("Heavy-impact change: Cargo.toml"))),
+        "merge preview should keep the heavy-impact review warning: {preview}"
     );
 }
 

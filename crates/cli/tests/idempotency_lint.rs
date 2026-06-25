@@ -75,9 +75,7 @@ fn every_state_changing_rpc_routes_through_dedup() {
     proto_paths.sort();
     let proto_src = proto_paths
         .iter()
-        .map(|p| {
-            std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
-        })
+        .map(|p| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())))
         .collect::<Vec<_>>()
         .join("\n");
 

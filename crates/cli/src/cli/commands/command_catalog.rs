@@ -1878,7 +1878,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
-        surface(documented_schemas(READ_JSON, &["integration list"]), "admin"),
+        surface(
+            documented_schemas(READ_JSON, &["integration list"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "install"],
@@ -1886,7 +1889,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "doctor"],
-        surface(documented_schemas(READ_JSON, &["integration doctor"]), "admin"),
+        surface(
+            documented_schemas(READ_JSON, &["integration doctor"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "uninstall"],

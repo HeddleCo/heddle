@@ -1700,9 +1700,7 @@ fn mark_source_thread_integrated(
         status: Some("auto_integrated".to_string()),
         reason: Some("redo restored integrated target state".to_string()),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
-        conflicts_resolved_manually: thread
-            .integration_policy_result
-            .conflicts_resolved_manually,
+        conflicts_resolved_manually: thread.integration_policy_result.conflicts_resolved_manually,
     };
     thread.freshness = ThreadFreshness::Current;
     thread.updated_at = chrono::Utc::now();

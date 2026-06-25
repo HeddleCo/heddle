@@ -42,6 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_prost_build::configure()
         .file_descriptor_set_path(&descriptor_path)
+        .bytes(".heddle.v1.ObjectChunk.data")
+        .bytes(".heddle.v1.PackChunk.data")
+        .bytes(".heddle.v1.RedactionTransfer.redactions_blob")
+        .bytes(".heddle.v1.StateVisibilityTransfer.state_visibility_blob")
         .build_server(true)
         .build_client(true)
         .compile_protos(&proto_files, &[proto_dir])?;

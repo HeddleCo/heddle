@@ -36,8 +36,8 @@ pub mod util;
 // them without a cli ↔ heddle-client cycle). Re-export under the
 // historical paths so internal code keeps working.
 pub use cli_shared::{
-    LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging,
-    init_logging_default, is_enabled, logging, log_operation, log_repo_event, remote,
+    LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging, init_logging_default,
+    is_enabled, log_operation, log_repo_event, logging, remote,
 };
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},

@@ -553,14 +553,14 @@ mod tests {
     use std::fs;
 
     use anyhow::Result;
-    use tempfile::TempDir;
-
-    use super::{super::Repository, CommitGraphIndex};
     #[cfg(feature = "async-source")]
     use objects::{
         object::{Attribution, Blob, ChangeId, ContentHash, Principal, State, Tree},
         store::{AsyncObjectSource, InMemoryStore, ObjectStore},
     };
+    use tempfile::TempDir;
+
+    use super::{super::Repository, CommitGraphIndex};
 
     fn commit_graph_path(repo: &Repository) -> std::path::PathBuf {
         repo.root().join(".heddle/state").join("commit-graph.bin")

@@ -110,7 +110,11 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// we can seek back at finalize and patch the real `object_count`
     /// into bytes 8..16.
     header_offset: u64,
+    /// Logical append position. Avoids flushing the buffered writer before
+    /// every object just to ask the file for its current offset.
+    pack_position: u64,
     object_count: u64,
+    declared_object_count: Option<u64>,
     total_uncompressed: u64,
     total_compressed: u64,
     /// Compression knobs. Only consulted when the `zstd` feature is on
@@ -143,6 +147,32 @@ struct BucketWriter {
     last_used: u64,
 }
 
+#[cfg(feature = "zstd")]
+struct CountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    written: u64,
+}
+
+#[cfg(feature = "zstd")]
+impl<'a, W: Write> CountingWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self { inner, written: 0 }
+    }
+}
+
+#[cfg(feature = "zstd")]
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// Open a streaming builder against `pack_writer`, using
     /// `bucket_dir` for transient index buckets and writing the
@@ -160,18 +190,56 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// the body to compute the trailer checksum — see the module-level
     /// note on the format.
     pub fn new(
-        mut pack_writer: W,
+        pack_writer: W,
         index_path: PathBuf,
         compression: CompressionConfig,
         bucket_dir: PathBuf,
     ) -> Result<Self> {
+        Self::new_inner(pack_writer, index_path, compression, bucket_dir, None)
+    }
+
+    /// Open a streaming builder whose final object count is known up front.
+    ///
+    /// This writes the real count into the pack header immediately, so callers
+    /// may safely stream already-flushed pack bytes before `finalize()` appends
+    /// the trailer checksum. `finalize()` still verifies that exactly this many
+    /// objects were added before producing the index.
+    pub fn new_with_object_count(
+        pack_writer: W,
+        index_path: PathBuf,
+        compression: CompressionConfig,
+        bucket_dir: PathBuf,
+        object_count: u64,
+    ) -> Result<Self> {
+        Self::new_inner(
+            pack_writer,
+            index_path,
+            compression,
+            bucket_dir,
+            Some(object_count),
+        )
+    }
+
+    fn new_inner(
+        mut pack_writer: W,
+        index_path: PathBuf,
+        compression: CompressionConfig,
+        bucket_dir: PathBuf,
+        declared_object_count: Option<u64>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
         let header_offset = pack_writer.stream_position().map_err(StoreError::from)?;
 
-        // Write a placeholder header with `count = 0`; finalize seeks
-        // back here and rewrites the real count.
+        // Write a placeholder header with `count = 0` unless the caller knows
+        // the count up front. The known-count path lets network senders tail
+        // flushed pack bytes before finalize without later mutating bytes they
+        // already sent.
         let mut header_bytes = Vec::with_capacity(16);
-        write_container_header(&mut header_bytes, pack_container_spec(), 0);
+        write_container_header(
+            &mut header_bytes,
+            pack_container_spec(),
+            declared_object_count.unwrap_or(0),
+        );
         pack_writer
             .write_all(&header_bytes)
             .map_err(StoreError::from)?;
@@ -190,7 +258,9 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         Ok(Self {
             pack_writer: Some(BufWriter::new(pack_writer)),
             header_offset,
+            pack_position: header_offset + header_bytes.len() as u64,
             object_count: 0,
+            declared_object_count,
             total_uncompressed: 0,
             total_compressed: 0,
             compression,
@@ -202,6 +272,17 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             index_path,
             finalized: false,
         })
+    }
+
+    /// Flush pack bytes written so far to the underlying writer.
+    ///
+    /// Used by hosted sync's interleaved build/send path: after each complete
+    /// entry is added, the sender flushes and drains full chunks from the file.
+    pub fn flush_pack(&mut self) -> Result<()> {
+        if let Some(writer) = self.pack_writer.as_mut() {
+            writer.flush().map_err(StoreError::from)?;
+        }
+        Ok(())
     }
 
     /// Add an object with a content-hash id.
@@ -232,15 +313,15 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// continuation bits without enforcing minimum-byte form), so the
     /// padded write decodes back to the same value any reader expects.
     pub fn add_id(&mut self, id: PackObjectId, obj_type: ObjectType, data: Vec<u8>) -> Result<()> {
-        // Compute the entry's offset relative to the header. Flush the
-        // BufWriter first so `stream_position` reflects bytes actually
-        // committed to the underlying writer.
+        // Compute the entry's offset relative to the header from our logical
+        // append cursor. Asking the underlying file for its position would
+        // flush the BufWriter on every object, which defeats the streaming
+        // sender's chunk-sized drain cadence.
         let pw = self
             .pack_writer
             .as_mut()
             .expect("add_id called after finalize");
-        pw.flush().map_err(StoreError::from)?;
-        let entry_start = pw.get_mut().stream_position().map_err(StoreError::from)?;
+        let entry_start = self.pack_position;
         let offset = entry_start
             .checked_sub(self.header_offset)
             .expect("header_offset should never be past current position");
@@ -253,6 +334,12 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         id.encode_tagged(&mut header_buf);
         super::varint::encode_type_and_size(obj_type, data.len() as u64, &mut header_buf);
         pw.write_all(&header_buf).map_err(StoreError::from)?;
+        self.pack_position = self
+            .pack_position
+            .checked_add(header_buf.len() as u64)
+            .ok_or_else(|| {
+                StoreError::InvalidObject("streaming pack position overflow".to_string())
+            })?;
         // Only consumed by the zstd-enabled streaming branch below, but
         // we compute it here while we already have `header_buf`'s length
         // in scope.
@@ -286,7 +373,19 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             let mut csize_buf = Vec::with_capacity(10);
             super::varint::encode_varint(data.len() as u64, &mut csize_buf);
             pw.write_all(&csize_buf).map_err(StoreError::from)?;
+            self.pack_position = self
+                .pack_position
+                .checked_add(csize_buf.len() as u64)
+                .ok_or_else(|| {
+                    StoreError::InvalidObject("streaming pack position overflow".to_string())
+                })?;
             pw.write_all(&data).map_err(StoreError::from)?;
+            self.pack_position = self
+                .pack_position
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| {
+                    StoreError::InvalidObject("streaming pack position overflow".to_string())
+                })?;
             self.total_compressed += data.len() as u64;
         } else {
             #[cfg(feature = "zstd")]
@@ -295,11 +394,18 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
                 // stream-compress the payload, then seek back to patch.
                 pw.write_all(&[0u8; CSIZE_PLACEHOLDER_LEN])
                     .map_err(StoreError::from)?;
-                pw.flush().map_err(StoreError::from)?;
-                let body_start = pw.get_mut().stream_position().map_err(StoreError::from)?;
+                self.pack_position = self
+                    .pack_position
+                    .checked_add(CSIZE_PLACEHOLDER_LEN as u64)
+                    .ok_or_else(|| {
+                        StoreError::InvalidObject("streaming pack position overflow".to_string())
+                    })?;
+                let body_start = self.pack_position;
+                let compressed_size;
                 {
+                    let mut counting = CountingWriter::new(&mut *pw);
                     let mut enc =
-                        zstd::stream::write::Encoder::new(&mut *pw, self.compression.level)
+                        zstd::stream::write::Encoder::new(&mut counting, self.compression.level)
                             .map_err(StoreError::from)?;
                     // Pass the source size so the zstd frame's optional
                     // Frame Content Size field is set — lets decoders
@@ -309,10 +415,19 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
                         .map_err(StoreError::from)?;
                     enc.write_all(&data).map_err(StoreError::from)?;
                     enc.finish().map_err(StoreError::from)?;
+                    compressed_size = counting.written;
                 }
-                pw.flush().map_err(StoreError::from)?;
-                let body_end = pw.get_mut().stream_position().map_err(StoreError::from)?;
-                let compressed_size = body_end - body_start;
+                self.pack_position =
+                    self.pack_position
+                        .checked_add(compressed_size)
+                        .ok_or_else(|| {
+                            StoreError::InvalidObject(
+                                "streaming pack position overflow".to_string(),
+                            )
+                        })?;
+                let body_end = body_start.checked_add(compressed_size).ok_or_else(|| {
+                    StoreError::InvalidObject("streaming pack position overflow".to_string())
+                })?;
                 self.total_compressed += compressed_size;
 
                 // Seek back over the placeholder, write a 10-byte
@@ -321,6 +436,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
                 // adds append correctly.
                 let mut csize_bytes = [0u8; CSIZE_PLACEHOLDER_LEN];
                 encode_varint_padded_to_10(compressed_size, &mut csize_bytes);
+                pw.flush().map_err(StoreError::from)?;
                 let inner = pw.get_mut();
                 inner
                     .seek(SeekFrom::Start(csize_pos))
@@ -420,9 +536,9 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         }
         self.open_bucket_writers = 0;
 
-        // 2. Patch the pack header with the real object count, then
-        //    re-stream the [header][body] bytes to compute the
-        //    trailer checksum.
+        // 2. Patch the pack header with the real object count unless the
+        //    caller declared it up front, then re-stream the [header][body]
+        //    bytes to compute the trailer checksum.
         let bw = self
             .pack_writer
             .take()
@@ -430,12 +546,21 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         let mut writer = bw
             .into_inner()
             .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
-        writer
-            .seek(SeekFrom::Start(self.header_offset))
-            .map_err(StoreError::from)?;
-        let mut header_bytes = Vec::with_capacity(16);
-        write_container_header(&mut header_bytes, pack_container_spec(), self.object_count);
-        writer.write_all(&header_bytes).map_err(StoreError::from)?;
+        if let Some(expected) = self.declared_object_count {
+            if expected != self.object_count {
+                return Err(StoreError::InvalidObject(format!(
+                    "streaming pack declared {expected} object(s) but added {}",
+                    self.object_count
+                )));
+            }
+        } else {
+            writer
+                .seek(SeekFrom::Start(self.header_offset))
+                .map_err(StoreError::from)?;
+            let mut header_bytes = Vec::with_capacity(16);
+            write_container_header(&mut header_bytes, pack_container_spec(), self.object_count);
+            writer.write_all(&header_bytes).map_err(StoreError::from)?;
+        }
 
         // 3. Hash the on-disk content from header_offset to current
         //    position (which is just past the body). One sequential
@@ -963,6 +1088,74 @@ mod tests {
         assert_eq!(count, 7);
         let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
         assert_eq!(reader.list_ids().len(), 7);
+    }
+
+    #[test]
+    fn declared_pack_count_is_written_before_finalize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bucket_dir = tmp.path().join("buckets");
+        let idx_path = tmp.path().join("test.idx");
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut b = StreamingPackBuilder::new_with_object_count(
+            cursor,
+            idx_path.clone(),
+            CompressionConfig::default(),
+            bucket_dir,
+            2,
+        )
+        .unwrap();
+
+        b.flush_pack().unwrap();
+        let initial = b.pack_writer.as_ref().unwrap().get_ref().get_ref().clone();
+        assert_eq!(u64::from_be_bytes(initial[8..16].try_into().unwrap()), 2);
+
+        let hash = deterministic_hash(0x40);
+        b.add(hash, ObjectType::Blob, b"known-count-entry".to_vec())
+            .unwrap();
+        b.flush_pack().unwrap();
+        let after_add = b.pack_writer.as_ref().unwrap().get_ref().get_ref().clone();
+        assert_eq!(u64::from_be_bytes(after_add[8..16].try_into().unwrap()), 2);
+
+        let second_hash = deterministic_hash(0x41);
+        b.add(second_hash, ObjectType::Blob, b"second-entry".to_vec())
+            .unwrap();
+        let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
+
+        assert_eq!(stats.object_count, 2);
+        assert_eq!(u64::from_be_bytes(pack_data[8..16].try_into().unwrap()), 2);
+        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        assert!(reader.has_object(&PackObjectId::Hash(hash)));
+        assert!(reader.has_object(&PackObjectId::Hash(second_hash)));
+    }
+
+    #[test]
+    fn declared_pack_count_mismatch_fails_finalize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bucket_dir = tmp.path().join("buckets");
+        let idx_path = tmp.path().join("test.idx");
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut b = StreamingPackBuilder::new_with_object_count(
+            cursor,
+            idx_path,
+            CompressionConfig::default(),
+            bucket_dir,
+            2,
+        )
+        .unwrap();
+
+        b.add(
+            deterministic_hash(0x50),
+            ObjectType::Blob,
+            b"only-entry".to_vec(),
+        )
+        .unwrap();
+        let error = b.finalize().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("streaming pack declared 2 object(s) but added 1")
+        );
     }
 
     #[test]

@@ -14,14 +14,13 @@ use std::{
 };
 
 use chrono::{TimeZone, Utc};
-use objects::{
-    error::{HeddleError, Result},
-    fs_atomic::{sync_directory, temp_path, write_file_atomic},
-};
-
 use heddle_schema::op_record::{
     LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
     decode_versioned_record, encode_latest_record, schema_version_from_u32,
+};
+use objects::{
+    error::{HeddleError, Result},
+    fs_atomic::{sync_directory, temp_path, write_file_atomic},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -2527,14 +2526,11 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
     use objects::object::ChangeId;
     use tempfile::TempDir;
 
-    use heddle_schema::op_record::tests_support::{encode_atomic_no_head, encode_pre_atomic};
-
-    use super::{
-        *,
-    };
+    use super::*;
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
         let state = ChangeId::generate();

@@ -10,11 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::{
-    error::Result,
-    object::ChangeId,
-    store::ObjectStore,
-};
+use objects::{error::Result, object::ChangeId, store::ObjectStore};
 use repo::Repository;
 use serde::Deserialize;
 use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
@@ -363,36 +359,31 @@ struct HeddleNote {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::{
         object::{Attribution, Principal, State, Tree},
         store::ObjectStore,
     };
     use tempfile::TempDir;
 
-    fn write_bridge_mapping(
-        repo: &Repository,
-        change_id: &str,
-        git_oid: &sley::ObjectId,
-    ) {
-        let mapping_path = repo.heddle_dir().join("git-bridge").join("bridge-mapping.json");
+    use super::*;
+
+    fn write_bridge_mapping(repo: &Repository, change_id: &str, git_oid: &sley::ObjectId) {
+        let mapping_path = repo
+            .heddle_dir()
+            .join("git-bridge")
+            .join("bridge-mapping.json");
         let mapping_parent = mapping_path.parent().expect("mapping path has parent");
         fs::create_dir_all(mapping_parent).expect("create bridge mapping directory");
-        let contents = format!(
-            r#"{{"entries":[{{"change_id":"{change_id}","git_oid":"{git_oid}"}}]}}"#
-        );
+        let contents =
+            format!(r#"{{"entries":[{{"change_id":"{change_id}","git_oid":"{git_oid}"}}]}}"#);
         std::fs::write(&mapping_path, contents).expect("write bridge mapping");
     }
 
-    fn write_bridge_note(
-        mirror: &SleyRepository,
-        target: sley::ObjectId,
-        body: &str,
-    ) {
+    fn write_bridge_note(mirror: &SleyRepository, target: sley::ObjectId, body: &str) {
         let refs = mirror.references();
         let notes_ref = notes_ref();
-        let expected_ref = sley::notes::notes_ref_expected(&refs, &notes_ref)
-            .expect("get notes ref expected");
+        let expected_ref =
+            sley::notes::notes_ref_expected(&refs, &notes_ref).expect("get notes ref expected");
         let identity = sley::notes::NotesCommitIdentity {
             author: b"heddle test <test@localhost> 0 +0000".to_vec(),
             committer: b"heddle test <test@localhost> 0 +0000".to_vec(),
@@ -417,10 +408,7 @@ mod tests {
         let repo = Repository::init_default(temp.path()).expect("init repo");
 
         let state_change_id = objects::object::ChangeId::generate();
-        let tree = repo
-            .store()
-            .put_tree(&Tree::new())
-            .expect("write tree");
+        let tree = repo.store().put_tree(&Tree::new()).expect("write tree");
         let state = State::new(
             tree,
             Vec::new(),
@@ -438,7 +426,10 @@ mod tests {
         let valid_note_target = mirror
             .write_blob("valid-note")
             .expect("write valid note blob");
-        let foreign_note = format!(r#"{{"change_id":"{}"}}"#, objects::object::ChangeId::generate());
+        let foreign_note = format!(
+            r#"{{"change_id":"{}"}}"#,
+            objects::object::ChangeId::generate()
+        );
         let valid_note = format!(
             r#"{{"change_id":"{}","status":"published"}}"#,
             state_change_id

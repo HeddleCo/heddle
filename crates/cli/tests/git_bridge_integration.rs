@@ -474,13 +474,25 @@ fn init_invalid_utf8_name_repo() -> TempDir {
     let temp = TempDir::new().expect("temp dir");
     git_output(temp.path(), &["init", "-q", "--initial-branch=main"], None);
 
-    let blob = git_output(temp.path(), &["hash-object", "-w", "--stdin"], Some(b"hello\n"));
+    let blob = git_output(
+        temp.path(),
+        &["hash-object", "-w", "--stdin"],
+        Some(b"hello\n"),
+    );
     let mut tree_input = Vec::new();
     write!(&mut tree_input, "100644 blob {blob}\t").expect("tree record");
     tree_input.extend_from_slice(b"bad\xffname\0");
     let tree = git_output(temp.path(), &["mktree", "-z"], Some(&tree_input));
-    let commit = git_output(temp.path(), &["commit-tree", &tree, "-m", "invalid name"], None);
-    git_output(temp.path(), &["update-ref", "refs/heads/main", &commit], None);
+    let commit = git_output(
+        temp.path(),
+        &["commit-tree", &tree, "-m", "invalid name"],
+        None,
+    );
+    git_output(
+        temp.path(),
+        &["update-ref", "refs/heads/main", &commit],
+        None,
+    );
 
     temp
 }
@@ -1036,11 +1048,8 @@ fn import_all_reuses_shared_gitlink_subtree_without_lossy_entries() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let mut bridge = GitBridge::new(&repo);
-    let stats = import_all(
-        &mut bridge,
-        Some(&git_repo.workdir().expect("workdir")),
-    )
-    .expect("default import accepts shared gitlink subtree");
+    let stats = import_all(&mut bridge, Some(&git_repo.workdir().expect("workdir")))
+        .expect("default import accepts shared gitlink subtree");
 
     assert_eq!(stats.states_created, 2);
     assert!(stats.lossy_entries.is_empty());
