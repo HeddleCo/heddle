@@ -1258,7 +1258,10 @@ fn read_untracked_directory_entry_payload(
             "truncated untracked directory payload".to_string(),
         ));
     }
-    let mtime_sec = read_i64_be(&data[*offset..], "journal untracked directory mtime seconds")?;
+    let mtime_sec = read_i64_be(
+        &data[*offset..],
+        "journal untracked directory mtime seconds",
+    )?;
     *offset += 8;
     let mtime_nsec = read_u32_be(&data[*offset..], "journal untracked directory mtime nanos")?;
     *offset += 4;

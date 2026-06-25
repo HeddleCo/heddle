@@ -41,7 +41,7 @@
 //!     actually load FSKit.
 
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString, OsStr},
+    ffi::{CStr, CString, OsStr, c_char, c_int, c_void},
     os::unix::ffi::OsStrExt,
     sync::Arc,
 };
@@ -63,8 +63,8 @@ pub mod readiness;
 // throughout this file so any signature change in `c_abi` propagates
 // here at the type-checker, not at runtime.
 use c_abi::{
-    heddle_fskit_is_available, heddle_fskit_session_free, heddle_fskit_session_new,
-    HeddleEnumerateEmit, HeddleFSKitSessionHandle,
+    HeddleEnumerateEmit, HeddleFSKitSessionHandle, heddle_fskit_is_available,
+    heddle_fskit_session_free, heddle_fskit_session_new,
 };
 
 // ----------------------------------------------------------------

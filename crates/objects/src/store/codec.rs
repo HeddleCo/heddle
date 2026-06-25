@@ -85,8 +85,7 @@ mod tests {
     #[test]
     fn encode_decode_tree_matches_old_recipe() {
         let blob_hash = ContentHash::compute(b"codec-tree-blob");
-        let tree =
-            Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
+        let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
         for config in compression_configs() {
             let serialized = rmp_serde::to_vec(&tree).unwrap();
             let expected = old_encode_raw(&serialized, &config).unwrap();

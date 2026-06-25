@@ -30,8 +30,9 @@
 //! keep working. Add a new short alias only when the letter is already
 //! reserved for that semantic in the table above.
 
-use super::{CliOutputMode, Commands};
 use clap::Parser;
+
+use super::{CliOutputMode, Commands};
 
 /// Heddle: An AI-native version control system.
 #[derive(Parser)]

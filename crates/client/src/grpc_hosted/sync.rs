@@ -1,5 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -12,18 +16,21 @@ use grpc::heddle::v1::{
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
-    store::{ObjectStore, PackObjectId},
+    store::{AnyStore, ObjectStore, PackObjectId},
 };
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
-use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
+use wire::{
+    ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete, PushComplete, RefEntry,
+    RefUpdated,
+};
 
 use super::{
     HostedGrpcClient, PullMaterialization,
     helpers::{
-        descriptor_id, descriptor_id_from_info, object_descriptor_with_status,
+        descriptor_id, descriptor_id_from_info, object_descriptor_with_status, object_type_name,
         parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
         transport_mode_name,
     },
@@ -44,6 +51,12 @@ struct PullWantPlan {
 }
 
 type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
+
+const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
+const PULL_PACK_SPOOL_OBJECT_THRESHOLD: usize = 512;
+const NATIVE_PACK_DRAIN_OBJECT_INTERVAL: usize = 32;
+const NATIVE_PACK_OBJECT_PREFETCH_LIMIT: usize = 32;
+const NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Default)]
 pub struct PullObjectMix {
@@ -175,9 +188,17 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let objects = wire::enumerate_state_closure(repo.store(), local_state)?;
+        let object_plan = wire::enumerate_state_closure_plan(repo.store(), local_state)?;
+        let full_objects = if object_plan.len() <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
+            Some(wire::enumerate_state_closure(repo.store(), local_state)?)
+        } else {
+            None
+        };
+        let object_count = full_objects
+            .as_ref()
+            .map_or(object_plan.len(), std::vec::Vec::len);
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
-        let transport_mode = preferred_transport_mode(&self.transport, objects.len());
+        let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
         let request_message = PushMessage {
             body: Some(push_message::Body::Request(PushRequest {
@@ -186,7 +207,10 @@ impl HostedGrpcClient {
                 target_thread: target_thread.to_string(),
                 create_thread: true,
                 force,
-                objects: objects.iter().map(to_proto_object_info).collect(),
+                objects: full_objects.as_ref().map_or_else(
+                    || object_plan.iter().map(to_proto_planned_object).collect(),
+                    |objects| objects.iter().map(to_proto_object_info).collect(),
+                ),
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
                     transfer_id.clone(),
                     transport_mode,
@@ -226,10 +250,21 @@ impl HostedGrpcClient {
             }
         };
 
-        let object_index = objects
-            .into_iter()
-            .map(|info| (descriptor_id_from_info(&info), info))
-            .collect::<HashMap<_, _>>();
+        let object_index = match full_objects {
+            Some(objects) => objects
+                .into_iter()
+                .map(|info| (descriptor_id_from_info(&info), info))
+                .collect::<HashMap<_, _>>(),
+            None => object_plan
+                .into_iter()
+                .map(|object| {
+                    (
+                        descriptor_id_from_plan(&object),
+                        object_info_from_plan(&object),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        };
 
         let ready_transport_mode = ready
             .transfer
@@ -258,18 +293,16 @@ impl HostedGrpcClient {
             .partition(|info| is_out_of_pack_transfer_object_type(info.obj_type));
 
         if !wanted_packable.is_empty() {
-            let bundle = wire::build_native_pack(repo.store(), &wanted_packable)?;
-            for message in encode_native_pack_messages(
-                &bundle,
+            send_native_pack_streaming_messages(
+                &tx,
+                repo,
+                &wanted_packable,
                 &transfer_id,
                 self.transport.chunk_size.max(1),
                 &self.transport,
                 ready_transport_mode,
-            )? {
-                tx.send(message).await.map_err(|_| {
-                    ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
-                })?;
-            }
+            )
+            .await?;
         }
 
         for info in wanted_sidecars {
@@ -635,6 +668,7 @@ impl HostedGrpcClient {
         };
         let remote_state = ChangeId::parse(&ready.remote_state)
             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+        let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
             wants,
             wanted_types,
@@ -666,7 +700,13 @@ impl HostedGrpcClient {
         drop(tx);
 
         let receive_start = Instant::now();
+        let use_pack_spool = advertised_object_count > PULL_PACK_SPOOL_OBJECT_THRESHOLD;
         let mut pack_state = wire::PackChunkState::default();
+        let mut pack_spool = if use_pack_spool {
+            Some(wire::PackChunkSpool::new_in(repo.heddle_dir())?)
+        } else {
+            None
+        };
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -688,15 +728,26 @@ impl HostedGrpcClient {
                         ));
                     }
                     let decode_start = Instant::now();
-                    wire::receive_pack_chunk(
-                        &mut pack_state,
-                        stream_kind == PackStreamKind::Index,
-                        transfer.resume_offset,
-                        transfer.chunk_index,
-                        transfer.is_complete,
-                        &chunk.data,
-                        chunk.is_final_chunk,
-                    )?;
+                    if let Some(pack_spool) = pack_spool.as_mut() {
+                        pack_spool.receive_chunk(
+                            stream_kind == PackStreamKind::Index,
+                            transfer.resume_offset,
+                            transfer.chunk_index,
+                            transfer.is_complete,
+                            &chunk.data,
+                            chunk.is_final_chunk,
+                        )?;
+                    } else {
+                        wire::receive_pack_chunk(
+                            &mut pack_state,
+                            stream_kind == PackStreamKind::Index,
+                            transfer.resume_offset,
+                            transfer.chunk_index,
+                            transfer.is_complete,
+                            &chunk.data,
+                            chunk.is_final_chunk,
+                        )?;
+                    }
                     let decode_elapsed = decode_start.elapsed();
                     profile.pack_decode += decode_elapsed;
                     profile.pack_decode_apply += decode_elapsed;
@@ -772,17 +823,28 @@ impl HostedGrpcClient {
 
                     if complete.success {
                         if native_pack_required {
-                            if !pack_state.is_complete() {
-                                return Err(ProtocolError::InvalidState(
-                                    "pull completed before native pack stream finished".to_string(),
-                                ));
-                            }
                             let store_start = Instant::now();
-                            let installed_ids = wire::install_received_pack(
-                                repo.store(),
-                                &pack_state.pack_data,
-                                &pack_state.index_data,
-                            )?;
+                            let installed_ids = if let Some(pack_spool) = pack_spool.as_mut() {
+                                if !pack_spool.is_complete() {
+                                    return Err(ProtocolError::InvalidState(
+                                        "pull completed before native pack stream finished"
+                                            .to_string(),
+                                    ));
+                                }
+                                pack_spool.install_into(repo.store())?
+                            } else {
+                                if !pack_state.is_complete() {
+                                    return Err(ProtocolError::InvalidState(
+                                        "pull completed before native pack stream finished"
+                                            .to_string(),
+                                    ));
+                                }
+                                wire::install_received_pack(
+                                    repo.store(),
+                                    &pack_state.pack_data,
+                                    &pack_state.index_data,
+                                )?
+                            };
                             profile.store_receive_object += store_start.elapsed();
                             received = installed_ids.len();
                             for id in installed_ids {
@@ -954,7 +1016,7 @@ fn redaction_push_message(
     Ok(PushMessage {
         body: Some(push_message::Body::Redaction(RedactionTransfer {
             blob_hash: hex,
-            redactions_blob: bytes,
+            redactions_blob: bytes.into(),
         })),
     })
 }
@@ -973,6 +1035,31 @@ fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedT
             .flatten()
             .copied()
             .any(wire::is_native_packable_object_type)
+}
+
+fn object_info_from_plan(object: &PlannedObject) -> ObjectInfo {
+    ObjectInfo {
+        id: object.id.clone(),
+        obj_type: object.obj_type,
+        size: 0,
+        delta_base: None,
+    }
+}
+
+fn to_proto_planned_object(object: &PlannedObject) -> ObjectDescriptor {
+    object_descriptor_with_status(
+        &object_info_from_plan(object),
+        ObjectAvailabilityStatus::Present,
+        "",
+    )
+}
+
+fn descriptor_id_from_plan(object: &PlannedObject) -> (String, String) {
+    let id = match &object.id {
+        wire::ObjectId::Hash(hash) => hash.to_hex(),
+        wire::ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+    };
+    (id, object_type_name(object.obj_type).to_string())
 }
 
 fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj_type: ObjectType) {
@@ -1032,7 +1119,7 @@ fn state_visibility_push_message(
         body: Some(push_message::Body::StateVisibility(
             StateVisibilityTransfer {
                 state_id,
-                state_visibility_blob: bytes,
+                state_visibility_blob: bytes.into(),
             },
         )),
     })
@@ -1383,64 +1470,217 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
     )
 }
 
-fn encode_native_pack_messages(
-    bundle: &wire::NativePackBundle,
+async fn send_native_pack_streaming_messages(
+    tx: &mpsc::Sender<PushMessage>,
+    repo: &Repository,
+    objects: &[ObjectInfo],
     transfer_id: &str,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
-) -> Result<Vec<PushMessage>, ProtocolError> {
-    let mut messages = Vec::new();
-    let chunk_size = chunk_size.max(1);
+) -> Result<(), ProtocolError> {
+    let object_count = u64::try_from(objects.len()).map_err(|_| {
+        ProtocolError::InvalidState("native pack object count exceeds u64".to_string())
+    })?;
+    let mut writer = wire::NativePackStreamingWriter::new_in(repo.heddle_dir(), object_count)?;
+    let mut pack_reader = wire::GrowingPackChunkReader::open(writer.pack_path(), chunk_size)?;
+    let (loaded_tx, mut loaded_rx) = mpsc::channel::<(
+        usize,
+        Result<wire::ObjectData, ProtocolError>,
+    )>(NATIVE_PACK_OBJECT_PREFETCH_LIMIT);
+    let store = repo.store().clone();
+    let object_plan = objects.to_vec();
+    let loader = tokio::task::spawn_blocking(move || {
+        load_native_pack_objects_parallel(store, object_plan, loaded_tx);
+    });
 
-    let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
-    for chunk_index in 0..pack_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
-        else {
-            break;
-        };
-        messages.push(PushMessage {
-            body: Some(push_message::Body::Pack(PackChunk {
-                stream_kind: PackStreamKind::Pack as i32,
-                data: bundle.pack_data[start..start + len].to_vec(),
-                transfer: Some(transport.transfer_checkpoint_with_mode(
-                    transfer_id,
-                    transport_mode,
-                    chunk_index as u32,
-                    start as u64,
-                    chunk_index + 1 == pack_total_chunks,
-                )),
-                chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == pack_total_chunks,
-            })),
-        });
-    }
+    let mut next_index = 0usize;
+    let mut pending = BTreeMap::new();
+    while next_index < objects.len() {
+        let (index, object) = loaded_rx.recv().await.ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "native pack object loader stopped before sending all objects".to_string(),
+            )
+        })?;
+        pending.insert(index, object);
 
-    let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
-    for chunk_index in 0..index_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
-        else {
-            break;
-        };
-        messages.push(PushMessage {
-            body: Some(push_message::Body::Pack(PackChunk {
-                stream_kind: PackStreamKind::Index as i32,
-                data: bundle.index_data[start..start + len].to_vec(),
-                transfer: Some(transport.transfer_checkpoint_with_mode(
+        while let Some(object) = pending.remove(&next_index) {
+            let object = object?;
+            let should_drain = object.data.len() >= chunk_size
+                || (next_index + 1) % NATIVE_PACK_DRAIN_OBJECT_INTERVAL == 0;
+            writer.add_object_data(object)?;
+            if should_drain {
+                writer.flush_pack()?;
+                drain_growing_native_pack_stream(
+                    tx,
+                    &mut pack_reader,
+                    false,
+                    PackStreamKind::Pack,
                     transfer_id,
+                    transport,
                     transport_mode,
-                    chunk_index as u32,
-                    start as u64,
-                    chunk_index + 1 == index_total_chunks,
-                )),
-                chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == index_total_chunks,
-            })),
-        });
+                )
+                .await?;
+            }
+            next_index += 1;
+        }
     }
-    Ok(messages)
+    loader.await.map_err(|err| {
+        ProtocolError::InvalidState(format!("native pack object loader task failed: {err}"))
+    })?;
+
+    let bundle = writer.finish()?;
+    drain_growing_native_pack_stream(
+        tx,
+        &mut pack_reader,
+        true,
+        PackStreamKind::Pack,
+        transfer_id,
+        transport,
+        transport_mode,
+    )
+    .await?;
+    send_native_pack_file_stream(
+        tx,
+        &bundle.index_path,
+        PackStreamKind::Index,
+        transfer_id,
+        chunk_size,
+        transport,
+        transport_mode,
+    )
+    .await
+}
+
+fn load_native_pack_objects_parallel(
+    store: AnyStore,
+    objects: Vec<ObjectInfo>,
+    tx: mpsc::Sender<(usize, Result<wire::ObjectData, ProtocolError>)>,
+) {
+    if objects.is_empty() {
+        return;
+    }
+    let worker_count = native_pack_object_load_worker_count(objects.len());
+    let objects = Arc::new(objects);
+    let next_index = Arc::new(AtomicUsize::new(0));
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let store = store.clone();
+            let objects = Arc::clone(&objects);
+            let next_index = Arc::clone(&next_index);
+            let tx = tx.clone();
+            scope.spawn(move || {
+                loop {
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    let Some(info) = objects.get(index) else {
+                        break;
+                    };
+                    let object = wire::load_object_data(&store, &info.id, info.obj_type);
+                    if tx.blocking_send((index, object)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn native_pack_object_load_worker_count(object_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    object_count
+        .min(available)
+        .min(NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT)
+        .max(1)
+}
+
+async fn drain_growing_native_pack_stream(
+    tx: &mpsc::Sender<PushMessage>,
+    reader: &mut wire::GrowingPackChunkReader,
+    final_stream: bool,
+    stream_kind: PackStreamKind,
+    transfer_id: &str,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+) -> Result<(), ProtocolError> {
+    while let Some((offset, chunk_index, data, is_final_chunk)) =
+        reader.next_available_chunk(final_stream)?
+    {
+        send_pack_chunk(
+            tx,
+            stream_kind,
+            data,
+            transfer_id,
+            transport,
+            transport_mode,
+            chunk_index,
+            offset,
+            is_final_chunk,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn send_native_pack_file_stream(
+    tx: &mpsc::Sender<PushMessage>,
+    path: &std::path::Path,
+    stream_kind: PackStreamKind,
+    transfer_id: &str,
+    chunk_size: usize,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+) -> Result<(), ProtocolError> {
+    let mut reader = wire::PackFileChunkReader::open(path, chunk_size)?;
+    while let Some((offset, chunk_index, data, is_final_chunk)) = reader.next_chunk()? {
+        send_pack_chunk(
+            tx,
+            stream_kind,
+            data,
+            transfer_id,
+            transport,
+            transport_mode,
+            chunk_index,
+            offset,
+            is_final_chunk,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_pack_chunk(
+    tx: &mpsc::Sender<PushMessage>,
+    stream_kind: PackStreamKind,
+    data: Vec<u8>,
+    transfer_id: &str,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+    chunk_index: u32,
+    offset: u64,
+    is_final_chunk: bool,
+) -> Result<(), ProtocolError> {
+    let chunk_length = data.len().min(u32::MAX as usize) as u32;
+    tx.send(PushMessage {
+        body: Some(push_message::Body::Pack(PackChunk {
+            stream_kind: stream_kind as i32,
+            data: data.into(),
+            transfer: Some(transport.transfer_checkpoint_with_mode(
+                transfer_id,
+                transport_mode,
+                chunk_index,
+                offset,
+                is_final_chunk,
+            )),
+            chunk_length,
+            is_final_chunk,
+        })),
+    })
+    .await
+    .map_err(|_| ProtocolError::InvalidState("push stream closed unexpectedly".to_string()))
 }
 
 fn preferred_transport_mode(
@@ -1473,6 +1713,7 @@ mod tests {
     use wire::{ObjectId, ObjectInfo};
 
     use super::*;
+    use crate::grpc_hosted::helpers::{descriptor_id_from_info, to_proto_object_info};
 
     fn temp_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().expect("tempdir");
@@ -2188,7 +2429,7 @@ mod tests {
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Pack as i32,
-                    data: bundle.pack_data[start..start + len].to_vec(),
+                    data: bundle.pack_data[start..start + len].to_vec().into(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -2213,7 +2454,7 @@ mod tests {
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Index as i32,
-                    data: bundle.index_data[start..start + len].to_vec(),
+                    data: bundle.index_data[start..start + len].to_vec().into(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,

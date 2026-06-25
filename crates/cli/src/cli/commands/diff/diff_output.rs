@@ -246,11 +246,7 @@ fn write_text_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Resul
         }
         let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
         writeln!(writer, "similarity index {pct}%")?;
-        writeln!(
-            writer,
-            "rename from {}",
-            quote_path_for_patch("", old_path)
-        )?;
+        writeln!(writer, "rename from {}", quote_path_for_patch("", old_path))?;
         writeln!(
             writer,
             "rename to {}",
@@ -332,11 +328,7 @@ fn write_text_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Resul
     if is_deleted {
         writer.write_all(b"+++ /dev/null\n")?;
     } else {
-        writeln!(
-            writer,
-            "+++ {}",
-            quote_path_for_patch("b/", &change.path)
-        )?;
+        writeln!(writer, "+++ {}", quote_path_for_patch("b/", &change.path))?;
     }
     if let Some(lines) = lines_ref {
         write_patch_hunks(change, lines, writer)?;
@@ -384,7 +376,11 @@ fn write_symlink_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Re
         let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
         writeln!(writer, "similarity index {pct}%")?;
         writeln!(writer, "rename from {}", quote_path_for_patch("", old_path))?;
-        writeln!(writer, "rename to {}", quote_path_for_patch("", &change.path))?;
+        writeln!(
+            writer,
+            "rename to {}",
+            quote_path_for_patch("", &change.path)
+        )?;
         // Pure rename (identical target) — the extended headers alone carry
         // the move, exactly like a text rename with no hunk body.
         if sym.old == sym.new {
@@ -539,11 +535,7 @@ fn write_binary_change<W: Write>(
     } else {
         // Plain binary modify: git stamps the mode at the end of the
         // index line (`index <old>..<new> 100644`).
-        writeln!(
-            writer,
-            "index 0000000..0000000 {}",
-            mode_str(change.mode)
-        )?;
+        writeln!(writer, "index 0000000..0000000 {}", mode_str(change.mode))?;
     }
     let (a, b) = if is_added {
         ("/dev/null".to_string(), quote_path_for_patch("b/", path))

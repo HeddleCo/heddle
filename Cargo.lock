@@ -1686,6 +1686,7 @@ dependencies = [
 name = "heddle-grpc"
 version = "0.7.1"
 dependencies = [
+ "bytes",
  "prost 0.14.4",
  "prost-types 0.14.4",
  "protoc-bin-vendored",

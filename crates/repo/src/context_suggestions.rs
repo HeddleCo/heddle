@@ -3,19 +3,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use objects::{
-    object::{
-        ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions,
-    },
-    store::ObjectStore,
-};
-
-use crate::{HistoryQuery, Repository, staleness};
-
 pub use objects::object::{
     ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
 };
+use objects::{
+    object::{ContextTarget, State, SuggestionInputs, SuggestionSignal, score_suggestions},
+    store::ObjectStore,
+};
+
+use crate::{HistoryQuery, Repository, staleness};
 
 impl Repository {
     pub fn suggest_context_targets(
@@ -134,8 +131,9 @@ fn normalize_tokens(input: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     #[test]
     fn rewrite_pct_is_zero_for_identical_content() {
@@ -165,7 +163,9 @@ mod tests {
         repo.snapshot(Some("update a".to_string()), None).unwrap();
 
         fs::write(dir.path().join("src/a.rs"), "three\n").unwrap();
-        let head = repo.snapshot(Some("update a again".to_string()), None).unwrap();
+        let head = repo
+            .snapshot(Some("update a again".to_string()), None)
+            .unwrap();
 
         let suggestions = repo.suggest_context_targets(&head, 10).unwrap();
 

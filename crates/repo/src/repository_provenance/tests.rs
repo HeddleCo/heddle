@@ -2,7 +2,10 @@
 use std::path::Path;
 
 use objects::{
-    object::{Attribution, Blob, ChangeId, ContentHash, Origin, Principal, State, Tree, TreeEntry},
+    object::{
+        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin, OriginSet,
+        Principal, State, Tree, TreeEntry,
+    },
     store::ObjectStore,
 };
 use tempfile::TempDir;
@@ -336,4 +339,83 @@ fn file_provenance_validates_coverage() {
         origin,
     );
     provenance.validate().unwrap();
+}
+
+#[test]
+fn provenance_merge_unions_origin_sets_not_set_indexes() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let store = repo.store();
+
+    let parent_blob_hash = store.put_blob(&Blob::from("kept\n")).unwrap();
+    let parent_tree_hash = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("lib.rs", parent_blob_hash, false).unwrap(),
+        ]))
+        .unwrap();
+    let parent_origin = Origin {
+        state_id: ChangeId::generate(),
+        attribution: Attribution::human(Principal::new("Parent", "parent@example.com")),
+        created_at: chrono::Utc::now(),
+        authored_at: None,
+    };
+    let parent_provenance = FileProvenance::new(
+        parent_blob_hash,
+        1,
+        vec![LineSpan {
+            start_line: 0,
+            line_len: 1,
+            origin_set_index: 11,
+        }],
+        vec![parent_origin],
+        (0..12)
+            .map(|_| OriginSet {
+                origin_indexes: vec![0],
+            })
+            .collect(),
+    );
+    parent_provenance
+        .validate()
+        .expect("fixture provenance should be valid");
+    let parent_provenance_blob = store
+        .put_blob(&Blob::from_slice(
+            &rmp_serde::to_vec(&parent_provenance).unwrap(),
+        ))
+        .unwrap();
+    let parent_provenance_root = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("lib.rs", parent_provenance_blob, false).unwrap(),
+        ]))
+        .unwrap();
+    let parent = State::new(
+        parent_tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Parent", "parent@example.com")),
+    )
+    .with_provenance(parent_provenance_root);
+    store.put_state(&parent).unwrap();
+
+    let child_blob_hash = store.put_blob(&Blob::from("kept\nadded\n")).unwrap();
+    let child_tree_hash = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("lib.rs", child_blob_hash, false).unwrap(),
+        ]))
+        .unwrap();
+    let child = State::new(
+        child_tree_hash,
+        vec![parent.change_id],
+        Attribution::human(Principal::new("Child", "child@example.com")),
+    );
+    store.put_state(&child).unwrap();
+
+    let provenance = repo
+        .get_file_provenance_for_state(&child, Path::new("lib.rs"))
+        .expect("provenance lookup should succeed")
+        .expect("child provenance should be synthesized");
+    provenance
+        .validate()
+        .expect("translated provenance must remain valid");
+    let line_sets = provenance.line_origin_set_indexes().unwrap();
+    let first_line_origins = &provenance.origin_sets[line_sets[0] as usize].origin_indexes;
+    assert_eq!(first_line_origins, &[0]);
 }

@@ -78,34 +78,25 @@ impl<K: Eq + Hash + Clone, V: Clone> OnceMap<K, V> {
             return v;
         }
         let v = init().await;
-        self.map()
-            .lock_or_poisoned()
-            .insert(key.clone(), v.clone());
+        self.map().lock_or_poisoned().insert(key.clone(), v.clone());
         v
     }
 
     /// Read without computing. Returns `None` if the key was never inserted.
     pub fn get(&self, key: &K) -> Option<V> {
-        self.map()
-            .lock_or_poisoned()
-            .get(key)
-            .cloned()
+        self.map().lock_or_poisoned().get(key).cloned()
     }
 
     /// Direct insert. Returns the previous value if any.
     pub fn insert(&self, key: K, value: V) -> Option<V> {
-        self.map()
-            .lock_or_poisoned()
-            .insert(key, value)
+        self.map().lock_or_poisoned().insert(key, value)
     }
 
     /// Remove and return the value for `key`, if any. Used by call
     /// sites that need to tear down a cached resource (the mount
     /// registry hands the handle back so the caller can unmount it).
     pub fn remove(&self, key: &K) -> Option<V> {
-        self.map()
-            .lock_or_poisoned()
-            .remove(key)
+        self.map().lock_or_poisoned().remove(key)
     }
 }
 

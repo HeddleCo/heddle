@@ -42,7 +42,8 @@ pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, RefsList, UpdateRef};
 pub use message_status::{Error, ErrorCode, Status, StatusCode};
 pub use native_pack::{
-    NativePackBundle, PackChunkState, build_native_pack, install_received_pack,
+    GrowingPackChunkReader, NativePackBundle, NativePackFileBundle, NativePackStreamingWriter,
+    PackChunkSpool, PackChunkState, PackFileChunkReader, build_native_pack, install_received_pack,
     is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
     receive_pack_chunk,
 };

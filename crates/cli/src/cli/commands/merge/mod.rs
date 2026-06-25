@@ -730,11 +730,6 @@ pub(crate) fn merge_thread_into_current(
                         .any(|blocker| is_real_merge_blocker(blocker))
                 {
                     Some(report.recommended_action.clone())
-                } else if preview_report
-                    .as_ref()
-                    .is_some_and(preview_needs_readiness_review)
-                {
-                    None
                 } else {
                     Some(land_local_command(&thread.id))
                 }
@@ -2030,14 +2025,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         // command. `land` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        if input
-            .preview_report
-            .is_some_and(preview_needs_readiness_review)
-        {
-            None
-        } else {
-            input.thread.as_ref().map(|t| land_local_command(&t.id))
-        }
+        input.thread.as_ref().map(|t| land_local_command(&t.id))
     } else {
         // Clean apply: nothing to do.
         None
@@ -2594,19 +2582,9 @@ fn render_merge_output(cli: &Cli, repo: &Repository, output: MergeOutput) -> Res
 /// real merge blocker (something that prevents `heddle merge` from
 /// advancing state) versus a non-blocking nudge.
 ///
-/// Real blockers are conflict-shaped strings ("path conflict(s) need
-/// manual resolution") or explicit policy gates such as heavy-impact
-/// review. Lower-confidence review nudges remain advisory; treating
-/// every "needs attention" string as a blocker causes the "merge
-/// succeeded but status:blocked" contradiction that this helper exists
-/// to prevent.
-fn preview_needs_readiness_review(report: &ThreadPreviewReport) -> bool {
-    report.thread_state != ThreadState::Ready.to_string() && !report.heavy_impact_paths.is_empty()
-}
-
 fn is_real_merge_blocker(advisory: &str) -> bool {
     let lower = advisory.to_lowercase();
-    lower.contains("path conflict") || lower.contains("heavy-impact change")
+    lower.contains("path conflict")
 }
 
 fn thread_paths(thread: &Option<Thread>) -> Vec<String> {

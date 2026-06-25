@@ -18,6 +18,7 @@ use sley::{FullName, RefPrecondition, Repository as SleyRepository};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
@@ -211,6 +212,9 @@ pub async fn cmd_push(
     }
 
     let user_config = UserConfig::load_default()?;
+    if state.is_none() {
+        auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Push)?;
+    }
 
     let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
 
