@@ -163,6 +163,16 @@ fn load_signer_reads_generated_pkcs8_keys_explicitly_and_implicitly() {
 }
 
 #[test]
+fn ed25519_pkcs8_loader_accepts_trailing_blank_line() {
+    let signer = Ed25519Signer::generate().expect("generate Ed25519 signer");
+    let mut pem = signer.to_pem().expect("export Ed25519 PEM");
+    pem.push('\n');
+
+    let loaded = Ed25519Signer::from_pem(&pem).expect("load Ed25519 PEM with trailing blank line");
+    assert_eq!(loaded.public_key(), signer.public_key());
+}
+
+#[test]
 fn load_signer_accepts_ecdsa_p256_alias_for_generated_pkcs8_key() {
     let signer = P256Signer::generate().expect("generate P-256 signer");
     let temp = TempDir::new().expect("create temp dir");

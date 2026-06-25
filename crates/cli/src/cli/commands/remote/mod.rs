@@ -23,7 +23,11 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
+use crate::client::HostedGrpcClient;
+#[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
+#[cfg(feature = "client")]
+use crate::remote::Remote;
 use crate::{
     bridge::{
         GitBridge,
@@ -208,7 +212,12 @@ pub async fn cmd_push(
 
     let user_config = UserConfig::load_default()?;
 
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
+
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && !repo.hosted_enabled()
+        && !push_uses_hosted_network
+    {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
         } else {
@@ -405,6 +414,7 @@ pub async fn cmd_push(
                 PushNetworkOptions {
                     addr,
                     repo_path: repo_path.as_deref(),
+                    remote_arg: remote.as_deref(),
                     session: network_session
                         .as_ref()
                         .context("network client config was not prevalidated")?,
@@ -639,6 +649,13 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
         return Ok(());
     }
     Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
+}
+
+fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
+    matches!(
+        classify_remote_spec(repo, remote_arg),
+        Some(RemoteTransportKind::NetworkHeddle)
+    )
 }
 
 fn native_heddle_local_push_target(
@@ -1164,10 +1181,6 @@ async fn push_local(
 
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
-    let repo_path = options
-        .repo_path
-        .context("network remotes must include a hosted repository path")?;
-
     let mut client = options.session.connect(options.addr).await?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
@@ -1178,10 +1191,15 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         );
     }
 
+    let repo_path = match options.repo_path {
+        Some(repo_path) => repo_path.to_string(),
+        None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
+    };
+
     let result = client
         .push(
             repo,
-            repo_path,
+            &repo_path,
             *options.state_id,
             options.track_name,
             options.force,
@@ -1218,9 +1236,152 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 }
 
 #[cfg(feature = "client")]
+async fn auto_provision_hosted_repo(
+    repo: &Repository,
+    client: &mut HostedGrpcClient,
+    options: &PushNetworkOptions<'_>,
+) -> Result<String> {
+    let namespace = client.get_current_user_namespace().await?;
+    let slug = default_spool_slug_from_repo_root(repo.root())?;
+    let created = client
+        .create_repository(&namespace.full_path, &slug)
+        .await
+        .map_err(|err| {
+            let full_path = format!("{}/{}", namespace.full_path, slug);
+            anyhow!(RecoveryAdvice::remote_push_failed(
+                options.track_name,
+                &format!(
+                    "could not create hosted spool {full_path}: {err}. If this spool already exists, push to heddle://{}/{full_path} or choose another local folder name",
+                    options.addr
+                ),
+            ))
+        })?;
+
+    let configured_remote = persist_auto_provisioned_remote(
+        repo,
+        options.remote_arg,
+        options.addr,
+        &created.full_path,
+    )?;
+
+    if !should_output_json(options.cli, Some(repo.config())) {
+        println!(
+            "{} created hosted spool {}",
+            style::ok_marker(),
+            style::bold(&created.full_path)
+        );
+        if let Some(remote_name) = configured_remote {
+            println!(
+                "{}",
+                style::field(
+                    "remote",
+                    &format!(
+                        "{} -> {}",
+                        style::bold(&remote_name),
+                        style::dim(&format!("heddle://{}/{}", options.addr, created.full_path))
+                    )
+                )
+            );
+        } else {
+            print_next(&format!(
+                "heddle remote add origin heddle://{}/{}",
+                options.addr, created.full_path
+            ));
+        }
+    }
+
+    Ok(created.full_path)
+}
+
+#[cfg(feature = "client")]
+fn persist_auto_provisioned_remote(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+    addr: SocketAddr,
+    full_path: &str,
+) -> Result<Option<String>> {
+    let Some(remote_name) = auto_provision_remote_name(repo, remote_arg)? else {
+        return Ok(None);
+    };
+    let mut cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    cfg.add(
+        &remote_name,
+        Remote {
+            url: format!("heddle://{addr}/{full_path}"),
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(Some(remote_name))
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_remote_name(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+) -> Result<Option<String>> {
+    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    match remote_arg {
+        Some(arg) if cfg.get(arg).is_ok() => Ok(Some(arg.to_string())),
+        Some(arg) => {
+            let is_direct_network_without_path = matches!(
+                RemoteTarget::parse(arg),
+                Ok(RemoteTarget::Network {
+                    repo_path: None,
+                    ..
+                })
+            );
+            if is_direct_network_without_path && cfg.default_name().is_none() {
+                Ok(Some("origin".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(Some(
+            cfg.default_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| "origin".to_string()),
+        )),
+    }
+}
+
+fn default_spool_slug_from_repo_root(root: &Path) -> Result<String> {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let slug = spool_slug_from_local_name(name);
+    if slug.is_empty() {
+        return Err(anyhow!(
+            "could not derive a hosted spool name from {}; rename the directory or pass a full hosted remote path",
+            root.display()
+        ));
+    }
+    Ok(slug)
+}
+
+fn spool_slug_from_local_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            slug.push(ch);
+            last_was_separator = false;
+        } else if !slug.is_empty() && !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+#[cfg(feature = "client")]
 struct PushNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
+    remote_arg: Option<&'a str>,
     session: &'a HostedSession,
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
@@ -1244,6 +1405,53 @@ mod git_overlay_config_atomic_tests {
 
     fn init_dot_git(root: &Path) {
         fs::create_dir_all(root.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn spool_slug_from_local_name_normalizes_folder_names() {
+        assert_eq!(spool_slug_from_local_name("My Cool Repo"), "my-cool-repo");
+        assert_eq!(spool_slug_from_local_name("Heddle_CLI.v2"), "heddle-cli-v2");
+        assert_eq!(spool_slug_from_local_name("---"), "");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_remote_name_uses_existing_or_origin_remote() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        assert_eq!(
+            auto_provision_remote_name(&repo, None).unwrap().as_deref(),
+            Some("origin")
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            Some("origin")
+        );
+
+        let mut cfg = RemoteConfig::open(&repo).unwrap();
+        cfg.add(
+            "weft",
+            Remote {
+                url: "heddle://127.0.0.1:8421".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("weft"))
+                .unwrap()
+                .as_deref(),
+            Some("weft")
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            None
+        );
     }
 
     #[test]

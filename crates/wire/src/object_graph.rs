@@ -128,6 +128,15 @@ pub fn enumerate_state_closure_with_options(
                 &mut out,
             )?;
         }
+        if let Some(discussions_blob) = state.discussions {
+            enumerate_blob_filtered(
+                store,
+                discussions_blob,
+                &excluded_hashes,
+                &mut seen_hashes,
+                &mut out,
+            )?;
+        }
     }
 
     Ok(out)
@@ -197,6 +206,15 @@ pub fn enumerate_state_closure_plan_with_options(
             enumerate_tree_plan_filtered(
                 store,
                 context_root,
+                &excluded_hashes,
+                &mut seen_hashes,
+                &mut out,
+            )?;
+        }
+        if let Some(discussions_blob) = state.discussions {
+            enumerate_blob_plan_filtered(
+                store,
+                discussions_blob,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut out,
@@ -278,6 +296,28 @@ fn enumerate_tree_closure_filtered(
     }
 
     Ok(())
+}
+
+fn enumerate_blob_filtered(
+    store: &impl ObjectStore,
+    blob_hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    out: &mut Vec<ObjectInfo>,
+) -> Result<()> {
+    if excluded.contains(&blob_hash) || !seen.insert(blob_hash) {
+        return Ok(());
+    }
+    let blob = store
+        .get_blob(&blob_hash)?
+        .ok_or_else(|| ProtocolError::ObjectNotFound(blob_hash.to_hex()))?;
+    out.push(ObjectInfo {
+        id: ObjectId::Hash(blob_hash),
+        obj_type: ObjectType::Blob,
+        size: blob.size() as u64,
+        delta_base: None,
+    });
+    emit_redaction_info(store, &blob_hash, out)
 }
 
 /// If `state` carries a state-visibility sidecar, push a StateVisibility
@@ -385,6 +425,26 @@ fn enumerate_tree_plan_filtered(
     Ok(())
 }
 
+fn enumerate_blob_plan_filtered(
+    store: &impl ObjectStore,
+    blob_hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    out: &mut Vec<PlannedObject>,
+) -> Result<()> {
+    if excluded.contains(&blob_hash) || !seen.insert(blob_hash) {
+        return Ok(());
+    }
+    if store.get_blob(&blob_hash)?.is_none() {
+        return Err(ProtocolError::ObjectNotFound(blob_hash.to_hex()));
+    }
+    out.push(PlannedObject {
+        id: ObjectId::Hash(blob_hash),
+        obj_type: ObjectType::Blob,
+    });
+    emit_redaction_plan(store, &blob_hash, out)
+}
+
 fn emit_redaction_plan(
     store: &impl ObjectStore,
     blob: &ContentHash,
@@ -435,6 +495,9 @@ fn collect_excluded(
         }
         if let Some(context_root) = state.context {
             collect_tree_hashes(store, context_root, &mut excluded_hashes)?;
+        }
+        if let Some(discussions_blob) = state.discussions {
+            excluded_hashes.insert(discussions_blob);
         }
     }
 
@@ -508,7 +571,8 @@ mod tests {
     use chrono::Utc;
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, Principal, Redaction, State, StateVisibility, Tree,
+            Attribution, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
+            DiscussionsBlob, Principal, Redaction, State, StateVisibility, SymbolAnchor, Tree,
             TreeEntry, VisibilityTier,
         },
         store::ObjectStore,
@@ -819,6 +883,67 @@ mod tests {
                 .any(|p| p.obj_type == ObjectType::StateVisibility
                     && p.id == ObjectId::ChangeId(state.change_id)),
             "plan closure must include a StateVisibility entry for the visible state"
+        );
+    }
+
+    #[test]
+    fn enumerate_state_closure_emits_discussions_blob() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        let principal = Principal::new("Tester", "tester@example.test");
+        let discussion_bytes = DiscussionsBlob::new(vec![Discussion {
+            id: "disc-1".to_string(),
+            anchor: SymbolAnchor::new("src/lib.rs", "answer"),
+            opened_against_state: state.change_id,
+            opened_at: 1_782_400_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: principal,
+                body: "Should this sync?".to_string(),
+                posted_at: 1_782_400_000,
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            orphaned: false,
+            visibility: VisibilityTier::default(),
+            resolved_annotation_id: None,
+        }])
+        .encode()
+        .expect("encode discussions");
+        let discussion_hash = repo
+            .store()
+            .put_blob(&Blob::new(discussion_bytes))
+            .expect("put discussions blob");
+        let state_with_discussions = state.with_discussions(discussion_hash);
+        repo.store()
+            .put_state(&state_with_discussions)
+            .expect("put state with discussions");
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state_with_discussions.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state_with_discussions.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            full.iter().any(|info| info.obj_type == ObjectType::Blob
+                && info.id == ObjectId::Hash(discussion_hash)),
+            "full closure must include the discussions blob referenced by the state"
+        );
+        assert!(
+            plan.iter()
+                .any(|p| p.obj_type == ObjectType::Blob && p.id == ObjectId::Hash(discussion_hash)),
+            "plan closure must include the discussions blob referenced by the state"
         );
     }
 }

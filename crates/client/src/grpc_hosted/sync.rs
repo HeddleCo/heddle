@@ -1279,6 +1279,11 @@ fn mark_missing_blobs_for_state(
     if let Some(context_root) = state.context.as_ref() {
         missing.extend(collect_missing_blobs(repo, context_root)?);
     }
+    if let Some(discussions_blob) = state.discussions.as_ref()
+        && !repo.store().has_blob(discussions_blob)?
+    {
+        missing.push(*discussions_blob);
+    }
     missing
         .into_iter()
         .try_for_each(|hash| repo.record_missing_blob(hash).map_err(ProtocolError::from))
@@ -1295,6 +1300,9 @@ fn clear_missing_blobs_for_state(
     let mut missing = collect_missing_blobs(repo, &state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
         missing.extend(collect_missing_blobs(repo, context_root)?);
+    }
+    if let Some(discussions_blob) = state.discussions.as_ref() {
+        missing.push(*discussions_blob);
     }
     missing
         .into_iter()
