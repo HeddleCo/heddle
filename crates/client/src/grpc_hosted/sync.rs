@@ -23,7 +23,10 @@ use repo::{
     GitCheckpointRecord, Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
     ThreadManager,
 };
-use sley::{EntryKind, GitObjectType, ObjectId as GitObjectId, Repository as SleyRepository};
+use sley::{
+    EntryKind, GitObjectType, ObjectId as GitObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -777,6 +780,7 @@ impl HostedGrpcClient {
         } else {
             None
         };
+        let mut git_lane_repo = None;
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -877,6 +881,15 @@ impl HostedGrpcClient {
                                 transfer.state_id
                             ))
                         })?;
+                    let decode_elapsed = decode_start.elapsed();
+                    profile.store_receive_object += decode_elapsed;
+                }
+                Some(pull_message::Body::GitLane(transfer)) => {
+                    let decode_start = Instant::now();
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(git_lane_transfer_size(&transfer));
+                    accept_git_lane_pull_transfer(repo, &mut git_lane_repo, transfer)?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
@@ -1732,6 +1745,201 @@ fn git_object_kind(object_type: GitObjectType) -> GitObjectKind {
         GitObjectType::Blob => GitObjectKind::Blob,
         GitObjectType::Tag => GitObjectKind::Tag,
     }
+}
+
+fn git_object_type_from_proto(kind: i32) -> Result<GitObjectType, ProtocolError> {
+    match GitObjectKind::try_from(kind).unwrap_or(GitObjectKind::Unspecified) {
+        GitObjectKind::Commit => Ok(GitObjectType::Commit),
+        GitObjectKind::Tree => Ok(GitObjectType::Tree),
+        GitObjectKind::Blob => Ok(GitObjectType::Blob),
+        GitObjectKind::Tag => Ok(GitObjectType::Tag),
+        GitObjectKind::Unspecified => Err(ProtocolError::InvalidState(
+            "Git object kind is required".to_string(),
+        )),
+    }
+}
+
+fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
+    match transfer.body.as_ref() {
+        Some(git_lane_transfer::Body::LooseObject(object)) => object.object_body.len(),
+        Some(git_lane_transfer::Body::RefUpdate(update)) => update
+            .target_oid
+            .len()
+            .saturating_add(update.peeled_oid.len())
+            .saturating_add(update.expected_target_oid.len())
+            .saturating_add(
+                update
+                    .checkpoint
+                    .as_ref()
+                    .map(git_checkpoint_transfer_size)
+                    .unwrap_or_default(),
+            ),
+        Some(git_lane_transfer::Body::Checkpoint(checkpoint)) => {
+            git_checkpoint_transfer_size(checkpoint)
+        }
+        None => 0,
+    }
+}
+
+fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
+    checkpoint
+        .heddle_change_id
+        .len()
+        .saturating_add(checkpoint.git_commit_oid.len())
+        .saturating_add(checkpoint.thread.len())
+        .saturating_add(checkpoint.metadata_json.len())
+}
+
+fn accept_git_lane_pull_transfer(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    transfer: GitLaneTransfer,
+) -> Result<(), ProtocolError> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    match transfer.body {
+        Some(git_lane_transfer::Body::LooseObject(object)) => {
+            accept_git_lane_loose_object(repo, git_repo, object)
+        }
+        Some(git_lane_transfer::Body::RefUpdate(update)) => {
+            accept_git_lane_ref_update(repo, git_repo, update)
+        }
+        Some(git_lane_transfer::Body::Checkpoint(checkpoint)) => {
+            record_git_lane_checkpoint(repo, git_lane_sley_repository(repo, git_repo)?, checkpoint)
+        }
+        None => Err(ProtocolError::InvalidState(
+            "GitLaneTransfer body is required".to_string(),
+        )),
+    }
+}
+
+fn accept_git_lane_loose_object(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    object: GitLooseObjectTransfer,
+) -> Result<(), ProtocolError> {
+    let git_repo = git_lane_sley_repository(repo, git_repo)?;
+    let kind = git_object_type_from_proto(object.kind)?;
+    let oid = git_oid_from_bytes(git_repo, "GitLooseObjectTransfer.oid", &object.oid)?;
+    let body_len = u64::try_from(object.object_body.len()).map_err(|_| {
+        ProtocolError::InvalidState("Git object body length exceeds u64".to_string())
+    })?;
+    if object.size != body_len {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git object {} size mismatch: declared {}, got {}",
+            oid.to_hex(),
+            object.size,
+            body_len
+        )));
+    }
+    let written = git_repo
+        .write_raw_object(kind, object.object_body.to_vec())
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("write Git object {}: {err}", oid.to_hex()))
+        })?;
+    if written != oid {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git object id mismatch: transfer named {}, body wrote {}",
+            oid.to_hex(),
+            written.to_hex()
+        )));
+    }
+    Ok(())
+}
+
+fn accept_git_lane_ref_update(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    update: GitRefUpdateTransfer,
+) -> Result<(), ProtocolError> {
+    let git_repo = git_lane_sley_repository(repo, git_repo)?;
+    let target = git_oid_from_bytes(
+        git_repo,
+        "GitRefUpdateTransfer.target_oid",
+        &update.target_oid,
+    )?;
+    let refs = git_repo.references();
+    let mut tx = refs.transaction();
+    tx.update_to(
+        update.name.clone(),
+        ReferenceTarget::Direct(target),
+        RefPrecondition::Any,
+        None,
+    );
+    tx.commit().map_err(|err| {
+        ProtocolError::InvalidState(format!("update Git ref {}: {err}", update.name))
+    })?;
+    if let Some(checkpoint) = update.checkpoint {
+        record_git_lane_checkpoint(repo, git_repo, checkpoint)?;
+    }
+    Ok(())
+}
+
+fn record_git_lane_checkpoint(
+    repo: &Repository,
+    git_repo: &SleyRepository,
+    checkpoint: GitCheckpointTransfer,
+) -> Result<(), ProtocolError> {
+    let state = ChangeId::try_from_slice(&checkpoint.heddle_change_id)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+    let commit_oid = git_oid_from_bytes(
+        git_repo,
+        "GitCheckpointTransfer.git_commit_oid",
+        &checkpoint.git_commit_oid,
+    )?;
+    let commit_hex = commit_oid.to_hex();
+    if repo
+        .latest_git_checkpoint_for_change(&state)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .is_some_and(|record| record.git_commit == commit_hex)
+    {
+        return Ok(());
+    }
+    let summary = serde_json::from_str::<serde_json::Value>(&checkpoint.metadata_json)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "pulled Git checkpoint".to_string());
+    repo.record_git_checkpoint(&state, commit_hex, summary)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+    Ok(())
+}
+
+fn git_lane_sley_repository<'a>(
+    repo: &Repository,
+    git_repo: &'a mut Option<SleyRepository>,
+) -> Result<&'a SleyRepository, ProtocolError> {
+    if git_repo.is_none() {
+        *git_repo = Some(
+            repo.git_overlay_sley_repository()
+                .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState(
+                        "git-overlay repository has no Git store".to_string(),
+                    )
+                })?,
+        );
+    }
+    match git_repo.as_ref() {
+        Some(git_repo) => Ok(git_repo),
+        None => Err(ProtocolError::InvalidState(
+            "git-overlay repository has no Git store".to_string(),
+        )),
+    }
+}
+
+fn git_oid_from_bytes(
+    git_repo: &SleyRepository,
+    field: &str,
+    bytes: &[u8],
+) -> Result<GitObjectId, ProtocolError> {
+    GitObjectId::from_raw(git_repo.object_format(), bytes)
+        .map_err(|err| ProtocolError::InvalidState(format!("{field}: {err}")))
 }
 
 async fn send_native_pack_streaming_messages(
