@@ -1200,15 +1200,27 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
-    let result = client
-        .push(
-            repo,
-            &repo_path,
-            *options.state_id,
-            options.track_name,
-            options.force,
-        )
-        .await?;
+    let result = if repo.capability() == RepositoryCapability::GitOverlay {
+        client
+            .push_git_overlay_checkpoint(
+                repo,
+                &repo_path,
+                *options.state_id,
+                options.track_name,
+                options.force,
+            )
+            .await?
+    } else {
+        client
+            .push(
+                repo,
+                &repo_path,
+                *options.state_id,
+                options.track_name,
+                options.force,
+            )
+            .await?
+    };
 
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
@@ -1348,6 +1360,7 @@ fn auto_provision_remote_name(
     }
 }
 
+#[cfg(any(feature = "client", test))]
 fn default_spool_slug_from_repo_root(root: &Path) -> Result<String> {
     let name = root
         .file_name()
@@ -1363,6 +1376,7 @@ fn default_spool_slug_from_repo_root(root: &Path) -> Result<String> {
     Ok(slug)
 }
 
+#[cfg(any(feature = "client", test))]
 fn spool_slug_from_local_name(name: &str) -> String {
     let mut slug = String::new();
     let mut last_was_separator = false;

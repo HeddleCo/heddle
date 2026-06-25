@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -8,17 +8,22 @@ use std::{
 };
 
 use grpc::heddle::v1::{
-    GetBlobRequest, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
-    PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
-    RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
-    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
-    pull_message, push_message,
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitLooseObjectTransfer, GitObjectKind,
+    GitRefKind, GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor,
+    PackChunk, PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage,
+    PushRequest, RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary,
+    ThreadIntegrationPolicy, ThreadMetadata, ThreadVerificationSummary, TransportMode,
+    UpdateRefRequest, WantObjects, git_lane_transfer, pull_message, push_message,
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::{AnyStore, ObjectStore, PackObjectId},
 };
-use repo::{Repository, RevisionAddress, SyncedThreadMetadata, ThreadManager};
+use repo::{
+    GitCheckpointRecord, Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
+    ThreadManager,
+};
+use sley::{EntryKind, GitObjectType, ObjectId as GitObjectId, Repository as SleyRepository};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -51,6 +56,11 @@ struct PullWantPlan {
 }
 
 type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
+
+struct GitLanePushPlan {
+    local_revision_address: String,
+    messages: Vec<PushMessage>,
+}
 
 const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
 const PULL_PACK_SPOOL_OBJECT_THRESHOLD: usize = 512;
@@ -188,6 +198,51 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
     ) -> Result<PushComplete, ProtocolError> {
+        self.push_with_revision(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            native_revision_address(local_state),
+            None,
+        )
+        .await
+    }
+
+    pub async fn push_git_overlay_checkpoint(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: ChangeId,
+        target_thread: &str,
+        force: bool,
+    ) -> Result<PushComplete, ProtocolError> {
+        let git_lane = build_git_lane_push_plan(repo, local_state, target_thread)?;
+        let local_revision_address = git_lane.local_revision_address.clone();
+        self.push_with_revision(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            local_revision_address,
+            Some(git_lane),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_with_revision(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: ChangeId,
+        target_thread: &str,
+        force: bool,
+        local_revision_address: String,
+        git_lane: Option<GitLanePushPlan>,
+    ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
         let object_plan = wire::enumerate_state_closure_plan(repo.store(), local_state)?;
@@ -224,7 +279,7 @@ impl HostedGrpcClient {
                 allow_partial_fetch: true,
                 thread_metadata: thread_metadata
                     .map(|metadata| to_proto_thread_metadata(&metadata)),
-                local_revision_address: native_revision_address(local_state),
+                local_revision_address,
                 client_operation_id: String::new(),
             })),
         };
@@ -313,6 +368,14 @@ impl HostedGrpcClient {
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
+        }
+
+        if let Some(git_lane) = git_lane {
+            for message in git_lane.messages {
+                tx.send(message).await.map_err(|_| {
+                    ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
+                })?;
+            }
         }
         drop(tx);
 
@@ -1481,6 +1544,196 @@ fn native_revision_address(change_id: ChangeId) -> String {
     RevisionAddress::heddle(change_id).to_string()
 }
 
+fn git_revision_address(commit_oid: &GitObjectId) -> String {
+    RevisionAddress::git_commit(commit_oid.to_hex()).to_string()
+}
+
+fn build_git_lane_push_plan(
+    repo: &Repository,
+    local_state: ChangeId,
+    target_thread: &str,
+) -> Result<GitLanePushPlan, ProtocolError> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Err(ProtocolError::InvalidState(
+            "Git lane pushes require a git-overlay repository".to_string(),
+        ));
+    }
+    let checkpoint = repo
+        .latest_git_checkpoint_for_change(&local_state)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "state {} has no Git checkpoint; run `heddle checkpoint` before pushing this git-overlay spool",
+                local_state.short()
+            ))
+        })?;
+    let git_repo = repo
+        .git_overlay_sley_repository()
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("git-overlay repository has no Git store".to_string())
+        })?;
+    let commit_oid = GitObjectId::from_hex(git_repo.object_format(), &checkpoint.git_commit)
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!(
+                "checkpoint {} has invalid Git commit oid: {err}",
+                checkpoint.git_commit
+            ))
+        })?;
+    git_repo.read_commit(&commit_oid).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} is not a readable Git commit: {err}",
+            checkpoint.git_commit
+        ))
+    })?;
+
+    let mut messages = collect_git_lane_loose_object_messages(&git_repo, commit_oid)?;
+    messages.push(git_ref_update_message(
+        local_state,
+        target_thread,
+        commit_oid,
+        &checkpoint,
+    )?);
+
+    Ok(GitLanePushPlan {
+        local_revision_address: git_revision_address(&commit_oid),
+        messages,
+    })
+}
+
+fn collect_git_lane_loose_object_messages(
+    git_repo: &SleyRepository,
+    root: GitObjectId,
+) -> Result<Vec<PushMessage>, ProtocolError> {
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([root]);
+    let mut messages = Vec::new();
+
+    while let Some(oid) = queue.pop_front() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        let object = git_repo.read_object(&oid).map_err(|err| {
+            ProtocolError::InvalidState(format!("read Git object {}: {err}", oid.to_hex()))
+        })?;
+        let object_type = object.object_type;
+        let body = object.body.clone();
+        messages.push(git_loose_object_message(&oid, object_type, body)?);
+
+        match object_type {
+            GitObjectType::Commit => {
+                let commit = git_repo.read_commit(&oid).map_err(|err| {
+                    ProtocolError::InvalidState(format!("parse Git commit {}: {err}", oid.to_hex()))
+                })?;
+                queue.push_back(commit.tree);
+                queue.extend(commit.parents);
+            }
+            GitObjectType::Tree => {
+                let tree = git_repo.read_tree(&oid).map_err(|err| {
+                    ProtocolError::InvalidState(format!("parse Git tree {}: {err}", oid.to_hex()))
+                })?;
+                for entry in tree.entries {
+                    match EntryKind::from_mode(entry.mode) {
+                        Some(
+                            EntryKind::Tree
+                            | EntryKind::Blob
+                            | EntryKind::BlobExecutable
+                            | EntryKind::Symlink,
+                        ) => {
+                            queue.push_back(entry.oid);
+                        }
+                        Some(EntryKind::Commit) => {
+                            // Gitlink entries name commits owned by the submodule
+                            // repository, not by this spool's Git object graph.
+                        }
+                        None => {
+                            return Err(ProtocolError::InvalidState(format!(
+                                "Git tree {} contains unsupported entry mode {:o}",
+                                oid.to_hex(),
+                                entry.mode
+                            )));
+                        }
+                    }
+                }
+            }
+            GitObjectType::Tag => {
+                let tag = git_repo.read_tag(&oid).map_err(|err| {
+                    ProtocolError::InvalidState(format!("parse Git tag {}: {err}", oid.to_hex()))
+                })?;
+                queue.push_back(tag.object);
+            }
+            GitObjectType::Blob => {}
+        }
+    }
+
+    Ok(messages)
+}
+
+fn git_loose_object_message(
+    oid: &GitObjectId,
+    object_type: GitObjectType,
+    body: Vec<u8>,
+) -> Result<PushMessage, ProtocolError> {
+    let size = u64::try_from(body.len()).map_err(|_| {
+        ProtocolError::InvalidState("Git object body length exceeds u64".to_string())
+    })?;
+    Ok(git_lane_push_message(git_lane_transfer::Body::LooseObject(
+        GitLooseObjectTransfer {
+            oid: oid.as_bytes().to_vec().into(),
+            kind: git_object_kind(object_type) as i32,
+            size,
+            object_body: body.into(),
+        },
+    )))
+}
+
+fn git_ref_update_message(
+    local_state: ChangeId,
+    target_thread: &str,
+    commit_oid: GitObjectId,
+    checkpoint: &GitCheckpointRecord,
+) -> Result<PushMessage, ProtocolError> {
+    let metadata_json = serde_json::json!({
+        "source": "heddle-checkpoint",
+        "summary": checkpoint.summary,
+        "committed_at": checkpoint.committed_at,
+    })
+    .to_string();
+    Ok(git_lane_push_message(git_lane_transfer::Body::RefUpdate(
+        GitRefUpdateTransfer {
+            name: format!("refs/heads/{target_thread}"),
+            kind: GitRefKind::Branch as i32,
+            target_oid: commit_oid.as_bytes().to_vec().into(),
+            peeled_oid: Vec::new().into(),
+            expected_missing: false,
+            expected_target_oid: Vec::new().into(),
+            checkpoint: Some(GitCheckpointTransfer {
+                heddle_change_id: local_state.as_bytes().to_vec().into(),
+                git_commit_oid: commit_oid.as_bytes().to_vec().into(),
+                thread: target_thread.to_string(),
+                metadata_json,
+            }),
+        },
+    )))
+}
+
+fn git_lane_push_message(body: git_lane_transfer::Body) -> PushMessage {
+    PushMessage {
+        body: Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(body),
+        })),
+    }
+}
+
+fn git_object_kind(object_type: GitObjectType) -> GitObjectKind {
+    match object_type {
+        GitObjectType::Commit => GitObjectKind::Commit,
+        GitObjectType::Tree => GitObjectKind::Tree,
+        GitObjectType::Blob => GitObjectKind::Blob,
+        GitObjectType::Tag => GitObjectKind::Tag,
+    }
+}
+
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushMessage>,
     repo: &Repository,
@@ -1777,6 +2030,74 @@ mod tests {
                 "keying path must stay byte-identical to the throwaway-encode path",
             );
         }
+    }
+
+    #[test]
+    fn git_lane_messages_walk_commit_tree_blob_and_attach_checkpoint() {
+        let dir = TempDir::new().expect("tempdir");
+        let git = sley::Repository::init(dir.path()).expect("init git");
+        let blob_oid = git.write_blob(b"hello\n").expect("write blob");
+        let tree = sley::TreeObject {
+            entries: vec![sley::plumbing::sley_object::TreeEntry {
+                mode: 0o100644,
+                name: sley::BString::from(b"hello.txt"),
+                oid: blob_oid,
+            }],
+        };
+        let tree_oid = git
+            .write_raw_object(sley::GitObjectType::Tree, tree.write())
+            .expect("write tree");
+        let commit = sley::CommitObject {
+            tree: tree_oid,
+            parents: Vec::new(),
+            author: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            committer: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            encoding: None,
+            message: b"checkpoint\n".to_vec(),
+        };
+        let commit_oid = git
+            .write_raw_object(sley::GitObjectType::Commit, commit.write())
+            .expect("write commit");
+
+        let messages = collect_git_lane_loose_object_messages(&git, commit_oid)
+            .expect("collect git lane messages");
+        let kinds = messages
+            .iter()
+            .filter_map(|message| match &message.body {
+                Some(push_message::Body::GitLane(GitLaneTransfer {
+                    body: Some(git_lane_transfer::Body::LooseObject(object)),
+                })) => Some(GitObjectKind::try_from(object.kind).expect("known kind")),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(kinds.len(), 3);
+        assert!(kinds.contains(&GitObjectKind::Commit));
+        assert!(kinds.contains(&GitObjectKind::Tree));
+        assert!(kinds.contains(&GitObjectKind::Blob));
+
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let ref_message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+        let Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::RefUpdate(update)),
+        })) = ref_message.body
+        else {
+            panic!("expected git ref update message");
+        };
+        assert_eq!(update.name, "refs/heads/main");
+        assert_eq!(update.kind, GitRefKind::Branch as i32);
+        assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
+        let checkpoint = update.checkpoint.expect("checkpoint");
+        assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
+        assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
+        assert_eq!(checkpoint.thread, "main");
     }
 
     fn loose_tree_path(repo: &Repository, hash: &ContentHash) -> std::path::PathBuf {
