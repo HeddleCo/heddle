@@ -28,6 +28,7 @@ mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
+mod revision_address;
 pub use repository_state_visibility::{
     DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,
     VisibilitySidecarRestore,
@@ -105,6 +106,7 @@ pub use repository::{
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
+pub use revision_address::{RevisionAddress, RevisionAddressParseError};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,

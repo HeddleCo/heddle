@@ -1073,72 +1073,11 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-
-        let current_branch = match self.git_overlay_current_branch()? {
-            Some(branch) => branch,
-            None => return Ok(None),
-        };
-        let branch_tips = self.git_overlay_branch_tips()?;
-        let imported_threads: std::collections::HashSet<ThreadName> =
-            self.refs().list_threads()?.into_iter().collect();
-        let threads_with_real_history: std::collections::HashSet<String> = imported_threads
-            .iter()
-            .filter_map(|thread| {
-                self.refs()
-                    .get_thread(thread)
-                    .ok()
-                    .flatten()
-                    .and_then(|change| self.store.get_state(&change).ok())
-                    .flatten()
-                    .filter(|state| !is_synthetic_root(state))
-                    .map(|_| thread.to_string())
-            })
-            .collect();
-        let mut missing_branches = branch_tips
-            .into_iter()
-            .filter(|tip| {
-                !(tip.history_imported
-                    || threads_with_real_history.contains(&tip.branch)
-                        && tip.mapped_change.is_some())
-            })
-            .map(|tip| tip.branch)
-            .collect::<Vec<_>>();
-        missing_branches.sort_by(|left, right| {
-            match (left == &current_branch, right == &current_branch) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => left.cmp(right),
-            }
-        });
-        missing_branches.dedup();
-
-        if missing_branches.is_empty() {
-            return Ok(None);
-        }
-
-        let missing_tags = self
-            .git_overlay_tag_tips()?
-            .into_iter()
-            .any(|tip| !tip.history_imported);
-        let recommended_command = if missing_branches.len() > 1 || missing_tags {
-            "heddle adopt".to_string()
-        } else if missing_branches
-            .iter()
-            .any(|branch| branch == &current_branch)
-        {
-            format!("heddle adopt --ref {current_branch}")
-        } else if missing_branches.len() == 1 {
-            format!("heddle adopt --ref {}", missing_branches[0])
-        } else {
-            "heddle adopt".to_string()
-        };
-
-        Ok(Some(GitOverlayImportHint {
-            current_branch,
-            missing_branch_count: missing_branches.len(),
-            missing_branches,
-            recommended_command,
-        }))
+        // Git-overlay treats Git refs and commits as Git-owned storage that
+        // Heddle reads directly. Missing Git->Heddle state mappings are not an
+        // everyday "needs adopt" condition; `adopt` is reserved for explicit
+        // conversion into Heddle-native storage.
+        Ok(None)
     }
 
     pub fn git_overlay_branch_tips(&self) -> Result<Vec<GitOverlayBranchTip>> {

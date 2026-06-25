@@ -36,7 +36,7 @@ use super::{
 use crate::{
     attribution::clean_attribution_value,
     bridge::GitBridge,
-    cli::{Cli, output_is_compact, should_output_json, style},
+    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -190,7 +190,6 @@ pub async fn cmd_snapshot(
     if let Some(advice) = unimported_git_history_advice(&repo, "capture")? {
         return Err(anyhow!(advice));
     }
-    preflight_large_capture(&repo, force)?;
     let complete_thread_resolution =
         repo.merge_state_manager()
             .load()?
@@ -200,6 +199,10 @@ pub async fn cmd_snapshot(
                     .iter()
                     .all(|path| merge_state.resolved.contains(path))
             });
+    if !complete_thread_resolution && !capture_has_worktree_changes(&repo)? {
+        return Err(anyhow!(nothing_to_capture_advice()));
+    }
+    preflight_large_capture(&repo, force)?;
     let mut output = match create_snapshot(&repo, &user_config, Some(intent), confidence, agent) {
         Ok(output) => output,
         Err(err) => {
@@ -352,6 +355,36 @@ fn missing_capture_intent_advice() -> RecoveryAdvice {
         "heddle capture -m \"...\"",
         vec!["heddle capture -m \"...\"".to_string()],
     )
+}
+
+fn nothing_to_capture_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "nothing_to_commit",
+        "nothing to capture: worktree has no changes eligible for Heddle capture",
+        "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
+        "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",
+        "capture would not create a meaningful Heddle state",
+        "repository state was left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
+fn capture_has_worktree_changes(repo: &Repository) -> Result<bool> {
+    if repo.current_state()?.is_none()
+        && let Some(status) = repo.git_overlay_worktree_status()?
+    {
+        return Ok(!status.is_clean());
+    }
+    let tree = match repo.current_state()? {
+        Some(state) => repo.require_tree(&state.tree)?,
+        None => Tree::new(),
+    };
+    let status = repo.compare_worktree_cached_with_options(
+        &tree,
+        &worktree_status_options(Some(repo.config())),
+    )?;
+    Ok(!status.is_clean())
 }
 
 fn missing_capture_identity_advice() -> RecoveryAdvice {

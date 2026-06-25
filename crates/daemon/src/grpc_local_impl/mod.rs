@@ -195,6 +195,7 @@ mod tests {
             success: true,
             old_value: marker.to_string(),
             error: String::new(),
+            old_revision_address: marker.to_string(),
         }
     }
 

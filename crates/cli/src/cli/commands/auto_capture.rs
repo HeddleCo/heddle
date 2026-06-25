@@ -211,4 +211,27 @@ mod tests {
         let status_options = crate::cli::worktree_status_options(Some(repo.config()));
         assert!(worktree_dirty(&repo, &status_options).unwrap());
     }
+
+    #[test]
+    fn command_boundary_auto_capture_is_noop_when_worktree_clean() {
+        let _env = AutoCaptureEnvGuard::clean();
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let path = repo.root().join("note.txt");
+        std::fs::write(&path, b"one\n").unwrap();
+        let seed = repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let outcome = auto_capture_command_boundary(
+            &quiet_cli(),
+            &repo,
+            &user_config(UserAutoCaptureMode::Command),
+            AutoCaptureTrigger::Push,
+        )
+        .unwrap();
+
+        assert!(outcome.is_none());
+        assert_eq!(repo.head().unwrap(), Some(seed.change_id));
+        let status_options = crate::cli::worktree_status_options(Some(repo.config()));
+        assert!(!worktree_dirty(&repo, &status_options).unwrap());
+    }
 }

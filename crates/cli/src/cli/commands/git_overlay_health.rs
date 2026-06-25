@@ -15,7 +15,7 @@ use repo::{
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
-use sley::{BString as GitBString, GitObjectType, Index, Repository as SleyRepository};
+use sley::{BString as GitBString, Index, Repository as SleyRepository};
 
 use super::{
     advice::RecoveryAdvice,
@@ -254,7 +254,7 @@ impl RepositoryVerificationState {
             .iter()
             .find(|check| {
                 matches!(check.name.as_str(), "head_mapping" | "tag_mapping")
-                    && check.status != "clean"
+                    && git_overlay_mapping_status_blocks(&check.status)
             })
             .or_else(|| {
                 health
@@ -908,7 +908,7 @@ fn mapping_verification_check(
         );
     }
     if let Some(mapping) = find_health_check(health, "head_mapping")
-        && mapping.status != "clean"
+        && git_overlay_mapping_status_blocks(&mapping.status)
     {
         return verification_check_from_health("Mapping", mapping, recommended_action, health);
     }
@@ -949,6 +949,10 @@ fn mapping_verification_check(
         None,
         Vec::new(),
     )
+}
+
+fn git_overlay_mapping_status_blocks(status: &str) -> bool {
+    !matches!(status, "clean" | "git_backed")
 }
 
 fn worktree_verification_check(
@@ -1440,7 +1444,7 @@ pub(crate) fn repository_setup_guidance(
     };
     let effect = match kind {
         RepositorySetupActionKind::Init => format!(
-            ".heddle metadata will be created; there are no Git commits to import yet, {worktree_tail}."
+            ".heddle metadata will be created; Git commits stay in Git storage, {worktree_tail}."
         ),
         RepositorySetupActionKind::Adopt
             if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
@@ -1635,38 +1639,10 @@ pub(crate) fn build_plain_git_verification_probe(
     let changes = plain_git_worktree_status(&root, &git_repo)?;
 
     let default_remote = git_default_remote_name_from_repo(&git_repo);
-    let git_head_has_commit = plain_git_head_has_commit(&git_repo, git_branch.as_deref())?;
-    let adopt = "heddle adopt".to_string();
     let init = "heddle init".to_string();
-    let import = if git_head_has_commit && (git_branches.len() > 1 || !git_tags.is_empty()) {
-        adopt.clone()
-    } else {
-        git_branch
-            .as_ref()
-            .filter(|_| git_head_has_commit)
-            .map(|branch| canonical_adopt_ref_command(branch))
-            .unwrap_or_else(|| adopt.clone())
-    };
-    let setup_action = if git_head_has_commit {
-        import.clone()
-    } else {
-        init.clone()
-    };
-    let setup_recovery_commands = if git_head_has_commit {
-        dedup_commands(vec![import.clone(), adopt.clone(), init.clone()])
-    } else {
-        vec![init.clone()]
-    };
-    let import_hint = git_head_has_commit.then(|| {
-        let missing_branches =
-            plain_git_missing_import_branches(git_branch.as_deref(), &git_branches);
-        PlainGitImportHint {
-            current_branch: git_branch.clone().unwrap_or_default(),
-            missing_branch_count: missing_branches.len(),
-            missing_branches,
-            recommended_command: import.clone(),
-        }
-    });
+    let setup_action = init.clone();
+    let setup_recovery_commands = vec![init.clone()];
+    let import_hint = None;
     let machine_contract_coverage = machine_contract_coverage();
     let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
     let action_plan = VerificationActionPlan {
@@ -1691,7 +1667,6 @@ pub(crate) fn build_plain_git_verification_probe(
     );
     details.insert("git_tag_count".to_string(), git_tags.len().to_string());
     let setup_action_fields = ActionFields::from_action(&setup_action);
-    let import_action_fields = ActionFields::from_action(&import);
     let mut checks = vec![
         VerificationCheck {
             name: "Git".to_string(),
@@ -1715,30 +1690,16 @@ pub(crate) fn build_plain_git_verification_probe(
             recovery_action_templates: action_templates(&setup_recovery_commands),
             details: BTreeMap::new(),
         },
-        if git_head_has_commit {
-            VerificationCheck {
-                name: "Mapping".to_string(),
-                status: "needs_import".to_string(),
-                clean: false,
-                summary: "Git history has not been imported into Heddle".to_string(),
-                recommended_action: Some(import.clone()),
-                recommended_action_template: import_action_fields.template,
-                recovery_commands: vec![import.clone()],
-                recovery_action_templates: action_templates(std::slice::from_ref(&import)),
-                details: BTreeMap::new(),
-            }
-        } else {
-            VerificationCheck {
-                name: "Mapping".to_string(),
-                status: "no_commits".to_string(),
-                clean: true,
-                summary: "No Git commits need import yet".to_string(),
-                recommended_action: None,
-                recommended_action_template: None,
-                recovery_commands: Vec::new(),
-                recovery_action_templates: Vec::new(),
-                details: BTreeMap::new(),
-            }
+        VerificationCheck {
+            name: "Mapping".to_string(),
+            status: "git_backed".to_string(),
+            clean: true,
+            summary: "Git refs will stay in Git storage after Heddle initialization".to_string(),
+            recommended_action: None,
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            details: BTreeMap::new(),
         },
     ];
     checks.push(verification_check(
@@ -1803,18 +1764,8 @@ pub(crate) fn build_plain_git_verification_probe(
         heddle_thread: None,
         worktree_dirty: !changes.is_clean(),
         worktree_state: if changes.is_clean() { "clean" } else { "dirty" }.to_string(),
-        import_state: if git_head_has_commit {
-            "needs_import"
-        } else {
-            "no_commits"
-        }
-        .to_string(),
-        mapping_state: if git_head_has_commit {
-            "needs_import"
-        } else {
-            "no_commits"
-        }
-        .to_string(),
+        import_state: "git_backed".to_string(),
+        mapping_state: "git_backed".to_string(),
         remote_drift: "unknown".to_string(),
         active_operation: None,
         default_remote,
@@ -1839,33 +1790,8 @@ pub(crate) fn build_plain_git_verification_probe(
     }))
 }
 
-fn plain_git_missing_import_branches(
-    git_branch: Option<&str>,
-    git_branches: &[String],
-) -> Vec<String> {
-    let mut missing = Vec::new();
-    if let Some(branch) = git_branch {
-        missing.push(branch.to_string());
-    }
-    missing.extend(
-        git_branches
-            .iter()
-            .filter(|branch| Some(branch.as_str()) != git_branch)
-            .cloned(),
-    );
-    dedup_commands(missing)
-}
-
 fn plain_git_current_branch(git_repo: &SleyRepository) -> Option<String> {
     git_repo.head().ok()?.branch_name().map(str::to_string)
-}
-
-fn dedup_commands(commands: Vec<String>) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    commands
-        .into_iter()
-        .filter(|command| seen.insert(command.clone()))
-        .collect()
 }
 
 fn plain_git_local_branches(git_repo: &SleyRepository) -> Vec<String> {
@@ -2062,22 +1988,6 @@ fn plain_git_head_index_or_empty(
 
 fn plain_git_path(path: &GitBString) -> String {
     String::from_utf8_lossy(path.as_bytes()).into_owned()
-}
-
-fn plain_git_head_has_commit(
-    git_repo: &SleyRepository,
-    git_branch: Option<&str>,
-) -> anyhow::Result<bool> {
-    let spec = git_branch
-        .map(|branch| format!("refs/heads/{branch}^{{commit}}"))
-        .unwrap_or_else(|| "HEAD^{commit}".to_string());
-    let Ok(id) = git_repo.rev_parse(&spec) else {
-        return Ok(false);
-    };
-    let Ok(object) = git_repo.read_object(&id) else {
-        return Ok(false);
-    };
-    Ok(object.object_type == GitObjectType::Commit)
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
@@ -2741,7 +2651,21 @@ fn build_git_overlay_health_inner(
                 checks,
             };
         }
-        Ok(Some(tip)) if !tip.history_imported => {}
+        Ok(Some(tip)) if !tip.history_imported => {
+            let mut details = BTreeMap::new();
+            details.insert("git_branch".to_string(), tip.branch.clone());
+            details.insert("git_commit".to_string(), tip.git_commit.clone());
+            checks.push(GitOverlayHealthCheck {
+                name: "head_mapping".to_string(),
+                status: "git_backed".to_string(),
+                summary: format!(
+                    "Git branch '{}' resolves directly to Git commit {}",
+                    tip.branch,
+                    short_oid(&tip.git_commit)
+                ),
+                details,
+            });
+        }
         Ok(Some(tip)) => checks.push(GitOverlayHealthCheck {
             name: "head_mapping".to_string(),
             status: "clean".to_string(),
@@ -2781,7 +2705,7 @@ fn build_git_overlay_health_inner(
         None => checks.push(GitOverlayHealthCheck {
             name: "import".to_string(),
             status: "clean".to_string(),
-            summary: "Git branch tips have been imported into Heddle".to_string(),
+            summary: "Git refs are read directly from Git storage".to_string(),
             details: BTreeMap::new(),
         }),
     }
@@ -3004,9 +2928,7 @@ fn build_git_overlay_health_inner(
 }
 
 fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealthCheck>> {
-    let mut missing = Vec::new();
     let mut mismatched = Vec::new();
-    let mut unmapped = Vec::new();
 
     for tip in repo.git_overlay_tag_tips()? {
         let marker = repo
@@ -3020,69 +2942,30 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
                 existing.short(),
                 mapped.short()
             )),
-            (Some(existing), None) => unmapped.push(format!(
-                "{} (marker {}; Git commit {})",
-                tip.tag,
-                existing.short(),
-                short_oid(&tip.git_commit)
-            )),
-            (None, _) => missing.push(tip.tag),
+            (Some(_), None) | (None, _) => {}
         }
     }
 
-    if mismatched.is_empty() && missing.is_empty() && unmapped.is_empty() {
+    if mismatched.is_empty() {
         return Ok(None);
     }
 
     let mut details = BTreeMap::new();
-    if !missing.is_empty() {
-        details.insert("missing_tags".to_string(), missing.join(", "));
-        details.insert("missing_tag_count".to_string(), missing.len().to_string());
-    }
-    if !mismatched.is_empty() {
-        details.insert("mismatched_tags".to_string(), mismatched.join(", "));
-        details.insert(
-            "mismatched_tag_count".to_string(),
-            mismatched.len().to_string(),
-        );
-    }
-    if !unmapped.is_empty() {
-        details.insert("unmapped_tags".to_string(), unmapped.join(", "));
-        details.insert("unmapped_tag_count".to_string(), unmapped.len().to_string());
-    }
-
-    if !mismatched.is_empty() || !unmapped.is_empty() {
-        let count = mismatched.len() + unmapped.len();
-        return Ok(Some(GitOverlayHealthCheck {
-            name: "tag_mapping".to_string(),
-            status: "tag_marker_mismatch".to_string(),
-            summary: format!(
-                "{count} Git tag marker(s) disagree with Heddle markers: {}",
-                preview_details(&mismatched, &unmapped)
-            ),
-            details,
-        }));
-    }
-
+    details.insert("mismatched_tags".to_string(), mismatched.join(", "));
+    details.insert(
+        "mismatched_tag_count".to_string(),
+        mismatched.len().to_string(),
+    );
     Ok(Some(GitOverlayHealthCheck {
         name: "tag_mapping".to_string(),
-        status: "tags_need_import".to_string(),
+        status: "tag_marker_mismatch".to_string(),
         summary: format!(
-            "{} Git tag(s) need Heddle marker import: {}",
-            missing.len(),
-            crate::cli::render::preview_list(&missing, missing.len())
+            "{} Git tag marker(s) disagree with Heddle markers: {}",
+            mismatched.len(),
+            crate::cli::render::preview_list(&mismatched, mismatched.len())
         ),
         details,
     }))
-}
-
-fn preview_details(primary: &[String], secondary: &[String]) -> String {
-    let items = primary
-        .iter()
-        .chain(secondary.iter())
-        .cloned()
-        .collect::<Vec<_>>();
-    crate::cli::render::preview_list(&items, items.len())
 }
 
 fn short_oid(oid: &str) -> &str {
@@ -3577,24 +3460,24 @@ mod tests {
         init.status = "needs_init".to_string();
         init.repository_mode = "plain-git".to_string();
         init.heddle_initialized = false;
-        init.import_state = "no_commits".to_string();
-        init.mapping_state = "no_commits".to_string();
+        init.import_state = "git_backed".to_string();
+        init.mapping_state = "git_backed".to_string();
 
         let guidance = repository_setup_guidance(&init).expect("init guidance");
         assert!(guidance.setup_line.contains("initialize Heddle"));
         assert!(guidance.setup_line.contains("heddle init"));
-        assert!(guidance.effect.contains("no Git commits to import yet"));
+        assert!(guidance.effect.contains("Git commits stay in Git storage"));
 
-        let mut adopt = verification_state(
+        let mut convert = verification_state(
             "heddle adopt --ref main",
             vec!["heddle adopt --ref main".to_string()],
         );
-        adopt.status = "needs_import".to_string();
-        adopt.repository_mode = "git-overlay".to_string();
-        adopt.import_state = "needs_import".to_string();
-        adopt.mapping_state = "needs_import".to_string();
+        convert.status = "needs_import".to_string();
+        convert.repository_mode = "git-overlay".to_string();
+        convert.import_state = "needs_import".to_string();
+        convert.mapping_state = "needs_import".to_string();
 
-        let guidance = repository_setup_guidance(&adopt).expect("adopt guidance");
+        let guidance = repository_setup_guidance(&convert).expect("conversion guidance");
         assert!(
             guidance
                 .setup_line
