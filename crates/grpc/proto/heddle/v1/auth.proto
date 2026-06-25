@@ -412,6 +412,12 @@ message MintAnonBiscuitRequest {
   // (operator-flippable break-glass under coordinated abuse). Empty
   // / omitted when the flag is off.
   optional string turnstile_token = 1;
+  // Opaque long-lived continuity token from the browser's HttpOnly
+  // anon-continuity cookie. When present and valid, the server mints
+  // the new 24h anon biscuit for the same Anon(uuid) and rotates the
+  // continuity token. When absent or invalid, the server creates a
+  // fresh anon profile instead.
+  string anon_continuity_token = 2;
   string client_operation_id = 15;
 }
 
@@ -425,6 +431,16 @@ message MintAnonBiscuitResponse {
   // biscuit's internal `expires_at` fact; surfaced so callers can
   // set `Max-Age` on the cookie without parsing the token.
   google.protobuf.Timestamp expires_at = 2;
+  // New opaque continuity token for the browser to store separately
+  // from the short-lived biscuit. It is not a bearer for normal RPCs;
+  // it can only be redeemed at MintAnonBiscuit to recover the same
+  // Anon(uuid) after the biscuit cookie expires.
+  string anon_continuity_token = 3;
+  // Expiry for `anon_continuity_token`.
+  google.protobuf.Timestamp continuity_expires_at = 4;
+  // Debug/audit surface for the anon profile id the biscuit carries.
+  // UI does not need to show this.
+  string anon_id = 5;
 }
 
 message IssuedCredentialResponse {

@@ -16,13 +16,13 @@ use grpc::heddle::v1::{
     repo_sync_service_client::RepoSyncServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
-use wire::ProtocolError;
 use repo::Repository;
 use tonic::{
     Request,
     metadata::MetadataValue,
     transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
 };
+use wire::ProtocolError;
 
 use crate::credentials;
 

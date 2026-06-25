@@ -7,8 +7,8 @@ use grpc::heddle::v1::{
     TransferCheckpoint, TransportMode,
 };
 use objects::object::{ChangeId, ContentHash};
-use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 use tonic::Status;
+use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostedTransportPolicy {

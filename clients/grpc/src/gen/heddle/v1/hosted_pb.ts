@@ -19,7 +19,101 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/hosted.proto.
  */
 export const file_heddle_v1_hosted: GenFile = /*@__PURE__*/
-  fileDesc("ChZoZWRkbGUvdjEvaG9zdGVkLnByb3RvEgloZWRkbGUudjEiFwoVTGlzdE5hbWVzcGFjZXNSZXF1ZXN0IiAKHkdldEN1cnJlbnRVc2VyTmFtZXNwYWNlUmVxdWVzdCKWAQoWQ3JlYXRlTmFtZXNwYWNlUmVxdWVzdBImCgRraW5kGAEgASgOMhguaGVkZGxlLnYxLk5hbWVzcGFjZUtpbmQSDAoEc2x1ZxgCIAEoCRITCgtwYXJlbnRfcGF0aBgDIAEoCRIUCgxkaXNwbGF5X25hbWUYBCABKAkSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSKMAQoWVXBkYXRlTmFtZXNwYWNlUmVxdWVzdBIRCglmdWxsX3BhdGgYASABKAkSEAoIbmV3X3NsdWcYAiABKAkSFAoMZGlzcGxheV9uYW1lGAMgASgJEhoKEmNsZWFyX2Rpc3BsYXlfbmFtZRgEIAEoCBIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIkgKFkRlbGV0ZU5hbWVzcGFjZVJlcXVlc3QSEQoJZnVsbF9wYXRoGAEgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiMQoXTGlzdFJlcG9zaXRvcmllc1JlcXVlc3QSFgoObmFtZXNwYWNlX3BhdGgYASABKAkiXAoXQ3JlYXRlUmVwb3NpdG9yeVJlcXVlc3QSFgoObmFtZXNwYWNlX3BhdGgYASABKAkSDAoEc2x1ZxgCIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIlsKF1VwZGF0ZVJlcG9zaXRvcnlSZXF1ZXN0EhEKCWZ1bGxfcGF0aBgBIAEoCRIQCghuZXdfc2x1ZxgCIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIkkKF0RlbGV0ZVJlcG9zaXRvcnlSZXF1ZXN0EhEKCWZ1bGxfcGF0aBgBIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIiUKEUxpc3RHcmFudHNSZXF1ZXN0EhAKCHJlc291cmNlGAEgASgJIpIBChJDcmVhdGVHcmFudFJlcXVlc3QSDwoHc3ViamVjdBgBIAEoCRIjCgRyb2xlGAIgASgOMhUuaGVkZGxlLnYxLkhvc3RlZFJvbGUSKQoGdGFyZ2V0GAMgASgLMhkuaGVkZGxlLnYxLkdyYW50VGFyZ2V0UmVmEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkikgEKElVwZGF0ZUdyYW50UmVxdWVzdBIPCgdzdWJqZWN0GAEgASgJEiMKBHJvbGUYAiABKA4yFS5oZWRkbGUudjEuSG9zdGVkUm9sZRIpCgZ0YXJnZXQYAyABKAsyGS5oZWRkbGUudjEuR3JhbnRUYXJnZXRSZWYSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSJtChJEZWxldGVHcmFudFJlcXVlc3QSDwoHc3ViamVjdBgBIAEoCRIpCgZ0YXJnZXQYAiABKAsyGS5oZWRkbGUudjEuR3JhbnRUYXJnZXRSZWYSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSITChFMaXN0QWN0b3JzUmVxdWVzdCIWChRMaXN0V29ya3RyZWVzUmVxdWVzdCKZAQoPSG9zdGVkTmFtZXNwYWNlEhQKDG5hbWVzcGFjZV9pZBgBIAEoCRImCgRraW5kGAIgASgOMhguaGVkZGxlLnYxLk5hbWVzcGFjZUtpbmQSDAoEc2x1ZxgDIAEoCRIRCglmdWxsX3BhdGgYBCABKAkSEQoJcGFyZW50X2lkGAUgASgJEhQKDGRpc3BsYXlfbmFtZRgGIAEoCSJoChBIb3N0ZWRSZXBvc2l0b3J5Eg8KB3JlcG9faWQYASABKAkSFAoMbmFtZXNwYWNlX2lkGAIgASgJEgwKBHNsdWcYAyABKAkSDAoEcGF0aBgEIAEoCRIRCglmdWxsX3BhdGgYBSABKAkibgoLSG9zdGVkR3JhbnQSDwoHc3ViamVjdBgBIAEoCRIjCgRyb2xlGAIgASgOMhUuaGVkZGxlLnYxLkhvc3RlZFJvbGUSKQoGdGFyZ2V0GAMgASgLMhkuaGVkZGxlLnYxLkdyYW50VGFyZ2V0UmVmIuAGCgxBY3RvclN1bW1hcnkSEgoKc2Vzc2lvbl9pZBgBIAEoCRIOCgZ0aHJlYWQYAiABKAkSEQoEcGF0aBgDIAEoCUgAiAEBEhIKCmJhc2Vfc3RhdGUYBCABKAwSLgoKc3RhcnRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFQoIcHJvdmlkZXIYBiABKAlIAYgBARISCgVtb2RlbBgHIAEoCUgCiAEBEg4KBnN0YXR1cxgIIAEoCRIeChFoZWRkbGVfc2Vzc2lvbl9pZBgJIAEoCUgDiAEBEhQKB2hhcm5lc3MYCiABKAlIBIgBARIbCg50aGlua2luZ19sZXZlbBgLIAEoCUgFiAEBEi4KDXVzYWdlX3N1bW1hcnkYDCABKAsyFy5oZWRkbGUudjEuVXNhZ2VTdW1tYXJ5EjkKEGxhc3RfcHJvZ3Jlc3NfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wSAaIAQESHwoScmVwb3J0X2ZsdXNoX3N0YXRlGA4gASgJSAeIAQESHwoSY2xpZW50X2luc3RhbmNlX2lkGA8gASgJSAiIAQESGgoNYXR0YWNoX3JlYXNvbhgQIAEoCUgJiAEBEh0KEG5hdGl2ZV9hY3Rvcl9rZXkYESABKAlICogBARIkChduYXRpdmVfcGFyZW50X2FjdG9yX2tleRgSIAEoCUgLiAEBEhkKDHByb2JlX3NvdXJjZRgTIAEoCUgMiAEBEh0KEHByb2JlX2NvbmZpZGVuY2UYFCABKAJIDYgBAUIHCgVfcGF0aEILCglfcHJvdmlkZXJCCAoGX21vZGVsQhQKEl9oZWRkbGVfc2Vzc2lvbl9pZEIKCghfaGFybmVzc0IRCg9fdGhpbmtpbmdfbGV2ZWxCEwoRX2xhc3RfcHJvZ3Jlc3NfYXRCFQoTX3JlcG9ydF9mbHVzaF9zdGF0ZUIVChNfY2xpZW50X2luc3RhbmNlX2lkQhAKDl9hdHRhY2hfcmVhc29uQhMKEV9uYXRpdmVfYWN0b3Jfa2V5QhoKGF9uYXRpdmVfcGFyZW50X2FjdG9yX2tleUIPCg1fcHJvYmVfc291cmNlQhMKEV9wcm9iZV9jb25maWRlbmNlIo0CCg9Xb3JrdHJlZVN1bW1hcnkSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRISCgpiYXNlX3N0YXRlGAMgASgMEhMKBnRocmVhZBgEIAEoCUgAiAEBEg8KB2NoYW5nZXMYBSABKA0SFwoKc2Vzc2lvbl9pZBgGIAEoCUgBiAEBEi4KCmNyZWF0ZWRfYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi8KC21vZGlmaWVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBISCgppc19jdXJyZW50GAkgASgIQgkKB190aHJlYWRCDQoLX3Nlc3Npb25faWQiPQoSTGlzdEFjdG9yc1Jlc3BvbnNlEicKBmFjdG9ycxgBIAMoCzIXLmhlZGRsZS52MS5BY3RvclN1bW1hcnkiRgoVTGlzdFdvcmt0cmVlc1Jlc3BvbnNlEi0KCXdvcmt0cmVlcxgBIAMoCzIaLmhlZGRsZS52MS5Xb3JrdHJlZVN1bW1hcnkisAIKCkludml0YXRpb24SCgoCaWQYASABKAkSDQoFZW1haWwYAiABKAkSFgoObmFtZXNwYWNlX3BhdGgYAyABKAkSIwoEcm9sZRgEIAEoDjIVLmhlZGRsZS52MS5Ib3N0ZWRSb2xlEhIKCmludml0ZWRfYnkYBSABKAkSLgoKY3JlYXRlZF9hdBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKZXhwaXJlc19hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLYWNjZXB0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhMKC2FjY2VwdGVkX2J5GAkgASgJEhAKCG1ldGFkYXRhGAogASgJIsQBChdDcmVhdGVJbnZpdGF0aW9uUmVxdWVzdBINCgVlbWFpbBgBIAEoCRIWCg5uYW1lc3BhY2VfcGF0aBgCIAEoCRIjCgRyb2xlGAMgASgOMhUuaGVkZGxlLnYxLkhvc3RlZFJvbGUSLgoKZXhwaXJlc19hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEAoIbWV0YWRhdGEYBSABKAkSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSJKChZMaXN0SW52aXRhdGlvbnNSZXF1ZXN0EhYKDm5hbWVzcGFjZV9wYXRoGAEgASgJEhgKEGluY2x1ZGVfYWNjZXB0ZWQYAiABKAgiRQoXTGlzdEludml0YXRpb25zUmVzcG9uc2USKgoLaW52aXRhdGlvbnMYASADKAsyFS5oZWRkbGUudjEuSW52aXRhdGlvbiJCChdSZXZva2VJbnZpdGF0aW9uUmVxdWVzdBIKCgJpZBgBIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIt8BCgtNZW1iZXJFbnRyeRItCgVncmFudBgBIAEoCzIcLmhlZGRsZS52MS5NZW1iZXJFbnRyeS5HcmFudEgAEisKCmludml0YXRpb24YAiABKAsyFS5oZWRkbGUudjEuSW52aXRhdGlvbkgAGmsKBUdyYW50Eg8KB3N1YmplY3QYASABKAkSIwoEcm9sZRgCIAEoDjIVLmhlZGRsZS52MS5Ib3N0ZWRSb2xlEhUKDXJlc291cmNlX3BhdGgYAyABKAkSFQoNcmVzb3VyY2Vfa2luZBgEIAEoCUIHCgVlbnRyeSJJChJMaXN0TWVtYmVyc1JlcXVlc3QSFgoObmFtZXNwYWNlX3BhdGgYASABKAkSGwoTaW5jbHVkZV9kZXNjZW5kYW50cxgCIAEoCCI+ChNMaXN0TWVtYmVyc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5oZWRkbGUudjEuTWVtYmVyRW50cnkiSAoWTGlzdE5hbWVzcGFjZXNSZXNwb25zZRIuCgpuYW1lc3BhY2VzGAEgAygLMhouaGVkZGxlLnYxLkhvc3RlZE5hbWVzcGFjZSJNChhMaXN0UmVwb3NpdG9yaWVzUmVzcG9uc2USMQoMcmVwb3NpdG9yaWVzGAEgAygLMhsuaGVkZGxlLnYxLkhvc3RlZFJlcG9zaXRvcnkiPAoSTGlzdEdyYW50c1Jlc3BvbnNlEiYKBmdyYW50cxgBIAMoCzIWLmhlZGRsZS52MS5Ib3N0ZWRHcmFudCp5Cg1OYW1lc3BhY2VLaW5kEh4KGk5BTUVTUEFDRV9LSU5EX1VOU1BFQ0lGSUVEEAASFwoTTkFNRVNQQUNFX0tJTkRfVVNFUhABEhYKEk5BTUVTUEFDRV9LSU5EX09SRxACEhcKE05BTUVTUEFDRV9LSU5EX1RFQU0QAzL8GAoRSG9zdGVkVXNlclNlcnZpY2USYAoXR2V0Q3VycmVudFVzZXJOYW1lc3BhY2USKS5oZWRkbGUudjEuR2V0Q3VycmVudFVzZXJOYW1lc3BhY2VSZXF1ZXN0GhouaGVkZGxlLnYxLkhvc3RlZE5hbWVzcGFjZRJQCg9DcmVhdGVOYW1lc3BhY2USIS5oZWRkbGUudjEuQ3JlYXRlTmFtZXNwYWNlUmVxdWVzdBoaLmhlZGRsZS52MS5Ib3N0ZWROYW1lc3BhY2USVQoOTGlzdE5hbWVzcGFjZXMSIC5oZWRkbGUudjEuTGlzdE5hbWVzcGFjZXNSZXF1ZXN0GiEuaGVkZGxlLnYxLkxpc3ROYW1lc3BhY2VzUmVzcG9uc2USUAoPVXBkYXRlTmFtZXNwYWNlEiEuaGVkZGxlLnYxLlVwZGF0ZU5hbWVzcGFjZVJlcXVlc3QaGi5oZWRkbGUudjEuSG9zdGVkTmFtZXNwYWNlEk8KD0RlbGV0ZU5hbWVzcGFjZRIhLmhlZGRsZS52MS5EZWxldGVOYW1lc3BhY2VSZXF1ZXN0GhkuaGVkZGxlLnYxLkRlbGV0ZVJlc3BvbnNlElMKEENyZWF0ZVJlcG9zaXRvcnkSIi5oZWRkbGUudjEuQ3JlYXRlUmVwb3NpdG9yeVJlcXVlc3QaGy5oZWRkbGUudjEuSG9zdGVkUmVwb3NpdG9yeRJbChBMaXN0UmVwb3NpdG9yaWVzEiIuaGVkZGxlLnYxLkxpc3RSZXBvc2l0b3JpZXNSZXF1ZXN0GiMuaGVkZGxlLnYxLkxpc3RSZXBvc2l0b3JpZXNSZXNwb25zZRJTChBVcGRhdGVSZXBvc2l0b3J5EiIuaGVkZGxlLnYxLlVwZGF0ZVJlcG9zaXRvcnlSZXF1ZXN0GhsuaGVkZGxlLnYxLkhvc3RlZFJlcG9zaXRvcnkSUQoQRGVsZXRlUmVwb3NpdG9yeRIiLmhlZGRsZS52MS5EZWxldGVSZXBvc2l0b3J5UmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJECgtDcmVhdGVHcmFudBIdLmhlZGRsZS52MS5DcmVhdGVHcmFudFJlcXVlc3QaFi5oZWRkbGUudjEuSG9zdGVkR3JhbnQSSQoKTGlzdEdyYW50cxIcLmhlZGRsZS52MS5MaXN0R3JhbnRzUmVxdWVzdBodLmhlZGRsZS52MS5MaXN0R3JhbnRzUmVzcG9uc2USRAoLVXBkYXRlR3JhbnQSHS5oZWRkbGUudjEuVXBkYXRlR3JhbnRSZXF1ZXN0GhYuaGVkZGxlLnYxLkhvc3RlZEdyYW50EkcKC0RlbGV0ZUdyYW50Eh0uaGVkZGxlLnYxLkRlbGV0ZUdyYW50UmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJLCg1BcHByb3ZlVGhyZWFkEh8uaGVkZGxlLnYxLkFwcHJvdmVUaHJlYWRSZXF1ZXN0GhkuaGVkZGxlLnYxLlRocmVhZEFwcHJvdmFsEk0KDlJldm9rZUFwcHJvdmFsEiAuaGVkZGxlLnYxLlJldm9rZUFwcHJvdmFsUmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJkChNMaXN0VGhyZWFkQXBwcm92YWxzEiUuaGVkZGxlLnYxLkxpc3RUaHJlYWRBcHByb3ZhbHNSZXF1ZXN0GiYuaGVkZGxlLnYxLkxpc3RUaHJlYWRBcHByb3ZhbHNSZXNwb25zZRJqChVDaGVja01lcmdlRWxpZ2liaWxpdHkSJy5oZWRkbGUudjEuQ2hlY2tNZXJnZUVsaWdpYmlsaXR5UmVxdWVzdBooLmhlZGRsZS52MS5DaGVja01lcmdlRWxpZ2liaWxpdHlSZXNwb25zZRJNChBDcmVhdGVJbnZpdGF0aW9uEiIuaGVkZGxlLnYxLkNyZWF0ZUludml0YXRpb25SZXF1ZXN0GhUuaGVkZGxlLnYxLkludml0YXRpb24SWAoPTGlzdEludml0YXRpb25zEiEuaGVkZGxlLnYxLkxpc3RJbnZpdGF0aW9uc1JlcXVlc3QaIi5oZWRkbGUudjEuTGlzdEludml0YXRpb25zUmVzcG9uc2USUQoQUmV2b2tlSW52aXRhdGlvbhIiLmhlZGRsZS52MS5SZXZva2VJbnZpdGF0aW9uUmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJMCgtMaXN0TWVtYmVycxIdLmhlZGRsZS52MS5MaXN0TWVtYmVyc1JlcXVlc3QaHi5oZWRkbGUudjEuTGlzdE1lbWJlcnNSZXNwb25zZRJWChNDcmVhdGVBcHByb3ZhbEdyb3VwEiUuaGVkZGxlLnYxLkNyZWF0ZUFwcHJvdmFsR3JvdXBSZXF1ZXN0GhguaGVkZGxlLnYxLkFwcHJvdmFsR3JvdXASYQoSTGlzdEFwcHJvdmFsR3JvdXBzEiQuaGVkZGxlLnYxLkxpc3RBcHByb3ZhbEdyb3Vwc1JlcXVlc3QaJS5oZWRkbGUudjEuTGlzdEFwcHJvdmFsR3JvdXBzUmVzcG9uc2USVwoTRGVsZXRlQXBwcm92YWxHcm91cBIlLmhlZGRsZS52MS5EZWxldGVBcHByb3ZhbEdyb3VwUmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJiChZBZGRBcHByb3ZhbEdyb3VwTWVtYmVyEiguaGVkZGxlLnYxLkFkZEFwcHJvdmFsR3JvdXBNZW1iZXJSZXF1ZXN0Gh4uaGVkZGxlLnYxLkFwcHJvdmFsR3JvdXBNZW1iZXISYwoZUmVtb3ZlQXBwcm92YWxHcm91cE1lbWJlchIrLmhlZGRsZS52MS5SZW1vdmVBcHByb3ZhbEdyb3VwTWVtYmVyUmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJTChJDcmVhdGVUaHJlYWRQb2xpY3kSJC5oZWRkbGUudjEuQ3JlYXRlVGhyZWFkUG9saWN5UmVxdWVzdBoXLmhlZGRsZS52MS5UaHJlYWRQb2xpY3kSYQoSTGlzdFRocmVhZFBvbGljaWVzEiQuaGVkZGxlLnYxLkxpc3RUaHJlYWRQb2xpY2llc1JlcXVlc3QaJS5oZWRkbGUudjEuTGlzdFRocmVhZFBvbGljaWVzUmVzcG9uc2USVQoSRGVsZXRlVGhyZWFkUG9saWN5EiQuaGVkZGxlLnYxLkRlbGV0ZVRocmVhZFBvbGljeVJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USawoZQWRkUG9saWN5R3JvdXBSZXF1aXJlbWVudBIrLmhlZGRsZS52MS5BZGRQb2xpY3lHcm91cFJlcXVpcmVtZW50UmVxdWVzdBohLmhlZGRsZS52MS5Qb2xpY3lHcm91cFJlcXVpcmVtZW50EmkKHFJlbW92ZVBvbGljeUdyb3VwUmVxdWlyZW1lbnQSLi5oZWRkbGUudjEuUmVtb3ZlUG9saWN5R3JvdXBSZXF1aXJlbWVudFJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USSQoKTGlzdEFjdG9ycxIcLmhlZGRsZS52MS5MaXN0QWN0b3JzUmVxdWVzdBodLmhlZGRsZS52MS5MaXN0QWN0b3JzUmVzcG9uc2USUgoNTGlzdFdvcmt0cmVlcxIfLmhlZGRsZS52MS5MaXN0V29ya3RyZWVzUmVxdWVzdBogLmhlZGRsZS52MS5MaXN0V29ya3RyZWVzUmVzcG9uc2USWQoSR3JhbnRTdXBwb3J0QWNjZXNzEiQuaGVkZGxlLnYxLkdyYW50U3VwcG9ydEFjY2Vzc1JlcXVlc3QaHS5oZWRkbGUudjEuU3VwcG9ydEFjY2Vzc0dyYW50EnAKF0xpc3RTdXBwb3J0QWNjZXNzR3JhbnRzEikuaGVkZGxlLnYxLkxpc3RTdXBwb3J0QWNjZXNzR3JhbnRzUmVxdWVzdBoqLmhlZGRsZS52MS5MaXN0U3VwcG9ydEFjY2Vzc0dyYW50c1Jlc3BvbnNlElcKE1Jldm9rZVN1cHBvcnRBY2Nlc3MSJS5oZWRkbGUudjEuUmV2b2tlU3VwcG9ydEFjY2Vzc1JlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp, file_heddle_v1_common, file_heddle_v1_policies, file_heddle_v1_support, file_heddle_v1_threads]);
+  fileDesc("ChZoZWRkbGUvdjEvaG9zdGVkLnByb3RvEgloZWRkbGUudjEiYgoTU3Bvb2xJbml0aWFsVG9vbGluZxIOCgZyZWFkbWUYASABKAgSDwoHbGljZW5zZRgCIAEoCRIRCglnaXRpZ25vcmUYAyABKAkSFwoPbGFuZ3VhZ2VfcHJlc2V0GAQgASgJIoYECg1TcG9vbFNldHRpbmdzEi4KCnZpc2liaWxpdHkYASABKA4yGi5oZWRkbGUudjEuU3Bvb2xWaXNpYmlsaXR5EkEKGGRlZmF1bHRfc3RhdGVfdmlzaWJpbGl0eRgCIAEoDjIfLmhlZGRsZS52MS5TcG9vbFN0YXRlVmlzaWJpbGl0eRI1Cg5ib290c3RyYXBfa2luZBgDIAEoDjIdLmhlZGRsZS52MS5TcG9vbEJvb3RzdHJhcEtpbmQSGAoQYm9vdHN0cmFwX3NvdXJjZRgEIAEoCRIxCgx3cml0ZV9wb2xpY3kYBSABKA4yGy5oZWRkbGUudjEuU3Bvb2xXcml0ZVBvbGljeRIxCgxjaGlsZF9wb2xpY3kYBiABKA4yGy5oZWRkbGUudjEuU3Bvb2xDaGlsZFBvbGljeRI3Cg9pbml0aWFsX3Rvb2xpbmcYByABKAsyHi5oZWRkbGUudjEuU3Bvb2xJbml0aWFsVG9vbGluZxIzCg1zeW5jX2JlaGF2aW9yGAggASgOMhwuaGVkZGxlLnYxLlNwb29sU3luY0JlaGF2aW9yEkgKGGJvb3RzdHJhcF9zeW5jX2RpcmVjdGlvbhgJIAEoDjImLmhlZGRsZS52MS5TcG9vbEJvb3RzdHJhcFN5bmNEaXJlY3Rpb24SEwoLZGVzY3JpcHRpb24YCiABKAkiFwoVTGlzdE5hbWVzcGFjZXNSZXF1ZXN0IiAKHkdldEN1cnJlbnRVc2VyTmFtZXNwYWNlUmVxdWVzdCLCAQoWQ3JlYXRlTmFtZXNwYWNlUmVxdWVzdBImCgRraW5kGAEgASgOMhguaGVkZGxlLnYxLk5hbWVzcGFjZUtpbmQSDAoEc2x1ZxgCIAEoCRITCgtwYXJlbnRfcGF0aBgDIAEoCRIUCgxkaXNwbGF5X25hbWUYBCABKAkSKgoIc2V0dGluZ3MYBSABKAsyGC5oZWRkbGUudjEuU3Bvb2xTZXR0aW5ncxIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIowBChZVcGRhdGVOYW1lc3BhY2VSZXF1ZXN0EhEKCWZ1bGxfcGF0aBgBIAEoCRIQCghuZXdfc2x1ZxgCIAEoCRIUCgxkaXNwbGF5X25hbWUYAyABKAkSGgoSY2xlYXJfZGlzcGxheV9uYW1lGAQgASgIEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiSAoWRGVsZXRlTmFtZXNwYWNlUmVxdWVzdBIRCglmdWxsX3BhdGgYASABKAkSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSIxChdMaXN0UmVwb3NpdG9yaWVzUmVxdWVzdBIWCg5uYW1lc3BhY2VfcGF0aBgBIAEoCSJcChdDcmVhdGVSZXBvc2l0b3J5UmVxdWVzdBIWCg5uYW1lc3BhY2VfcGF0aBgBIAEoCRIMCgRzbHVnGAIgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiWwoXVXBkYXRlUmVwb3NpdG9yeVJlcXVlc3QSEQoJZnVsbF9wYXRoGAEgASgJEhAKCG5ld19zbHVnGAIgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiSQoXRGVsZXRlUmVwb3NpdG9yeVJlcXVlc3QSEQoJZnVsbF9wYXRoGAEgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiJQoRTGlzdEdyYW50c1JlcXVlc3QSEAoIcmVzb3VyY2UYASABKAkikgEKEkNyZWF0ZUdyYW50UmVxdWVzdBIPCgdzdWJqZWN0GAEgASgJEiMKBHJvbGUYAiABKA4yFS5oZWRkbGUudjEuSG9zdGVkUm9sZRIpCgZ0YXJnZXQYAyABKAsyGS5oZWRkbGUudjEuR3JhbnRUYXJnZXRSZWYSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSKSAQoSVXBkYXRlR3JhbnRSZXF1ZXN0Eg8KB3N1YmplY3QYASABKAkSIwoEcm9sZRgCIAEoDjIVLmhlZGRsZS52MS5Ib3N0ZWRSb2xlEikKBnRhcmdldBgDIAEoCzIZLmhlZGRsZS52MS5HcmFudFRhcmdldFJlZhIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIm0KEkRlbGV0ZUdyYW50UmVxdWVzdBIPCgdzdWJqZWN0GAEgASgJEikKBnRhcmdldBgCIAEoCzIZLmhlZGRsZS52MS5HcmFudFRhcmdldFJlZhIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIhMKEUxpc3RBY3RvcnNSZXF1ZXN0IhYKFExpc3RXb3JrdHJlZXNSZXF1ZXN0IsUBCg9Ib3N0ZWROYW1lc3BhY2USFAoMbmFtZXNwYWNlX2lkGAEgASgJEiYKBGtpbmQYAiABKA4yGC5oZWRkbGUudjEuTmFtZXNwYWNlS2luZBIMCgRzbHVnGAMgASgJEhEKCWZ1bGxfcGF0aBgEIAEoCRIRCglwYXJlbnRfaWQYBSABKAkSFAoMZGlzcGxheV9uYW1lGAYgASgJEioKCHNldHRpbmdzGAcgASgLMhguaGVkZGxlLnYxLlNwb29sU2V0dGluZ3MiaAoQSG9zdGVkUmVwb3NpdG9yeRIPCgdyZXBvX2lkGAEgASgJEhQKDG5hbWVzcGFjZV9pZBgCIAEoCRIMCgRzbHVnGAMgASgJEgwKBHBhdGgYBCABKAkSEQoJZnVsbF9wYXRoGAUgASgJIr4BCghCb29rbWFyaxIKCgJpZBgBIAEoCRIVCg1yZXNvdXJjZV9raW5kGAIgASgJEhEKCWZ1bGxfcGF0aBgDIAEoCRIMCgRuYW1lGAQgASgJEg4KBmZvbGRlchgFIAEoCRIuCgpjcmVhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCIWChRMaXN0Qm9va21hcmtzUmVxdWVzdCI/ChVMaXN0Qm9va21hcmtzUmVzcG9uc2USJgoJYm9va21hcmtzGAEgAygLMhMuaGVkZGxlLnYxLkJvb2ttYXJrInwKFVVwc2VydEJvb2ttYXJrUmVxdWVzdBIVCg1yZXNvdXJjZV9raW5kGAEgASgJEhEKCWZ1bGxfcGF0aBgCIAEoCRIMCgRuYW1lGAMgASgJEg4KBmZvbGRlchgEIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIl4KFURlbGV0ZUJvb2ttYXJrUmVxdWVzdBIVCg1yZXNvdXJjZV9raW5kGAEgASgJEhEKCWZ1bGxfcGF0aBgCIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIm4KC0hvc3RlZEdyYW50Eg8KB3N1YmplY3QYASABKAkSIwoEcm9sZRgCIAEoDjIVLmhlZGRsZS52MS5Ib3N0ZWRSb2xlEikKBnRhcmdldBgDIAEoCzIZLmhlZGRsZS52MS5HcmFudFRhcmdldFJlZiLgBgoMQWN0b3JTdW1tYXJ5EhIKCnNlc3Npb25faWQYASABKAkSDgoGdGhyZWFkGAIgASgJEhEKBHBhdGgYAyABKAlIAIgBARISCgpiYXNlX3N0YXRlGAQgASgMEi4KCnN0YXJ0ZWRfYXQYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhUKCHByb3ZpZGVyGAYgASgJSAGIAQESEgoFbW9kZWwYByABKAlIAogBARIOCgZzdGF0dXMYCCABKAkSHgoRaGVkZGxlX3Nlc3Npb25faWQYCSABKAlIA4gBARIUCgdoYXJuZXNzGAogASgJSASIAQESGwoOdGhpbmtpbmdfbGV2ZWwYCyABKAlIBYgBARIuCg11c2FnZV9zdW1tYXJ5GAwgASgLMhcuaGVkZGxlLnYxLlVzYWdlU3VtbWFyeRI5ChBsYXN0X3Byb2dyZXNzX2F0GA0gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgGiAEBEh8KEnJlcG9ydF9mbHVzaF9zdGF0ZRgOIAEoCUgHiAEBEh8KEmNsaWVudF9pbnN0YW5jZV9pZBgPIAEoCUgIiAEBEhoKDWF0dGFjaF9yZWFzb24YECABKAlICYgBARIdChBuYXRpdmVfYWN0b3Jfa2V5GBEgASgJSAqIAQESJAoXbmF0aXZlX3BhcmVudF9hY3Rvcl9rZXkYEiABKAlIC4gBARIZCgxwcm9iZV9zb3VyY2UYEyABKAlIDIgBARIdChBwcm9iZV9jb25maWRlbmNlGBQgASgCSA2IAQFCBwoFX3BhdGhCCwoJX3Byb3ZpZGVyQggKBl9tb2RlbEIUChJfaGVkZGxlX3Nlc3Npb25faWRCCgoIX2hhcm5lc3NCEQoPX3RoaW5raW5nX2xldmVsQhMKEV9sYXN0X3Byb2dyZXNzX2F0QhUKE19yZXBvcnRfZmx1c2hfc3RhdGVCFQoTX2NsaWVudF9pbnN0YW5jZV9pZEIQCg5fYXR0YWNoX3JlYXNvbkITChFfbmF0aXZlX2FjdG9yX2tleUIaChhfbmF0aXZlX3BhcmVudF9hY3Rvcl9rZXlCDwoNX3Byb2JlX3NvdXJjZUITChFfcHJvYmVfY29uZmlkZW5jZSKNAgoPV29ya3RyZWVTdW1tYXJ5EgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSEgoKYmFzZV9zdGF0ZRgDIAEoDBITCgZ0aHJlYWQYBCABKAlIAIgBARIPCgdjaGFuZ2VzGAUgASgNEhcKCnNlc3Npb25faWQYBiABKAlIAYgBARIuCgpjcmVhdGVkX2F0GAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgttb2RpZmllZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEgoKaXNfY3VycmVudBgJIAEoCEIJCgdfdGhyZWFkQg0KC19zZXNzaW9uX2lkIj0KEkxpc3RBY3RvcnNSZXNwb25zZRInCgZhY3RvcnMYASADKAsyFy5oZWRkbGUudjEuQWN0b3JTdW1tYXJ5IkYKFUxpc3RXb3JrdHJlZXNSZXNwb25zZRItCgl3b3JrdHJlZXMYASADKAsyGi5oZWRkbGUudjEuV29ya3RyZWVTdW1tYXJ5IrACCgpJbnZpdGF0aW9uEgoKAmlkGAEgASgJEg0KBWVtYWlsGAIgASgJEhYKDm5hbWVzcGFjZV9wYXRoGAMgASgJEiMKBHJvbGUYBCABKA4yFS5oZWRkbGUudjEuSG9zdGVkUm9sZRISCgppbnZpdGVkX2J5GAUgASgJEi4KCmNyZWF0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCmV4cGlyZXNfYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi8KC2FjY2VwdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBITCgthY2NlcHRlZF9ieRgJIAEoCRIQCghtZXRhZGF0YRgKIAEoCSLEAQoXQ3JlYXRlSW52aXRhdGlvblJlcXVlc3QSDQoFZW1haWwYASABKAkSFgoObmFtZXNwYWNlX3BhdGgYAiABKAkSIwoEcm9sZRgDIAEoDjIVLmhlZGRsZS52MS5Ib3N0ZWRSb2xlEi4KCmV4cGlyZXNfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhAKCG1ldGFkYXRhGAUgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiSgoWTGlzdEludml0YXRpb25zUmVxdWVzdBIWCg5uYW1lc3BhY2VfcGF0aBgBIAEoCRIYChBpbmNsdWRlX2FjY2VwdGVkGAIgASgIIkUKF0xpc3RJbnZpdGF0aW9uc1Jlc3BvbnNlEioKC2ludml0YXRpb25zGAEgAygLMhUuaGVkZGxlLnYxLkludml0YXRpb24iQgoXUmV2b2tlSW52aXRhdGlvblJlcXVlc3QSCgoCaWQYASABKAkSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSLfAQoLTWVtYmVyRW50cnkSLQoFZ3JhbnQYASABKAsyHC5oZWRkbGUudjEuTWVtYmVyRW50cnkuR3JhbnRIABIrCgppbnZpdGF0aW9uGAIgASgLMhUuaGVkZGxlLnYxLkludml0YXRpb25IABprCgVHcmFudBIPCgdzdWJqZWN0GAEgASgJEiMKBHJvbGUYAiABKA4yFS5oZWRkbGUudjEuSG9zdGVkUm9sZRIVCg1yZXNvdXJjZV9wYXRoGAMgASgJEhUKDXJlc291cmNlX2tpbmQYBCABKAlCBwoFZW50cnkiSQoSTGlzdE1lbWJlcnNSZXF1ZXN0EhYKDm5hbWVzcGFjZV9wYXRoGAEgASgJEhsKE2luY2x1ZGVfZGVzY2VuZGFudHMYAiABKAgiPgoTTGlzdE1lbWJlcnNSZXNwb25zZRInCgdlbnRyaWVzGAEgAygLMhYuaGVkZGxlLnYxLk1lbWJlckVudHJ5IkgKFkxpc3ROYW1lc3BhY2VzUmVzcG9uc2USLgoKbmFtZXNwYWNlcxgBIAMoCzIaLmhlZGRsZS52MS5Ib3N0ZWROYW1lc3BhY2UiTQoYTGlzdFJlcG9zaXRvcmllc1Jlc3BvbnNlEjEKDHJlcG9zaXRvcmllcxgBIAMoCzIbLmhlZGRsZS52MS5Ib3N0ZWRSZXBvc2l0b3J5IjwKEkxpc3RHcmFudHNSZXNwb25zZRImCgZncmFudHMYASADKAsyFi5oZWRkbGUudjEuSG9zdGVkR3JhbnQqeQoNTmFtZXNwYWNlS2luZBIeChpOQU1FU1BBQ0VfS0lORF9VTlNQRUNJRklFRBAAEhcKE05BTUVTUEFDRV9LSU5EX1VTRVIQARIWChJOQU1FU1BBQ0VfS0lORF9PUkcQAhIXChNOQU1FU1BBQ0VfS0lORF9URUFNEAMqbgoPU3Bvb2xWaXNpYmlsaXR5EiAKHFNQT09MX1ZJU0lCSUxJVFlfVU5TUEVDSUZJRUQQABIcChhTUE9PTF9WSVNJQklMSVRZX1BSSVZBVEUQARIbChdTUE9PTF9WSVNJQklMSVRZX1BVQkxJQxACKqoBChRTcG9vbFN0YXRlVmlzaWJpbGl0eRImCiJTUE9PTF9TVEFURV9WSVNJQklMSVRZX1VOU1BFQ0lGSUVEEAASIQodU1BPT0xfU1RBVEVfVklTSUJJTElUWV9QVUJMSUMQARIjCh9TUE9PTF9TVEFURV9WSVNJQklMSVRZX0lOVEVSTkFMEAISIgoeU1BPT0xfU1RBVEVfVklTSUJJTElUWV9QUklWQVRFEAMqogEKElNwb29sQm9vdHN0cmFwS2luZBIkCiBTUE9PTF9CT09UU1RSQVBfS0lORF9VTlNQRUNJRklFRBAAEh4KGlNQT09MX0JPT1RTVFJBUF9LSU5EX0VNUFRZEAESIwofU1BPT0xfQk9PVFNUUkFQX0tJTkRfR0lUX1JFTU9URRACEiEKHVNQT09MX0JPT1RTVFJBUF9LSU5EX1RFTVBMQVRFEAMqyAEKG1Nwb29sQm9vdHN0cmFwU3luY0RpcmVjdGlvbhIuCipTUE9PTF9CT09UU1RSQVBfU1lOQ19ESVJFQ1RJT05fVU5TUEVDSUZJRUQQABInCiNTUE9PTF9CT09UU1RSQVBfU1lOQ19ESVJFQ1RJT05fUFVMTBABEicKI1NQT09MX0JPT1RTVFJBUF9TWU5DX0RJUkVDVElPTl9QVVNIEAISJwojU1BPT0xfQk9PVFNUUkFQX1NZTkNfRElSRUNUSU9OX0JJREkQAyqgAQoQU3Bvb2xXcml0ZVBvbGljeRIiCh5TUE9PTF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIhCh1TUE9PTF9XUklURV9QT0xJQ1lfREVWRUxPUEVSUxABEiIKHlNQT09MX1dSSVRFX1BPTElDWV9NQUlOVEFJTkVSUxACEiEKHVNQT09MX1dSSVRFX1BPTElDWV9PV05FUl9PTkxZEAMqngEKEFNwb29sQ2hpbGRQb2xpY3kSIgoeU1BPT0xfQ0hJTERfUE9MSUNZX1VOU1BFQ0lGSUVEEAASIgoeU1BPT0xfQ0hJTERfUE9MSUNZX01BSU5UQUlORVJTEAESIQodU1BPT0xfQ0hJTERfUE9MSUNZX0RFVkVMT1BFUlMQAhIfChtTUE9PTF9DSElMRF9QT0xJQ1lfRElTQUJMRUQQAyqyAQoRU3Bvb2xTeW5jQmVoYXZpb3ISIwofU1BPT0xfU1lOQ19CRUhBVklPUl9VTlNQRUNJRklFRBAAEh4KGlNQT09MX1NZTkNfQkVIQVZJT1JfTUFOVUFMEAESJAogU1BPT0xfU1lOQ19CRUhBVklPUl9IRURETEVfU1RBUlQQAhIyCi5TUE9PTF9TWU5DX0JFSEFWSU9SX0hFRERMRV9TVEFSVF9XSVRIX1BSRVNFTkNFEAMy6BoKEUhvc3RlZFVzZXJTZXJ2aWNlEmAKF0dldEN1cnJlbnRVc2VyTmFtZXNwYWNlEikuaGVkZGxlLnYxLkdldEN1cnJlbnRVc2VyTmFtZXNwYWNlUmVxdWVzdBoaLmhlZGRsZS52MS5Ib3N0ZWROYW1lc3BhY2USUAoPQ3JlYXRlTmFtZXNwYWNlEiEuaGVkZGxlLnYxLkNyZWF0ZU5hbWVzcGFjZVJlcXVlc3QaGi5oZWRkbGUudjEuSG9zdGVkTmFtZXNwYWNlElUKDkxpc3ROYW1lc3BhY2VzEiAuaGVkZGxlLnYxLkxpc3ROYW1lc3BhY2VzUmVxdWVzdBohLmhlZGRsZS52MS5MaXN0TmFtZXNwYWNlc1Jlc3BvbnNlElAKD1VwZGF0ZU5hbWVzcGFjZRIhLmhlZGRsZS52MS5VcGRhdGVOYW1lc3BhY2VSZXF1ZXN0GhouaGVkZGxlLnYxLkhvc3RlZE5hbWVzcGFjZRJPCg9EZWxldGVOYW1lc3BhY2USIS5oZWRkbGUudjEuRGVsZXRlTmFtZXNwYWNlUmVxdWVzdBoZLmhlZGRsZS52MS5EZWxldGVSZXNwb25zZRJTChBDcmVhdGVSZXBvc2l0b3J5EiIuaGVkZGxlLnYxLkNyZWF0ZVJlcG9zaXRvcnlSZXF1ZXN0GhsuaGVkZGxlLnYxLkhvc3RlZFJlcG9zaXRvcnkSWwoQTGlzdFJlcG9zaXRvcmllcxIiLmhlZGRsZS52MS5MaXN0UmVwb3NpdG9yaWVzUmVxdWVzdBojLmhlZGRsZS52MS5MaXN0UmVwb3NpdG9yaWVzUmVzcG9uc2USUwoQVXBkYXRlUmVwb3NpdG9yeRIiLmhlZGRsZS52MS5VcGRhdGVSZXBvc2l0b3J5UmVxdWVzdBobLmhlZGRsZS52MS5Ib3N0ZWRSZXBvc2l0b3J5ElEKEERlbGV0ZVJlcG9zaXRvcnkSIi5oZWRkbGUudjEuRGVsZXRlUmVwb3NpdG9yeVJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USRAoLQ3JlYXRlR3JhbnQSHS5oZWRkbGUudjEuQ3JlYXRlR3JhbnRSZXF1ZXN0GhYuaGVkZGxlLnYxLkhvc3RlZEdyYW50EkkKCkxpc3RHcmFudHMSHC5oZWRkbGUudjEuTGlzdEdyYW50c1JlcXVlc3QaHS5oZWRkbGUudjEuTGlzdEdyYW50c1Jlc3BvbnNlEkQKC1VwZGF0ZUdyYW50Eh0uaGVkZGxlLnYxLlVwZGF0ZUdyYW50UmVxdWVzdBoWLmhlZGRsZS52MS5Ib3N0ZWRHcmFudBJHCgtEZWxldGVHcmFudBIdLmhlZGRsZS52MS5EZWxldGVHcmFudFJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USSwoNQXBwcm92ZVRocmVhZBIfLmhlZGRsZS52MS5BcHByb3ZlVGhyZWFkUmVxdWVzdBoZLmhlZGRsZS52MS5UaHJlYWRBcHByb3ZhbBJNCg5SZXZva2VBcHByb3ZhbBIgLmhlZGRsZS52MS5SZXZva2VBcHByb3ZhbFJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USZAoTTGlzdFRocmVhZEFwcHJvdmFscxIlLmhlZGRsZS52MS5MaXN0VGhyZWFkQXBwcm92YWxzUmVxdWVzdBomLmhlZGRsZS52MS5MaXN0VGhyZWFkQXBwcm92YWxzUmVzcG9uc2USagoVQ2hlY2tNZXJnZUVsaWdpYmlsaXR5EicuaGVkZGxlLnYxLkNoZWNrTWVyZ2VFbGlnaWJpbGl0eVJlcXVlc3QaKC5oZWRkbGUudjEuQ2hlY2tNZXJnZUVsaWdpYmlsaXR5UmVzcG9uc2USTQoQQ3JlYXRlSW52aXRhdGlvbhIiLmhlZGRsZS52MS5DcmVhdGVJbnZpdGF0aW9uUmVxdWVzdBoVLmhlZGRsZS52MS5JbnZpdGF0aW9uElgKD0xpc3RJbnZpdGF0aW9ucxIhLmhlZGRsZS52MS5MaXN0SW52aXRhdGlvbnNSZXF1ZXN0GiIuaGVkZGxlLnYxLkxpc3RJbnZpdGF0aW9uc1Jlc3BvbnNlElEKEFJldm9rZUludml0YXRpb24SIi5oZWRkbGUudjEuUmV2b2tlSW52aXRhdGlvblJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USTAoLTGlzdE1lbWJlcnMSHS5oZWRkbGUudjEuTGlzdE1lbWJlcnNSZXF1ZXN0Gh4uaGVkZGxlLnYxLkxpc3RNZW1iZXJzUmVzcG9uc2USVgoTQ3JlYXRlQXBwcm92YWxHcm91cBIlLmhlZGRsZS52MS5DcmVhdGVBcHByb3ZhbEdyb3VwUmVxdWVzdBoYLmhlZGRsZS52MS5BcHByb3ZhbEdyb3VwEmEKEkxpc3RBcHByb3ZhbEdyb3VwcxIkLmhlZGRsZS52MS5MaXN0QXBwcm92YWxHcm91cHNSZXF1ZXN0GiUuaGVkZGxlLnYxLkxpc3RBcHByb3ZhbEdyb3Vwc1Jlc3BvbnNlElcKE0RlbGV0ZUFwcHJvdmFsR3JvdXASJS5oZWRkbGUudjEuRGVsZXRlQXBwcm92YWxHcm91cFJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USYgoWQWRkQXBwcm92YWxHcm91cE1lbWJlchIoLmhlZGRsZS52MS5BZGRBcHByb3ZhbEdyb3VwTWVtYmVyUmVxdWVzdBoeLmhlZGRsZS52MS5BcHByb3ZhbEdyb3VwTWVtYmVyEmMKGVJlbW92ZUFwcHJvdmFsR3JvdXBNZW1iZXISKy5oZWRkbGUudjEuUmVtb3ZlQXBwcm92YWxHcm91cE1lbWJlclJlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2USUwoSQ3JlYXRlVGhyZWFkUG9saWN5EiQuaGVkZGxlLnYxLkNyZWF0ZVRocmVhZFBvbGljeVJlcXVlc3QaFy5oZWRkbGUudjEuVGhyZWFkUG9saWN5EmEKEkxpc3RUaHJlYWRQb2xpY2llcxIkLmhlZGRsZS52MS5MaXN0VGhyZWFkUG9saWNpZXNSZXF1ZXN0GiUuaGVkZGxlLnYxLkxpc3RUaHJlYWRQb2xpY2llc1Jlc3BvbnNlElUKEkRlbGV0ZVRocmVhZFBvbGljeRIkLmhlZGRsZS52MS5EZWxldGVUaHJlYWRQb2xpY3lSZXF1ZXN0GhkuaGVkZGxlLnYxLkRlbGV0ZVJlc3BvbnNlEmsKGUFkZFBvbGljeUdyb3VwUmVxdWlyZW1lbnQSKy5oZWRkbGUudjEuQWRkUG9saWN5R3JvdXBSZXF1aXJlbWVudFJlcXVlc3QaIS5oZWRkbGUudjEuUG9saWN5R3JvdXBSZXF1aXJlbWVudBJpChxSZW1vdmVQb2xpY3lHcm91cFJlcXVpcmVtZW50Ei4uaGVkZGxlLnYxLlJlbW92ZVBvbGljeUdyb3VwUmVxdWlyZW1lbnRSZXF1ZXN0GhkuaGVkZGxlLnYxLkRlbGV0ZVJlc3BvbnNlEkkKCkxpc3RBY3RvcnMSHC5oZWRkbGUudjEuTGlzdEFjdG9yc1JlcXVlc3QaHS5oZWRkbGUudjEuTGlzdEFjdG9yc1Jlc3BvbnNlElIKDUxpc3RXb3JrdHJlZXMSHy5oZWRkbGUudjEuTGlzdFdvcmt0cmVlc1JlcXVlc3QaIC5oZWRkbGUudjEuTGlzdFdvcmt0cmVlc1Jlc3BvbnNlElkKEkdyYW50U3VwcG9ydEFjY2VzcxIkLmhlZGRsZS52MS5HcmFudFN1cHBvcnRBY2Nlc3NSZXF1ZXN0Gh0uaGVkZGxlLnYxLlN1cHBvcnRBY2Nlc3NHcmFudBJwChdMaXN0U3VwcG9ydEFjY2Vzc0dyYW50cxIpLmhlZGRsZS52MS5MaXN0U3VwcG9ydEFjY2Vzc0dyYW50c1JlcXVlc3QaKi5oZWRkbGUudjEuTGlzdFN1cHBvcnRBY2Nlc3NHcmFudHNSZXNwb25zZRJXChNSZXZva2VTdXBwb3J0QWNjZXNzEiUuaGVkZGxlLnYxLlJldm9rZVN1cHBvcnRBY2Nlc3NSZXF1ZXN0GhkuaGVkZGxlLnYxLkRlbGV0ZVJlc3BvbnNlElIKDUxpc3RCb29rbWFya3MSHy5oZWRkbGUudjEuTGlzdEJvb2ttYXJrc1JlcXVlc3QaIC5oZWRkbGUudjEuTGlzdEJvb2ttYXJrc1Jlc3BvbnNlEkcKDlVwc2VydEJvb2ttYXJrEiAuaGVkZGxlLnYxLlVwc2VydEJvb2ttYXJrUmVxdWVzdBoTLmhlZGRsZS52MS5Cb29rbWFyaxJNCg5EZWxldGVCb29rbWFyaxIgLmhlZGRsZS52MS5EZWxldGVCb29rbWFya1JlcXVlc3QaGS5oZWRkbGUudjEuRGVsZXRlUmVzcG9uc2ViBnByb3RvMw", [file_google_protobuf_timestamp, file_heddle_v1_common, file_heddle_v1_policies, file_heddle_v1_support, file_heddle_v1_threads]);
+
+/**
+ * @generated from message heddle.v1.SpoolInitialTooling
+ */
+export type SpoolInitialTooling = Message<"heddle.v1.SpoolInitialTooling"> & {
+  /**
+   * @generated from field: bool readme = 1;
+   */
+  readme: boolean;
+
+  /**
+   * @generated from field: string license = 2;
+   */
+  license: string;
+
+  /**
+   * @generated from field: string gitignore = 3;
+   */
+  gitignore: string;
+
+  /**
+   * @generated from field: string language_preset = 4;
+   */
+  languagePreset: string;
+};
+
+/**
+ * Describes the message heddle.v1.SpoolInitialTooling.
+ * Use `create(SpoolInitialToolingSchema)` to create a new message.
+ */
+export const SpoolInitialToolingSchema: GenMessage<SpoolInitialTooling> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 0);
+
+/**
+ * @generated from message heddle.v1.SpoolSettings
+ */
+export type SpoolSettings = Message<"heddle.v1.SpoolSettings"> & {
+  /**
+   * @generated from field: heddle.v1.SpoolVisibility visibility = 1;
+   */
+  visibility: SpoolVisibility;
+
+  /**
+   * @generated from field: heddle.v1.SpoolStateVisibility default_state_visibility = 2;
+   */
+  defaultStateVisibility: SpoolStateVisibility;
+
+  /**
+   * @generated from field: heddle.v1.SpoolBootstrapKind bootstrap_kind = 3;
+   */
+  bootstrapKind: SpoolBootstrapKind;
+
+  /**
+   * @generated from field: string bootstrap_source = 4;
+   */
+  bootstrapSource: string;
+
+  /**
+   * @generated from field: heddle.v1.SpoolWritePolicy write_policy = 5;
+   */
+  writePolicy: SpoolWritePolicy;
+
+  /**
+   * @generated from field: heddle.v1.SpoolChildPolicy child_policy = 6;
+   */
+  childPolicy: SpoolChildPolicy;
+
+  /**
+   * @generated from field: heddle.v1.SpoolInitialTooling initial_tooling = 7;
+   */
+  initialTooling?: SpoolInitialTooling | undefined;
+
+  /**
+   * @generated from field: heddle.v1.SpoolSyncBehavior sync_behavior = 8;
+   */
+  syncBehavior: SpoolSyncBehavior;
+
+  /**
+   * @generated from field: heddle.v1.SpoolBootstrapSyncDirection bootstrap_sync_direction = 9;
+   */
+  bootstrapSyncDirection: SpoolBootstrapSyncDirection;
+
+  /**
+   * @generated from field: string description = 10;
+   */
+  description: string;
+};
+
+/**
+ * Describes the message heddle.v1.SpoolSettings.
+ * Use `create(SpoolSettingsSchema)` to create a new message.
+ */
+export const SpoolSettingsSchema: GenMessage<SpoolSettings> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 1);
 
 /**
  * @generated from message heddle.v1.ListNamespacesRequest
@@ -32,7 +126,7 @@ export type ListNamespacesRequest = Message<"heddle.v1.ListNamespacesRequest"> &
  * Use `create(ListNamespacesRequestSchema)` to create a new message.
  */
 export const ListNamespacesRequestSchema: GenMessage<ListNamespacesRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 0);
+  messageDesc(file_heddle_v1_hosted, 2);
 
 /**
  * @generated from message heddle.v1.GetCurrentUserNamespaceRequest
@@ -45,7 +139,7 @@ export type GetCurrentUserNamespaceRequest = Message<"heddle.v1.GetCurrentUserNa
  * Use `create(GetCurrentUserNamespaceRequestSchema)` to create a new message.
  */
 export const GetCurrentUserNamespaceRequestSchema: GenMessage<GetCurrentUserNamespaceRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 1);
+  messageDesc(file_heddle_v1_hosted, 3);
 
 /**
  * @generated from message heddle.v1.CreateNamespaceRequest
@@ -72,6 +166,11 @@ export type CreateNamespaceRequest = Message<"heddle.v1.CreateNamespaceRequest">
   displayName: string;
 
   /**
+   * @generated from field: heddle.v1.SpoolSettings settings = 5;
+   */
+  settings?: SpoolSettings | undefined;
+
+  /**
    * Idempotency (audit-idempotency enforces tag 15).
    *
    * @generated from field: string client_operation_id = 15;
@@ -84,7 +183,7 @@ export type CreateNamespaceRequest = Message<"heddle.v1.CreateNamespaceRequest">
  * Use `create(CreateNamespaceRequestSchema)` to create a new message.
  */
 export const CreateNamespaceRequestSchema: GenMessage<CreateNamespaceRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 2);
+  messageDesc(file_heddle_v1_hosted, 4);
 
 /**
  * @generated from message heddle.v1.UpdateNamespaceRequest
@@ -123,7 +222,7 @@ export type UpdateNamespaceRequest = Message<"heddle.v1.UpdateNamespaceRequest">
  * Use `create(UpdateNamespaceRequestSchema)` to create a new message.
  */
 export const UpdateNamespaceRequestSchema: GenMessage<UpdateNamespaceRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 3);
+  messageDesc(file_heddle_v1_hosted, 5);
 
 /**
  * @generated from message heddle.v1.DeleteNamespaceRequest
@@ -147,7 +246,7 @@ export type DeleteNamespaceRequest = Message<"heddle.v1.DeleteNamespaceRequest">
  * Use `create(DeleteNamespaceRequestSchema)` to create a new message.
  */
 export const DeleteNamespaceRequestSchema: GenMessage<DeleteNamespaceRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 4);
+  messageDesc(file_heddle_v1_hosted, 6);
 
 /**
  * @generated from message heddle.v1.ListRepositoriesRequest
@@ -164,7 +263,7 @@ export type ListRepositoriesRequest = Message<"heddle.v1.ListRepositoriesRequest
  * Use `create(ListRepositoriesRequestSchema)` to create a new message.
  */
 export const ListRepositoriesRequestSchema: GenMessage<ListRepositoriesRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 5);
+  messageDesc(file_heddle_v1_hosted, 7);
 
 /**
  * @generated from message heddle.v1.CreateRepositoryRequest
@@ -193,7 +292,7 @@ export type CreateRepositoryRequest = Message<"heddle.v1.CreateRepositoryRequest
  * Use `create(CreateRepositoryRequestSchema)` to create a new message.
  */
 export const CreateRepositoryRequestSchema: GenMessage<CreateRepositoryRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 6);
+  messageDesc(file_heddle_v1_hosted, 8);
 
 /**
  * @generated from message heddle.v1.UpdateRepositoryRequest
@@ -222,7 +321,7 @@ export type UpdateRepositoryRequest = Message<"heddle.v1.UpdateRepositoryRequest
  * Use `create(UpdateRepositoryRequestSchema)` to create a new message.
  */
 export const UpdateRepositoryRequestSchema: GenMessage<UpdateRepositoryRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 7);
+  messageDesc(file_heddle_v1_hosted, 9);
 
 /**
  * @generated from message heddle.v1.DeleteRepositoryRequest
@@ -246,7 +345,7 @@ export type DeleteRepositoryRequest = Message<"heddle.v1.DeleteRepositoryRequest
  * Use `create(DeleteRepositoryRequestSchema)` to create a new message.
  */
 export const DeleteRepositoryRequestSchema: GenMessage<DeleteRepositoryRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 8);
+  messageDesc(file_heddle_v1_hosted, 10);
 
 /**
  * @generated from message heddle.v1.ListGrantsRequest
@@ -263,7 +362,7 @@ export type ListGrantsRequest = Message<"heddle.v1.ListGrantsRequest"> & {
  * Use `create(ListGrantsRequestSchema)` to create a new message.
  */
 export const ListGrantsRequestSchema: GenMessage<ListGrantsRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 9);
+  messageDesc(file_heddle_v1_hosted, 11);
 
 /**
  * @generated from message heddle.v1.CreateGrantRequest
@@ -297,7 +396,7 @@ export type CreateGrantRequest = Message<"heddle.v1.CreateGrantRequest"> & {
  * Use `create(CreateGrantRequestSchema)` to create a new message.
  */
 export const CreateGrantRequestSchema: GenMessage<CreateGrantRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 10);
+  messageDesc(file_heddle_v1_hosted, 12);
 
 /**
  * @generated from message heddle.v1.UpdateGrantRequest
@@ -331,7 +430,7 @@ export type UpdateGrantRequest = Message<"heddle.v1.UpdateGrantRequest"> & {
  * Use `create(UpdateGrantRequestSchema)` to create a new message.
  */
 export const UpdateGrantRequestSchema: GenMessage<UpdateGrantRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 11);
+  messageDesc(file_heddle_v1_hosted, 13);
 
 /**
  * @generated from message heddle.v1.DeleteGrantRequest
@@ -360,7 +459,7 @@ export type DeleteGrantRequest = Message<"heddle.v1.DeleteGrantRequest"> & {
  * Use `create(DeleteGrantRequestSchema)` to create a new message.
  */
 export const DeleteGrantRequestSchema: GenMessage<DeleteGrantRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 12);
+  messageDesc(file_heddle_v1_hosted, 14);
 
 /**
  * @generated from message heddle.v1.ListActorsRequest
@@ -373,7 +472,7 @@ export type ListActorsRequest = Message<"heddle.v1.ListActorsRequest"> & {
  * Use `create(ListActorsRequestSchema)` to create a new message.
  */
 export const ListActorsRequestSchema: GenMessage<ListActorsRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 13);
+  messageDesc(file_heddle_v1_hosted, 15);
 
 /**
  * @generated from message heddle.v1.ListWorktreesRequest
@@ -386,7 +485,7 @@ export type ListWorktreesRequest = Message<"heddle.v1.ListWorktreesRequest"> & {
  * Use `create(ListWorktreesRequestSchema)` to create a new message.
  */
 export const ListWorktreesRequestSchema: GenMessage<ListWorktreesRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 14);
+  messageDesc(file_heddle_v1_hosted, 16);
 
 /**
  * @generated from message heddle.v1.HostedNamespace
@@ -421,6 +520,11 @@ export type HostedNamespace = Message<"heddle.v1.HostedNamespace"> & {
    * @generated from field: string display_name = 6;
    */
   displayName: string;
+
+  /**
+   * @generated from field: heddle.v1.SpoolSettings settings = 7;
+   */
+  settings?: SpoolSettings | undefined;
 };
 
 /**
@@ -428,7 +532,7 @@ export type HostedNamespace = Message<"heddle.v1.HostedNamespace"> & {
  * Use `create(HostedNamespaceSchema)` to create a new message.
  */
 export const HostedNamespaceSchema: GenMessage<HostedNamespace> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 15);
+  messageDesc(file_heddle_v1_hosted, 17);
 
 /**
  * @generated from message heddle.v1.HostedRepository
@@ -465,7 +569,155 @@ export type HostedRepository = Message<"heddle.v1.HostedRepository"> & {
  * Use `create(HostedRepositorySchema)` to create a new message.
  */
 export const HostedRepositorySchema: GenMessage<HostedRepository> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 16);
+  messageDesc(file_heddle_v1_hosted, 18);
+
+/**
+ * @generated from message heddle.v1.Bookmark
+ */
+export type Bookmark = Message<"heddle.v1.Bookmark"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * "repo" | "namespace" for the current web UI. Kept as a string so
+   * future bookmarkable resource kinds can ship without enum churn.
+   *
+   * @generated from field: string resource_kind = 2;
+   */
+  resourceKind: string;
+
+  /**
+   * @generated from field: string full_path = 3;
+   */
+  fullPath: string;
+
+  /**
+   * @generated from field: string name = 4;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string folder = 5;
+   */
+  folder: string;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp created_at = 6;
+   */
+  createdAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp updated_at = 7;
+   */
+  updatedAt?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message heddle.v1.Bookmark.
+ * Use `create(BookmarkSchema)` to create a new message.
+ */
+export const BookmarkSchema: GenMessage<Bookmark> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 19);
+
+/**
+ * @generated from message heddle.v1.ListBookmarksRequest
+ */
+export type ListBookmarksRequest = Message<"heddle.v1.ListBookmarksRequest"> & {
+};
+
+/**
+ * Describes the message heddle.v1.ListBookmarksRequest.
+ * Use `create(ListBookmarksRequestSchema)` to create a new message.
+ */
+export const ListBookmarksRequestSchema: GenMessage<ListBookmarksRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 20);
+
+/**
+ * @generated from message heddle.v1.ListBookmarksResponse
+ */
+export type ListBookmarksResponse = Message<"heddle.v1.ListBookmarksResponse"> & {
+  /**
+   * @generated from field: repeated heddle.v1.Bookmark bookmarks = 1;
+   */
+  bookmarks: Bookmark[];
+};
+
+/**
+ * Describes the message heddle.v1.ListBookmarksResponse.
+ * Use `create(ListBookmarksResponseSchema)` to create a new message.
+ */
+export const ListBookmarksResponseSchema: GenMessage<ListBookmarksResponse> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 21);
+
+/**
+ * @generated from message heddle.v1.UpsertBookmarkRequest
+ */
+export type UpsertBookmarkRequest = Message<"heddle.v1.UpsertBookmarkRequest"> & {
+  /**
+   * @generated from field: string resource_kind = 1;
+   */
+  resourceKind: string;
+
+  /**
+   * @generated from field: string full_path = 2;
+   */
+  fullPath: string;
+
+  /**
+   * @generated from field: string name = 3;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string folder = 4;
+   */
+  folder: string;
+
+  /**
+   * Idempotency (audit-idempotency enforces tag 15).
+   *
+   * @generated from field: string client_operation_id = 15;
+   */
+  clientOperationId: string;
+};
+
+/**
+ * Describes the message heddle.v1.UpsertBookmarkRequest.
+ * Use `create(UpsertBookmarkRequestSchema)` to create a new message.
+ */
+export const UpsertBookmarkRequestSchema: GenMessage<UpsertBookmarkRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 22);
+
+/**
+ * @generated from message heddle.v1.DeleteBookmarkRequest
+ */
+export type DeleteBookmarkRequest = Message<"heddle.v1.DeleteBookmarkRequest"> & {
+  /**
+   * @generated from field: string resource_kind = 1;
+   */
+  resourceKind: string;
+
+  /**
+   * @generated from field: string full_path = 2;
+   */
+  fullPath: string;
+
+  /**
+   * Idempotency (audit-idempotency enforces tag 15).
+   *
+   * @generated from field: string client_operation_id = 15;
+   */
+  clientOperationId: string;
+};
+
+/**
+ * Describes the message heddle.v1.DeleteBookmarkRequest.
+ * Use `create(DeleteBookmarkRequestSchema)` to create a new message.
+ */
+export const DeleteBookmarkRequestSchema: GenMessage<DeleteBookmarkRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_hosted, 23);
 
 /**
  * @generated from message heddle.v1.HostedGrant
@@ -492,7 +744,7 @@ export type HostedGrant = Message<"heddle.v1.HostedGrant"> & {
  * Use `create(HostedGrantSchema)` to create a new message.
  */
 export const HostedGrantSchema: GenMessage<HostedGrant> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 17);
+  messageDesc(file_heddle_v1_hosted, 24);
 
 /**
  * @generated from message heddle.v1.ActorSummary
@@ -604,7 +856,7 @@ export type ActorSummary = Message<"heddle.v1.ActorSummary"> & {
  * Use `create(ActorSummarySchema)` to create a new message.
  */
 export const ActorSummarySchema: GenMessage<ActorSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 18);
+  messageDesc(file_heddle_v1_hosted, 25);
 
 /**
  * @generated from message heddle.v1.WorktreeSummary
@@ -661,7 +913,7 @@ export type WorktreeSummary = Message<"heddle.v1.WorktreeSummary"> & {
  * Use `create(WorktreeSummarySchema)` to create a new message.
  */
 export const WorktreeSummarySchema: GenMessage<WorktreeSummary> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 19);
+  messageDesc(file_heddle_v1_hosted, 26);
 
 /**
  * @generated from message heddle.v1.ListActorsResponse
@@ -678,7 +930,7 @@ export type ListActorsResponse = Message<"heddle.v1.ListActorsResponse"> & {
  * Use `create(ListActorsResponseSchema)` to create a new message.
  */
 export const ListActorsResponseSchema: GenMessage<ListActorsResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 20);
+  messageDesc(file_heddle_v1_hosted, 27);
 
 /**
  * @generated from message heddle.v1.ListWorktreesResponse
@@ -695,7 +947,7 @@ export type ListWorktreesResponse = Message<"heddle.v1.ListWorktreesResponse"> &
  * Use `create(ListWorktreesResponseSchema)` to create a new message.
  */
 export const ListWorktreesResponseSchema: GenMessage<ListWorktreesResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 21);
+  messageDesc(file_heddle_v1_hosted, 28);
 
 /**
  * @generated from message heddle.v1.Invitation
@@ -767,7 +1019,7 @@ export type Invitation = Message<"heddle.v1.Invitation"> & {
  * Use `create(InvitationSchema)` to create a new message.
  */
 export const InvitationSchema: GenMessage<Invitation> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 22);
+  messageDesc(file_heddle_v1_hosted, 29);
 
 /**
  * @generated from message heddle.v1.CreateInvitationRequest
@@ -815,7 +1067,7 @@ export type CreateInvitationRequest = Message<"heddle.v1.CreateInvitationRequest
  * Use `create(CreateInvitationRequestSchema)` to create a new message.
  */
 export const CreateInvitationRequestSchema: GenMessage<CreateInvitationRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 23);
+  messageDesc(file_heddle_v1_hosted, 30);
 
 /**
  * @generated from message heddle.v1.ListInvitationsRequest
@@ -839,7 +1091,7 @@ export type ListInvitationsRequest = Message<"heddle.v1.ListInvitationsRequest">
  * Use `create(ListInvitationsRequestSchema)` to create a new message.
  */
 export const ListInvitationsRequestSchema: GenMessage<ListInvitationsRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 24);
+  messageDesc(file_heddle_v1_hosted, 31);
 
 /**
  * @generated from message heddle.v1.ListInvitationsResponse
@@ -856,7 +1108,7 @@ export type ListInvitationsResponse = Message<"heddle.v1.ListInvitationsResponse
  * Use `create(ListInvitationsResponseSchema)` to create a new message.
  */
 export const ListInvitationsResponseSchema: GenMessage<ListInvitationsResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 25);
+  messageDesc(file_heddle_v1_hosted, 32);
 
 /**
  * @generated from message heddle.v1.RevokeInvitationRequest
@@ -880,7 +1132,7 @@ export type RevokeInvitationRequest = Message<"heddle.v1.RevokeInvitationRequest
  * Use `create(RevokeInvitationRequestSchema)` to create a new message.
  */
 export const RevokeInvitationRequestSchema: GenMessage<RevokeInvitationRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 26);
+  messageDesc(file_heddle_v1_hosted, 33);
 
 /**
  * Members = direct grants + pending invitations for a namespace.
@@ -913,7 +1165,7 @@ export type MemberEntry = Message<"heddle.v1.MemberEntry"> & {
  * Use `create(MemberEntrySchema)` to create a new message.
  */
 export const MemberEntrySchema: GenMessage<MemberEntry> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 27);
+  messageDesc(file_heddle_v1_hosted, 34);
 
 /**
  * @generated from message heddle.v1.MemberEntry.Grant
@@ -947,7 +1199,7 @@ export type MemberEntry_Grant = Message<"heddle.v1.MemberEntry.Grant"> & {
  * Use `create(MemberEntry_GrantSchema)` to create a new message.
  */
 export const MemberEntry_GrantSchema: GenMessage<MemberEntry_Grant> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 27, 0);
+  messageDesc(file_heddle_v1_hosted, 34, 0);
 
 /**
  * @generated from message heddle.v1.ListMembersRequest
@@ -971,7 +1223,7 @@ export type ListMembersRequest = Message<"heddle.v1.ListMembersRequest"> & {
  * Use `create(ListMembersRequestSchema)` to create a new message.
  */
 export const ListMembersRequestSchema: GenMessage<ListMembersRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 28);
+  messageDesc(file_heddle_v1_hosted, 35);
 
 /**
  * @generated from message heddle.v1.ListMembersResponse
@@ -988,7 +1240,7 @@ export type ListMembersResponse = Message<"heddle.v1.ListMembersResponse"> & {
  * Use `create(ListMembersResponseSchema)` to create a new message.
  */
 export const ListMembersResponseSchema: GenMessage<ListMembersResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 29);
+  messageDesc(file_heddle_v1_hosted, 36);
 
 /**
  * @generated from message heddle.v1.ListNamespacesResponse
@@ -1005,7 +1257,7 @@ export type ListNamespacesResponse = Message<"heddle.v1.ListNamespacesResponse">
  * Use `create(ListNamespacesResponseSchema)` to create a new message.
  */
 export const ListNamespacesResponseSchema: GenMessage<ListNamespacesResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 30);
+  messageDesc(file_heddle_v1_hosted, 37);
 
 /**
  * @generated from message heddle.v1.ListRepositoriesResponse
@@ -1022,7 +1274,7 @@ export type ListRepositoriesResponse = Message<"heddle.v1.ListRepositoriesRespon
  * Use `create(ListRepositoriesResponseSchema)` to create a new message.
  */
 export const ListRepositoriesResponseSchema: GenMessage<ListRepositoriesResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 31);
+  messageDesc(file_heddle_v1_hosted, 38);
 
 /**
  * @generated from message heddle.v1.ListGrantsResponse
@@ -1039,7 +1291,7 @@ export type ListGrantsResponse = Message<"heddle.v1.ListGrantsResponse"> & {
  * Use `create(ListGrantsResponseSchema)` to create a new message.
  */
 export const ListGrantsResponseSchema: GenMessage<ListGrantsResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_hosted, 32);
+  messageDesc(file_heddle_v1_hosted, 39);
 
 /**
  * Namespace kinds in the hosted control plane. `USER` namespaces are
@@ -1075,6 +1327,218 @@ export enum NamespaceKind {
  */
 export const NamespaceKindSchema: GenEnum<NamespaceKind> = /*@__PURE__*/
   enumDesc(file_heddle_v1_hosted, 0);
+
+/**
+ * @generated from enum heddle.v1.SpoolVisibility
+ */
+export enum SpoolVisibility {
+  /**
+   * @generated from enum value: SPOOL_VISIBILITY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_VISIBILITY_PRIVATE = 1;
+   */
+  PRIVATE = 1,
+
+  /**
+   * @generated from enum value: SPOOL_VISIBILITY_PUBLIC = 2;
+   */
+  PUBLIC = 2,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolVisibility.
+ */
+export const SpoolVisibilitySchema: GenEnum<SpoolVisibility> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 1);
+
+/**
+ * @generated from enum heddle.v1.SpoolStateVisibility
+ */
+export enum SpoolStateVisibility {
+  /**
+   * @generated from enum value: SPOOL_STATE_VISIBILITY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_STATE_VISIBILITY_PUBLIC = 1;
+   */
+  PUBLIC = 1,
+
+  /**
+   * @generated from enum value: SPOOL_STATE_VISIBILITY_INTERNAL = 2;
+   */
+  INTERNAL = 2,
+
+  /**
+   * @generated from enum value: SPOOL_STATE_VISIBILITY_PRIVATE = 3;
+   */
+  PRIVATE = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolStateVisibility.
+ */
+export const SpoolStateVisibilitySchema: GenEnum<SpoolStateVisibility> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 2);
+
+/**
+ * @generated from enum heddle.v1.SpoolBootstrapKind
+ */
+export enum SpoolBootstrapKind {
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_KIND_EMPTY = 1;
+   */
+  EMPTY = 1,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_KIND_GIT_REMOTE = 2;
+   */
+  GIT_REMOTE = 2,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_KIND_TEMPLATE = 3;
+   */
+  TEMPLATE = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolBootstrapKind.
+ */
+export const SpoolBootstrapKindSchema: GenEnum<SpoolBootstrapKind> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 3);
+
+/**
+ * @generated from enum heddle.v1.SpoolBootstrapSyncDirection
+ */
+export enum SpoolBootstrapSyncDirection {
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_SYNC_DIRECTION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_SYNC_DIRECTION_PULL = 1;
+   */
+  PULL = 1,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_SYNC_DIRECTION_PUSH = 2;
+   */
+  PUSH = 2,
+
+  /**
+   * @generated from enum value: SPOOL_BOOTSTRAP_SYNC_DIRECTION_BIDI = 3;
+   */
+  BIDI = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolBootstrapSyncDirection.
+ */
+export const SpoolBootstrapSyncDirectionSchema: GenEnum<SpoolBootstrapSyncDirection> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 4);
+
+/**
+ * @generated from enum heddle.v1.SpoolWritePolicy
+ */
+export enum SpoolWritePolicy {
+  /**
+   * @generated from enum value: SPOOL_WRITE_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_WRITE_POLICY_DEVELOPERS = 1;
+   */
+  DEVELOPERS = 1,
+
+  /**
+   * @generated from enum value: SPOOL_WRITE_POLICY_MAINTAINERS = 2;
+   */
+  MAINTAINERS = 2,
+
+  /**
+   * @generated from enum value: SPOOL_WRITE_POLICY_OWNER_ONLY = 3;
+   */
+  OWNER_ONLY = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolWritePolicy.
+ */
+export const SpoolWritePolicySchema: GenEnum<SpoolWritePolicy> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 5);
+
+/**
+ * @generated from enum heddle.v1.SpoolChildPolicy
+ */
+export enum SpoolChildPolicy {
+  /**
+   * @generated from enum value: SPOOL_CHILD_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_CHILD_POLICY_MAINTAINERS = 1;
+   */
+  MAINTAINERS = 1,
+
+  /**
+   * @generated from enum value: SPOOL_CHILD_POLICY_DEVELOPERS = 2;
+   */
+  DEVELOPERS = 2,
+
+  /**
+   * @generated from enum value: SPOOL_CHILD_POLICY_DISABLED = 3;
+   */
+  DISABLED = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolChildPolicy.
+ */
+export const SpoolChildPolicySchema: GenEnum<SpoolChildPolicy> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 6);
+
+/**
+ * @generated from enum heddle.v1.SpoolSyncBehavior
+ */
+export enum SpoolSyncBehavior {
+  /**
+   * @generated from enum value: SPOOL_SYNC_BEHAVIOR_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SPOOL_SYNC_BEHAVIOR_MANUAL = 1;
+   */
+  MANUAL = 1,
+
+  /**
+   * @generated from enum value: SPOOL_SYNC_BEHAVIOR_HEDDLE_START = 2;
+   */
+  HEDDLE_START = 2,
+
+  /**
+   * @generated from enum value: SPOOL_SYNC_BEHAVIOR_HEDDLE_START_WITH_PRESENCE = 3;
+   */
+  HEDDLE_START_WITH_PRESENCE = 3,
+}
+
+/**
+ * Describes the enum heddle.v1.SpoolSyncBehavior.
+ */
+export const SpoolSyncBehaviorSchema: GenEnum<SpoolSyncBehavior> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_hosted, 7);
 
 /**
  * @generated from service heddle.v1.HostedUserService
@@ -1384,6 +1848,36 @@ export const HostedUserService: GenService<{
   revokeSupportAccess: {
     methodKind: "unary";
     input: typeof RevokeSupportAccessRequestSchema;
+    output: typeof DeleteResponseSchema;
+  },
+  /**
+   * ── Caller-owned bookmarks ───────────────────────────────────────
+   * Accepts both user and anonymous biscuits. Anonymous callers can
+   * only write their own bookmark rows; promotion migrates those rows
+   * to the eventual user account without granting repo/namespace write
+   * permissions.
+   *
+   * @generated from rpc heddle.v1.HostedUserService.ListBookmarks
+   */
+  listBookmarks: {
+    methodKind: "unary";
+    input: typeof ListBookmarksRequestSchema;
+    output: typeof ListBookmarksResponseSchema;
+  },
+  /**
+   * @generated from rpc heddle.v1.HostedUserService.UpsertBookmark
+   */
+  upsertBookmark: {
+    methodKind: "unary";
+    input: typeof UpsertBookmarkRequestSchema;
+    output: typeof BookmarkSchema;
+  },
+  /**
+   * @generated from rpc heddle.v1.HostedUserService.DeleteBookmark
+   */
+  deleteBookmark: {
+    methodKind: "unary";
+    input: typeof DeleteBookmarkRequestSchema;
     output: typeof DeleteResponseSchema;
   },
 }> = /*@__PURE__*/
