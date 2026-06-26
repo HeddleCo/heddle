@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
+#[cfg(feature = "client")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -11,7 +13,7 @@ use std::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
+use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -22,8 +24,11 @@ use objects::{
 use refs::Head;
 use repo::{BlobHydrator, Repository};
 use serde::Serialize;
+#[cfg(feature = "client")]
+use sley::plumbing::sley_worktree;
 use sley::{
-    GitObjectType, IndexWriteOptions, ObjectId, RefPrecondition, Repository as SleyRepository,
+    ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
+    IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
 };
 
 use super::{
@@ -344,7 +349,7 @@ fn finish_git_overlay_clone(
     options: &CloneOptions,
     remote_label: String,
 ) -> Result<()> {
-    write_git_overlay_origin(local_path, &remote_label)?;
+    configure_git_overlay_origin(local_path, &remote_label)?;
     let repo = Repository::init(local_path)?;
     let mut bridge = GitBridge::new(&repo);
     let refs = options
@@ -420,123 +425,27 @@ fn finish_git_overlay_clone(
     Ok(())
 }
 
-fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()> {
-    let config_path = local_path.join(".git").join("config");
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = ensure_git_config_core_bare_false(&contents);
-    contents = remove_git_config_remote_section(&contents, "origin");
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    contents.push_str(&format!(
-        "[remote \"origin\"]\n\turl = {remote_label}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
-    ));
-    fs::write(config_path, contents)?;
+fn configure_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()> {
+    let git_repo = SleyRepository::discover(local_path).map_err(anyhow::Error::msg)?;
+    let core_plan = git_repo
+        .plan_config_set("core.bare", "false", ConfigEditScope::Local)
+        .map_err(anyhow::Error::msg)?
+        .with_fsync(true);
+    git_repo
+        .apply_config_edit_plan(core_plan)
+        .map_err(anyhow::Error::msg)?;
+
+    let origin = RemoteConfigSet::new("origin")
+        .with_url(remote_label)
+        .with_fetch_refspec("+refs/heads/*:refs/remotes/origin/*");
+    let remote_plan = git_repo
+        .plan_remote_set(origin, ConfigEditScope::Local)
+        .map_err(anyhow::Error::msg)?
+        .with_fsync(true);
+    git_repo
+        .apply_config_edit_plan(remote_plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
-}
-
-fn ensure_git_config_core_bare_false(contents: &str) -> String {
-    let mut rewritten = String::new();
-    let mut in_core = false;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_core = trimmed == "[core]";
-            rewritten.push_str(line);
-            rewritten.push('\n');
-            continue;
-        }
-        if in_core
-            && trimmed
-                .split_once('=')
-                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("bare"))
-        {
-            continue;
-        }
-        rewritten.push_str(line);
-        rewritten.push('\n');
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten.push_str("[core]\n");
-    rewritten.push_str("\tbare = false\n");
-    rewritten
-}
-
-fn remove_git_config_remote_section(contents: &str, remote_name: &str) -> String {
-    remove_git_config_named_section(contents, "remote", remote_name)
-}
-
-fn remove_git_config_branch_section(contents: &str, branch_name: &str) -> String {
-    remove_git_config_named_section(contents, "branch", branch_name)
-}
-
-fn remove_git_config_named_section(contents: &str, section: &str, subsection_name: &str) -> String {
-    let mut rewritten = String::new();
-    let mut skipping_section = false;
-    for line in contents.lines() {
-        if let Some(section_name) = parse_git_config_subsection_name(line, section) {
-            skipping_section = section_name == subsection_name;
-            if skipping_section {
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_section = false;
-        }
-        if !skipping_section {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten
-}
-
-fn parse_git_config_subsection_name(line: &str, section: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let prefix = format!("[{section} \"");
-    let inner = trimmed.strip_prefix(&prefix)?.strip_suffix("\"]")?;
-    unescape_git_config_string(inner)
-}
-
-fn escape_git_config_string(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\u{0008}' => out.push_str("\\b"),
-            ch => out.push(ch),
-        }
-    }
-    out
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
-    }
-    Some(out)
 }
 
 fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Result<()> {
@@ -607,17 +516,20 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
 }
 
 fn write_git_overlay_branch_upstream(local_path: &Path, branch: &str) -> Result<()> {
-    let config_path = local_path.join(".git").join("config");
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = remove_git_config_branch_section(&contents, branch);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    let branch_section = escape_git_config_string(branch);
-    contents.push_str(&format!(
-        "[branch \"{branch_section}\"]\n\tremote = origin\n\tmerge = refs/heads/{branch}\n"
-    ));
-    fs::write(config_path, contents)?;
+    let git_repo = SleyRepository::discover(local_path).map_err(anyhow::Error::msg)?;
+    let plan = ConfigEditPlan::new(git_repo.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "branch",
+            Some(branch.to_string()),
+            vec![
+                ConfigSectionEntry::new("remote", "origin"),
+                ConfigSectionEntry::new("merge", format!("refs/heads/{branch}")),
+            ],
+        ))
+        .with_fsync(true);
+    git_repo
+        .apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -1164,7 +1076,7 @@ fn clone_default_remote_failed_advice(origin_url: &str, cause: String) -> Recove
         "clone_default_remote_failed",
         format!("Cloned state, but could not configure default remote 'origin': {cause}"),
         "Inspect the clone, then configure the remote with `heddle remote add origin <url>` if you want push/pull defaults.",
-        format!("local clone could not write default remote 'origin' for {origin_url}: {cause}"),
+        format!("clone could not write default remote 'origin' for {origin_url}: {cause}"),
         "future push or pull commands would not know which remote to use by default",
         "objects, refs, and worktree files were already copied into the clone",
         "heddle remote add origin <url>",
@@ -1285,17 +1197,10 @@ async fn clone_network(
     let session = HostedSession::build(&user_config, server_key, HostedAuthMode::ConfigToken)?;
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
-    let mut cleanup = CloneDestinationCleanup::new(local_path);
-
-    // Create the local directory only after TLS/auth prevalidation.
-    fs::create_dir_all(local_path)?;
-
-    // Initialize the local repository only after TLS/auth prevalidation.
-    let local_repo = Repository::init(local_path)?;
-
+    let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
 
-    if should_output_json(cli, Some(local_repo.config())) {
+    if json_output {
         println!(
             "{}",
             serde_json::json!({
@@ -1308,7 +1213,37 @@ async fn clone_network(
         println!("Connected to {}", addr);
     }
 
-    let track_name = thread.as_deref().unwrap_or("main");
+    let remote_refs = client
+        .list_refs_with_revision_addresses(repo_path)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.is_thread)
+        .collect::<Vec<_>>();
+    let track_name = select_hosted_clone_thread(
+        thread.as_deref(),
+        remote_refs.iter().map(|entry| entry.name.as_str()),
+        repo_path,
+    )?;
+    let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
+        .is_some_and(|address| address.starts_with("git:"));
+
+    let mut cleanup = CloneDestinationCleanup::new(local_path);
+
+    // Create the local directory only after TLS/auth prevalidation and remote
+    // ref discovery. Git-backed hosted refs need `.git` present before
+    // Repository::init so the destination is opened as Git-overlay and accepts
+    // the Git lane transfers during pull.
+    fs::create_dir_all(local_path)?;
+    if git_overlay_clone {
+        SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
+    }
+
+    // Initialize the local repository only after TLS/auth prevalidation.
+    let local_repo = Repository::init(local_path)?;
+    let origin_url = hosted_clone_origin_url(&endpoint_spec, repo_path);
+    if git_overlay_clone {
+        configure_git_overlay_origin(local_path, &origin_url)?;
+    }
     let materialization = if lazy {
         PullMaterialization::Lazy
     } else {
@@ -1318,8 +1253,8 @@ async fn clone_network(
         .pull_with_depth_and_materialization(
             &local_repo,
             repo_path,
-            track_name,
-            Some(track_name),
+            &track_name,
+            Some(&track_name),
             depth,
             materialization,
         )
@@ -1338,19 +1273,29 @@ async fn clone_network(
             // which is a resolved IP). The hydrator re-resolves DNS on
             // every process start so a future LB rotation doesn't pin us
             // to a stale IP.
-            let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
+            let cfg = LazyHydratorConfig::hosted(
+                endpoint_spec.clone(),
+                repo_path,
+                &track_name,
+                &track_name,
+            );
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
+        } else if git_overlay_clone {
+            finish_hosted_git_overlay_checkout(&local_repo, &track_name)
+                .context("failed to finish hosted Git-overlay checkout")?;
+            configure_git_overlay_origin_tracking(local_path, &track_name)?;
         } else if let Some(state) = final_state {
             local_repo
                 .goto_from_materialized_state(&state, None)
                 .context("failed to materialize hosted clone worktree")?;
         }
+        configure_hosted_clone_origin(&local_repo, &endpoint_spec, repo_path)?;
         if should_output_json(cli, Some(local_repo.config())) {
             let output = heddle_clone_output(
-                addr.to_string(),
+                origin_url.clone(),
                 local_path.display().to_string(),
-                track_name.to_string(),
+                track_name.clone(),
                 None,
                 final_state.map(|state| state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
@@ -1361,7 +1306,7 @@ async fn clone_network(
             println!(
                 "{} cloned {} into {}{}",
                 style::ok_marker(),
-                style::dim(&addr.to_string()),
+                style::dim(&origin_url),
                 style::bold(&local_path.display().to_string()),
                 style::dim(&depth_info)
             );
@@ -1381,6 +1326,112 @@ async fn clone_network(
 
     cleanup.disarm();
     Ok(())
+}
+
+#[cfg(feature = "client")]
+fn select_hosted_clone_thread<'a>(
+    requested: Option<&str>,
+    remote_threads: impl IntoIterator<Item = &'a str>,
+    remote_label: &str,
+) -> Result<String> {
+    if let Some(requested) = requested {
+        return Ok(requested.to_string());
+    }
+
+    let mut threads = remote_threads
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    threads.sort();
+    threads.dedup();
+    if threads.iter().any(|thread| thread == "main") {
+        return Ok("main".to_string());
+    }
+    threads
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label)))
+}
+
+#[cfg(feature = "client")]
+fn hosted_clone_thread_revision_address<'a>(
+    remote_refs: &'a [HostedRefEntry],
+    thread: &str,
+) -> Option<&'a str> {
+    remote_refs
+        .iter()
+        .find(|entry| entry.name == thread && entry.is_thread)
+        .map(|entry| entry.revision_address.as_str())
+}
+
+#[cfg(feature = "client")]
+fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result<()> {
+    Repository::ensure_git_overlay_local_excludes(repo.root())?;
+    let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
+    let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
+    let checkout = sley_worktree::checkout_branch_filtered(
+        repo.root(),
+        git_repo.git_dir(),
+        git_repo.object_format(),
+        branch,
+        hosted_clone_reflog_committer(),
+        &config,
+    )
+    .map_err(anyhow::Error::msg)?;
+    if checkout.oid.is_null() {
+        let branch_ref = format!("refs/heads/{branch}");
+        anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
+    }
+    sley_worktree::reset_index_and_worktree_to_commit(
+        repo.root(),
+        git_repo.git_dir(),
+        git_repo.object_format(),
+        &checkout.oid,
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn hosted_clone_reflog_committer() -> Vec<u8> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("Heddle <heddle@local> {seconds} +0000").into_bytes()
+}
+
+#[cfg(feature = "client")]
+fn configure_hosted_clone_origin(
+    repo: &Repository,
+    endpoint_spec: &str,
+    repo_path: &str,
+) -> Result<String> {
+    let origin_url = hosted_clone_origin_url(endpoint_spec, repo_path);
+    let mut cfg = RemoteConfig::open(repo).map_err(|err| {
+        anyhow!(clone_default_remote_failed_advice(
+            &origin_url,
+            err.to_string()
+        ))
+    })?;
+    cfg.add(
+        "origin",
+        Remote {
+            url: origin_url.clone(),
+        },
+    )
+    .map_err(|err| {
+        anyhow!(clone_default_remote_failed_advice(
+            &origin_url,
+            err.to_string()
+        ))
+    })?;
+    Ok(origin_url)
+}
+
+#[cfg(feature = "client")]
+fn hosted_clone_origin_url(endpoint_spec: &str, repo_path: &str) -> String {
+    format!("heddle://{endpoint_spec}/{repo_path}")
 }
 
 fn copy_worktree(from: &Path, to: &Path) -> Result<()> {
@@ -1600,6 +1651,38 @@ mod tests {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_thread_selection_prefers_main() {
+        let selected =
+            select_hosted_clone_thread(None, ["master", "main"].into_iter(), "owner/repo")
+                .expect("thread selected");
+
+        assert_eq!(selected, "main");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_thread_selection_uses_only_advertised_master() {
+        let selected = select_hosted_clone_thread(None, ["master"].into_iter(), "owner/repo")
+            .expect("thread selected");
+
+        assert_eq!(selected, "master");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_thread_selection_honors_requested_thread() {
+        let selected = select_hosted_clone_thread(
+            Some("feature"),
+            ["main", "master"].into_iter(),
+            "owner/repo",
+        )
+        .expect("thread selected");
+
+        assert_eq!(selected, "feature");
+    }
+
     // ---- clone text-mode summary helpers (heddle#161) ----
 
     #[test]
@@ -1738,6 +1821,24 @@ mod tests {
         assert_eq!(
             hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
             "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_origin_is_persisted_as_default_remote() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+
+        let origin = configure_hosted_clone_origin(&repo, "weft.local:8421", "smoke-cli/project")
+            .expect("configure hosted origin");
+
+        assert_eq!(origin, "heddle://weft.local:8421/smoke-cli/project");
+        let cfg = RemoteConfig::open(&repo).expect("open remotes");
+        assert_eq!(cfg.default_name(), Some("origin"));
+        assert_eq!(
+            cfg.get("origin").expect("origin remote").url,
+            "heddle://weft.local:8421/smoke-cli/project"
         );
     }
 

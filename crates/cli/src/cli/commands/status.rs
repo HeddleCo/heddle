@@ -249,8 +249,8 @@ struct PlainGitStatusOutput {
 /// the filtered synthetic root) and the worktree is clean — i.e. there
 /// is genuinely nothing to act on yet. The repo is already initialized,
 /// so recommending `heddle init --quickstart` here read as "you
-/// initialized wrong" (heddle#644); point at the first commit instead.
-/// A dirty worktree already has its own advice (`heddle commit`), and
+/// initialized wrong" (heddle#644); point at the first save instead.
+/// A dirty worktree already has its own advice, and
 /// Git-overlay repos have their own onboarding (import/adopt), so both
 /// are left alone.
 fn first_save_recommendation(
@@ -479,7 +479,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let repo_open_ms = repo_open_start.elapsed().as_millis();
     let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
+    let compact_json = as_json && output_is_compact(cli);
     let short_text = short && !as_json;
+    let short_path = short_text || compact_json;
 
     let current_state_start = Instant::now();
     let current_state = repo.current_state()?;
@@ -490,8 +492,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let operation_ms = operation_start.elapsed().as_millis();
     // Single gating predicate for the slower "walk every thread /
     // inspect remote tracking / populate cross-thread relations" path.
-    // JSON and `-v` text actually display the data; default text doesn't.
-    let needs_full_walk = cli.verbose > 0 || as_json;
+    // Full JSON and `-v` text display thread topology and cross-thread
+    // relations. Compact JSON is the lightweight decision surface and uses
+    // the same construction path as short text.
+    let needs_full_walk = cli.verbose > 0 || (as_json && !compact_json);
     let needs_remote_tracking = needs_full_walk || short_text;
     let remote_tracking_start = Instant::now();
     let remote_tracking = if needs_remote_tracking {
@@ -502,7 +506,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let remote_tracking_ms = remote_tracking_start.elapsed().as_millis();
 
     let import_hint_start = Instant::now();
-    let import_hint = if short_text {
+    let import_hint = if short_path {
         None
     } else {
         repo.git_overlay_import_hint().unwrap_or(None)
@@ -564,7 +568,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     };
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
-    if short_text {
+    if short_path {
         let recommended_action = if trust.verified {
             primary_next_action_with_verification(
                 operation.as_ref(),
@@ -1039,7 +1043,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     }
     let recommended_action = if git_backed_without_capture {
         if has_changes {
-            "heddle commit -m \"...\"".to_string()
+            "heddle capture -m \"...\"".to_string()
         } else {
             String::new()
         }
@@ -2183,7 +2187,7 @@ fn render_git_index_status(index: &GitIndexPlan) {
     if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
         println!(
             "  include the rest with: {}",
-            style::bold("heddle commit --all -m \"...\"")
+            style::bold("heddle capture -m \"...\"")
         );
     }
 }
@@ -2199,14 +2203,16 @@ fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> Strin
 fn git_index_commit_scope_text(index: &GitIndexPlan) -> &'static str {
     match index.commit_mode {
         "staged_index" => {
-            "plain `heddle commit` checkpoints staged paths only; unstaged and untracked paths stay put"
+            "`heddle checkpoint` writes the current captured state to Git; capture additional paths first"
         }
-        "worktree_all" => "plain `heddle commit` checkpoints all unstaged and untracked paths",
+        "worktree_all" => {
+            "`heddle capture` saves the worktree; `heddle checkpoint` writes the captured state to Git"
+        }
         "worktree_all_explicit" => {
-            "`heddle commit --all` checkpoints staged, unstaged, and untracked paths"
+            "`heddle capture` saves staged, unstaged, and untracked paths; `heddle checkpoint` writes the captured state to Git"
         }
         "none" => "no Git paths are ready to commit",
-        _ => "plain `heddle commit` checkpoints the listed paths",
+        _ => "`heddle checkpoint` writes the current captured state to Git",
     }
 }
 
