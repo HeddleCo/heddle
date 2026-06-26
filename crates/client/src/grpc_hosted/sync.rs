@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
+    io::{self, Write},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -8,12 +9,12 @@ use std::{
 };
 
 use grpc::heddle::v1::{
-    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitLooseObjectTransfer, GitObjectKind,
-    GitRefKind, GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor,
-    PackChunk, PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage,
-    PushRequest, RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary,
-    ThreadIntegrationPolicy, ThreadMetadata, ThreadVerificationSummary, TransportMode,
-    UpdateRefRequest, WantObjects, git_lane_transfer, pull_message, push_message,
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer, GitRefKind,
+    GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
+    PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
+    RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
+    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
+    git_lane_transfer, pull_message, push_message,
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
@@ -24,8 +25,7 @@ use repo::{
     ThreadManager,
 };
 use sley::{
-    EntryKind, GitObjectType, ObjectId as GitObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository,
+    ObjectId as GitObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -62,7 +62,17 @@ type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
 
 struct GitLanePushPlan {
     local_revision_address: String,
-    messages: Vec<PushMessage>,
+    pack: GitPackPushPlan,
+    ref_update: PushMessage,
+}
+
+#[derive(Clone)]
+struct GitPackPushPlan {
+    transfer_id: String,
+    pack_id: Vec<u8>,
+    pack_size: u64,
+    root: GitObjectId,
+    git_repo: SleyRepository,
 }
 
 const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
@@ -79,6 +89,14 @@ pub struct PullObjectMix {
     pub actions: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostedRefEntry {
+    pub name: String,
+    pub change_id: ChangeId,
+    pub is_thread: bool,
+    pub revision_address: String,
 }
 
 impl PullObjectMix {
@@ -123,6 +141,22 @@ pub struct PullProfile {
 
 impl HostedGrpcClient {
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
+        Ok(self
+            .list_refs_with_revision_addresses(repo_path)
+            .await?
+            .into_iter()
+            .map(|entry| RefEntry {
+                name: entry.name,
+                change_id: entry.change_id,
+                is_thread: entry.is_thread,
+            })
+            .collect())
+    }
+
+    pub async fn list_refs_with_revision_addresses(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
         let mut request = Request::new(ListRefsRequest {
             repo_path: repo_path.to_string(),
         });
@@ -137,11 +171,12 @@ impl HostedGrpcClient {
             .refs
             .into_iter()
             .map(|entry| {
-                Ok(RefEntry {
+                Ok(HostedRefEntry {
                     name: entry.name,
                     change_id: ChangeId::try_from_slice(&entry.change_id)
                         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                     is_thread: entry.is_thread,
+                    revision_address: entry.revision_address,
                 })
             })
             .collect()
@@ -221,7 +256,12 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
     ) -> Result<PushComplete, ProtocolError> {
-        let git_lane = build_git_lane_push_plan(repo, local_state, target_thread)?;
+        let git_lane = build_git_lane_push_plan(
+            repo,
+            local_state,
+            target_thread,
+            self.transport.chunk_size.max(1),
+        )?;
         let local_revision_address = git_lane.local_revision_address.clone();
         self.push_with_revision(
             repo,
@@ -244,7 +284,7 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
         local_revision_address: String,
-        git_lane: Option<GitLanePushPlan>,
+        mut git_lane: Option<GitLanePushPlan>,
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
@@ -310,6 +350,9 @@ impl HostedGrpcClient {
                 ));
             }
         };
+        if let Some(git_lane) = git_lane.as_mut() {
+            apply_git_ref_expectation(&mut git_lane.ref_update, &ready.remote_revision_address)?;
+        }
 
         let object_index = match full_objects {
             Some(objects) => objects
@@ -374,11 +417,11 @@ impl HostedGrpcClient {
         }
 
         if let Some(git_lane) = git_lane {
-            for message in git_lane.messages {
-                tx.send(message).await.map_err(|_| {
-                    ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
-                })?;
-            }
+            send_git_pack_streaming_messages(&tx, &git_lane.pack, self.transport.chunk_size.max(1))
+                .await?;
+            tx.send(git_lane.ref_update).await.map_err(|_| {
+                ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
+            })?;
         }
         drop(tx);
 
@@ -781,6 +824,7 @@ impl HostedGrpcClient {
             None
         };
         let mut git_lane_repo = None;
+        let mut git_pack_state = wire::GitPackChunkState::default();
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -889,12 +933,18 @@ impl HostedGrpcClient {
                     profile.bytes_received = profile
                         .bytes_received
                         .saturating_add(git_lane_transfer_size(&transfer));
-                    accept_git_lane_pull_transfer(repo, &mut git_lane_repo, transfer)?;
+                    accept_git_lane_pull_transfer(
+                        repo,
+                        &mut git_lane_repo,
+                        &mut git_pack_state,
+                        transfer,
+                    )?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
                 Some(pull_message::Body::Complete(complete)) => {
                     profile.receive_and_apply = receive_start.elapsed();
+                    git_pack_state.ensure_idle()?;
                     let final_state = if complete.new_state.is_empty() {
                         None
                     } else {
@@ -1565,6 +1615,7 @@ fn build_git_lane_push_plan(
     repo: &Repository,
     local_state: ChangeId,
     target_thread: &str,
+    chunk_size: usize,
 ) -> Result<GitLanePushPlan, ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(ProtocolError::InvalidState(
@@ -1600,104 +1651,240 @@ fn build_git_lane_push_plan(
         ))
     })?;
 
-    let mut messages = collect_git_lane_loose_object_messages(&git_repo, commit_oid)?;
-    messages.push(git_ref_update_message(
-        local_state,
-        target_thread,
-        commit_oid,
-        &checkpoint,
-    )?);
+    let pack = build_git_lane_pack_plan(&git_repo, commit_oid, chunk_size)?;
+    let ref_update = git_ref_update_message(local_state, target_thread, commit_oid, &checkpoint)?;
 
     Ok(GitLanePushPlan {
         local_revision_address: git_revision_address(&commit_oid),
-        messages,
+        pack,
+        ref_update,
     })
 }
 
-fn collect_git_lane_loose_object_messages(
+fn build_git_lane_pack_plan(
     git_repo: &SleyRepository,
     root: GitObjectId,
-) -> Result<Vec<PushMessage>, ProtocolError> {
-    let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([root]);
-    let mut messages = Vec::new();
+    chunk_size: usize,
+) -> Result<GitPackPushPlan, ProtocolError> {
+    let objects = git_repo.objects();
+    let mut sink = io::sink();
+    let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
+        objects.as_ref(),
+        git_repo.object_format(),
+        [root],
+        &HashSet::new(),
+        &mut sink,
+    )
+    .map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "plan reachable Git pack stream for {}: {err}",
+            root.to_hex()
+        ))
+    })?
+    .ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} did not produce a reachable Git pack",
+            root.to_hex()
+        ))
+    })?;
+    if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git pack exceeds maximum transfer size of {} bytes",
+            wire::MAX_RECEIVED_GIT_PACK_SIZE
+        )));
+    }
+    let chunk_size = chunk_size.max(1) as u64;
+    let chunk_count = pack.pack_size.div_ceil(chunk_size);
+    if chunk_count > u32::MAX as u64 {
+        return Err(ProtocolError::InvalidState(
+            "Git pack chunk count exceeds u32".to_string(),
+        ));
+    }
+    Ok(GitPackPushPlan {
+        transfer_id: format!("git-pack:{}", root.to_hex()),
+        pack_id: pack.checksum.as_bytes().to_vec(),
+        pack_size: pack.pack_size,
+        root,
+        git_repo: git_repo.clone(),
+    })
+}
 
-    while let Some(oid) = queue.pop_front() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        let object = git_repo.read_object(&oid).map_err(|err| {
-            ProtocolError::InvalidState(format!("read Git object {}: {err}", oid.to_hex()))
-        })?;
-        let object_type = object.object_type;
-        let body = object.body.clone();
-        messages.push(git_loose_object_message(&oid, object_type, body)?);
+async fn send_git_pack_streaming_messages(
+    tx: &mpsc::Sender<PushMessage>,
+    pack: &GitPackPushPlan,
+    chunk_size: usize,
+) -> Result<(), ProtocolError> {
+    let tx = tx.clone();
+    let pack = pack.clone();
+    tokio::task::spawn_blocking(move || stream_git_pack_messages_blocking(tx, pack, chunk_size))
+        .await
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}"))
+        })?
+}
 
-        match object_type {
-            GitObjectType::Commit => {
-                let commit = git_repo.read_commit(&oid).map_err(|err| {
-                    ProtocolError::InvalidState(format!("parse Git commit {}: {err}", oid.to_hex()))
-                })?;
-                queue.push_back(commit.tree);
-                queue.extend(commit.parents);
-            }
-            GitObjectType::Tree => {
-                let tree = git_repo.read_tree(&oid).map_err(|err| {
-                    ProtocolError::InvalidState(format!("parse Git tree {}: {err}", oid.to_hex()))
-                })?;
-                for entry in tree.entries {
-                    match EntryKind::from_mode(entry.mode) {
-                        Some(
-                            EntryKind::Tree
-                            | EntryKind::Blob
-                            | EntryKind::BlobExecutable
-                            | EntryKind::Symlink,
-                        ) => {
-                            queue.push_back(entry.oid);
-                        }
-                        Some(EntryKind::Commit) => {
-                            // Gitlink entries name commits owned by the submodule
-                            // repository, not by this spool's Git object graph.
-                        }
-                        None => {
-                            return Err(ProtocolError::InvalidState(format!(
-                                "Git tree {} contains unsupported entry mode {:o}",
-                                oid.to_hex(),
-                                entry.mode
-                            )));
-                        }
-                    }
-                }
-            }
-            GitObjectType::Tag => {
-                let tag = git_repo.read_tag(&oid).map_err(|err| {
-                    ProtocolError::InvalidState(format!("parse Git tag {}: {err}", oid.to_hex()))
-                })?;
-                queue.push_back(tag.object);
-            }
-            GitObjectType::Blob => {}
+fn stream_git_pack_messages_blocking(
+    tx: mpsc::Sender<PushMessage>,
+    pack: GitPackPushPlan,
+    chunk_size: usize,
+) -> Result<(), ProtocolError> {
+    let objects = pack.git_repo.objects();
+    let mut writer = GitPackPushMessageWriter::new(
+        tx,
+        pack.transfer_id.clone(),
+        pack.pack_id.clone(),
+        pack.pack_size,
+        chunk_size,
+    );
+    let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
+        objects.as_ref(),
+        pack.git_repo.object_format(),
+        [pack.root],
+        &HashSet::new(),
+        &mut writer,
+    )
+    .map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "stream reachable Git pack for {}: {err}",
+            pack.root.to_hex()
+        ))
+    })?
+    .ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} did not produce a reachable Git pack",
+            pack.root.to_hex()
+        ))
+    })?;
+    writer.finish()?;
+    if summary.pack_size != pack.pack_size || summary.checksum.as_bytes() != pack.pack_id.as_slice()
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git pack stream changed while sending {}; expected {} bytes/{}, got {} bytes/{}",
+            pack.root.to_hex(),
+            pack.pack_size,
+            hex::encode(&pack.pack_id),
+            summary.pack_size,
+            summary.checksum.to_hex()
+        )));
+    }
+    Ok(())
+}
+
+struct GitPackPushMessageWriter {
+    tx: mpsc::Sender<PushMessage>,
+    transfer_id: String,
+    pack_id: Vec<u8>,
+    pack_size: u64,
+    chunk_size: usize,
+    buffer: Vec<u8>,
+    offset: u64,
+    chunk_index: u32,
+}
+
+impl GitPackPushMessageWriter {
+    fn new(
+        tx: mpsc::Sender<PushMessage>,
+        transfer_id: String,
+        pack_id: Vec<u8>,
+        pack_size: u64,
+        chunk_size: usize,
+    ) -> Self {
+        let chunk_size = chunk_size.max(1);
+        Self {
+            tx,
+            transfer_id,
+            pack_id,
+            pack_size,
+            chunk_size,
+            buffer: Vec::with_capacity(chunk_size),
+            offset: 0,
+            chunk_index: 0,
         }
     }
 
-    Ok(messages)
+    fn send_buffer(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buffer);
+        let next_offset = self.offset.checked_add(chunk.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Git pack offset overflow")
+        })?;
+        if next_offset > self.pack_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Git pack stream exceeded planned size {}; got at least {}",
+                    self.pack_size, next_offset
+                ),
+            ));
+        }
+        let is_final_chunk = next_offset == self.pack_size;
+        self.tx
+            .blocking_send(git_lane_push_message(git_lane_transfer::Body::Pack(
+                GitPackTransfer {
+                    transfer_id: self.transfer_id.clone(),
+                    offset: self.offset,
+                    chunk_index: self.chunk_index,
+                    is_final_chunk,
+                    pack_size: self.pack_size,
+                    pack_chunk: chunk.into(),
+                    pack_id: self.pack_id.clone().into(),
+                },
+            )))
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "push stream closed unexpectedly")
+            })?;
+        self.offset = next_offset;
+        self.chunk_index = self.chunk_index.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk index overflow")
+        })?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), ProtocolError> {
+        self.send_buffer().map_err(|err| {
+            ProtocolError::InvalidState(format!("send final Git pack chunk: {err}"))
+        })?;
+        if self.offset != self.pack_size {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack stream length mismatch: expected {}, got {}",
+                self.pack_size, self.offset
+            )));
+        }
+        Ok(())
+    }
 }
 
-fn git_loose_object_message(
-    oid: &GitObjectId,
-    object_type: GitObjectType,
-    body: Vec<u8>,
-) -> Result<PushMessage, ProtocolError> {
-    let size = u64::try_from(body.len()).map_err(|_| {
-        ProtocolError::InvalidState("Git object body length exceeds u64".to_string())
-    })?;
-    Ok(git_lane_push_message(git_lane_transfer::Body::LooseObject(
-        GitLooseObjectTransfer {
-            oid: oid.as_bytes().to_vec().into(),
-            kind: git_object_kind(object_type) as i32,
-            size,
-            object_body: body.into(),
-        },
-    )))
+impl Write for GitPackPushMessageWriter {
+    fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
+        let written = buf.len();
+        while !buf.is_empty() {
+            if self.offset == self.pack_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Git pack stream wrote past planned size {}", self.pack_size),
+                ));
+            }
+            let capacity = self
+                .chunk_size
+                .checked_sub(self.buffer.len())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk buffer overflow")
+                })?;
+            let take = capacity.min(buf.len());
+            self.buffer.extend_from_slice(&buf[..take]);
+            buf = &buf[take..];
+            if self.buffer.len() == self.chunk_size {
+                self.send_buffer()?;
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn git_ref_update_message(
@@ -1730,6 +1917,62 @@ fn git_ref_update_message(
     )))
 }
 
+fn apply_git_ref_expectation(
+    message: &mut PushMessage,
+    remote_revision_address: &str,
+) -> Result<(), ProtocolError> {
+    let expectation = parse_git_ref_expectation(remote_revision_address)?;
+    let Some(push_message::Body::GitLane(GitLaneTransfer {
+        body: Some(git_lane_transfer::Body::RefUpdate(update)),
+    })) = message.body.as_mut()
+    else {
+        return Err(ProtocolError::InvalidState(
+            "Git lane push plan missing ref update message".to_string(),
+        ));
+    };
+    match &expectation {
+        GitRefRemoteExpectation::Missing => {
+            update.expected_missing = true;
+            update.expected_target_oid = Vec::new().into();
+        }
+        GitRefRemoteExpectation::Value(oid) => {
+            update.expected_missing = false;
+            update.expected_target_oid = oid.clone().into();
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GitRefRemoteExpectation {
+    Missing,
+    Value(Vec<u8>),
+}
+
+fn parse_git_ref_expectation(
+    remote_revision_address: &str,
+) -> Result<GitRefRemoteExpectation, ProtocolError> {
+    if remote_revision_address.is_empty() || remote_revision_address.starts_with("heddle:") {
+        return Ok(GitRefRemoteExpectation::Missing);
+    }
+    let Some(hex_oid) = remote_revision_address.strip_prefix("git:") else {
+        return Err(ProtocolError::InvalidState(format!(
+            "server returned unsupported remote_revision_address {remote_revision_address:?}"
+        )));
+    };
+    let oid = hex::decode(hex_oid).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "server returned invalid Git remote_revision_address: {err}"
+        ))
+    })?;
+    match oid.len() {
+        20 | 32 => Ok(GitRefRemoteExpectation::Value(oid)),
+        len => Err(ProtocolError::InvalidState(format!(
+            "server returned Git remote_revision_address with {len} bytes; expected SHA-1 or SHA-256"
+        ))),
+    }
+}
+
 fn git_lane_push_message(body: git_lane_transfer::Body) -> PushMessage {
     PushMessage {
         body: Some(push_message::Body::GitLane(GitLaneTransfer {
@@ -1738,30 +1981,9 @@ fn git_lane_push_message(body: git_lane_transfer::Body) -> PushMessage {
     }
 }
 
-fn git_object_kind(object_type: GitObjectType) -> GitObjectKind {
-    match object_type {
-        GitObjectType::Commit => GitObjectKind::Commit,
-        GitObjectType::Tree => GitObjectKind::Tree,
-        GitObjectType::Blob => GitObjectKind::Blob,
-        GitObjectType::Tag => GitObjectKind::Tag,
-    }
-}
-
-fn git_object_type_from_proto(kind: i32) -> Result<GitObjectType, ProtocolError> {
-    match GitObjectKind::try_from(kind).unwrap_or(GitObjectKind::Unspecified) {
-        GitObjectKind::Commit => Ok(GitObjectType::Commit),
-        GitObjectKind::Tree => Ok(GitObjectType::Tree),
-        GitObjectKind::Blob => Ok(GitObjectType::Blob),
-        GitObjectKind::Tag => Ok(GitObjectType::Tag),
-        GitObjectKind::Unspecified => Err(ProtocolError::InvalidState(
-            "Git object kind is required".to_string(),
-        )),
-    }
-}
-
 fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
     match transfer.body.as_ref() {
-        Some(git_lane_transfer::Body::LooseObject(object)) => object.object_body.len(),
+        Some(git_lane_transfer::Body::Pack(pack)) => pack.pack_chunk.len(),
         Some(git_lane_transfer::Body::RefUpdate(update)) => update
             .target_oid
             .len()
@@ -1793,14 +2015,15 @@ fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
 fn accept_git_lane_pull_transfer(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
+    git_pack_state: &mut wire::GitPackChunkState,
     transfer: GitLaneTransfer,
 ) -> Result<(), ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Ok(());
     }
     match transfer.body {
-        Some(git_lane_transfer::Body::LooseObject(object)) => {
-            accept_git_lane_loose_object(repo, git_repo, object)
+        Some(git_lane_transfer::Body::Pack(pack)) => {
+            accept_git_lane_pack(repo, git_repo, git_pack_state, pack)
         }
         Some(git_lane_transfer::Body::RefUpdate(update)) => {
             accept_git_lane_ref_update(repo, git_repo, update)
@@ -1814,37 +2037,28 @@ fn accept_git_lane_pull_transfer(
     }
 }
 
-fn accept_git_lane_loose_object(
+fn accept_git_lane_pack(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
-    object: GitLooseObjectTransfer,
+    git_pack_state: &mut wire::GitPackChunkState,
+    pack: GitPackTransfer,
 ) -> Result<(), ProtocolError> {
+    let Some(pack_bytes) = git_pack_state.receive_chunk(
+        &pack.transfer_id,
+        pack.offset,
+        pack.chunk_index,
+        pack.is_final_chunk,
+        pack.pack_size,
+        &pack.pack_chunk,
+    )?
+    else {
+        return Ok(());
+    };
     let git_repo = git_lane_sley_repository(repo, git_repo)?;
-    let kind = git_object_type_from_proto(object.kind)?;
-    let oid = git_oid_from_bytes(git_repo, "GitLooseObjectTransfer.oid", &object.oid)?;
-    let body_len = u64::try_from(object.object_body.len()).map_err(|_| {
-        ProtocolError::InvalidState("Git object body length exceeds u64".to_string())
-    })?;
-    if object.size != body_len {
-        return Err(ProtocolError::InvalidState(format!(
-            "Git object {} size mismatch: declared {}, got {}",
-            oid.to_hex(),
-            object.size,
-            body_len
-        )));
-    }
-    let written = git_repo
-        .write_raw_object(kind, object.object_body.to_vec())
-        .map_err(|err| {
-            ProtocolError::InvalidState(format!("write Git object {}: {err}", oid.to_hex()))
-        })?;
-    if written != oid {
-        return Err(ProtocolError::InvalidState(format!(
-            "Git object id mismatch: transfer named {}, body wrote {}",
-            oid.to_hex(),
-            written.to_hex()
-        )));
-    }
+    git_repo
+        .objects_mut()
+        .install_raw_pack(&pack_bytes)
+        .map_err(|err| ProtocolError::InvalidState(format!("install Git pack: {err}")))?;
     Ok(())
 }
 
@@ -1859,6 +2073,13 @@ fn accept_git_lane_ref_update(
         "GitRefUpdateTransfer.target_oid",
         &update.target_oid,
     )?;
+    git_repo.read_commit(&target).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "Git ref {} target commit {} is not present after pack receive: {err}",
+            update.name,
+            target.to_hex()
+        ))
+    })?;
     let refs = git_repo.references();
     let mut tx = refs.transaction();
     tx.update_to(
@@ -2241,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn git_lane_messages_walk_commit_tree_blob_and_attach_checkpoint() {
+    fn git_lane_messages_pack_reachable_commit_graph_and_attach_checkpoint() {
         let dir = TempDir::new().expect("tempdir");
         let git = sley::Repository::init(dir.path()).expect("init git");
         let blob_oid = git.write_blob(b"hello\n").expect("write blob");
@@ -2267,22 +2488,31 @@ mod tests {
             .write_raw_object(sley::GitObjectType::Commit, commit.write())
             .expect("write commit");
 
-        let messages = collect_git_lane_loose_object_messages(&git, commit_oid)
-            .expect("collect git lane messages");
-        let kinds = messages
-            .iter()
-            .filter_map(|message| match &message.body {
-                Some(push_message::Body::GitLane(GitLaneTransfer {
-                    body: Some(git_lane_transfer::Body::LooseObject(object)),
-                })) => Some(GitObjectKind::try_from(object.kind).expect("known kind")),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(kinds.len(), 3);
-        assert!(kinds.contains(&GitObjectKind::Commit));
-        assert!(kinds.contains(&GitObjectKind::Tree));
-        assert!(kinds.contains(&GitObjectKind::Blob));
+        let pack = build_git_lane_pack_plan(&git, commit_oid, 64 * 1024)
+            .expect("build git lane pack plan");
+        assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
+        let (tx, mut rx) = mpsc::channel(8);
+        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024)
+            .expect("stream git lane pack");
+        let mut pack_bytes = Vec::new();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.blocking_recv() {
+            let Some(push_message::Body::GitLane(GitLaneTransfer {
+                body: Some(git_lane_transfer::Body::Pack(pack)),
+            })) = chunk.body
+            else {
+                panic!("expected git pack chunk");
+            };
+            pack_bytes.extend_from_slice(&pack.pack_chunk);
+            chunks.push(pack);
+        }
+        assert!(!chunks.is_empty());
+        assert!(chunks.last().expect("pack chunk").is_final_chunk);
+        assert_eq!(pack_bytes.len() as u64, pack.pack_size);
+        let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
+            .expect("generated pack should index");
+        assert_eq!(indexed.pack_id.as_bytes(), pack.pack_id.as_slice());
+        assert_eq!(indexed.objects.len(), 3);
 
         let state = ChangeId::from_bytes([9u8; 16]);
         let checkpoint = GitCheckpointRecord {
@@ -2306,6 +2536,103 @@ mod tests {
         assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
         assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
         assert_eq!(checkpoint.thread, "main");
+    }
+
+    #[test]
+    fn git_ref_expectation_marks_missing_when_remote_has_no_git_revision() {
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let commit_oid = GitObjectId::from_hex(
+            sley::ObjectFormat::Sha1,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("oid");
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let mut message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+
+        apply_git_ref_expectation(&mut message, "").expect("missing expectation");
+        let update = git_ref_update_from_message(&message);
+        assert!(update.expected_missing);
+        assert!(update.expected_target_oid.is_empty());
+    }
+
+    #[test]
+    fn git_ref_expectation_uses_remote_git_revision_oid() {
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let commit_oid = GitObjectId::from_hex(
+            sley::ObjectFormat::Sha1,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("oid");
+        let remote_oid = "89abcdef012345670123456789abcdef01234567";
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let mut message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+
+        apply_git_ref_expectation(&mut message, &format!("git:{remote_oid}"))
+            .expect("git expectation");
+        let update = git_ref_update_from_message(&message);
+        assert!(!update.expected_missing);
+        assert_eq!(hex::encode(update.expected_target_oid.as_ref()), remote_oid);
+    }
+
+    #[test]
+    fn git_pack_stream_writer_emits_ordered_chunks() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut writer =
+            GitPackPushMessageWriter::new(tx, "git-pack:test".to_string(), vec![0x42; 20], 10, 4);
+        writer.write_all(b"abcdefghij").expect("write pack bytes");
+        writer.finish().expect("finish pack stream");
+
+        let mut chunks = Vec::new();
+        while let Some(message) = rx.blocking_recv() {
+            let Some(push_message::Body::GitLane(GitLaneTransfer {
+                body: Some(git_lane_transfer::Body::Pack(pack)),
+            })) = message.body
+            else {
+                panic!("expected git pack chunk");
+            };
+            chunks.push(pack);
+        }
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert!(!chunks[0].is_final_chunk);
+        assert_eq!(chunks[0].pack_chunk.as_ref(), b"abcd");
+        assert_eq!(chunks[1].offset, 4);
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert!(!chunks[1].is_final_chunk);
+        assert_eq!(chunks[1].pack_chunk.as_ref(), b"efgh");
+        assert_eq!(chunks[2].offset, 8);
+        assert_eq!(chunks[2].chunk_index, 2);
+        assert!(chunks[2].is_final_chunk);
+        assert_eq!(chunks[2].pack_chunk.as_ref(), b"ij");
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.pack_id.as_ref() == &[0x42; 20][..])
+        );
+    }
+
+    fn git_ref_update_from_message(message: &PushMessage) -> &GitRefUpdateTransfer {
+        let Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::RefUpdate(update)),
+        })) = message.body.as_ref()
+        else {
+            panic!("expected git ref update message");
+        };
+        update
     }
 
     fn loose_tree_path(repo: &Repository, hash: &ContentHash) -> std::path::PathBuf {

@@ -352,3 +352,4 @@ impl HostedGrpcClient {
 
 pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
 pub use session::{HostedAuthMode, HostedSession};
+pub use sync::HostedRefEntry;
