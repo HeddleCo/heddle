@@ -824,7 +824,7 @@ impl HostedGrpcClient {
             None
         };
         let mut git_lane_repo = None;
-        let mut git_pack_state = wire::GitPackChunkState::default();
+        let mut git_pack_state = GitPackPullInstallState::default();
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -2012,10 +2012,180 @@ fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
         .saturating_add(checkpoint.metadata_json.len())
 }
 
+#[derive(Default)]
+struct GitPackPullInstallState {
+    active: Option<GitPackPullInstall>,
+}
+
+impl GitPackPullInstallState {
+    fn ensure_idle(&self) -> Result<(), ProtocolError> {
+        if self.active.is_none() {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidState(
+                "Git pack transfer ended before final chunk".to_string(),
+            ))
+        }
+    }
+
+    fn receive_chunk(
+        &mut self,
+        git_repo: &SleyRepository,
+        pack: GitPackTransfer,
+    ) -> Result<(), ProtocolError> {
+        if pack.transfer_id.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack transfer_id is required".to_string(),
+            ));
+        }
+        if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack exceeds maximum transfer size of {} bytes",
+                wire::MAX_RECEIVED_GIT_PACK_SIZE
+            )));
+        }
+        if pack.pack_chunk.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk must not be empty".to_string(),
+            ));
+        }
+        let pack_id =
+            GitObjectId::from_raw(git_repo.object_format(), &pack.pack_id).map_err(|err| {
+                ProtocolError::InvalidState(format!("GitPackTransfer.pack_id: {err}"))
+            })?;
+        if self.active.is_none() {
+            if pack.offset != 0 {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack offset mismatch: expected 0, got {}",
+                    pack.offset
+                )));
+            }
+            if pack.chunk_index != 0 {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack chunk index mismatch: expected 0, got {}",
+                    pack.chunk_index
+                )));
+            }
+            let writer = git_repo
+                .objects()
+                .begin_raw_pack_install(pack_id, pack.pack_size)
+                .map_err(|err| {
+                    ProtocolError::InvalidState(format!("begin Git pack install: {err}"))
+                })?;
+            self.active = Some(GitPackPullInstall {
+                transfer_id: pack.transfer_id.clone(),
+                pack_id,
+                pack_size: pack.pack_size,
+                next_offset: 0,
+                next_chunk_index: 0,
+                writer,
+            });
+        }
+
+        let active = self.active.as_mut().ok_or_else(|| {
+            ProtocolError::InvalidState("Git pack install not active".to_string())
+        })?;
+        active.receive_chunk(&pack, pack_id)?;
+        if pack.is_final_chunk {
+            let active = self.active.take().ok_or_else(|| {
+                ProtocolError::InvalidState("Git pack install not active".to_string())
+            })?;
+            active.finish()?;
+            git_repo.refresh_objects();
+        }
+        Ok(())
+    }
+}
+
+struct GitPackPullInstall {
+    transfer_id: String,
+    pack_id: GitObjectId,
+    pack_size: u64,
+    next_offset: u64,
+    next_chunk_index: u32,
+    writer: sley::plumbing::sley_odb::RawPackStreamingInstall,
+}
+
+impl GitPackPullInstall {
+    fn receive_chunk(
+        &mut self,
+        pack: &GitPackTransfer,
+        pack_id: GitObjectId,
+    ) -> Result<(), ProtocolError> {
+        if self.transfer_id != pack.transfer_id {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack transfer id changed from {:?} to {:?}",
+                self.transfer_id, pack.transfer_id
+            )));
+        }
+        if self.pack_id != pack_id {
+            return Err(ProtocolError::InvalidState(
+                "Git pack id changed during transfer".to_string(),
+            ));
+        }
+        if self.pack_size != pack.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack size changed during transfer".to_string(),
+            ));
+        }
+        if pack.offset != self.next_offset {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack offset mismatch: expected {}, got {}",
+                self.next_offset, pack.offset
+            )));
+        }
+        if pack.chunk_index != self.next_chunk_index {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack chunk index mismatch: expected {}, got {}",
+                self.next_chunk_index, pack.chunk_index
+            )));
+        }
+        let chunk_len = u64::try_from(pack.pack_chunk.len()).map_err(|_| {
+            ProtocolError::InvalidState("Git pack chunk length exceeds u64".to_string())
+        })?;
+        let next_offset = self
+            .next_offset
+            .checked_add(chunk_len)
+            .ok_or_else(|| ProtocolError::InvalidState("Git pack offset overflow".to_string()))?;
+        if next_offset > self.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk exceeds declared pack size".to_string(),
+            ));
+        }
+        self.writer.write_all(&pack.pack_chunk).map_err(|err| {
+            ProtocolError::InvalidState(format!("write streamed Git pack chunk: {err}"))
+        })?;
+        self.next_offset = next_offset;
+        self.next_chunk_index = self.next_chunk_index.checked_add(1).ok_or_else(|| {
+            ProtocolError::InvalidState("Git pack chunk index overflow".to_string())
+        })?;
+        if pack.is_final_chunk {
+            if self.next_offset != self.pack_size {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack final size mismatch: declared {}, received {}",
+                    self.pack_size, self.next_offset
+                )));
+            }
+        } else if self.next_offset == self.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack reached declared size without final chunk marker".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), ProtocolError> {
+        self.writer
+            .finish()
+            .map_err(|err| ProtocolError::InvalidState(format!("install Git pack: {err}")))?;
+        Ok(())
+    }
+}
+
 fn accept_git_lane_pull_transfer(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
-    git_pack_state: &mut wire::GitPackChunkState,
+    git_pack_state: &mut GitPackPullInstallState,
     transfer: GitLaneTransfer,
 ) -> Result<(), ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
@@ -2040,25 +2210,11 @@ fn accept_git_lane_pull_transfer(
 fn accept_git_lane_pack(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
-    git_pack_state: &mut wire::GitPackChunkState,
+    git_pack_state: &mut GitPackPullInstallState,
     pack: GitPackTransfer,
 ) -> Result<(), ProtocolError> {
-    let Some(pack_bytes) = git_pack_state.receive_chunk(
-        &pack.transfer_id,
-        pack.offset,
-        pack.chunk_index,
-        pack.is_final_chunk,
-        pack.pack_size,
-        &pack.pack_chunk,
-    )?
-    else {
-        return Ok(());
-    };
     let git_repo = git_lane_sley_repository(repo, git_repo)?;
-    git_repo
-        .objects_mut()
-        .install_raw_pack(&pack_bytes)
-        .map_err(|err| ProtocolError::InvalidState(format!("install Git pack: {err}")))?;
+    git_pack_state.receive_chunk(git_repo, pack)?;
     Ok(())
 }
 
@@ -2623,6 +2779,49 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.pack_id.as_ref() == &[0x42; 20][..])
         );
+    }
+
+    #[test]
+    fn git_pack_pull_install_state_streams_pack_into_sley_store() {
+        let source_dir = TempDir::new().expect("source tempdir");
+        let source = sley::Repository::init(source_dir.path()).expect("init source git");
+        let blob_oid = source.write_blob(b"streamed pull pack\n").expect("blob");
+        let pack = sley::plumbing::sley_odb::build_reachable_pack(
+            source.objects().as_ref(),
+            source.object_format(),
+            [blob_oid],
+            &HashSet::new(),
+        )
+        .expect("build pack")
+        .expect("reachable pack");
+
+        let dest_dir = TempDir::new().expect("dest tempdir");
+        let dest = sley::Repository::init(dest_dir.path()).expect("init dest git");
+        let mut state = GitPackPullInstallState::default();
+        let chunk_size = 7usize;
+        let mut offset = 0u64;
+        for (chunk_index, chunk) in pack.pack.chunks(chunk_size).enumerate() {
+            let next_offset = offset + chunk.len() as u64;
+            state
+                .receive_chunk(
+                    &dest,
+                    GitPackTransfer {
+                        transfer_id: "git-pack:test".to_string(),
+                        offset,
+                        chunk_index: chunk_index as u32,
+                        is_final_chunk: next_offset == pack.pack.len() as u64,
+                        pack_size: pack.pack.len() as u64,
+                        pack_chunk: chunk.to_vec().into(),
+                        pack_id: pack.checksum.as_bytes().to_vec().into(),
+                    },
+                )
+                .expect("receive chunk");
+            offset = next_offset;
+        }
+
+        state.ensure_idle().expect("stream should finish");
+        let object = dest.read_object(&blob_oid).expect("read installed object");
+        assert_eq!(object.body.as_slice(), b"streamed pull pack\n");
     }
 
     fn git_ref_update_from_message(message: &PushMessage) -> &GitRefUpdateTransfer {
