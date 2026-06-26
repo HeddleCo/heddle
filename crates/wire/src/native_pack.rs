@@ -72,6 +72,8 @@ pub struct PackFileChunkReader {
     chunk_index: u32,
 }
 
+pub type NativePackFileChunk = (u64, u32, Vec<u8>, bool);
+
 impl PackFileChunkReader {
     pub fn open(path: &Path, chunk_size: usize) -> Result<Self> {
         let file = File::open(path)?;
@@ -85,7 +87,7 @@ impl PackFileChunkReader {
         })
     }
 
-    pub fn next_chunk(&mut self) -> Result<Option<(u64, u32, Vec<u8>, bool)>> {
+    pub fn next_chunk(&mut self) -> Result<Option<NativePackFileChunk>> {
         if self.offset >= self.total_len {
             return Ok(None);
         }
@@ -135,7 +137,7 @@ impl GrowingPackChunkReader {
     pub fn next_available_chunk(
         &mut self,
         final_stream: bool,
-    ) -> Result<Option<(u64, u32, Vec<u8>, bool)>> {
+    ) -> Result<Option<NativePackFileChunk>> {
         let total_len = self.file.metadata()?.len();
         if self.offset >= total_len {
             return Ok(None);

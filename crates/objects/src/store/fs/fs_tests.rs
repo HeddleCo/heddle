@@ -403,6 +403,39 @@ fn loose_state_shadows_stale_packed_copy_on_cold_read() {
     );
 }
 
+#[test]
+fn install_pack_refreshes_state_as_loose_authoritative_copy() {
+    let (_temp, store) = create_test_store();
+
+    let tree = Tree::new();
+    let tree_hash = tree.hash();
+    store.put_tree(&tree).unwrap();
+    let attribution = Attribution::human(Principal::new("Sync", "sync@example.com"));
+    let base = State::new(tree_hash, vec![], attribution);
+    let change_id = base.change_id;
+    store.put_state(&base).unwrap();
+
+    let discussion_hash = ContentHash::compute(b"discussion-sidecar");
+    let refreshed = base.clone().with_discussions(discussion_hash);
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add_id(
+        PackObjectId::ChangeId(change_id),
+        PackObjectType::State,
+        rmp_serde::to_vec_named(&refreshed).unwrap(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    store.clear_recent_object_caches();
+    assert_eq!(
+        store.get_state(&change_id).unwrap().unwrap().discussions,
+        Some(discussion_hash),
+        "received state pack must refresh the loose state body so mutable \
+         tail pointers are visible on cold reads",
+    );
+}
+
 #[cfg(feature = "zstd")]
 #[test]
 fn install_pack_accepts_valid_compressed_blob_pack() {

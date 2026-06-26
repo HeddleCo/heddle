@@ -18,7 +18,7 @@ use crate::{credentials, grpc_hosted::HostedGrpcClient};
 /// How a hosted session resolves its auth token.
 pub enum HostedAuthMode {
     /// Use only the token from env/user config (`remote_token`). Used by
-    /// fetch, support, approval, clone, and lazy hydration.
+    /// fetch, support, approval, and lazy hydration.
     ConfigToken,
     /// Use the config token, falling back to the per-server credential store
     /// (and its proof key) when no config token is present. Used by push and

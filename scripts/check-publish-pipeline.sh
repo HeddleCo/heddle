@@ -23,9 +23,9 @@
 #   - explicit publishable-crates list (no auto-discovery — implicit
 #     `publish = true` in Cargo.toml is too easy to misconfigure)
 #
-# This mirrors scripts/check-release-pipeline.sh (heddle#56) and shares
-# the same PyYAML venv fallback. The two asserters are independently
-# runnable but follow the same two-pass shape.
+# This mirrors scripts/check-release-pipeline.sh (heddle#56). The two
+# asserters are independently runnable but follow the same two-pass
+# shape.
 
 set -euo pipefail
 
@@ -132,12 +132,12 @@ else
   fi
 fi
 
-# --- Strict structural checks (parsed YAML) -------------------------------
+# --- Strict structural checks ---------------------------------------------
 #
 # The grep-based checks above answer "does the pipeline mention X
-# anywhere?" — useful as a smoke screen, but blind to per-job
-# structure. The strict checks below parse publish-crates.yml and
-# verify:
+# anywhere?" — useful as a smoke screen, but blind to per-job structure.
+# The strict checks below verify the workflow's relevant structure without
+# pulling in a PyYAML runtime dependency:
 #
 #   - validate-publish declares the documented outputs (commit_sha,
 #     to_publish, has_publishes). Without commit_sha, the SHA pin in
@@ -152,163 +152,124 @@ fi
 #   - the trigger really is push-only (no workflow_dispatch slipped in
 #     past the grep via a different shape).
 
-ensure_pyyaml() {
-  # Echo the python interpreter to use (with PyYAML importable), or
-  # return non-zero. Lifted from scripts/check-release-pipeline.sh —
-  # same venv fallback so PEP 668 distros don't break the asserter.
-  if python3 -c 'import yaml' 2>/dev/null; then
-    echo python3
-    return 0
-  fi
-  local venv
-  venv="$(mktemp -d)/venv"
-  python3 -m venv "$venv" >/dev/null 2>&1 || return 1
-  "$venv/bin/pip" install --quiet --disable-pip-version-check pyyaml >/dev/null 2>&1 || return 1
-  "$venv/bin/python" -c 'import yaml' 2>/dev/null || return 1
-  echo "$venv/bin/python"
-}
-
 if ! command -v python3 >/dev/null 2>&1; then
   err "python3 not available; strict structural checks skipped"
-elif ! PY=$(ensure_pyyaml); then
-  err "PyYAML not available and venv fallback failed; strict structural checks skipped"
 else
-  strict_report=$("$PY" - "$WF" <<'PY'
+  strict_report=$(python3 - "$WF" <<'PY'
+import re
 import sys
-import yaml
+from pathlib import Path
 
 wf_path = sys.argv[1]
-with open(wf_path) as f:
-    wf = yaml.safe_load(f)
+text = Path(wf_path).read_text()
+lines = text.splitlines()
 
 errors = []
 oks = []
 
-# Trigger shape. PyYAML parses `on:` to the literal True (it's a YAML
-# boolean keyword), so we look it up under both keys to be safe.
-on = wf.get("on") or wf.get(True) or {}
-if not isinstance(on, dict):
+def line_index(pattern):
+    rx = re.compile(pattern)
+    for i, line in enumerate(lines):
+        if rx.match(line):
+            return i
+    return -1
+
+def block_after(start_pattern, sibling_pattern):
+    start = line_index(start_pattern)
+    if start < 0:
+        return ""
+    sibling = re.compile(sibling_pattern)
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if sibling.match(lines[i]):
+            end = i
+            break
+    return "\n".join(lines[start:end])
+
+on_block = block_after(r"^on:\s*$", r"^[A-Za-z0-9_-]+:")
+jobs_block = block_after(r"^jobs:\s*$", r"^[A-Za-z0-9_-]+:")
+validate_block = block_after(r"^  validate-publish:\s*$", r"^  [A-Za-z0-9_-]+:")
+publish_block = block_after(r"^  publish:\s*$", r"^  [A-Za-z0-9_-]+:")
+
+if not on_block:
     errors.append("workflow `on:` must be a mapping (push:...)")
 else:
-    push = on.get("push") or {}
-    if not isinstance(push, dict):
+    if not re.search(r"(?m)^  push:\s*$", on_block):
         errors.append("workflow must trigger on push (with branches: [main])")
     else:
-        branches = push.get("branches") or []
-        if isinstance(branches, str):
-            branches = [branches]
-        if "main" not in branches:
-            errors.append(f"push trigger must include 'main' branch (got {branches!r})")
-        else:
+        push_block = block_after(r"^  push:\s*$", r"^  [A-Za-z0-9_-]+:")
+        if re.search(r"(?m)^    branches:\s*$", push_block) and re.search(
+            r"(?m)^      - ['\"]?main['\"]?\s*$", push_block
+        ):
             oks.append("push trigger restricted to main branch")
-        if "tags" in push:
+        else:
+            errors.append("push trigger must include 'main' branch")
+        if re.search(r"(?m)^    tags:", push_block):
             errors.append("push trigger must not include tags (tag releases live in release.yml — heddle#56)")
-    if "workflow_dispatch" in on:
+    if re.search(r"(?m)^  workflow_dispatch:\s*$", on_block):
         errors.append("workflow_dispatch must not be declared (force-publish is a deliberate ops action)")
     else:
         oks.append("workflow_dispatch correctly absent")
 
-jobs = wf.get("jobs", {}) or {}
+if not jobs_block:
+    errors.append("jobs mapping missing or malformed")
 
-vp = jobs.get("validate-publish")
-if not isinstance(vp, dict):
+if not validate_block:
     errors.append("validate-publish job missing or malformed")
 else:
-    outs = vp.get("outputs", {}) or {}
     for out_name in ("commit_sha", "to_publish", "has_publishes"):
-        if out_name not in outs:
+        if re.search(rf"(?m)^      {re.escape(out_name)}:\s*", validate_block):
+            oks.append(f"validate-publish exports {out_name} output")
+        else:
             errors.append(
                 f"validate-publish must declare a '{out_name}' output "
                 f"(downstream publish job reads from it)"
             )
-        else:
-            oks.append(f"validate-publish exports {out_name} output")
 
-pub = jobs.get("publish")
-if not isinstance(pub, dict):
+if not publish_block:
     errors.append("publish job missing or malformed")
 else:
-    needs = pub.get("needs", [])
-    if isinstance(needs, str):
-        needs = [needs]
-    if "validate-publish" not in needs:
-        errors.append("publish job does not declare 'needs: validate-publish' (would skip the trust gate)")
-    else:
+    if re.search(r"(?m)^    needs:\s*validate-publish\s*$", publish_block) or re.search(
+        r"(?m)^    needs:\s*\[\s*validate-publish\s*\]\s*$", publish_block
+    ):
         oks.append("publish job declares needs: validate-publish")
+    else:
+        errors.append("publish job does not declare 'needs: validate-publish' (would skip the trust gate)")
 
-    if_clause = pub.get("if", "")
-    if "needs.validate-publish.outputs.has_publishes" not in str(if_clause):
+    if "needs.validate-publish.outputs.has_publishes" in publish_block:
+        oks.append("publish job gates execution on has_publishes")
+    else:
         errors.append(
             "publish job's `if:` must reference "
             "needs.validate-publish.outputs.has_publishes so no-op merges skip the job entirely"
         )
-    else:
-        oks.append("publish job gates execution on has_publishes")
 
-    # Checkout step must pin to the commit_sha output, not the mutable
-    # refs/heads/main. Acting on main after validate-publish reads its
-    # HEAD would re-resolve to whatever main points at when checkout
-    # runs — a window where a force-push would redirect the publish.
-    SHA_REF_OK = "${{ needs.validate-publish.outputs.commit_sha }}"
-    MAIN_REF_BAD = "refs/heads/main"
-    steps = pub.get("steps", []) or []
-    checkouts = [
-        s for s in steps
-        if isinstance(s, dict)
-        and isinstance(s.get("uses"), str)
-        and s.get("uses", "").startswith("actions/checkout@")
-    ]
-    if not checkouts:
+    if "uses: actions/checkout@" not in publish_block:
         errors.append("publish job has no actions/checkout step — cannot verify SHA pin")
-    for s in checkouts:
-        ref = (s.get("with") or {}).get("ref", "")
-        if not isinstance(ref, str):
-            ref = str(ref)
-        if SHA_REF_OK not in ref:
+    elif "ref: ${{ needs.validate-publish.outputs.commit_sha }}" in publish_block:
+        if re.search(r"(?m)^\s*ref:\s*refs/heads/main\s*$", publish_block):
             errors.append(
-                f"publish job checks out '{ref}' instead of needs.validate-publish.outputs.commit_sha — TOCTOU on mutable main ref"
-            )
-        elif MAIN_REF_BAD in ref:
-            errors.append(
-                f"publish job mixes refs/heads/main with commit_sha ('{ref}') — refs/heads/main is mutable; remove it"
+                "publish job mixes refs/heads/main with commit_sha — refs/heads/main is mutable; remove it"
             )
         else:
             oks.append("publish job pins checkout to validated commit_sha")
+    else:
+        errors.append(
+            "publish job checkout must use ref: ${{ needs.validate-publish.outputs.commit_sha }} "
+            "— TOCTOU on mutable main ref"
+        )
 
-    # The token must reach cargo as the CARGO_REGISTRY_TOKEN env var
-    # (cargo's documented name; renaming the env var would mean cargo
-    # can't find the token at all) AND it must originate from
-    # secrets.CRATES_IO_API_KEY (the actual repo-settings secret name;
-    # renaming this side would resolve to an empty string and break
-    # authentication at first publish).
-    #
-    # We assert each half separately so a regression on either side
-    # is reported on its own line.
-    job_env = pub.get("env", {}) or {}
-    token_envs = []
-    if "CARGO_REGISTRY_TOKEN" in job_env:
-        token_envs.append(("job", job_env["CARGO_REGISTRY_TOKEN"]))
-    for s in steps:
-        if not isinstance(s, dict):
-            continue
-        step_env = s.get("env", {}) or {}
-        if "CARGO_REGISTRY_TOKEN" in step_env:
-            token_envs.append((s.get("name") or s.get("id") or "step", step_env["CARGO_REGISTRY_TOKEN"]))
-    if not token_envs:
+    if re.search(r"(?m)^      CARGO_REGISTRY_TOKEN:\s*", publish_block):
+        oks.append("env var key is exactly CARGO_REGISTRY_TOKEN (the name cargo reads)")
+        if "secrets.CRATES_IO_API_KEY" in publish_block:
+            oks.append("CARGO_REGISTRY_TOKEN wired from secrets.CRATES_IO_API_KEY")
+        else:
+            errors.append("CARGO_REGISTRY_TOKEN env var must read from secrets.CRATES_IO_API_KEY")
+    else:
         errors.append(
             "publish job must expose CARGO_REGISTRY_TOKEN as an env var "
             "(at job or step scope) so cargo publish can authenticate"
         )
-    else:
-        oks.append("env var key is exactly CARGO_REGISTRY_TOKEN (the name cargo reads)")
-        valid = [t for t in token_envs if "secrets.CRATES_IO_API_KEY" in str(t[1])]
-        if not valid:
-            errors.append(
-                "CARGO_REGISTRY_TOKEN env var must read from secrets.CRATES_IO_API_KEY "
-                f"(got {token_envs!r})"
-            )
-        else:
-            oks.append("CARGO_REGISTRY_TOKEN wired from secrets.CRATES_IO_API_KEY")
 
 print("OKS:")
 for o in oks:

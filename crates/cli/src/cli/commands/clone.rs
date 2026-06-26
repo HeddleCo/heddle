@@ -131,6 +131,7 @@ fn heddle_clone_output(
     remote: String,
     local: String,
     branch: String,
+    repository_capability: &'static str,
     objects: Option<usize>,
     state: Option<String>,
     trust: Option<RepositoryVerificationState>,
@@ -145,7 +146,7 @@ fn heddle_clone_output(
         remote,
         local,
         branch: Some(branch),
-        repository_capability: Some("native"),
+        repository_capability: Some(repository_capability),
         commits_imported: None,
         states_created: None,
         objects,
@@ -999,6 +1000,7 @@ async fn clone_local(
             origin_url,
             local_path.display().to_string(),
             track_name.to_string(),
+            local_repo.capability_label(),
             Some(objects_copied),
             Some(state_id.to_string()),
             Some(build_repository_verification_state(&local_repo)),
@@ -1194,7 +1196,8 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(&user_config, server_key, HostedAuthMode::ConfigToken)?;
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let json_output = should_output_json(cli, None);
@@ -1296,6 +1299,7 @@ async fn clone_network(
                 origin_url.clone(),
                 local_path.display().to_string(),
                 track_name.clone(),
+                local_repo.capability_label(),
                 None,
                 final_state.map(|state| state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
@@ -1647,6 +1651,45 @@ mod tests {
     }
 
     #[test]
+    fn heddle_clone_output_uses_native_repository_capability() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init(temp.path()).expect("init native repo");
+
+        let output = heddle_clone_output(
+            "file:///tmp/native".to_string(),
+            temp.path().display().to_string(),
+            "main".to_string(),
+            repo.capability_label(),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(repo.capability_label(), "native-heddle");
+        assert_eq!(output.repository_capability, Some("native-heddle"));
+    }
+
+    #[test]
+    fn heddle_clone_output_uses_git_overlay_repository_capability() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        SleyRepository::init(temp.path()).expect("init git repo");
+        let repo = Repository::init(temp.path()).expect("init git-overlay repo");
+
+        let output = heddle_clone_output(
+            "heddle://weft.local:8421/org/repo".to_string(),
+            temp.path().display().to_string(),
+            "main".to_string(),
+            repo.capability_label(),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(repo.capability_label(), "git-overlay");
+        assert_eq!(output.repository_capability, Some("git-overlay"));
+    }
+
+    #[test]
     fn reject_unsupported_passes_when_no_flags_set() {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
@@ -1654,9 +1697,8 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn hosted_clone_thread_selection_prefers_main() {
-        let selected =
-            select_hosted_clone_thread(None, ["master", "main"].into_iter(), "owner/repo")
-                .expect("thread selected");
+        let selected = select_hosted_clone_thread(None, ["master", "main"], "owner/repo")
+            .expect("thread selected");
 
         assert_eq!(selected, "main");
     }
@@ -1664,8 +1706,8 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn hosted_clone_thread_selection_uses_only_advertised_master() {
-        let selected = select_hosted_clone_thread(None, ["master"].into_iter(), "owner/repo")
-            .expect("thread selected");
+        let selected =
+            select_hosted_clone_thread(None, ["master"], "owner/repo").expect("thread selected");
 
         assert_eq!(selected, "master");
     }
@@ -1673,12 +1715,9 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn hosted_clone_thread_selection_honors_requested_thread() {
-        let selected = select_hosted_clone_thread(
-            Some("feature"),
-            ["main", "master"].into_iter(),
-            "owner/repo",
-        )
-        .expect("thread selected");
+        let selected =
+            select_hosted_clone_thread(Some("feature"), ["main", "master"], "owner/repo")
+                .expect("thread selected");
 
         assert_eq!(selected, "feature");
     }

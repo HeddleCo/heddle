@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle commit -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const DIRTY_WORKTREE_STASH_COMMAND: &str = "heddle stash push -m \"...\"";
+pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle checkpoint -m \"...\"";
 
 #[derive(Debug, Clone)]
 pub struct RecoveryAdvice {
@@ -629,6 +630,23 @@ impl RecoveryAdvice {
             "no repository objects, refs, metadata, or worktree files were changed",
             DIRTY_WORKTREE_CAPTURE_COMMAND,
             vec![DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()],
+        )
+    }
+
+    pub(crate) fn repository_no_head_anchor_first(action: &str) -> Self {
+        Self::safety_refusal(
+            "repository_no_head",
+            format!("Repository has no HEAD state for {action}"),
+            "Create a Heddle anchor with `heddle commit -m \"...\"`; for a clean Git-overlay checkout that only needs metadata, use `heddle checkpoint -m \"...\"`, then retry.",
+            "the repository has no current HEAD state",
+            format!("`{action}` needs a concrete Heddle state id and cannot safely infer one"),
+            "no repository objects, refs, metadata, or worktree files were changed",
+            DIRTY_WORKTREE_COMMIT_COMMAND,
+            vec![
+                DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
+                GIT_OVERLAY_CHECKPOINT_COMMAND.to_string(),
+                "heddle status".to_string(),
+            ],
         )
     }
 

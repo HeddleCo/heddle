@@ -15,16 +15,21 @@ use grpc::heddle::v1::{
     ListDiscussionsBySymbolRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
-use repo::operation_dedup::OperationDedupStore;
+use repo::{RepositoryCapability, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
-use super::{advice::RecoveryAdvice, history_target::resolve_state_id};
-use crate::cli::{
-    cli_args::{
-        Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-        DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
+use super::{
+    advice::RecoveryAdvice, history_target::resolve_state_id, snapshot::ensure_current_state,
+};
+use crate::{
+    cli::{
+        cli_args::{
+            Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
+            DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
+        },
+        should_output_json,
     },
-    should_output_json,
+    config::UserConfig,
 };
 
 pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
@@ -94,7 +99,7 @@ fn open_service(cli: &Cli) -> Result<LocalDiscussionService> {
 }
 
 async fn run_open(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussOpenArgs) -> Result<()> {
-    let state_id = resolve_state(cli, args.state.as_deref())?;
+    let state_id = resolve_open_state(cli, args.state.as_deref())?;
     let req = OpenDiscussionRequest {
         repo_path: String::new(),
         state_id,
@@ -370,8 +375,33 @@ fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
     let head = repo
         .head()
         .context("read HEAD")?
-        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("discuss")))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_anchor_first("discuss")))?;
     Ok(head.as_bytes().to_vec())
+}
+
+fn resolve_open_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
+    let repo = cli.open_repo().context("open Heddle repository")?;
+    if let Some(s) = explicit {
+        return Ok(resolve_state_id(&repo, s)?.as_bytes().to_vec());
+    }
+    if let Some(head) = repo.head().context("read HEAD")? {
+        return Ok(head.as_bytes().to_vec());
+    }
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && repo
+            .git_overlay_worktree_status()?
+            .is_some_and(|status| status.is_clean())
+    {
+        let state_id = ensure_current_state(
+            &repo,
+            &UserConfig::load_default().unwrap_or_default(),
+            Some("Bootstrap git-overlay before opening discussion".to_string()),
+        )?;
+        return Ok(state_id.as_bytes().to_vec());
+    }
+    Err(anyhow!(RecoveryAdvice::repository_no_head_anchor_first(
+        "discuss"
+    )))
 }
 
 fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {

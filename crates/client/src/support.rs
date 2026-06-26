@@ -36,6 +36,19 @@ struct SupportAccessOutput {
 }
 
 #[derive(Serialize)]
+struct SupportGrantOutput {
+    output_kind: &'static str,
+    #[serde(flatten)]
+    grant: SupportAccessOutput,
+}
+
+#[derive(Serialize)]
+struct SupportListOutput {
+    output_kind: &'static str,
+    grants: Vec<SupportAccessOutput>,
+}
+
+#[derive(Serialize)]
 struct SupportRevokeOutput {
     output_kind: &'static str,
     id: String,
@@ -180,7 +193,7 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
         return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
             "support_target_required",
-            "one of --namespace or --repo is required",
+            "one of --namespace or --target-repo is required",
             "Choose the hosted namespace or repository that should receive support access.",
             "heddle support grant --namespace <namespace>",
         )));
@@ -201,7 +214,11 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrant) -> Result<()> {
         .await?;
     let out: SupportAccessOutput = grant.into();
     if ctx.should_output_json(Some(repo.config())) {
-        println!("{}", serde_json::to_string(&out)?);
+        let output = SupportGrantOutput {
+            output_kind: "support_grant",
+            grant: out,
+        };
+        println!("{}", serde_json::to_string(&output)?);
     } else {
         let target = if !out.namespace_path.is_empty() {
             format!("namespace {}", out.namespace_path)
@@ -225,7 +242,7 @@ async fn run_list(ctx: &dyn CliContext, args: SupportList) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
         return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
             "support_target_required",
-            "one of --namespace or --repo is required",
+            "one of --namespace or --target-repo is required",
             "Choose the hosted namespace or repository whose support grants should be listed.",
             "heddle support list --namespace <namespace>",
         )));
@@ -241,7 +258,11 @@ async fn run_list(ctx: &dyn CliContext, args: SupportList) -> Result<()> {
         .await?;
     let entries: Vec<SupportAccessOutput> = grants.into_iter().map(Into::into).collect();
     if ctx.should_output_json(Some(repo.config())) {
-        println!("{}", serde_json::to_string(&entries)?);
+        let output = SupportListOutput {
+            output_kind: "support_list",
+            grants: entries,
+        };
+        println!("{}", serde_json::to_string(&output)?);
     } else if entries.is_empty() {
         println!("No support-access grants on the requested resource.");
     } else {

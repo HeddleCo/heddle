@@ -303,7 +303,7 @@ impl Repository {
             line_sets.push(if set.is_empty() {
                 final_origin_set
             } else {
-                builder.origin_set_from_set_indexes(set.into_iter())?
+                builder.origin_set_from_set_indexes(set)?
             });
         }
 
@@ -333,7 +333,7 @@ impl Repository {
                     set.insert(*index);
                 }
             }
-            line_sets.push(builder.origin_set_from_set_indexes(set.into_iter())?);
+            line_sets.push(builder.origin_set_from_set_indexes(set)?);
         }
 
         Ok(builder.into_file_provenance(file_blob, final_lines.len(), line_sets))

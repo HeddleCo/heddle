@@ -1302,6 +1302,8 @@ impl Repository {
         let mut added = BTreeSet::new();
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
+        let ignore_patterns = self.ignore_patterns()?;
+        let ignore_matcher = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
 
         git_repo
             .stream_short_status_with_options(
@@ -1317,6 +1319,9 @@ impl Repository {
                     let path = PathBuf::from(path);
 
                     if entry.index == b'?' && entry.worktree == b'?' {
+                        if git_overlay_untracked_path_ignored(&ignore_matcher, &path) {
+                            return Ok(SleyStreamControl::Continue);
+                        }
                         added.insert(path);
                     } else if entry.index == b'D' || entry.worktree == b'D' {
                         deleted.insert(path);
@@ -2528,6 +2533,17 @@ fn git_path(path: &[u8]) -> String {
 
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
+}
+
+fn git_overlay_untracked_path_ignored(
+    ignore_matcher: &crate::worktree_ignore::WorktreeIgnoreMatcher,
+    path: &Path,
+) -> bool {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    ignore_matcher.should_prune_directory_child(parent, name)
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {

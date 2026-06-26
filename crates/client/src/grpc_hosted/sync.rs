@@ -2356,7 +2356,7 @@ async fn send_native_pack_streaming_messages(
         while let Some(object) = pending.remove(&next_index) {
             let object = object?;
             let should_drain = object.data.len() >= chunk_size
-                || (next_index + 1) % NATIVE_PACK_DRAIN_OBJECT_INTERVAL == 0;
+                || (next_index + 1).is_multiple_of(NATIVE_PACK_DRAIN_OBJECT_INTERVAL);
             writer.add_object_data(object)?;
             if should_drain {
                 writer.flush_pack()?;
@@ -2441,8 +2441,7 @@ fn native_pack_object_load_worker_count(object_count: usize) -> usize {
         .unwrap_or(1);
     object_count
         .min(available)
-        .min(NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT)
-        .max(1)
+        .clamp(1, NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT)
 }
 
 async fn drain_growing_native_pack_stream(

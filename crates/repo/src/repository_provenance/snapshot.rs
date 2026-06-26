@@ -264,7 +264,7 @@ impl Repository {
             line_sets.push(if set.is_empty() {
                 final_origin_set
             } else {
-                builder.origin_set_from_set_indexes(set.into_iter())?
+                builder.origin_set_from_set_indexes(set)?
             });
         }
 
