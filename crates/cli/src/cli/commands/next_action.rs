@@ -231,12 +231,6 @@ fn reject_demoted_breadcrumbs(action: &str, command_path: &[&str]) -> Result<()>
         ["ship"] => Err(next_action_validation_error(format!(
             "`ship` was renamed to `land`; next_action `{action}` is non-canonical"
         ))),
-        ["checkpoint"] => Err(next_action_validation_error(format!(
-            "`checkpoint` is an advanced Git primitive; next_action `{action}` must use `commit`"
-        ))),
-        ["capture"] => Err(next_action_validation_error(format!(
-            "`capture` is an advanced savepoint primitive; next_action `{action}` must use `commit`"
-        ))),
         ["merge"] => Err(next_action_validation_error(format!(
             "`merge` is an advanced merge primitive; managed-thread next_action `{action}` must use `ready`, `sync`, or `land`"
         ))),
@@ -460,6 +454,7 @@ mod tests {
     #[test]
     fn validator_accepts_canonical_everyday_actions() {
         for action in [
+            "heddle capture -m \"...\"",
             "heddle commit -m \"...\"",
             "heddle ready --thread feature",
             "heddle land --thread feature --no-push",
@@ -478,8 +473,6 @@ mod tests {
     fn validator_rejects_demoted_breadcrumbs() {
         for action in [
             "heddle ship --thread feature",
-            "heddle checkpoint -m \"...\"",
-            "heddle capture -m \"...\"",
             "heddle merge feature --preview",
             "heddle thread refresh feature",
             "heddle thread resolve feature",
@@ -496,6 +489,15 @@ mod tests {
         let err = validate_next_action("heddle checkpoint -m \"...\"", ctx(&["status"]))
             .expect_err("native repositories must not receive checkpoint breadcrumbs");
         assert!(err.to_string().contains("not executable"));
+    }
+
+    #[test]
+    fn validator_accepts_checkpoint_for_git_overlay_repositories() {
+        validate_next_action(
+            "heddle checkpoint -m \"...\"",
+            NextActionValidationContext::new(&["status"], repo::RepositoryCapability::GitOverlay),
+        )
+        .expect("git-overlay repositories may use checkpoint as a next action");
     }
 
     #[test]

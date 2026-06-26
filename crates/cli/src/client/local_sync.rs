@@ -96,7 +96,8 @@ impl LocalSync {
         // therefore always walk the tree(s) to surface redactions,
         // and condition just the object-copy step on the
         // `state_already_present` flag.
-        let state_already_present = target.store().has_state(state_id)?;
+        let target_state = target.store().get_state(state_id)?;
+        let state_already_present = target_state.is_some();
 
         // Source-side state read drives both the object copy (when
         // needed) and sidecar propagation (always).
@@ -131,6 +132,7 @@ impl LocalSync {
                 self.copy_tree_recursive(target, &context_root, copied)?;
             }
         }
+        self.copy_state_blob_dependencies(target, &state, copied)?;
 
         // Copy parent states recursively (if depth allows). We recurse
         // on parents even when the current state was already present —
@@ -153,11 +155,48 @@ impl LocalSync {
             }
         }
 
-        if !state_already_present {
+        if !state_already_present || state_metadata_roots_changed(target_state.as_ref(), &state) {
             target.store().put_state(&state)?;
-            *copied += 1;
+            if !state_already_present {
+                *copied += 1;
+            }
         }
 
+        Ok(())
+    }
+
+    fn copy_state_blob_dependencies(
+        &self,
+        target: &Repository,
+        state: &objects::object::State,
+        copied: &mut usize,
+    ) -> Result<()> {
+        for hash in [
+            state.risk_signals,
+            state.review_signatures,
+            state.discussions,
+            state.structured_conflicts,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.copy_blob_dependency(target, &hash, copied)?;
+        }
+        Ok(())
+    }
+
+    fn copy_blob_dependency(
+        &self,
+        target: &Repository,
+        hash: &ContentHash,
+        copied: &mut usize,
+    ) -> Result<()> {
+        if target.store().has_blob(hash)? {
+            return Ok(());
+        }
+        let blob = self.source.require_blob(hash)?;
+        target.store().put_blob(&blob)?;
+        *copied += 1;
         Ok(())
     }
 
@@ -296,4 +335,17 @@ impl LocalSync {
         target.store().put_blob(&blob)?;
         Ok(true)
     }
+}
+
+fn state_metadata_roots_changed(
+    target_state: Option<&objects::object::State>,
+    source_state: &objects::object::State,
+) -> bool {
+    let Some(target_state) = target_state else {
+        return true;
+    };
+    target_state.risk_signals != source_state.risk_signals
+        || target_state.review_signatures != source_state.review_signatures
+        || target_state.discussions != source_state.discussions
+        || target_state.structured_conflicts != source_state.structured_conflicts
 }

@@ -1176,6 +1176,89 @@ fn test_cli_clone_local_attaches_head_to_cloned_thread() {
 }
 
 #[test]
+fn test_cli_local_sync_copies_context_and_discussion_blobs() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let remote = temp.path().join("remote");
+    let clone_dir = temp.path().join("clone");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::create_dir_all(&remote).unwrap();
+
+    heddle(&["init"], Some(&source)).unwrap();
+    std::fs::write(source.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(&source)).unwrap();
+    heddle(
+        &[
+            "context",
+            "set",
+            "--path",
+            "src/lib.rs",
+            "--scope",
+            "symbol:run",
+            "--kind",
+            "rationale",
+            "-m",
+            "run is the smoke-test entry point",
+        ],
+        Some(&source),
+    )
+    .unwrap();
+    let open_json = heddle(
+        &[
+            "--output",
+            "json",
+            "discuss",
+            "open",
+            "src/lib.rs",
+            "run",
+            "should this remain the entry point?",
+        ],
+        Some(&source),
+    )
+    .unwrap();
+    let opened: Value = serde_json::from_str(&open_json).expect("discuss open JSON parses");
+    let discussion_id = opened["id"].as_str().expect("discussion id").to_string();
+
+    heddle(&["init"], Some(&remote)).unwrap();
+    let remote_path = remote.to_str().expect("remote path utf8");
+    heddle(&["remote", "add", "local", remote_path], Some(&source)).unwrap();
+    heddle(&["push", "local"], Some(&source)).unwrap();
+    heddle(
+        &[
+            "clone",
+            remote_path,
+            clone_dir.to_str().expect("clone path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("local clone succeeds after push");
+
+    let context_json = heddle(&["--output", "json", "context", "list"], Some(&clone_dir))
+        .expect("cloned repo can list context");
+    let context: Value = serde_json::from_str(&context_json).expect("context list JSON parses");
+    assert!(
+        context["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "context list should survive local push/clone sync: {context}"
+    );
+
+    let discussions_json = heddle(&["--output", "json", "discuss", "list"], Some(&clone_dir))
+        .expect("cloned repo can list discussions");
+    let discussions: Value =
+        serde_json::from_str(&discussions_json).expect("discussion list JSON parses");
+    let entries = discussions["discussions"]
+        .as_array()
+        .expect("discussion list array");
+    assert!(
+        entries
+            .iter()
+            .any(|discussion| discussion["id"].as_str() == Some(discussion_id.as_str())),
+        "discussion list should survive local push/clone sync: {discussions}"
+    );
+}
+
+#[test]
 fn test_cli_clone_local_bare_git_heddle_remote_skips_admin_files_and_sets_origin() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source");

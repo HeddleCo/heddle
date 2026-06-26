@@ -406,6 +406,7 @@ jobs:
           set -euo pipefail
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+          cargo check --locked -p heddle-cli --features client
           # Assert the default `cargo install -p heddle-cli` flow produces
           # `heddle-fuse-worker` so the sibling-binary lookup in
           # `mount::worker::default_worker_binary` resolves on a stock

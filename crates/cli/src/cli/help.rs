@@ -113,11 +113,11 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push"
+                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle capture -m \"...\" -> heddle checkpoint -m \"...\" -> heddle push"
             );
             let _ = writeln!(
                 out,
-                "Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"
+                "Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle checkpoint -m \"...\" -> heddle ready -> heddle land"
             );
             let _ = writeln!(out);
             let _ = writeln!(
@@ -641,10 +641,8 @@ Core nouns:
   Use it for risky edits, agent work, or parallel experiments without stash
   juggling.
 - Capture: a cheap recoverable save point on the current thread.
-- Commit: the normal human save path. In native Heddle it saves the state; in a
-  Git-overlay repo it saves the Heddle state and writes the matching Git
-  checkpoint as one operation.
-- Checkpoint: the explicit Git-overlay boundary for already-captured work.
+- Capture: the normal Heddle-native save path for recoverable state.
+- Checkpoint: the Git-overlay commit boundary for already-captured work.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
 
@@ -652,7 +650,8 @@ Everyday loop:
 
     heddle status
     heddle diff
-    heddle commit -m "..."
+    heddle capture -m "..."
+    heddle checkpoint -m "..."
     heddle start <name> --path ../<name>
     heddle ready
     heddle land --thread <name>
@@ -673,7 +672,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 
 | Git concept | Heddle concept + semantic difference |
 |-------------|--------------------------------------|
-| `git commit` | `heddle commit -m "..."`: saves a Heddle State. In native Heddle this is the authored snapshot; in Git-overlay mode it also writes the matching Git checkpoint when safe. |
+| `git commit` | `heddle checkpoint -m "..."`: writes an already-captured Heddle state to the Git lane in Git-overlay mode. Use `heddle capture -m "..."` first for Heddle-native state. |
 | Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
@@ -721,9 +720,8 @@ between threads with `heddle thread switch <name>`, and integrate with\n\
   is just a ref.\n\
 - Multiple threads coexist on disk simultaneously without `git stash` /\n\
   `git worktree` gymnastics. Each thread's working tree is its own.\n\
-- `heddle commit` captures work and writes the Git-facing checkpoint.\n\
-  Use `heddle capture` and `heddle checkpoint` separately when you want\n\
-  finer-grained Heddle states before producing Git commits.\n\
+- `heddle capture` records Heddle-native work; `heddle checkpoint`\n\
+  writes the Git-facing commit boundary for already-captured work.\n\
 \n\
 # Workspace modes (`--workspace`)\n\
 \n\
@@ -798,8 +796,6 @@ These three look similar but operate at different layers:\n\
 - `heddle capture` records a recoverable Heddle step on the current\n\
   thread — for undo, provenance, and review. Captures are\n\
   fine-grained and accumulate freely as work progresses.\n\
-- `heddle commit -m \"...\"` is the one-step human path: capture the\n\
-  current work and write the Git-facing checkpoint.\n\
 - `heddle checkpoint` commits the current captured work to the\n\
   git-overlay branch/index. It refuses when the worktree has changes\n\
   that haven't been captured yet — capture first, then checkpoint.\n\
@@ -921,14 +917,16 @@ Start in an existing Git checkout:\n\
 Save and sync ordinary work:\n\
 \n\
     heddle diff\n\
-    heddle commit -m \"...\"                    # one Heddle state + one Git commit\n\
+    heddle capture -m \"...\"                   # Heddle-native state\n\
+    heddle checkpoint -m \"...\"                # Git-facing commit boundary\n\
     heddle push\n\
 \n\
 Isolate risky work:\n\
 \n\
     heddle start <name> --path ../<name>\n\
     cd ../<name>\n\
-    heddle commit -m \"...\"\n\
+    heddle capture -m \"...\"\n\
+    heddle checkpoint -m \"...\"\n\
     heddle ready\n\
     cd -\n\
     heddle land --thread <name> --no-push     # add --push when ready to publish\n\
@@ -940,8 +938,8 @@ Recover or prove state:\n\
 \n\
 State-specific recovery:\n\
 \n\
-    Worktree has unsaved edits: heddle commit -m \"...\"\n\
-    Captured in Heddle but not Git: heddle commit -m \"...\"\n\
+    Worktree has unsaved edits: heddle capture -m \"...\"\n\
+    Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
     Convert Git history to native Heddle storage: heddle adopt --ref <branch>\n";
 
 const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
@@ -964,7 +962,8 @@ Manual setup, when you want one ref at a time:\n\
 Daily loop:\n\
 \n\
     heddle status\n\
-    heddle commit -m \"...\"                    # save work as Heddle + Git\n\
+    heddle capture -m \"...\"                   # save Heddle-native state\n\
+    heddle checkpoint -m \"...\"                # write the Git lane boundary\n\
     heddle push                               # Git-overlay remotes use the top-level verb\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\

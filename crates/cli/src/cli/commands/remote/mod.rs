@@ -3,17 +3,17 @@
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use objects::{fs_atomic::write_file_atomic, object::ThreadName};
+use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::{FullName, RefPrecondition, Repository as SleyRepository};
+use sley::{
+    ConfigEdit, ConfigEditPlan, ConfigSectionEntry, FullName, RefPrecondition, RemoteConfigSet,
+    Repository as SleyRepository,
+};
 
 use super::{
     action_line::print_next,
@@ -655,7 +655,7 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
     Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
 }
 
-fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
+pub(super) fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
     matches!(
         classify_remote_spec(repo, remote_arg),
         Some(RemoteTransportKind::NetworkHeddle)
@@ -967,147 +967,37 @@ fn git_remote_push_url(git: &SleyRepository, remote: &str) -> Result<Option<Stri
 }
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {
-    let config_path = git_overlay_config_path_for_write(root)
-        .context("Git-overlay tracking refresh requires a writable Git config")?;
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = remove_git_config_named_section(&contents, "branch", branch);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    contents.push_str(&format!(
-        "[branch \"{}\"]\n\tremote = {}\n\tmerge = refs/heads/{}\n",
-        escape_git_config_section(branch),
-        quote_git_config_value(remote),
-        escape_git_config_value(branch)
-    ));
-    write_file_atomic(&config_path, contents.as_bytes())?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "branch",
+            Some(branch.to_string()),
+            vec![
+                ConfigSectionEntry::new("remote", remote),
+                ConfigSectionEntry::new("merge", format!("refs/heads/{branch}")),
+            ],
+        ))
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
 fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
-    let config_path = git_overlay_config_path_for_write(root)
-        .context("Git-overlay remote tracking requires a writable Git config")?;
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = remove_git_config_named_section(&contents, "remote", name);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    contents.push_str(&format!(
-        "[remote \"{}\"]\n\turl = {}\n\tfetch = +refs/heads/*:refs/remotes/{}/*\n",
-        escape_git_config_section(name),
-        quote_git_config_value(url),
-        escape_git_config_value(name)
-    ));
-    write_file_atomic(&config_path, contents.as_bytes())?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let remote = RemoteConfigSet::new(name)
+        .with_url(url)
+        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "remote",
+            Some(remote.name),
+            remote.entries,
+        ))
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
-}
-
-fn git_overlay_config_path_for_write(root: &Path) -> Option<PathBuf> {
-    let dot_git = root.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git.join("config"));
-    }
-    let git_dir = pointed_git_dir(&dot_git)?;
-    Some(common_git_dir(&git_dir).unwrap_or(git_dir).join("config"))
-}
-
-fn pointed_git_dir(dot_git: &Path) -> Option<PathBuf> {
-    if dot_git.is_dir() {
-        return Some(dot_git.to_path_buf());
-    }
-    let contents = fs::read_to_string(dot_git).ok()?;
-    let target = contents.trim().strip_prefix("gitdir:")?.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dot_git.parent()?.join(path)
-    })
-}
-
-fn common_git_dir(git_dir: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(git_dir.join("commondir")).ok()?;
-    let target = contents.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        git_dir.join(path)
-    })
-}
-
-fn remove_git_config_named_section(contents: &str, section: &str, subsection_name: &str) -> String {
-    let mut rewritten = String::new();
-    let mut skipping_section = false;
-    for line in contents.lines() {
-        if let Some(section_name) = parse_git_config_subsection_name(line, section) {
-            skipping_section = section_name == subsection_name;
-            if skipping_section {
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_section = false;
-        }
-        if !skipping_section {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten
-}
-
-fn parse_git_config_subsection_name(line: &str, section: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let prefix = format!("[{section} \"");
-    let inner = trimmed.strip_prefix(&prefix)?.strip_suffix("\"]")?;
-    unescape_git_config_string(inner)
-}
-
-fn escape_git_config_section(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn escape_git_config_value(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\u{0008}' => out.push_str("\\b"),
-            ch => out.push(ch),
-        }
-    }
-    out
-}
-
-fn quote_git_config_value(value: &str) -> String {
-    format!("\"{}\"", escape_git_config_value(value))
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
-    }
-    Some(out)
 }
 
 fn remote_urls_match(left: &str, right: &str) -> bool {
@@ -1360,7 +1250,7 @@ fn auto_provision_remote_name(
     }
 }
 
-#[cfg(any(feature = "client", test))]
+#[cfg(feature = "client")]
 fn default_spool_slug_from_repo_root(root: &Path) -> Result<String> {
     let name = root
         .file_name()
@@ -1409,20 +1299,17 @@ struct PushNetworkOptions<'a> {
 
 #[cfg(test)]
 mod git_overlay_config_atomic_tests {
-    //! Crash-mid-write semantics for the Git-overlay `.git/config`
-    //! writers. Both `write_git_overlay_remote` and
-    //! `write_git_overlay_branch_upstream` now route through
-    //! `objects::fs_atomic::write_file_atomic` — the same tmp-and-rename
-    //! primitive `remote add`/`remove` use. The atomicity contract:
-    //! after the helper returns, the file is the full new content; a
-    //! prior interrupted write that left the file partially-written
-    //! must not leak back into the result.
+    //! Crash-mid-write semantics for the Git-overlay `.git/config` writers.
+    //! Both helpers route through Sley's config editor, so section parsing,
+    //! quoting, locking, and atomic replacement stay Git-parity tested.
+    use std::fs;
+
     use tempfile::TempDir;
 
     use super::*;
 
-    fn init_dot_git(root: &Path) {
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn init_git_repo(root: &Path) {
+        SleyRepository::init(root).unwrap();
     }
 
     #[test]
@@ -1476,7 +1363,7 @@ mod git_overlay_config_atomic_tests {
     fn write_git_overlay_remote_recovers_from_partial_prior_write() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        init_dot_git(root);
+        init_git_repo(root);
         let config = root.join(".git").join("config");
 
         // Establish a clean baseline so we know what "previous full
@@ -1520,7 +1407,7 @@ mod git_overlay_config_atomic_tests {
     fn write_git_overlay_branch_upstream_recovers_from_partial_prior_write() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        init_dot_git(root);
+        init_git_repo(root);
         let config = root.join(".git").join("config");
 
         // Baseline.

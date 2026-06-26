@@ -2738,7 +2738,7 @@ fn build_git_overlay_health_inner(
                     summary: format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     ),
-                    recovery_commands: vec!["heddle commit -m \"...\"".to_string()],
+                    recovery_commands: vec!["heddle checkpoint -m \"...\"".to_string()],
                     checks,
                 };
             }
@@ -2753,7 +2753,7 @@ fn build_git_overlay_health_inner(
                 clean: false,
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
                 recovery_commands: vec![
-                    "heddle commit -m \"...\"".to_string(),
+                    "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],
                 checks,
@@ -2793,7 +2793,7 @@ fn build_git_overlay_health_inner(
                 .cloned()
                 .unwrap_or_else(|| "<branch>".to_string());
             let recovery = if status == "needs_checkpoint" {
-                "heddle commit -m \"...\"".to_string()
+                "heddle checkpoint -m \"...\"".to_string()
             } else {
                 canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
             };
@@ -2838,7 +2838,7 @@ fn build_git_overlay_health_inner(
             clean: false,
             summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
             recovery_commands: vec![
-                "heddle commit -m \"...\"".to_string(),
+                "heddle capture -m \"...\"".to_string(),
                 "heddle stash push -m \"...\"".to_string(),
             ],
             checks,
@@ -3123,7 +3123,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                     "{changed} Heddle worktree path(s) are not captured in the current state"
                 ),
                 recovery_commands: vec![
-                    "heddle commit -m \"...\"".to_string(),
+                    "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],
                 checks,
