@@ -63,9 +63,23 @@ impl FromStr for RevisionAddress {
             if oid.is_empty() {
                 return Err(RevisionAddressParseError::EmptyGitCommit);
             }
+            validate_git_commit_oid(oid)?;
             return Ok(Self::GitCommit(oid.to_string()));
         }
         Err(RevisionAddressParseError::UnknownPrefix)
+    }
+}
+
+#[cfg(feature = "git-overlay")]
+fn validate_git_commit_oid(oid: &str) -> Result<(), RevisionAddressParseError> {
+    match oid.len() {
+        40 | 64 if oid.bytes().all(|byte| byte.is_ascii_hexdigit()) => Ok(()),
+        40 | 64 => Err(RevisionAddressParseError::InvalidGitCommit(
+            "commit oid must be lowercase or uppercase hex".to_string(),
+        )),
+        len => Err(RevisionAddressParseError::InvalidGitCommit(format!(
+            "commit oid must be 40 or 64 hex characters, got {len}"
+        ))),
     }
 }
 
@@ -75,6 +89,9 @@ pub enum RevisionAddressParseError {
     UnknownPrefix,
     #[error("git revision address is missing a commit oid")]
     EmptyGitCommit,
+    #[cfg(feature = "git-overlay")]
+    #[error("invalid Git commit oid: {0}")]
+    InvalidGitCommit(String),
     #[error("invalid Heddle change id: {0}")]
     InvalidHeddle(String),
 }
@@ -106,5 +123,30 @@ mod tests {
             address
         );
         assert_eq!(address.storage_prefix(), "git");
+    }
+
+    #[cfg(feature = "git-overlay")]
+    #[test]
+    fn git_revision_address_rejects_invalid_oids() {
+        assert_eq!(
+            "git:".parse::<RevisionAddress>().unwrap_err(),
+            RevisionAddressParseError::EmptyGitCommit,
+        );
+
+        assert_eq!(
+            "git:not-an-oid".parse::<RevisionAddress>().unwrap_err(),
+            RevisionAddressParseError::InvalidGitCommit(
+                "commit oid must be 40 or 64 hex characters, got 10".to_string(),
+            ),
+        );
+
+        assert_eq!(
+            "git:gggggggggggggggggggggggggggggggggggggggg"
+                .parse::<RevisionAddress>()
+                .unwrap_err(),
+            RevisionAddressParseError::InvalidGitCommit(
+                "commit oid must be lowercase or uppercase hex".to_string(),
+            ),
+        );
     }
 }

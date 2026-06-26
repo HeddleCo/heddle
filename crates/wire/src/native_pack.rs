@@ -34,6 +34,14 @@ pub const MAX_RECEIVED_PACK_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// second in-memory buffer controlled by the remote sender.
 pub const MAX_RECEIVED_PACK_INDEX_SIZE: u64 = 256 * 1024 * 1024;
 
+/// Maximum hosted Git pack accepted by the Git-lane transfer primitive.
+///
+/// Git-overlay sync sends Git-shaped data as raw Git packs. The sender and
+/// receiver still stream those bytes in bounded chunks, but the declared pack
+/// size is untrusted wire input and needs a hard ceiling before buffering or
+/// spooling work begins.
+pub const MAX_RECEIVED_GIT_PACK_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct NativePackBundle {
     pub pack_data: Vec<u8>,
@@ -274,6 +282,127 @@ pub struct PackChunkState {
 impl PackChunkState {
     pub fn is_complete(&self) -> bool {
         self.pack_complete && self.index_complete
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct GitPackChunkState {
+    transfer_id: Option<String>,
+    pack_size: Option<u64>,
+    next_offset: u64,
+    next_chunk_index: u32,
+    pack_data: Vec<u8>,
+}
+
+impl GitPackChunkState {
+    pub fn is_idle(&self) -> bool {
+        self.transfer_id.is_none()
+            && self.pack_size.is_none()
+            && self.next_offset == 0
+            && self.next_chunk_index == 0
+            && self.pack_data.is_empty()
+    }
+
+    pub fn ensure_idle(&self) -> Result<()> {
+        if self.is_idle() {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidState(
+                "Git pack transfer ended before final chunk".to_string(),
+            ))
+        }
+    }
+
+    pub fn receive_chunk(
+        &mut self,
+        transfer_id: &str,
+        offset: u64,
+        chunk_index: u32,
+        is_final_chunk: bool,
+        pack_size: u64,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        if transfer_id.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack transfer_id is required".to_string(),
+            ));
+        }
+        if pack_size > MAX_RECEIVED_GIT_PACK_SIZE {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack exceeds maximum transfer size of {MAX_RECEIVED_GIT_PACK_SIZE} bytes"
+            )));
+        }
+        if data.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk must not be empty".to_string(),
+            ));
+        }
+        match self.transfer_id.as_ref() {
+            Some(current) if current != transfer_id => {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack transfer id changed from {current:?} to {transfer_id:?}"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                self.transfer_id = Some(transfer_id.to_string());
+                self.pack_size = Some(pack_size);
+            }
+        }
+        if self.pack_size != Some(pack_size) {
+            return Err(ProtocolError::InvalidState(
+                "Git pack size changed during transfer".to_string(),
+            ));
+        }
+        if offset != self.next_offset {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack offset mismatch: expected {}, got {}",
+                self.next_offset, offset
+            )));
+        }
+        if chunk_index != self.next_chunk_index {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack chunk index mismatch: expected {}, got {}",
+                self.next_chunk_index, chunk_index
+            )));
+        }
+        let chunk_len = u64::try_from(data.len()).map_err(|_| {
+            ProtocolError::InvalidState("Git pack chunk length exceeds u64".to_string())
+        })?;
+        let next_offset = self
+            .next_offset
+            .checked_add(chunk_len)
+            .ok_or_else(|| ProtocolError::InvalidState("Git pack offset overflow".to_string()))?;
+        if next_offset > pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk exceeds declared pack size".to_string(),
+            ));
+        }
+        self.pack_data.extend_from_slice(data);
+        self.next_offset = next_offset;
+        self.next_chunk_index = self.next_chunk_index.checked_add(1).ok_or_else(|| {
+            ProtocolError::InvalidState("Git pack chunk index overflow".to_string())
+        })?;
+        if is_final_chunk {
+            if self.next_offset != pack_size {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack final size mismatch: declared {}, received {}",
+                    pack_size, self.next_offset
+                )));
+            }
+            let pack_data = std::mem::take(&mut self.pack_data);
+            self.transfer_id = None;
+            self.pack_size = None;
+            self.next_offset = 0;
+            self.next_chunk_index = 0;
+            return Ok(Some(pack_data));
+        }
+        if self.next_offset == pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack reached declared size without final chunk marker".to_string(),
+            ));
+        }
+        Ok(None)
     }
 }
 
@@ -640,10 +769,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        GrowingPackChunkReader, MAX_RECEIVED_PACK_SIZE, NativePackStreamingWriter, ObjectData,
-        ObjectId, ObjectInfo, ObjectType, PackChunkSpool, PackChunkState, PackFileChunkReader,
-        build_native_pack, install_received_pack, next_pack_chunk, receive_pack_chunk,
-        receive_pack_chunk_with_limit,
+        GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_PACK_SIZE,
+        NativePackStreamingWriter, ObjectData, ObjectId, ObjectInfo, ObjectType, PackChunkSpool,
+        PackChunkState, PackFileChunkReader, build_native_pack, install_received_pack,
+        next_pack_chunk, receive_pack_chunk, receive_pack_chunk_with_limit,
     };
 
     fn create_test_store() -> (TempDir, FsStore) {
@@ -726,6 +855,40 @@ mod tests {
                 .to_string()
                 .contains("native pack chunk index mismatch: expected 1, got 2")
         );
+    }
+
+    #[test]
+    fn git_pack_chunk_state_requires_ordered_chunks_and_final_size() {
+        let mut state = GitPackChunkState::default();
+
+        assert!(
+            state
+                .receive_chunk("git-pack:test", 0, 0, false, 8, b"abcd")
+                .unwrap()
+                .is_none()
+        );
+        let error = state
+            .receive_chunk("git-pack:test", 4, 2, true, 8, b"efgh")
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Git pack chunk index mismatch: expected 1, got 2")
+        );
+        assert!(state.ensure_idle().is_err());
+
+        let mut state = GitPackChunkState::default();
+        state
+            .receive_chunk("git-pack:test", 0, 0, false, 8, b"abcd")
+            .unwrap();
+        let complete = state
+            .receive_chunk("git-pack:test", 4, 1, true, 8, b"efgh")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(complete, b"abcdefgh");
+        assert!(state.ensure_idle().is_ok());
     }
 
     #[test]

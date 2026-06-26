@@ -178,14 +178,6 @@ message StateVisibilityTransfer {
   bytes state_visibility_blob = 2;
 }
 
-enum GitObjectKind {
-  GIT_OBJECT_KIND_UNSPECIFIED = 0;
-  GIT_OBJECT_KIND_COMMIT = 1;
-  GIT_OBJECT_KIND_TREE = 2;
-  GIT_OBJECT_KIND_BLOB = 3;
-  GIT_OBJECT_KIND_TAG = 4;
-}
-
 enum GitRefKind {
   GIT_REF_KIND_UNSPECIFIED = 0;
   GIT_REF_KIND_BRANCH = 1;
@@ -194,13 +186,14 @@ enum GitRefKind {
   GIT_REF_KIND_OTHER = 4;
 }
 
-// Git-lane transport for git-overlay repos. These messages carry Git-shaped
-// data as Git data; they are not Heddle native states/captures.
-message GitLooseObjectTransfer {
-  bytes oid = 1;
-  GitObjectKind kind = 2;
-  uint64 size = 3;
-  bytes object_body = 4;
+message GitPackTransfer {
+  string transfer_id = 1;
+  uint64 offset = 2;
+  uint32 chunk_index = 3;
+  bool is_final_chunk = 4;
+  uint64 pack_size = 5;
+  bytes pack_chunk = 6;
+  bytes pack_id = 7;
 }
 
 message GitRefUpdateTransfer {
@@ -222,7 +215,7 @@ message GitCheckpointTransfer {
 
 message GitLaneTransfer {
   oneof body {
-    GitLooseObjectTransfer loose_object = 1;
+    GitPackTransfer pack = 1;
     GitRefUpdateTransfer ref_update = 2;
     GitCheckpointTransfer checkpoint = 3;
   }
