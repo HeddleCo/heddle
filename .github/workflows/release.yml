@@ -271,7 +271,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
-        run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount --target ${{ matrix.target }}
+        run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount,client --target ${{ matrix.target }}
 
       - name: Stage artifact (unix)
         if: matrix.archive == 'tar.gz'
