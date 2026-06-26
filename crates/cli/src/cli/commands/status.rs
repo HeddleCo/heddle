@@ -4,6 +4,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
+    path::Path,
     time::Instant,
 };
 
@@ -12,13 +13,17 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use objects::worktree::WorktreeStatus;
 use repo::{
-    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
+    AgentUsageSummary, GitRemoteTrackingStatus, RepoConfig, Repository, RepositoryCapability,
     RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory, ThreadMode,
     ThreadState, WorktreeCompareProfile, describe_thread_advice_with_initial, is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
 use serde::Serialize;
+use sley::{
+    Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
+    StreamControl,
+};
 use tokio::time::{Duration, sleep};
 #[cfg(feature = "client")]
 use tokio_tungstenite::{
@@ -337,6 +342,9 @@ pub async fn cmd_status(
     if watch {
         return watch_status(cli, short, watch_iterations, watch_interval_ms).await;
     }
+    if short && cli.verbose == 0 && try_render_fast_short_status(cli)? {
+        return Ok(());
+    }
     if let Some(output) = build_plain_git_status_probe(cli)? {
         render_plain_git_status(cli, &output, short)?;
         return Ok(());
@@ -344,6 +352,229 @@ pub async fn cmd_status(
     let output = build_status_output(cli, short)?;
     render_status(cli, &output, short)?;
     Ok(())
+}
+
+fn try_render_fast_short_status(cli: &Cli) -> Result<bool> {
+    let total_start = Instant::now();
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+
+    let discover_start = Instant::now();
+    let git = match SleyRepository::discover(start) {
+        Ok(git) => git,
+        Err(_) => return Ok(false),
+    };
+    let Some(workdir) = git.workdir() else {
+        return Ok(false);
+    };
+    let discover_ms = discover_start.elapsed().as_millis();
+
+    let config_start = Instant::now();
+    let fast_repo = match fast_short_repo_kind(&workdir)? {
+        FastShortRepoKind::PlainGit => FastShortRepoKind::PlainGit,
+        FastShortRepoKind::GitOverlay { config } => {
+            if should_output_json(cli, Some(&config)) {
+                return Ok(false);
+            }
+            FastShortRepoKind::GitOverlay { config }
+        }
+        FastShortRepoKind::Fallback => return Ok(false),
+    };
+    if matches!(fast_repo, FastShortRepoKind::PlainGit) && should_output_json(cli, None) {
+        return Ok(false);
+    }
+    let config_ms = config_start.elapsed().as_millis();
+
+    let status_start = Instant::now();
+    let changes = fast_sley_changes(&git)?;
+    let status_ms = status_start.elapsed().as_millis();
+
+    let branch_start = Instant::now();
+    let branch = fast_git_branch(&git)?;
+    let subject = branch.as_deref().unwrap_or("detached");
+    let branch_ms = branch_start.elapsed().as_millis();
+
+    let remote_start = Instant::now();
+    let remote_health = match &fast_repo {
+        FastShortRepoKind::PlainGit | FastShortRepoKind::Fallback => None,
+        FastShortRepoKind::GitOverlay { .. } => branch
+            .as_deref()
+            .map(|branch| fast_remote_health(&git, branch))
+            .transpose()?
+            .flatten(),
+    };
+    let remote_ms = remote_start.elapsed().as_millis();
+
+    render_short_changes(&changes);
+    if changes.is_empty() {
+        let health = match fast_repo {
+            FastShortRepoKind::PlainGit => "setup needed",
+            FastShortRepoKind::GitOverlay { .. } | FastShortRepoKind::Fallback => {
+                remote_health.unwrap_or("clean")
+            }
+        };
+        println!("{} {}", style::bold(subject), style::thread_state(health));
+    }
+
+    if profile_enabled() {
+        emit_profile(
+            "status fast short",
+            &[
+                ProfileField::millis("git_discover_ms", discover_ms),
+                ProfileField::millis("config_ms", config_ms),
+                ProfileField::millis("sley_status_ms", status_ms),
+                ProfileField::millis("branch_ms", branch_ms),
+                ProfileField::millis("remote_ms", remote_ms),
+                ProfileField::duration("total_ms", total_start.elapsed()),
+            ],
+        );
+    }
+
+    Ok(true)
+}
+
+enum FastShortRepoKind {
+    PlainGit,
+    GitOverlay { config: Box<RepoConfig> },
+    Fallback,
+}
+
+fn fast_short_repo_kind(workdir: &Path) -> Result<FastShortRepoKind> {
+    let heddle_dir = workdir.join(".heddle");
+    if !heddle_dir.exists() {
+        return Ok(FastShortRepoKind::PlainGit);
+    }
+    if heddle_dir.join("objectstore").is_file() {
+        return Ok(FastShortRepoKind::Fallback);
+    }
+    let config_path = heddle_dir.join("config.toml");
+    if !config_path.is_file() {
+        return Ok(FastShortRepoKind::Fallback);
+    }
+    let config = RepoConfig::load(&config_path)?;
+    Ok(FastShortRepoKind::GitOverlay {
+        config: Box::new(config),
+    })
+}
+
+fn fast_sley_changes(git: &SleyRepository) -> Result<ChangesInfo> {
+    let mut changes = ChangesInfo::default();
+    git.stream_short_status_with_options(
+        ShortStatusOptions {
+            untracked_mode: StatusUntrackedMode::All,
+            ..ShortStatusOptions::default()
+        },
+        |entry| {
+            append_fast_status_row(&mut changes, entry);
+            Ok(StreamControl::Continue)
+        },
+    )?;
+    Ok(changes)
+}
+
+fn append_fast_status_row(changes: &mut ChangesInfo, entry: ShortStatusRow<'_>) {
+    let path = String::from_utf8_lossy(entry.path).into_owned();
+    if path.is_empty() || ignored_git_overlay_status_path(&path) {
+        return;
+    }
+    if (entry.index == b'?' && entry.worktree == b'?') || entry.index == b'A' {
+        changes.added.push(path);
+    } else if entry.index == b'D' || entry.worktree == b'D' {
+        changes.deleted.push(path);
+    } else {
+        changes.modified.push(path);
+    }
+}
+
+fn ignored_git_overlay_status_path(path: &str) -> bool {
+    path == ".heddle" || path.starts_with(".heddle/")
+}
+
+fn fast_git_branch(git: &SleyRepository) -> Result<Option<String>> {
+    Ok(git
+        .head()
+        .ok()
+        .and_then(|head| head.branch_name().map(str::to_string)))
+}
+
+fn fast_remote_health(git: &SleyRepository, branch: &str) -> Result<Option<&'static str>> {
+    let Some(head) = git.head().ok().and_then(|head| head.oid) else {
+        return Ok(None);
+    };
+    if git
+        .find_reference(&format!("refs/heads/{branch}"))?
+        .is_some()
+        && let Some(tracking_ref) = fast_configured_tracking_ref(git, branch)?
+        && let Some(upstream) = fast_rev_parse(git, &tracking_ref)
+    {
+        return fast_remote_health_for_pair(git, head, upstream);
+    }
+
+    let remotes = git.remote_names()?;
+    for remote in &remotes {
+        if remote.trim().is_empty() {
+            continue;
+        }
+        let remote_ref = format!("refs/remotes/{remote}/{branch}");
+        let Some(upstream) = fast_rev_parse(git, &remote_ref) else {
+            continue;
+        };
+        if upstream == head {
+            return Ok(None);
+        }
+        return fast_remote_health_for_pair(git, head, upstream);
+    }
+
+    if remotes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some("ready to push"))
+    }
+}
+
+fn fast_configured_tracking_ref(git: &SleyRepository, branch: &str) -> Result<Option<String>> {
+    let config = git.config_snapshot()?;
+    let Some(remote) = config.get("branch", Some(branch), "remote") else {
+        return Ok(None);
+    };
+    let Some(merge) = config.get("branch", Some(branch), "merge") else {
+        return Ok(None);
+    };
+    if remote == "." {
+        return Ok(Some(merge.to_string()));
+    }
+    let Some(short) = merge.strip_prefix("refs/heads/") else {
+        return Ok(None);
+    };
+    Ok(Some(format!("refs/remotes/{remote}/{short}")))
+}
+
+fn fast_rev_parse(git: &SleyRepository, rev: &str) -> Option<sley::ObjectId> {
+    git.rev_parse(rev).ok()
+}
+
+fn fast_remote_health_for_pair(
+    git: &SleyRepository,
+    head: sley::ObjectId,
+    upstream: sley::ObjectId,
+) -> Result<Option<&'static str>> {
+    if head == upstream {
+        return Ok(None);
+    }
+    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
+    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
+        git.git_dir(),
+        git.object_format(),
+        &db,
+        &head,
+        &upstream,
+    )?;
+    Ok(match (ahead, behind) {
+        (0, 0) => None,
+        (_, 0) => Some("ready to push"),
+        (0, _) => Some("behind upstream"),
+        _ => Some("remote_diverged"),
+    })
 }
 
 pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
