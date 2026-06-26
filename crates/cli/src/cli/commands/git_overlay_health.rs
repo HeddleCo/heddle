@@ -1093,6 +1093,12 @@ fn find_health_check<'a>(
     health.checks.iter().find(|check| check.name == name)
 }
 
+fn head_mapping_is_git_backed(checks: &[GitOverlayHealthCheck]) -> bool {
+    checks
+        .iter()
+        .any(|check| check.name == "head_mapping" && check.status == "git_backed")
+}
+
 fn verification_check(
     name: &str,
     clean: bool,
@@ -2753,6 +2759,7 @@ fn build_git_overlay_health_inner(
                 clean: false,
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
                 recovery_commands: vec![
+                    "heddle commit -m \"...\"".to_string(),
                     "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],
@@ -2818,7 +2825,8 @@ fn build_git_overlay_health_inner(
         }
     }
 
-    if let Ok(Some(state)) = repo.current_state()
+    if !head_mapping_is_git_backed(&checks)
+        && let Ok(Some(state)) = repo.current_state()
         && let Ok(tree) = repo.require_tree(&state.tree)
         && let Ok(status) = repo.compare_worktree_cached_with_options(
             &tree,

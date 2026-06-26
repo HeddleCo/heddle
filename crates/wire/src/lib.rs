@@ -99,6 +99,9 @@ pub enum ProtocolError {
     #[error("object not found: {0}")]
     ObjectNotFound(String),
 
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
     #[error("invalid state: {0}")]
     InvalidState(String),
 
@@ -146,6 +149,7 @@ impl ProtocolError {
             ProtocolError::AuthenticationFailed(_) => "permission denied".to_string(),
             ProtocolError::AuthorizationFailed(_) => "permission denied".to_string(),
             ProtocolError::ObjectNotFound(_) => "object not found".to_string(),
+            ProtocolError::AlreadyExists(_) => "resource already exists".to_string(),
             ProtocolError::InvalidState(_) => "invalid request state".to_string(),
             ProtocolError::Remote(_) => "internal server error".to_string(),
             ProtocolError::RemoteFailure { message, .. } => message.clone(),
@@ -164,6 +168,7 @@ impl ProtocolError {
             ProtocolError::AuthenticationFailed(_) => ErrorCode::PermissionDenied,
             ProtocolError::AuthorizationFailed(_) => ErrorCode::PermissionDenied,
             ProtocolError::ObjectNotFound(_) => ErrorCode::NotFound,
+            ProtocolError::AlreadyExists(_) => ErrorCode::InvalidArgument,
             ProtocolError::InvalidState(_) => ErrorCode::InvalidArgument,
             ProtocolError::Remote(_) => ErrorCode::Server,
             ProtocolError::RemoteFailure { code, .. } => *code,
@@ -238,6 +243,11 @@ mod tests {
                 ProtocolError::ObjectNotFound("abc123".to_string()),
                 "object not found",
                 ErrorCode::NotFound,
+            ),
+            (
+                ProtocolError::AlreadyExists("__users/luke/repo".to_string()),
+                "resource already exists",
+                ErrorCode::InvalidArgument,
             ),
             (
                 ProtocolError::InvalidState("bad resume".to_string()),

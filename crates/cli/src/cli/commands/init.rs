@@ -17,7 +17,7 @@ use tracing::{debug, info};
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    checkpoint::create_git_checkpoint,
+    checkpoint::{create_git_checkpoint, create_git_checkpoint_with_git_parents},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, is_placeholder_principal,
@@ -25,7 +25,7 @@ use super::{
     },
 };
 use crate::{
-    bridge::{GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback},
+    bridge::{GitBridge, git_core::git_config_identity_with_global_fallback},
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
@@ -644,13 +644,13 @@ fn quickstart_preflight(
     }
 
     // A shallow Git checkout (`.git/shallow`) can't be imported until full
-    // ancestry is available — `import_all` refuses it, but only AFTER
+    // ancestry is available — `import_git_history` refuses it, but only AFTER
     // `bootstrap_git_overlay` has created `.heddle/` and edited the Git
     // excludes, leaving a half-initialized sidecar. Detect it here, read-only,
     // and refuse before any write — but only when the repo will run as a Git
     // overlay AND has history to import (the exact condition under which
-    // `run_quickstart_actions` calls `import_all`). Mirrors `import_all`'s own
-    // `git_dir()/shallow` probe (cid 3329409826).
+    // `run_quickstart_actions` imports history). Mirrors `import_git_history`'s
+    // own `git_dir()/shallow` probe (cid 3329409826).
     if is_git_overlay && git_has_commits(root) && git_is_shallow(root) {
         bail!(quickstart_shallow_clone_advice());
     }
@@ -983,7 +983,7 @@ fn object_peels_to_commit(repo: &SleyRepository, mut oid: ObjectId) -> bool {
 /// Read-only decision for the Git-overlay quickstart's pre-capture checkout
 /// attachment.
 ///
-/// After `import_all`, `ensure_quickstart_thread` may point the requested
+/// After `import_git_history`, `ensure_quickstart_thread` may point the requested
 /// Heddle thread at the CURRENT state and `write_through_thread_checkout` would
 /// then write that state to `refs/heads/<thread>`. That is valid only when the
 /// current Git HEAD resolves to a real commit and an existing target branch is
@@ -1058,6 +1058,11 @@ fn git_head_is_detached(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn git_head_commit_oid(path: &Path) -> Result<Option<ObjectId>> {
+    let repo = SleyRepository::discover(path)?;
+    Ok(repo.head().ok().and_then(|head| head.oid))
+}
+
 /// Resolve the on-disk repo config the way `Repository::open` does: when the
 /// local `.heddle/` is a worktree pointer (`.heddle/objectstore`), the real
 /// config lives in the shared dir it points at; otherwise it is the local
@@ -1104,31 +1109,20 @@ fn run_quickstart_actions(
         .clone()
         .unwrap_or_else(|| "quickstart".to_string());
     ensure_quickstart_thread(repo, &thread)?;
+    let git_parent = match attachment {
+        QuickstartAttachmentPlan::Attach => git_head_commit_oid(repo.root())?,
+        QuickstartAttachmentPlan::SkipUnborn => None,
+    };
 
-    // On a Git overlay with imported history, `head_ref()` deliberately
-    // resolves back to the live Git branch (e.g. `main`) — so merely writing
-    // `.heddle/HEAD = Attached{thread}` above is NOT enough: the capture and
-    // checkpoint below both target `head_ref()`, and would advance the Git
-    // branch while the quickstart thread stays at the imported tip, even though
-    // the output says `Thread: <thread>` (cid 3329409824). The preflight has
-    // already decided whether all attachment preconditions hold; execute that
-    // plan here without re-discovering partial after-the-fact guards.
+    // Direct git-backed overlay keeps Git history in the Git lane rather than
+    // importing it as Heddle-native states. For a non-empty Git checkout, attach
+    // HEAD to the requested quickstart branch at the current Git tip before the
+    // capture. The capture remains Heddle-native; the checkpoint below carries
+    // this saved Git tip as its Git parent.
     match attachment {
         QuickstartAttachmentPlan::Attach => {
-            let mut bridge = GitBridge::new(repo);
-            if let WriteThroughOutcome::Skipped(reason) =
-                bridge.write_through_thread_checkout(&thread)?
-            {
-                bail!(RecoveryAdvice::safety_refusal(
-                    "quickstart_thread_checkout_skipped",
-                    format!("Could not attach the Git checkout to thread '{thread}': {reason}"),
-                    "Resolve the Git checkout issue and re-run `heddle init --quickstart`.",
-                    reason.to_string(),
-                    "quickstart would capture and checkpoint on the requested thread, but the Git checkout could not be attached to its branch",
-                    "the current Heddle state was preserved",
-                    "heddle init --quickstart",
-                    vec!["heddle init --quickstart".to_string()],
-                ));
+            if let Some(parent) = git_parent {
+                GitBridge::new(repo).attach_checkout_to_branch_at(&thread, parent)?;
             }
         }
         QuickstartAttachmentPlan::SkipUnborn => {}
@@ -1155,11 +1149,17 @@ fn run_quickstart_actions(
     // Checkpoint is Git-overlay only; on native repos the capture above
     // is the user-visible "first commit".
     let git_commit = if repo.capability() == RepositoryCapability::GitOverlay {
-        let record = create_git_checkpoint(
-            repo,
-            Some("quickstart: first commit"),
-            worktree_status_options(Some(repo.config())),
-        )?;
+        let status_options = worktree_status_options(Some(repo.config()));
+        let record = if let Some(parent) = git_parent {
+            create_git_checkpoint_with_git_parents(
+                repo,
+                Some("quickstart: first commit"),
+                status_options,
+                vec![parent],
+            )?
+        } else {
+            create_git_checkpoint(repo, Some("quickstart: first commit"), status_options)?
+        };
         Some(record.git_commit)
     } else {
         None

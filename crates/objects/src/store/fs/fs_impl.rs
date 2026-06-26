@@ -118,6 +118,31 @@ fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec
     Ok(ids)
 }
 
+fn state_entries_from_pack(
+    reader: &crate::store::pack::PackReader,
+    ids: &[PackObjectId],
+) -> Result<Vec<(ChangeId, Vec<u8>)>> {
+    let mut states = Vec::new();
+    for id in ids {
+        let PackObjectId::ChangeId(change_id) = id else {
+            continue;
+        };
+        let Some((obj_type, data)) = reader.get_object(id)? else {
+            continue;
+        };
+        if obj_type != ObjectType::State {
+            return Err(HeddleError::InvalidObject(format!(
+                "pack id {} is indexed as {:?}, expected State",
+                change_id.to_string_full(),
+                obj_type
+            )));
+        }
+        validate_state_serialized(&data, *change_id)?;
+        states.push((*change_id, data));
+    }
+    Ok(states)
+}
+
 fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
     match (id, obj_type) {
         (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
@@ -911,7 +936,11 @@ impl ObjectStore for FsStore {
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = validate_and_list_pack(&reader)?;
+        let state_entries = state_entries_from_pack(&reader, &ids)?;
         self.install_pack_files(pack_data, index_data)?;
+        for (id, data) in state_entries {
+            self.put_state_serialized(&data, id)?;
+        }
         self.clear_recent_object_caches();
         Ok(ids)
     }
@@ -936,7 +965,14 @@ impl ObjectStore for FsStore {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
             validate_and_list_pack(&reader)?
         };
+        let state_entries = {
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
+            state_entries_from_pack(&reader, &ids)?
+        };
         self.install_pack_files_streaming(pack_path, index_path)?;
+        for (id, data) in state_entries {
+            self.put_state_serialized(&data, id)?;
+        }
         Ok(ids)
     }
 

@@ -557,6 +557,101 @@ fn test_cli_status_after_git_overlay_init_uses_git_backed_refs() {
 }
 
 #[test]
+fn test_cli_status_after_manual_git_commit_keeps_direct_git_backed_ref_clean() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    std::fs::write(temp.path().join("tracked.txt"), "captured by heddle\n").unwrap();
+    heddle(
+        &["capture", "-m", "capture before git commit"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    std::fs::write(temp.path().join("tracked.txt"), "committed by git\n").unwrap();
+    git_commit_all(temp.path(), "manual git commit");
+
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(parsed["repository_capability"], "git-overlay");
+    assert_eq!(parsed["verification"]["status"], "clean");
+    assert_eq!(parsed["verification"]["mapping_state"], "git_backed");
+    assert!(parsed["recommended_action"].is_null(), "{parsed}");
+    assert_eq!(parsed["changed_path_count"], 0, "{parsed}");
+    assert_eq!(parsed["worktree_changed_path_count"], 0, "{parsed}");
+    assert_eq!(parsed["thread_health"], "clean", "{parsed}");
+
+    let verify = heddle(&["verify", "--output", "json"], Some(temp.path())).unwrap();
+    let parsed_verify: Value = serde_json::from_str(&verify).unwrap();
+    assert_eq!(parsed_verify["status"], "clean", "{parsed_verify}");
+    assert_eq!(
+        parsed_verify["mapping_state"], "git_backed",
+        "{parsed_verify}"
+    );
+    assert_eq!(parsed_verify["worktree_state"], "clean", "{parsed_verify}");
+}
+
+#[test]
+fn test_cli_discuss_open_bootstraps_clean_git_overlay_anchor() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let list = heddle_output(&["--output", "json", "discuss", "list"], Some(temp.path()))
+        .expect("invoke no-anchor discussion list");
+    assert!(
+        !list.status.success(),
+        "read-only discussion list should refuse without creating a hidden anchor"
+    );
+    let list_stderr = std::str::from_utf8(&list.stderr).unwrap_or("");
+    let advice: Value =
+        serde_json::from_str(list_stderr).expect("discussion list refusal should be JSON advice");
+    assert_eq!(advice["kind"], "repository_no_head");
+    assert_eq!(advice["primary_command"], "heddle commit -m \"...\"");
+    assert!(
+        advice["recovery_commands"]
+            .as_array()
+            .is_some_and(|commands| commands
+                .iter()
+                .any(|command| { command.as_str() == Some("heddle checkpoint -m \"...\"") })),
+        "no-anchor discussion advice should include a clean Git-overlay checkpoint path: {advice}"
+    );
+
+    let open = heddle_output(
+        &[
+            "--output",
+            "json",
+            "discuss",
+            "open",
+            "tracked.txt",
+            "tracked",
+            "anchor discussion",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke discussion open");
+    assert!(
+        open.status.success(),
+        "discussion open should bootstrap a clean Git-overlay anchor: stderr={}",
+        std::str::from_utf8(&open.stderr).unwrap_or("")
+    );
+    let opened: Value =
+        serde_json::from_slice(&open.stdout).expect("discussion open should emit JSON");
+    assert_eq!(opened["output_kind"], "discuss_open");
+    assert!(
+        opened["opened_against_state"]
+            .as_str()
+            .is_some_and(|state| !state.is_empty()),
+        "discussion should be anchored to the bootstrapped Heddle state: {opened}"
+    );
+}
+
+#[test]
 fn test_cli_color_force_emits_ansi_for_human_status() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());

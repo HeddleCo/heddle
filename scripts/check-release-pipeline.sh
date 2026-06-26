@@ -166,17 +166,17 @@ else
   err "missing deterministic Heddle-<tag>-macos-universal.dmg artifact name"
 fi
 
-if grep -F 'cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount --target ${{ matrix.target }}' "$WF" >/dev/null; then
+if grep -F 'cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount' "$WF" >/dev/null; then
   ok "release CLI build explicitly enables mount backends"
 else
-  err "release CLI build must pass --features mount so macOS binaries include FSKit support"
+  err "release CLI build must include --features mount so macOS binaries include FSKit support"
 fi
 
 if grep -F "cargo build --release --locked -p heddle-mount --features fskit --target" scripts/build-macos-cask-artifact.sh >/dev/null \
-   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount --target" scripts/build-macos-cask-artifact.sh >/dev/null; then
+   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount" scripts/build-macos-cask-artifact.sh >/dev/null; then
   ok "macOS cask build explicitly enables FSKit/mount features"
 else
-  err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with --features mount"
+  err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with mount enabled"
 fi
 
 if ! grep -F "target: aarch64-apple-darwin" "$WF" >/dev/null \

@@ -1237,11 +1237,41 @@ const CONTRACTS: &[CommandContractEntry] = &[
     #[cfg(feature = "client")]
     entry(&["auth", "login"], MUTATING_TEXT),
     #[cfg(feature = "client")]
-    entry(&["auth", "logout"], MUTATING_NO_OP_ID),
+    entry(
+        &["auth", "logout"],
+        json_discriminators(
+            documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
+            &[json_discriminator(
+                Some("auth logout"),
+                "output_kind",
+                "auth_logout",
+            )],
+        ),
+    ),
     #[cfg(feature = "client")]
-    entry(&["auth", "status"], READ_JSON),
+    entry(
+        &["auth", "status"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["auth status"]),
+            &[json_discriminator(
+                Some("auth status"),
+                "output_kind",
+                "auth_status",
+            )],
+        ),
+    ),
     #[cfg(feature = "client")]
-    entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
+    entry(
+        &["auth", "create-service-token"],
+        json_discriminators(
+            documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
+            &[json_discriminator(
+                Some("auth create-service-token"),
+                "output_kind",
+                "auth_create_service_token",
+            )],
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
     entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
@@ -2003,9 +2033,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["presence"],
-        category(feature_gated(READ_JSON, "client"), "collab"),
+        category(feature_gated(GROUP, "client"), "collab"),
     ),
-    entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["presence", "publish"],
+        feature_gated(MUTATING_TEXT, "client"),
+    ),
     entry(
         &["pull"],
         exits(
@@ -2537,16 +2570,49 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["support"],
-        category(feature_gated(MUTATING, "client"), "repo"),
+        category(feature_gated(GROUP, "client"), "repo"),
     ),
     entry(
         &["support", "grant"],
-        feature_gated(MUTATING_NO_OP_ID, "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["support grant"]),
+                &[json_discriminator(
+                    Some("support grant"),
+                    "output_kind",
+                    "support_grant",
+                )],
+            ),
+            "client",
+        ),
     ),
-    entry(&["support", "list"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["support", "list"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["support list"]),
+                &[json_discriminator(
+                    Some("support list"),
+                    "output_kind",
+                    "support_list",
+                )],
+            ),
+            "client",
+        ),
+    ),
     entry(
         &["support", "revoke"],
-        feature_gated(MUTATING_NO_OP_ID, "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["support revoke"]),
+                &[json_discriminator(
+                    Some("support revoke"),
+                    "output_kind",
+                    "support_revoke",
+                )],
+            ),
+            "client",
+        ),
     ),
     entry(
         &["switch"],
@@ -4608,6 +4674,23 @@ mod tests {
             &["agent", "release", "--session", "session-1"],
         ),
         sample(&["agent", "list"], &["agent", "list"]),
+        #[cfg(feature = "client")]
+        sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
+        #[cfg(feature = "client")]
+        sample(&["auth", "logout"], &["auth", "logout"]),
+        #[cfg(feature = "client")]
+        sample(&["auth", "status"], &["auth", "status"]),
+        #[cfg(feature = "client")]
+        sample(
+            &["auth", "create-service-token"],
+            &[
+                "auth",
+                "create-service-token",
+                "github-ci-main",
+                "--namespace",
+                "heddle/platform",
+            ],
+        ),
         #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
         #[cfg(feature = "git-overlay")]
@@ -4725,6 +4808,11 @@ mod tests {
         sample(&["maintenance", "index"], &["maintenance", "index"]),
         sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
         sample(&["merge"], &["merge", "feature"]),
+        #[cfg(feature = "client")]
+        sample(
+            &["presence", "publish"],
+            &["presence", "publish", "--session", "session-1"],
+        ),
         sample(&["pull"], &["pull"]),
         sample(&["push"], &["push"]),
         sample(&["query"], &["query"]),
@@ -4851,6 +4939,29 @@ mod tests {
         sample(&["stash", "clear"], &["stash", "clear"]),
         sample(&["stash", "show"], &["stash", "show"]),
         sample(&["status"], &["status"]),
+        #[cfg(feature = "client")]
+        sample(
+            &["support", "grant"],
+            &[
+                "support",
+                "grant",
+                "support@heddle.dev",
+                "--namespace",
+                "heddle/platform",
+                "--reason",
+                "release verification",
+            ],
+        ),
+        #[cfg(feature = "client")]
+        sample(
+            &["support", "list"],
+            &["support", "list", "--namespace", "heddle/platform"],
+        ),
+        #[cfg(feature = "client")]
+        sample(
+            &["support", "revoke"],
+            &["support", "revoke", "00000000-0000-0000-0000-000000000000"],
+        ),
         sample(&["switch"], &["switch", "main"]),
         sample(&["sync"], &["sync"]),
         sample(&["thread", "create"], &["thread", "create", "feature"]),
@@ -5821,6 +5932,9 @@ mod tests {
                 "agent stop",
                 "agent capture",
                 "agent ready",
+                "auth logout",
+                "auth status",
+                "auth create-service-token",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5901,6 +6015,9 @@ mod tests {
                 "stash list",
                 "stash show",
                 "status",
+                "support grant",
+                "support list",
+                "support revoke",
                 "switch",
                 "sync",
                 "thread create",

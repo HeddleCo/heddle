@@ -18,7 +18,7 @@ use sley::{
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        count_exported_commits, delete_reference_if_present,
+        copy_reachable_objects, count_exported_commits, delete_reference_if_present,
         git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
         read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
     },
@@ -81,6 +81,13 @@ fn commit_is_byte_faithful(state: &State) -> bool {
             .unwrap_or(true)
 }
 
+pub(crate) struct ExportStateOptions<'a> {
+    pub(crate) identity: Option<&'a LocalGitIdentity>,
+    pub(crate) message_override: Option<&'a str>,
+    pub(crate) parent_override: Option<&'a [ObjectId]>,
+    pub(crate) audience: &'a AudienceTier,
+}
+
 /// Export a single state to Git for `audience`.
 ///
 /// Returns `Ok(None)` — **absence** — when the state's effective visibility
@@ -94,9 +101,7 @@ pub(crate) fn export_state(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
     state_id: &ChangeId,
-    identity: Option<&LocalGitIdentity>,
-    message_override: Option<&str>,
-    audience: &AudienceTier,
+    options: ExportStateOptions<'_>,
 ) -> GitResult<Option<ObjectId>> {
     let state = heddle_repo
         .store()
@@ -109,7 +114,7 @@ pub(crate) fn export_state(
     let tier = heddle_repo
         .effective_visibility_tier(state_id)
         .map_err(|e| GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}")))?;
-    if !visible(&tier, audience) {
+    if !visible(&tier, options.audience) {
         return Ok(None);
     }
 
@@ -157,7 +162,7 @@ pub(crate) fn export_state(
         .upstream_url
         .as_deref()
         .filter(|s| !s.is_empty());
-    let message = match message_override {
+    let message = match options.message_override {
         Some(message) => GitBridge::build_commit_message_with_footer_with_body(
             &state, message, hosted_url, /*omitted=*/ 0,
         ),
@@ -165,18 +170,22 @@ pub(crate) fn export_state(
             GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
         }
     };
-    let parent_oids: Vec<ObjectId> = state
-        .parents
-        .iter()
-        .map(|parent_id| {
-            mapping
-                .get_git(parent_id)
-                .ok_or(GitBridgeError::StateNotFound(*parent_id))
-        })
-        .collect::<GitResult<Vec<_>>>()?;
+    let parent_oids: Vec<ObjectId> = if let Some(parents) = options.parent_override {
+        parents.to_vec()
+    } else {
+        state
+            .parents
+            .iter()
+            .map(|parent_id| {
+                mapping
+                    .get_git(parent_id)
+                    .ok_or(GitBridgeError::StateNotFound(*parent_id))
+            })
+            .collect::<GitResult<Vec<_>>>()?
+    };
 
     let sig = if principal_is_default_unknown(&state.attribution.principal) {
-        let Some(identity) = identity else {
+        let Some(identity) = options.identity else {
             return Err(GitBridgeError::Git(
                 "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
@@ -499,14 +508,28 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             .commit_message_overrides
             .get(&state_id)
             .map(String::as_str);
+        let parent_override = bridge
+            .commit_parent_overrides
+            .get(&state_id)
+            .map(Vec::as_slice);
+        if let Some(parents) = parent_override
+            && !parents.is_empty()
+        {
+            let checkout_repo =
+                SleyRepository::discover(bridge.heddle_repo.root()).map_err(git_err)?;
+            copy_reachable_objects(&checkout_repo, &repo, parents.iter().copied())?;
+        }
         let Some(git_oid) = export_state(
             &mut bridge.mapping,
             bridge.heddle_repo,
             &repo,
             &state_id,
-            identity.as_ref(),
-            message_override,
-            &audience,
+            ExportStateOptions {
+                identity: identity.as_ref(),
+                message_override,
+                parent_override,
+                audience: &audience,
+            },
         )?
         else {
             // Embargoed for this audience — emit absence (no commit minted).

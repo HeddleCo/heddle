@@ -639,6 +639,7 @@ pub struct GitBridge<'a> {
     pub(crate) git_repo_path: Option<PathBuf>,
     pub(crate) mapping: SyncMapping,
     pub(crate) commit_message_overrides: HashMap<ChangeId, String>,
+    pub(crate) commit_parent_overrides: HashMap<ChangeId, Vec<ObjectId>>,
 }
 
 struct MappingFileSnapshot {
@@ -682,6 +683,7 @@ impl<'a> GitBridge<'a> {
             git_repo_path: None,
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
+            commit_parent_overrides: HashMap::new(),
         }
     }
 
@@ -789,12 +791,62 @@ impl<'a> GitBridge<'a> {
         self.commit_message_overrides.insert(state_id, message);
     }
 
+    pub(crate) fn set_commit_parent_override(
+        &mut self,
+        state_id: ChangeId,
+        parents: Vec<ObjectId>,
+    ) {
+        self.commit_parent_overrides.insert(state_id, parents);
+    }
+
+    pub(crate) fn attach_checkout_to_branch_at(
+        &self,
+        thread: &str,
+        git_oid: ObjectId,
+    ) -> GitResult<()> {
+        if !self.heddle_repo.root().join(".git").exists() {
+            return Ok(());
+        }
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let object_repo = common_repo_for_worktree(&checkout_repo)?;
+        let branch_ref = format!("refs/heads/{thread}");
+        let previous_branch = object_repo
+            .find_reference(&branch_ref)
+            .ok()
+            .flatten()
+            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
+        if let Some(previous) = previous_branch
+            && previous != git_oid
+        {
+            return Err(GitBridgeError::Conflict(format!(
+                "branch {branch_ref} points at {previous}, expected {git_oid}"
+            )));
+        }
+        let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
+        });
+        set_reference(
+            &object_repo,
+            &branch_ref,
+            git_oid,
+            expected,
+            "heddle: quickstart attach branch",
+        )?;
+
+        let head_path = checkout_repo.git_dir().join("HEAD");
+        fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
+        fsync_path(&head_path)?;
+        fsync_path(checkout_repo.git_dir())?;
+        Ok(())
+    }
+
     pub(crate) fn with_mapping_rollback<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> GitResult<T>,
     ) -> GitResult<T> {
         let mapping = self.mapping.clone();
         let commit_message_overrides = self.commit_message_overrides.clone();
+        let commit_parent_overrides = self.commit_parent_overrides.clone();
         let mapping_file = MappingFileSnapshot::read(self.mapping_path())?;
         let mapping_tmp_file = MappingFileSnapshot::read(self.mapping_tmp_path())?;
 
@@ -803,6 +855,7 @@ impl<'a> GitBridge<'a> {
             Err(error) => {
                 self.mapping = mapping;
                 self.commit_message_overrides = commit_message_overrides;
+                self.commit_parent_overrides = commit_parent_overrides;
                 if let Err(rollback_error) = mapping_file
                     .restore()
                     .and_then(|()| mapping_tmp_file.restore())
@@ -1699,10 +1752,8 @@ impl<'a> GitBridge<'a> {
             copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
             fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
 
-            let commit = checkout_repo.read_commit(&git_oid).map_err(git_err)?;
-            let mut index = checkout_repo
-                .index_from_tree(&commit.tree)
-                .map_err(git_err)?;
+            let commit = object_repo.read_commit(&git_oid).map_err(git_err)?;
+            let mut index = object_repo.index_from_tree(&commit.tree).map_err(git_err)?;
             index.upgrade_version_for_flags();
             checkout_repo
                 .write_index(
@@ -2085,6 +2136,7 @@ fn fetch_heddle_notes_into_repo(
             record_promisor_refs: false,
             update_head_ok: false,
             ssh_options: None,
+            atomic: false,
             depth: None,
             merge_srcs: Vec::new(),
             filter: None,
@@ -3706,6 +3758,7 @@ fn clone_url_to_bare_via_sley(
                 record_promisor_refs: false,
                 update_head_ok: false,
                 ssh_options: None,
+                atomic: false,
                 depth,
                 merge_srcs: Vec::new(),
                 filter: None,
@@ -3762,6 +3815,7 @@ fn fetch_network_remote(
                 record_promisor_refs: false,
                 update_head_ok: false,
                 ssh_options: None,
+                atomic: false,
                 depth: None,
                 merge_srcs: Vec::new(),
                 filter: None,

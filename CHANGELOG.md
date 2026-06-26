@@ -13,6 +13,24 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.5.1 - 2026-06-26
+
+### Changed
+
+- Upgraded the native-git substrate to sley `0.3.0` and switched published
+  Heddle crates back to the crates.io dependency instead of the sibling path.
+- Hosted Git-overlay sync now sends Git-shaped data through the Git lane as
+  packs, while Heddle-native captures, state, context, discussions, and
+  visibility metadata remain on the Heddle lane.
+- `heddle-grpc` and `@heddleco/grpc` move to `0.7.2` with the Git lane pack
+  transfer protobuf surface and hosted spool API additions.
+
+### Fixed
+
+- Heddle's Sley fetch call sites now pass the explicit `FetchOptions.atomic`
+  setting required by sley `0.3.0`, preserving the previous non-atomic fetch
+  behavior.
+
 ## 0.5.0 - 2026-06-23
 
 Native-git substrate jumps to sley 0.2.0, the storage seam lands, and the

@@ -1154,7 +1154,7 @@ fn test_cli_clone_local_attaches_head_to_cloned_thread() {
     assert_eq!(clone_output["cloned"], true);
     assert_eq!(clone_output["transport"], "heddle");
     assert_eq!(clone_output["branch"], "main");
-    assert_eq!(clone_output["repository_capability"], "native");
+    assert_eq!(clone_output["repository_capability"], "native-heddle");
     assert!(clone_output["objects"].is_number());
     assert!(clone_output["state"].is_string());
     assert_eq!(clone_output["verification"]["status"], "clean");

@@ -540,6 +540,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     ) && git_worktree_status
         .as_ref()
         .is_some_and(WorktreeStatus::is_clean);
+    let git_backed_mapping = trust.mapping_state == "git_backed";
 
     // Get worktree status
     let worktree_status_start = Instant::now();
@@ -550,6 +551,14 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         && trust.status != "needs_checkpoint"
     {
         (changes_from_status(status), None)
+    } else if git_backed_mapping {
+        (
+            git_worktree_status
+                .as_ref()
+                .map(changes_from_status)
+                .unwrap_or_default(),
+            None,
+        )
     } else if let Some(ref state) = current_state {
         let tree = repo.require_tree(&state.tree)?;
         let (status, profile) =
@@ -933,11 +942,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let has_changes = !output.changes.modified.is_empty()
         || !output.changes.added.is_empty()
         || !output.changes.deleted.is_empty();
-    let git_backed_without_capture = repo.capability() == RepositoryCapability::GitOverlay
-        && current_state.is_none()
-        && thread_summary.as_ref().is_some_and(|thread| {
-            thread.thread_health == "git_backed" && thread.current_state.is_none()
-        });
+    let git_backed_current_thread = git_backed_mapping;
     let checkpointed_clean = output.git_checkpoint.is_some() && !has_changes;
     let thread_stub = output.thread.as_ref().map(|thread| Thread {
         id: thread.clone(),
@@ -1041,9 +1046,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
-    let recommended_action = if git_backed_without_capture {
+    let recommended_action = if git_backed_current_thread {
         if has_changes {
-            "heddle capture -m \"...\"".to_string()
+            "heddle commit -m \"...\"".to_string()
         } else {
             String::new()
         }
@@ -1056,7 +1061,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     };
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
-        if git_backed_without_capture {
+        if git_backed_current_thread {
             if has_changes {
                 "dirty_worktree".to_string()
             } else {
@@ -1089,7 +1094,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
         trust_blockers.push(format!("Verification: {}", trust.summary));
     }
-    let display_thread_summary = (!git_backed_without_capture)
+    let display_thread_summary = (!git_backed_current_thread)
         .then_some(thread_summary.as_ref())
         .flatten();
     let worktree_changed_path_count = changes_path_count(&output.changes);
@@ -2187,7 +2192,7 @@ fn render_git_index_status(index: &GitIndexPlan) {
     if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
         println!(
             "  include the rest with: {}",
-            style::bold("heddle capture -m \"...\"")
+            style::bold("heddle commit --all -m \"...\"")
         );
     }
 }
@@ -2202,17 +2207,13 @@ fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> Strin
 
 fn git_index_commit_scope_text(index: &GitIndexPlan) -> &'static str {
     match index.commit_mode {
-        "staged_index" => {
-            "`heddle checkpoint` writes the current captured state to Git; capture additional paths first"
-        }
-        "worktree_all" => {
-            "`heddle capture` saves the worktree; `heddle checkpoint` writes the captured state to Git"
-        }
+        "staged_index" => "plain `heddle commit` checkpoints staged paths only",
+        "worktree_all" => "plain `heddle commit` captures and checkpoints all current paths",
         "worktree_all_explicit" => {
-            "`heddle capture` saves staged, unstaged, and untracked paths; `heddle checkpoint` writes the captured state to Git"
+            "`heddle commit --all` captures and checkpoints staged, unstaged, and untracked paths"
         }
         "none" => "no Git paths are ready to commit",
-        _ => "`heddle checkpoint` writes the current captured state to Git",
+        _ => "`heddle commit` captures and checkpoints the current Git worktree",
     }
 }
 

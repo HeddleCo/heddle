@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git-muscle-memory compatibility shims.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -15,14 +11,15 @@ use objects::{
     },
     store::ObjectStore,
     util::gitlink_blob_content,
-    worktree::should_ignore as should_ignore_path,
+    worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
-use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
+use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::{
     BString as GitBString, GitObjectType, Index, IndexEntry, IndexStage, ObjectId,
-    Repository as SleyRepository,
+    Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
+    StreamControl,
 };
 
 use super::{
@@ -680,14 +677,6 @@ fn index_or_empty(git: &SleyRepository) -> Result<Index> {
     Ok(git.open_index()?.unwrap_or_else(empty_git_index))
 }
 
-fn head_index_or_empty(git: &SleyRepository) -> Result<Index> {
-    let Some(head_oid) = git.head()?.oid else {
-        return Ok(empty_git_index());
-    };
-    let commit = git.read_commit(&head_oid)?;
-    Ok(git.index_from_tree(&commit.tree)?)
-}
-
 fn git_index_intent(repo: &Repository, git: &SleyRepository) -> Result<GitIndexIntent> {
     let ignore_patterns = repo.ignore_patterns()?;
     git_index_intent_for_root_with_ignore_and_repo(repo.root(), &ignore_patterns, git)
@@ -719,44 +708,59 @@ fn git_index_intent_for_root_with_ignore_and_repo(
     ignore_patterns: &[String],
     git: &SleyRepository,
 ) -> Result<GitIndexIntent> {
-    let index = index_or_empty(git).context("failed to inspect Git index before commit")?;
-    let head_index =
-        head_index_or_empty(git).context("failed to inspect Git index before commit")?;
-
-    let head_entries = index_entries_by_path(&head_index);
-    let index_entries = index_entries_by_path(&index);
+    let ignore_matcher = build_worktree_ignore(ignore_patterns);
     let mut intent = GitIndexIntent::default();
-
-    for (path, entry) in &index_entries {
-        if head_entries.get(path) != Some(entry) {
-            intent.staged_paths.push(path.clone());
-        }
-    }
-    for path in head_entries.keys() {
-        if !index_entries.contains_key(path) {
-            intent.staged_paths.push(path.clone());
-        }
-    }
-
-    let tracked_paths: BTreeSet<String> = index_entries.keys().cloned().collect();
-    let gitlink_paths: BTreeSet<String> = index_entries
-        .iter()
-        .filter(|(_, entry)| entry.mode == GIT_MODE_COMMIT)
-        .map(|(path, _)| path.clone())
-        .collect();
-    for (path, entry) in &index_entries {
-        if entry.mode == GIT_MODE_COMMIT {
-            continue;
-        }
-        if worktree_entry_changed(root, git, path, entry)? {
-            intent.extra_paths.push(format!("unstaged: {path}"));
-        }
-    }
-    for path in untracked_worktree_paths(root, &tracked_paths, &gitlink_paths, ignore_patterns)? {
-        intent.extra_paths.push(format!("untracked: {path}"));
-    }
+    git.stream_short_status_with_options(
+        ShortStatusOptions {
+            untracked_mode: StatusUntrackedMode::All,
+            ..ShortStatusOptions::default()
+        },
+        |entry| {
+            append_status_row_to_index_intent(&mut intent, &ignore_matcher, entry);
+            Ok(StreamControl::Continue)
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to inspect Git status before commit at {}",
+            root.display()
+        )
+    })?;
 
     Ok(intent)
+}
+
+fn append_status_row_to_index_intent(
+    intent: &mut GitIndexIntent,
+    ignore_matcher: &WorktreeIgnoreMatcher,
+    entry: ShortStatusRow<'_>,
+) {
+    let path = String::from_utf8_lossy(entry.path).into_owned();
+    if path.is_empty() {
+        return;
+    }
+    if entry.index == b'?' && entry.worktree == b'?' {
+        if !ignore_matcher.is_ignored(Path::new(&path)) {
+            intent.extra_paths.push(format!("untracked: {path}"));
+        }
+        return;
+    }
+    if entry.index != b' ' && entry.index != b'!' {
+        intent.staged_paths.push(path.clone());
+    }
+    if entry.worktree != b' '
+        && entry.worktree != b'!'
+        && !status_row_is_gitlink_worktree_only(entry)
+    {
+        intent.extra_paths.push(format!("unstaged: {path}"));
+    }
+}
+
+fn status_row_is_gitlink_worktree_only(entry: ShortStatusRow<'_>) -> bool {
+    entry.index == b' '
+        && (entry.index_mode == Some(GIT_MODE_COMMIT)
+            || entry.head_mode == Some(GIT_MODE_COMMIT)
+            || entry.worktree_mode == Some(GIT_MODE_COMMIT))
 }
 
 fn git_ignore_patterns_for_root(root: &Path) -> Result<Vec<String>> {
@@ -965,125 +969,6 @@ fn sparse_git_index_advice(path: &str) -> RecoveryAdvice {
         "heddle status",
         vec!["heddle status".to_string()],
     )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct IndexEntryIntent {
-    id: ObjectId,
-    mode: u32,
-}
-
-fn index_entries_by_path(index: &Index) -> BTreeMap<String, IndexEntryIntent> {
-    index
-        .entries
-        .iter()
-        .map(|entry| {
-            (
-                git_path_from_bstring(&entry.path),
-                IndexEntryIntent {
-                    id: entry.oid,
-                    mode: entry.mode,
-                },
-            )
-        })
-        .collect()
-}
-
-fn worktree_entry_changed(
-    root: &Path,
-    git: &SleyRepository,
-    path: &str,
-    entry: &IndexEntryIntent,
-) -> Result<bool> {
-    let state = repo::git_worktree_status::git_worktree_entry_state_in_repo(
-        git, root, path, entry.id, entry.mode, None,
-    )
-    .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
-    Ok(state != GitWorktreeEntryState::Clean)
-}
-
-fn untracked_worktree_paths(
-    root: &Path,
-    tracked_paths: &BTreeSet<String>,
-    gitlink_paths: &BTreeSet<String>,
-    ignore_patterns: &[String],
-) -> Result<Vec<String>> {
-    // The `ignore` crate walks the tree honoring per-directory
-    // `.gitignore` files at every level (plus `.git/info/exclude` and
-    // the user-global gitignore) — matching git-commit's own rules.
-    // The previous walkdir+flat-list approach only loaded the
-    // top-level `.gitignore`, so a nested `src/.gitignore *.tmp`
-    // would have failed to ignore `src/foo.tmp`. The `ignore_patterns`
-    // arg layers heddle's own ignore policy on top.
-    let extra_patterns: Vec<String> = ignore_patterns.to_vec();
-    // Clone the gitlink set into the closure so the walker prunes
-    // any submodule subtree — `tracked_paths` only contains the
-    // submodule path itself, so without this prune every file under
-    // a clean submodule worktree would be reported as untracked.
-    let gitlinks = gitlink_paths.clone();
-    let root_owned = root.to_path_buf();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .filter_entry(move |entry| {
-            if is_git_or_heddle_dir(entry.path()) {
-                return false;
-            }
-            if let Ok(relative) = entry.path().strip_prefix(&root_owned)
-                && !relative.as_os_str().is_empty()
-            {
-                let rel = pathbuf_to_git_path(relative);
-                if gitlinks.contains(&rel) {
-                    return false;
-                }
-            }
-            true
-        })
-        .build();
-    let mut paths = Vec::new();
-    for entry in walker {
-        let entry = entry.context("failed to inspect worktree before commit")?;
-        let file_type = entry.file_type();
-        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
-            continue;
-        }
-        let Ok(relative) = entry.path().strip_prefix(root) else {
-            continue;
-        };
-        if relative.as_os_str().is_empty() {
-            continue;
-        }
-        if should_ignore_path(relative, &extra_patterns) {
-            continue;
-        }
-        let path = repo_relative_string(root, entry.path())?;
-        if !tracked_paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
-}
-
-fn is_git_or_heddle_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".git" || name == ".heddle")
-}
-
-fn repo_relative_string(root: &Path, path: &Path) -> Result<String> {
-    let relative = path
-        .strip_prefix(root)
-        .with_context(|| format!("failed to relativize path {}", path.display()))?;
-    Ok(pathbuf_to_git_path(relative))
-}
-
-fn pathbuf_to_git_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn git_path_from_bstring(path: &GitBString) -> String {

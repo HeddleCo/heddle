@@ -17,7 +17,7 @@ use objects::{object::ThreadName, store::ObjectStore};
 use oplog::{OpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::Repository as SleyRepository;
+use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
     action_line::print_next,
@@ -107,7 +107,16 @@ pub(crate) fn create_git_checkpoint(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true)
+    create_git_checkpoint_inner(repo, message, status_options, true, None)
+}
+
+pub(crate) fn create_git_checkpoint_with_git_parents(
+    repo: &Repository,
+    message: Option<&str>,
+    status_options: repo::WorktreeStatusOptions,
+    git_parents: Vec<ObjectId>,
+) -> Result<GitCheckpointRecord> {
+    create_git_checkpoint_inner(repo, message, status_options, true, Some(git_parents))
 }
 
 pub(crate) fn create_git_checkpoint_from_index_snapshot(
@@ -115,7 +124,7 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false)
+    create_git_checkpoint_inner(repo, message, status_options, false, None)
 }
 
 fn create_git_checkpoint_inner(
@@ -123,6 +132,7 @@ fn create_git_checkpoint_inner(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
+    git_parent_override: Option<Vec<ObjectId>>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(native_checkpoint_unavailable_advice(repo)));
@@ -175,6 +185,9 @@ fn create_git_checkpoint_inner(
         .unwrap_or_else(|| "HEAD".to_string());
     let previous_git_oid = git_rev_parse_head(repo.root());
     let mut bridge = GitBridge::new(repo);
+    if let Some(parents) = git_parent_override {
+        bridge.set_commit_parent_override(state.change_id, parents);
+    }
     let git_commit = match bridge
         .write_through_current_checkout_with_message(state.change_id, summary.clone())?
     {

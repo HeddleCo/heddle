@@ -14,6 +14,8 @@ use sley::{
     ConfigEdit, ConfigEditPlan, ConfigSectionEntry, FullName, RefPrecondition, RemoteConfigSet,
     Repository as SleyRepository,
 };
+#[cfg(feature = "client")]
+use wire::ProtocolError;
 
 use super::{
     action_line::print_next,
@@ -1149,32 +1151,35 @@ async fn auto_provision_hosted_repo(
 ) -> Result<String> {
     let namespace = client.get_current_user_namespace().await?;
     let slug = default_spool_slug_from_repo_root(repo.root())?;
-    let created = client
-        .create_repository(&namespace.full_path, &slug)
-        .await
-        .map_err(|err| {
-            let full_path = format!("{}/{}", namespace.full_path, slug);
-            anyhow!(RecoveryAdvice::remote_push_failed(
+    let derived_full_path = format!("{}/{}", namespace.full_path, slug);
+    let provisioned_repo = match client.create_repository(&namespace.full_path, &slug).await {
+        Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
+        Err(err) if auto_provision_create_already_exists(&err) => {
+            AutoProvisionedHostedRepo::Existing(derived_full_path)
+        }
+        Err(err) => {
+            return Err(anyhow!(RecoveryAdvice::remote_push_failed(
                 options.track_name,
-                &format!(
-                    "could not create hosted spool {full_path}: {err}. If this spool already exists, push to heddle://{}/{full_path} or choose another local folder name",
-                    options.addr
-                ),
-            ))
-        })?;
+                &auto_provision_create_error_message(&slug, &err),
+            )));
+        }
+    };
 
     let configured_remote = persist_auto_provisioned_remote(
         repo,
         options.remote_arg,
         options.addr,
-        &created.full_path,
+        provisioned_repo.full_path(),
     )?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
+        let display_full_path =
+            hosted_spool_display_path(&namespace, &slug, provisioned_repo.full_path());
         println!(
-            "{} created hosted spool {}",
+            "{} {} hosted spool {}",
             style::ok_marker(),
-            style::bold(&created.full_path)
+            provisioned_repo.status_verb(),
+            style::bold(&display_full_path)
         );
         if let Some(remote_name) = configured_remote {
             println!(
@@ -1184,19 +1189,105 @@ async fn auto_provision_hosted_repo(
                     &format!(
                         "{} -> {}",
                         style::bold(&remote_name),
-                        style::dim(&format!("heddle://{}/{}", options.addr, created.full_path))
+                        style::dim(&format!("heddle://{}/{}", options.addr, display_full_path))
                     )
                 )
             );
         } else {
             print_next(&format!(
                 "heddle remote add origin heddle://{}/{}",
-                options.addr, created.full_path
+                options.addr, display_full_path
             ));
         }
     }
 
-    Ok(created.full_path)
+    Ok(provisioned_repo.into_full_path())
+}
+
+#[cfg(feature = "client")]
+enum AutoProvisionedHostedRepo {
+    Created(String),
+    Existing(String),
+}
+
+#[cfg(feature = "client")]
+impl AutoProvisionedHostedRepo {
+    fn full_path(&self) -> &str {
+        match self {
+            Self::Created(full_path) | Self::Existing(full_path) => full_path,
+        }
+    }
+
+    fn into_full_path(self) -> String {
+        match self {
+            Self::Created(full_path) | Self::Existing(full_path) => full_path,
+        }
+    }
+
+    fn status_verb(&self) -> &'static str {
+        match self {
+            Self::Created(_) => "created",
+            Self::Existing(_) => "using",
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_create_already_exists(err: &ProtocolError) -> bool {
+    match err {
+        ProtocolError::AlreadyExists(_) => true,
+        ProtocolError::Remote(message) => message_indicates_already_exists(message),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "client")]
+fn message_indicates_already_exists(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("already exists")
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> String {
+    let error = match err {
+        ProtocolError::Remote(_) | ProtocolError::LockError(_) => err.client_message(),
+        _ => redact_internal_hosted_paths(&err.to_string()),
+    };
+    format!(
+        "could not create hosted spool '{slug}': {error}. Pass a full hosted remote path or choose another local folder name"
+    )
+}
+
+#[cfg(feature = "client")]
+fn hosted_spool_display_path(
+    namespace: &wire::HostedNamespaceInfo,
+    slug: &str,
+    full_path: &str,
+) -> String {
+    if hosted_path_contains_internal_user_namespace(full_path) && !namespace.slug.is_empty() {
+        format!("{}/{}", namespace.slug, slug)
+    } else {
+        full_path.to_string()
+    }
+}
+
+#[cfg(feature = "client")]
+fn redact_internal_hosted_paths(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|part| {
+            if hosted_path_contains_internal_user_namespace(part) {
+                "[user namespace]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(feature = "client")]
+fn hosted_path_contains_internal_user_namespace(value: &str) -> bool {
+    value.contains("__users/")
 }
 
 #[cfg(feature = "client")]
@@ -1357,6 +1448,55 @@ mod git_overlay_config_atomic_tests {
                 .as_deref(),
             None
         );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_reuses_create_repository_already_exists() {
+        let typed_already_exists = ProtocolError::AlreadyExists("luke/demo-repo".to_string());
+        assert!(auto_provision_create_already_exists(&typed_already_exists));
+
+        let already_exists = ProtocolError::Remote("repository already exists".to_string());
+        assert!(auto_provision_create_already_exists(&already_exists));
+
+        let validation = ProtocolError::InvalidState("repository already exists".to_string());
+        assert!(!auto_provision_create_already_exists(&validation));
+
+        let permission = ProtocolError::AuthorizationFailed("missing grant".to_string());
+        assert!(!auto_provision_create_already_exists(&permission));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_hides_internal_user_namespace_paths_in_cli_text() {
+        let namespace = wire::HostedNamespaceInfo {
+            namespace_id: "user-1".to_string(),
+            kind: "user".to_string(),
+            slug: "alice".to_string(),
+            parent_id: None,
+            display_name: None,
+            full_path: "__users/user-1".to_string(),
+        };
+
+        assert_eq!(
+            hosted_spool_display_path(&namespace, "demo-repo", "__users/user-1/demo-repo"),
+            "alice/demo-repo"
+        );
+
+        let validation =
+            ProtocolError::InvalidState("namespace __users/user-1 rejected".to_string());
+        let validation_message = auto_provision_create_error_message("demo-repo", &validation);
+        assert!(
+            !validation_message.contains("__users/"),
+            "{validation_message}"
+        );
+        assert!(validation_message.contains("demo-repo"));
+
+        let remote =
+            ProtocolError::Remote("repository __users/user-1/demo-repo failed".to_string());
+        let remote_message = auto_provision_create_error_message("demo-repo", &remote);
+        assert!(!remote_message.contains("__users/"), "{remote_message}");
+        assert!(remote_message.contains("internal server error"));
     }
 
     #[test]
