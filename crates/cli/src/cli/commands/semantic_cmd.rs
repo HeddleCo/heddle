@@ -67,7 +67,7 @@ fn cmd_semantic_hot(
             if matches!(spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
                 ensure_current_state(
                     &repo,
-                    &UserConfig::load_default().unwrap_or_default(),
+                    &UserConfig::load_default()?,
                     Some("Bootstrap git-overlay before semantic analysis".to_string()),
                 )?;
             }
@@ -76,7 +76,7 @@ fn cmd_semantic_hot(
         }
         None => ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Bootstrap git-overlay before semantic analysis".to_string()),
         )?,
     };

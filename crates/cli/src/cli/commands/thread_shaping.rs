@@ -97,7 +97,7 @@ pub fn cmd_capture_split(
 
     let target_repo = Repository::open(&target.execution_path)?;
     apply_selected_worktree_paths(&repo, &target_repo, &moved_paths)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     let target_snapshot = create_snapshot(
         &target_repo,
         &user_config,
@@ -163,7 +163,7 @@ pub fn cmd_thread_move(
     }
 
     apply_selected_state_paths(&source_repo, &source_current, &target_repo, &moved_paths)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     let target_snapshot = create_snapshot(
         &target_repo,
         &user_config,
@@ -226,7 +226,7 @@ pub fn cmd_thread_absorb(
         .ok_or_else(|| anyhow!(RecoveryAdvice::thread_absorb_parent_required(&child.id)))?;
     let parent = load_thread(&repo, &parent_id)?;
     let parent_repo = Repository::open(&parent.execution_path)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     let status_options = worktree_status_options(Some(parent_repo.config()));
     if worktree_dirty(&parent_repo, &status_options)? {
         create_snapshot(

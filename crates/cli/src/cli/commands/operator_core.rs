@@ -400,7 +400,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
 
         create_snapshot(
             repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Continue merge".to_string()),
             None,
             SnapshotAgentOverrides {
