@@ -1232,44 +1232,51 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
     ),
-    #[cfg(feature = "client")]
-    entry(&["auth"], category(GROUP, "repo")),
-    #[cfg(feature = "client")]
-    entry(&["auth", "login"], MUTATING_TEXT),
-    #[cfg(feature = "client")]
+    entry(
+        &["auth"],
+        category(feature_gated(GROUP, "client"), "repo"),
+    ),
+    entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
     entry(
         &["auth", "logout"],
-        json_discriminators(
-            documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
-            &[json_discriminator(
-                Some("auth logout"),
-                "output_kind",
-                "auth_logout",
-            )],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
+                &[json_discriminator(
+                    Some("auth logout"),
+                    "output_kind",
+                    "auth_logout",
+                )],
+            ),
+            "client",
         ),
     ),
-    #[cfg(feature = "client")]
     entry(
         &["auth", "status"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["auth status"]),
-            &[json_discriminator(
-                Some("auth status"),
-                "output_kind",
-                "auth_status",
-            )],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["auth status"]),
+                &[json_discriminator(
+                    Some("auth status"),
+                    "output_kind",
+                    "auth_status",
+                )],
+            ),
+            "client",
         ),
     ),
-    #[cfg(feature = "client")]
     entry(
         &["auth", "create-service-token"],
-        json_discriminators(
-            documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
-            &[json_discriminator(
-                Some("auth create-service-token"),
-                "output_kind",
-                "auth_create_service_token",
-            )],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
+                &[json_discriminator(
+                    Some("auth create-service-token"),
+                    "output_kind",
+                    "auth_create_service_token",
+                )],
+            ),
+            "client",
         ),
     ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
@@ -2992,6 +2999,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
 static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
     OnceLock::new();
 
+static ADVERTISED_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
+    OnceLock::new();
+
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
 }
@@ -3019,6 +3029,7 @@ pub fn build_command_catalog() -> CommandCatalogOutput {
         .find(|arg| arg.get_long() == Some("op-id"))
         .map(catalog_option);
     walk_commands(&command, &mut Vec::new(), &mut commands, &op_id_option);
+    append_feature_gated_command_entries(&command, &mut commands, &op_id_option);
     CommandCatalogOutput {
         kind: "command_catalog".to_string(),
         executable_path: heddle_argv0(),
@@ -3072,6 +3083,126 @@ fn walk_commands(
             walk_commands(subcommand, prefix, out, op_id_option);
         }
         prefix.pop();
+    }
+}
+
+/// Append catalog entries for `feature_gated` contracts whose clap
+/// subcommand is compiled out of THIS build (e.g. the `client`-gated
+/// `auth`/`support`/`presence` surfaces in a default `cargo install`).
+///
+/// `walk_commands` only sees the live clap tree, so without this the
+/// hosted verbs would be missing from the catalog `commands` list even
+/// though their contract (schema verbs, `output_kind` discriminators)
+/// is advertised — breaking the wire-format-stable promise agents read.
+/// Entries already produced by the walk (the feature IS on) are skipped.
+fn append_feature_gated_command_entries(
+    root: &clap::Command,
+    out: &mut Vec<CommandCatalogEntry>,
+    op_id_option: &Option<CommandCatalogOption>,
+) {
+    let present: std::collections::BTreeSet<Vec<String>> =
+        out.iter().map(|entry| entry.path.clone()).collect();
+    for entry in CONTRACTS.iter() {
+        if entry.contract.feature_gate.is_none() {
+            continue;
+        }
+        if removed_phase_1_2_contract_path(entry.path) {
+            continue;
+        }
+        let owned_path: Vec<String> = entry.path.iter().map(|s| (*s).to_string()).collect();
+        if present.contains(&owned_path) {
+            continue;
+        }
+        // Defensive: never synthesize an entry that the clap tree
+        // actually carries (the feature is enabled in this build).
+        if clap_command_path_exists(root, entry.path) {
+            continue;
+        }
+        out.push(feature_gated_catalog_entry(&owned_path, entry.contract, op_id_option));
+    }
+}
+
+/// Build a [`CommandCatalogEntry`] for a contract with no live clap node.
+/// Clap-derived fields (aliases, summary, options, arguments,
+/// subcommand-ness) are empty/false; every behavioral field comes from
+/// the contract, identically to [`catalog_entry`].
+fn feature_gated_catalog_entry(
+    path: &[String],
+    contract: CommandContract,
+    op_id_option: &Option<CommandCatalogOption>,
+) -> CommandCatalogEntry {
+    let mut options = Vec::new();
+    if contract.supports_op_id
+        && let Some(op_id_option) = op_id_option
+    {
+        options.push(op_id_option.clone());
+    }
+    CommandCatalogEntry {
+        path: path.to_vec(),
+        display: path.join(" "),
+        aliases: Vec::new(),
+        tier: help_visibility_to_tier(contract.help_visibility).to_string(),
+        surface: contract.surface.to_string(),
+        help_visibility: contract.help_visibility.to_string(),
+        help_rank: contract.help_rank,
+        canonical_command: contract
+            .canonical_command
+            .map(std::string::ToString::to_string),
+        canonical_action: canonical_action(contract),
+        command_action: contract.advertised_action.map(command_action_from_advertised),
+        summary: String::new(),
+        has_subcommands: false,
+        supports_json: contract.supports_json,
+        mutates: contract.mutates,
+        supports_op_id: contract.supports_op_id,
+        persists_op_id: contract.persists_op_id,
+        op_id_behavior: op_id_behavior(contract).to_string(),
+        op_id_store_scope: op_id_store_scope(contract).to_string(),
+        observe_only: contract.observe_only,
+        may_initialize: contract.may_initialize,
+        may_import_git: contract.may_import_git,
+        may_write_worktree: contract.may_write_worktree,
+        may_move_ref: contract.may_move_ref,
+        destructive_requires_force: contract.destructive_requires_force,
+        writes_heddle_refs: contract.writes_heddle_refs,
+        writes_git_refs: contract.writes_git_refs,
+        writes_worktree: contract.writes_worktree,
+        writes_config: contract.writes_config,
+        writes_hooks: contract.writes_hooks,
+        network_io: contract.network_io,
+        daemon_process: contract.daemon_process,
+        object_gc: contract.object_gc,
+        external_command: contract.external_command,
+        requires_git_executable: contract.requires_git_executable,
+        destructive_data: contract.destructive_data,
+        side_effects: side_effects(contract)
+            .iter()
+            .map(|effect| (*effect).to_string())
+            .collect(),
+        side_effect_class: side_effect_class(contract).to_string(),
+        first_run_behavior: first_run_behavior(contract).to_string(),
+        json_kind: contract.json_kind.to_string(),
+        json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
+        schema_verbs: contract
+            .schema_verbs
+            .iter()
+            .map(|verb| (*verb).to_string())
+            .collect(),
+        documented_schema_verbs: contract
+            .documented_schema_verbs
+            .iter()
+            .map(|verb| (*verb).to_string())
+            .collect(),
+        options,
+        arguments: Vec::new(),
+        exit_codes: contract
+            .exit_codes
+            .iter()
+            .map(|(code, reason)| CommandCatalogExitCode {
+                code: *code,
+                reason: (*reason).to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -3658,6 +3789,31 @@ fn active_command_contract_entries() -> &'static [&'static CommandContractEntry]
         .as_slice()
 }
 
+/// The contracts advertised to agents: every [`active_command_contract_entries`]
+/// entry (present in the compiled clap tree) PLUS any `feature_gated` contract
+/// whose clap subcommand is compiled out of this build. The hosted surfaces
+/// (`auth`, `support`, `presence`) are `client`-gated, so a default
+/// `cargo install heddle-cli` omits their clap nodes — but their schema verbs
+/// and `output_kind` discriminators are a wire-format-stable promise that must
+/// stay advertised in the catalog regardless of build features. Distinct from
+/// the active set, which the clap-tree-equivalence invariants pin exactly.
+fn advertised_command_contract_entries() -> &'static [&'static CommandContractEntry] {
+    ADVERTISED_COMMAND_CONTRACT_ENTRIES
+        .get_or_init(|| {
+            let command = Cli::command();
+            let mut entries = active_command_contract_entries().to_vec();
+            for entry in CONTRACTS.iter() {
+                if entry.contract.feature_gate.is_some()
+                    && !clap_command_path_exists(&command, entry.path)
+                {
+                    entries.push(entry);
+                }
+            }
+            entries
+        })
+        .as_slice()
+}
+
 fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
     let mut current = command;
     for part in path {
@@ -3673,7 +3829,7 @@ fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
 }
 
 pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
-    active_command_contract_entries()
+    advertised_command_contract_entries()
         .iter()
         .copied()
         .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
@@ -3708,7 +3864,7 @@ pub fn command_json_discriminator_for_schema_verb(
 pub fn command_json_discriminators_for_schema_verb(
     schema_verb: &str,
 ) -> Vec<CommandJsonDiscriminator> {
-    active_command_contract_entries()
+    advertised_command_contract_entries()
         .iter()
         .copied()
         .filter(|entry| {
@@ -3742,7 +3898,7 @@ fn json_discriminators_for_path<'a>(
     path: impl IntoIterator<Item = &'a str>,
 ) -> Vec<CommandJsonDiscriminator> {
     let path = path.into_iter().collect::<Vec<_>>();
-    active_command_contract_entries()
+    advertised_command_contract_entries()
         .iter()
         .copied()
         .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
@@ -4363,7 +4519,7 @@ fn collect_schema_verbs(
     select: impl Fn(CommandContract) -> &'static [&'static str],
 ) -> Vec<&'static str> {
     let mut verbs = Vec::new();
-    for entry in active_command_contract_entries().iter().copied() {
+    for entry in advertised_command_contract_entries().iter().copied() {
         if removed_phase_1_2_contract_path(entry.path) {
             continue;
         }
@@ -6616,6 +6772,6 @@ mod tests {
 
     #[test]
     fn feature_gated_command_roots_are_catalog_owned() {
-        assert_eq!(feature_gated_command_roots(), &["presence", "support"]);
+        assert_eq!(feature_gated_command_roots(), &["auth", "presence", "support"]);
     }
 }
