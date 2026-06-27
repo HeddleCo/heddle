@@ -110,15 +110,6 @@ pub(crate) fn create_git_checkpoint(
     create_git_checkpoint_inner(repo, message, status_options, true, None)
 }
 
-pub(crate) fn create_git_checkpoint_with_git_parents(
-    repo: &Repository,
-    message: Option<&str>,
-    status_options: repo::WorktreeStatusOptions,
-    git_parents: Vec<ObjectId>,
-) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true, Some(git_parents))
-}
-
 pub(crate) fn create_git_checkpoint_from_index_snapshot(
     repo: &Repository,
     message: Option<&str>,

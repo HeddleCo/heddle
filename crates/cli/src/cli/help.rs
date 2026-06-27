@@ -113,11 +113,11 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             let _ = writeln!(out);
             let _ = writeln!(
                 out,
-                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle capture -m \"...\" -> heddle checkpoint -m \"...\" -> heddle push"
+                "Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push"
             );
             let _ = writeln!(
                 out,
-                "Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle checkpoint -m \"...\" -> heddle ready -> heddle land"
+                "Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"
             );
             let _ = writeln!(out);
             let _ = writeln!(
@@ -126,7 +126,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
             );
             let _ = writeln!(
                 out,
-                "Start here: `heddle init`, `heddle adopt`, or `heddle clone`."
+                "Start here: `heddle init`, `heddle commit`, or `heddle clone`."
             );
             let _ = writeln!(
                 out,
@@ -641,8 +641,8 @@ Core nouns:
   Use it for risky edits, agent work, or parallel experiments without stash
   juggling.
 - Capture: a cheap recoverable save point on the current thread.
-- Capture: the normal Heddle-native save path for recoverable state.
-- Checkpoint: the Git-overlay commit boundary for already-captured work.
+- Commit: the normal save path; Git-overlay repos also write the Git boundary.
+- Checkpoint: the advanced Git-overlay boundary for already-captured work.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
 
@@ -650,8 +650,7 @@ Everyday loop:
 
     heddle status
     heddle diff
-    heddle capture -m "..."
-    heddle checkpoint -m "..."
+    heddle commit -m "..."
     heddle start <name> --path ../<name>
     heddle ready
     heddle land --thread <name>
@@ -672,7 +671,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 
 | Git concept | Heddle concept + semantic difference |
 |-------------|--------------------------------------|
-| `git commit` | `heddle checkpoint -m "..."`: writes an already-captured Heddle state to the Git lane in Git-overlay mode. Use `heddle capture -m "..."` first for Heddle-native state. |
+| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git boundary. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
 | Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
@@ -699,8 +698,9 @@ Reconciliation examples:
     heddle fetch origin
     heddle sync
 
-For an existing Git checkout, start with `heddle status`; it prints the exact
-`heddle adopt` command when Heddle needs to import Git refs first.
+For an existing Git checkout, start with `heddle status`; `heddle init` creates
+the sidecar while Git commits stay in Git storage. Use `heddle adopt` only when
+you explicitly want to convert Git-backed refs into Heddle-native storage.
 "#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
@@ -902,7 +902,7 @@ turns and resolves into one of three terminal states:\n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL`.\n\
 Defaults to the repo's namespace policy.\n";
 
-const GIT_OVERLAY_TOPIC: &str = "Git-overlay quick start\n\
+const GIT_OVERLAY_TOPIC: &str = "Git-overlay workflow\n\
 \n\
 Use this when you want Heddle's captured states, isolated threads, merge\n\
 previews, undo, provenance, and machine-safe JSON with Git compatibility kept\n\
@@ -917,16 +917,15 @@ Start in an existing Git checkout:\n\
 Save and sync ordinary work:\n\
 \n\
     heddle diff\n\
-    heddle capture -m \"...\"                   # Heddle-native state\n\
-    heddle checkpoint -m \"...\"                # Git-facing commit boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
+    # advanced split: heddle capture -m \"...\" && heddle checkpoint -m \"...\"\n\
     heddle push\n\
 \n\
 Isolate risky work:\n\
 \n\
     heddle start <name> --path ../<name>\n\
     cd ../<name>\n\
-    heddle capture -m \"...\"\n\
-    heddle checkpoint -m \"...\"\n\
+    heddle commit -m \"...\"\n\
     heddle ready\n\
     cd -\n\
     heddle land --thread <name> --no-push     # add --push when ready to publish\n\
@@ -938,7 +937,7 @@ Recover or prove state:\n\
 \n\
 State-specific recovery:\n\
 \n\
-    Worktree has unsaved edits: heddle capture -m \"...\"\n\
+    Worktree has unsaved edits: heddle commit -m \"...\"\n\
     Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
     Convert Git history to native Heddle storage: heddle adopt --ref <branch>\n";
 
@@ -959,11 +958,14 @@ Manual setup, when you want one ref at a time:\n\
     heddle init\n\
     heddle bridge git import --ref <branch>\n\
 \n\
+Explicit conversion to native Heddle storage:\n\
+\n\
+    heddle adopt --ref <branch>\n\
+\n\
 Daily loop:\n\
 \n\
     heddle status\n\
-    heddle capture -m \"...\"                   # save Heddle-native state\n\
-    heddle checkpoint -m \"...\"                # write the Git lane boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
     heddle push                               # Git-overlay remotes use the top-level verb\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\

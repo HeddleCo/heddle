@@ -264,15 +264,15 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
         assert_verify_failed_json_without_git(&["verify", "--output", "json"], committed.path());
     assert_eq!(verify["repository_mode"], "plain-git");
     assert_eq!(verify["status"], "needs_init");
-    assert_eq!(verify["recommended_action"], "heddle adopt --ref main");
+    assert_eq!(verify["recommended_action"], "heddle init");
     assert_eq!(
         verify["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"]),
+        heddle_argv_json(["init"]),
         "machine argv must replay the same Heddle binary even when PATH cannot resolve `heddle`: {verify}"
     );
     assert_eq!(
         verify["checks"][1]["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"]),
+        heddle_argv_json(["init"]),
         "per-check argv must also be hermetic for no-PATH agents: {verify}"
     );
     assert!(
@@ -1253,7 +1253,7 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
     let verify = assert_verify_failed_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(verify["status"], "needs_checkpoint", "{verify}");
     assert_eq!(
-        verify["recommended_action"], "heddle commit -m \"...\"",
+        verify["recommended_action"], "heddle checkpoint -m \"...\"",
         "{verify}"
     );
 }

@@ -2,7 +2,7 @@
 
 The `heddle` binary — Heddle's foreground command-line interface.
 
-For the full Heddle product overview, install instructions, and quickstart,
+For the full Heddle product overview, install instructions, and getting started guide,
 see [the workspace README](../../README.md). This file documents verbs whose
 implementation details are too specific to belong in the product-level
 README.
