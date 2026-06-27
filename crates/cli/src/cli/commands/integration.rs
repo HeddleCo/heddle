@@ -151,10 +151,10 @@ pub fn maybe_prompt_init_install(
 /// `--install-harnesses` request WITHOUT writing anything. Returns the
 /// harnesses to install once writes are safe.
 ///
-/// `--quickstart` calls this before any filesystem mutation so scope
-/// errors fail before writes. The install itself is deferred to
-/// [`perform_init_install`] after the writes land. Only the directory
-/// `root` is needed, so it works before the repository exists on disk.
+/// Init calls this before installing harnesses so scope errors fail before
+/// integration files are written. The install itself is deferred to
+/// [`perform_init_install`] after the repository is created. Only the
+/// directory `root` is needed, so it works before the repository exists on disk.
 pub fn prompt_init_install_decision(
     _cli: &Cli,
     root: &Path,
@@ -177,7 +177,7 @@ pub fn prompt_init_install_decision(
     // uses, in this pre-write decision phase, so an invalid
     // `--harness-install-scope` OR a harness that rejects the chosen scope
     // (e.g. `codex` requires `--scope user`) fails before any repo is created
-    // instead of after — keeping the quickstart fail-before-writes contract.
+    // instead of after repository creation.
     // Only matters when something will actually be installed.
     if !harnesses.is_empty() {
         validate_install_plan(&harnesses, &args.harness_install_scope)?;
@@ -638,8 +638,8 @@ fn target_harnesses(manifest: &IntegrationManifest, requested: Vec<String>) -> R
 /// ([`install_codex`] et al.) call this, so the two can never disagree — a
 /// future scope-restricted harness adds its rule here and is automatically
 /// enforced in the preflight. This closes the class behind cid 3329409818: a
-/// `--quickstart --install-harnesses codex` with the default `--scope repo`
-/// must fail in the preflight, not after `.heddle/`/capture/checkpoint exist.
+/// `heddle init --install-harnesses codex` with the default `--scope repo`
+/// must fail in the preflight, not after integration writes have started.
 fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()> {
     match harness {
         "codex" if *scope != IntegrationScope::User => Err(anyhow!(RecoveryAdvice::invalid_usage(
@@ -653,10 +653,9 @@ fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()>
 }
 
 /// Pre-write validation of a harness-install plan: the scope string parses AND
-/// every selected harness accepts that scope. The quickstart preflight runs
-/// this before any filesystem write so a harness/scope combination that the
-/// install would reject (e.g. `codex` + `repo`) fails before a repo is created,
-/// not midway through `install_selected` after `.heddle/` already exists.
+/// every selected harness accepts that scope. Init runs this before installing
+/// anything so a harness/scope combination that the install would reject (e.g.
+/// `codex` + `repo`) fails before `install_selected` starts writing files.
 fn validate_install_plan(harnesses: &[String], scope_value: &str) -> Result<()> {
     let scope = IntegrationScope::parse(scope_value)?;
     for harness in harnesses {

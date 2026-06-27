@@ -253,8 +253,8 @@ struct PlainGitStatusOutput {
 /// initialized but has no user-visible history yet (the log shows only
 /// the filtered synthetic root) and the worktree is clean — i.e. there
 /// is genuinely nothing to act on yet. The repo is already initialized,
-/// so recommending `heddle init --quickstart` here read as "you
-/// initialized wrong" (heddle#644); point at the first save instead.
+/// so recommending another init shape here read as "you initialized wrong"
+/// (heddle#644); point at the first save instead.
 /// A dirty worktree already has its own advice, and
 /// Git-overlay repos have their own onboarding (import/adopt), so both
 /// are left alone.

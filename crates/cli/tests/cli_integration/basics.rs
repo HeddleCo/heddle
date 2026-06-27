@@ -467,9 +467,9 @@ fn test_cli_init_in_git_repo_bootstraps_sidecar() {
     assert_eq!(parsed["storage_model"], "git+heddle-sidecar");
 }
 
-/// heddle#644: a successful non-quickstart init on an empty directory
-/// must end with a next step in both text and JSON — the first save —
-/// instead of a null `recommended_action`.
+/// heddle#644: a successful init on an empty directory must end with a
+/// next step in both text and JSON — the first save — instead of a null
+/// `recommended_action`.
 #[test]
 fn test_cli_init_empty_dir_recommends_first_save() {
     let temp = TempDir::new().unwrap();
@@ -489,9 +489,9 @@ fn test_cli_init_empty_dir_recommends_first_save() {
     assert_eq!(parsed["next_action"], parsed["recommended_action"]);
 }
 
-/// A non-quickstart init over existing Git history creates only the
-/// Heddle sidecar. Git commits stay in `.git`, so the next save path is
-/// the normal commit/checkpoint flow rather than adopt/import.
+/// Init over existing Git history creates only the Heddle sidecar. Git
+/// commits stay in `.git`, so the next save path is the normal
+/// commit/checkpoint flow rather than adopt/import.
 #[test]
 fn test_cli_init_with_git_history_recommends_commit() {
     let temp = TempDir::new().unwrap();
@@ -802,33 +802,20 @@ fn test_cli_status_surfaces_git_import_hint_for_many_branches() {
         );
     }
 
-    // Import-hint information has moved to `heddle bridge git status
-    // --output json`; per-command outputs no longer carry it.
+    // Direct Git-backed refs are readable without a separate import hint.
     let output = heddle(
         &["bridge", "git", "status", "--output", "json"],
         Some(temp.path()),
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
-
     assert_eq!(
-        parsed["git_overlay_import_hint"]["missing_branch_count"],
-        13
-    );
-    assert_eq!(
-        parsed["git_overlay_import_hint"]["missing_branches"]
-            .as_array()
-            .unwrap()
-            .len(),
-        13
+        parsed["verification"]["import_state"], "git_backed",
+        "Git refs should be directly readable without import hints: {parsed}"
     );
     assert!(
-        parsed["git_overlay_import_hint"]["missing_branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|branch| branch.as_str() == Some("feature/drop-in")),
-        "first-run bridge import hint should include the active branch: {parsed}"
+        parsed["git_overlay_import_hint"].is_null(),
+        "direct Git-backed refs should not produce missing-branch hints: {parsed}"
     );
 }
 
@@ -958,7 +945,7 @@ fn test_cli_show_head_in_plain_git_repo_surfaces_import_hint() {
     let output = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["recommended_action"], "heddle adopt");
+    assert_eq!(parsed["recommended_action"], "heddle init");
     assert!(parsed["state"].is_null());
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -977,7 +964,7 @@ fn test_cli_log_in_plain_git_repo_surfaces_import_hint() {
     let output = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["recommended_action"], "heddle adopt");
+    assert_eq!(parsed["recommended_action"], "heddle init");
     assert!(parsed["states"].as_array().unwrap().is_empty());
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -1087,14 +1074,14 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]
@@ -1268,25 +1255,16 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
         "plain file should remain visible in larger git fixture: {parsed}"
     );
 
-    // Import-hint information has moved to `heddle bridge git status
-    // --output json`; per-command outputs no longer carry it.
+    // Direct Git-backed refs are readable without a separate import hint.
     let bridge_output = heddle(
         &["bridge", "git", "status", "--output", "json"],
         Some(temp.path()),
     )
     .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_eq!(
-        bridge["git_overlay_import_hint"]["missing_branch_count"],
-        21
-    );
     assert!(
-        bridge["git_overlay_import_hint"]["missing_branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|branch| branch.as_str() == Some("feature/drop-in")),
-        "first-run bridge import hint should include the active branch: {bridge}"
+        bridge["git_overlay_import_hint"].is_null(),
+        "direct Git-backed refs should not produce missing-branch hints: {bridge}"
     );
 }
 
@@ -1318,9 +1296,9 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
     )
     .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_eq!(
-        bridge["git_overlay_import_hint"]["missing_branch_count"],
-        11
+    assert!(
+        bridge["git_overlay_import_hint"].is_null(),
+        "direct Git-backed refs should not produce missing-branch hints: {bridge}"
     );
 }
 
@@ -1353,8 +1331,7 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
         "dirty files should still be reported after branch switch: {second}"
     );
 
-    // Import-hint information has moved to `heddle bridge git status
-    // --output json`; per-command outputs no longer carry it.
+    // Direct Git-backed refs are readable without a separate import hint.
     let bridge_output = heddle(
         &["bridge", "git", "status", "--output", "json"],
         Some(temp.path()),
@@ -1362,12 +1339,8 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert!(
-        bridge["git_overlay_import_hint"]["missing_branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "feature/drop-in"),
-        "after switching branches, the old branch should become importable history: {bridge}"
+        bridge["git_overlay_import_hint"].is_null(),
+        "after switching branches, Git refs stay directly readable: {bridge}"
     );
 }
 
@@ -1441,7 +1414,10 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 2);
+    assert!(
+        before["git_overlay_import_hint"].is_null(),
+        "direct Git-backed refs should not require import before bridge sync: {before}"
+    );
 
     let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
     let parsed_import: serde_json::Value =
@@ -1659,7 +1635,7 @@ fn test_cli_thread_list_marks_tip_only_branch_with_ref_scoped_import_action() {
     );
     assert_eq!(
         available_ref["recommended_action"],
-        "heddle adopt --ref support/git-only"
+        "heddle switch support/git-only"
     );
 }
 
@@ -1751,10 +1727,7 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
-    assert_eq!(
-        parsed["git_overlay_import_hint"]["missing_branches"][0],
-        "support/diagnose-switch"
-    );
+    assert!(parsed["git_overlay_import_hint"].is_null());
     assert!(
         !temp.path().join(".heddle").exists(),
         "diagnose should not bootstrap plain Git before explicit init"
@@ -1826,7 +1799,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -1834,7 +1807,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(status["thread"], "support/ready-switch");
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]
@@ -1858,8 +1831,8 @@ fn test_cli_workspace_surfaces_git_import_hint_in_text_output() {
         "missing branch hint: {output}"
     );
     assert!(
-        output.contains("heddle adopt"),
-        "missing import command: {output}"
+        output.contains("heddle switch support/import-me"),
+        "missing switch command: {output}"
     );
 }
 
@@ -2075,7 +2048,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
 }
 
 #[test]
-fn test_cli_checkpoint_refuses_plain_git_repo_before_adoption() {
+fn test_cli_checkpoint_refuses_plain_git_repo_before_init() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("checkpoint.txt"), "checkpoint me").unwrap();
@@ -2090,10 +2063,10 @@ fn test_cli_checkpoint_refuses_plain_git_repo_before_adoption() {
         ],
         Some(temp.path()),
     )
-    .expect("invoke checkpoint before adoption");
+    .expect("invoke checkpoint before init");
     assert!(
         !output.status.success(),
-        "checkpoint should refuse plain Git instead of implicitly adopting"
+        "checkpoint should refuse plain Git instead of implicitly initializing"
     );
     assert!(
         output.stdout.is_empty(),
@@ -2102,7 +2075,7 @@ fn test_cli_checkpoint_refuses_plain_git_repo_before_adoption() {
     );
     let envelope: Value =
         serde_json::from_slice(&output.stderr).expect("refusal should be JSON advice");
-    assert_eq!(envelope["kind"], "git_repo_needs_adoption");
+    assert_eq!(envelope["kind"], "git_repo_needs_init");
     assert_eq!(envelope["primary_command"], "heddle init");
 
     assert!(
@@ -2134,7 +2107,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -2142,7 +2115,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert!(status["state"]["change_id"].as_str().is_some());
     assert!(status["git_checkpoint"].is_null());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]

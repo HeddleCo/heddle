@@ -32,7 +32,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", style::bold("Git-overlay quick start"));
+    println!("{}", style::bold("Git-overlay workflow"));
     println!("Use Heddle as the daily loop with Git interoperability kept explicit.");
     println!();
     println!("1. Orient");
@@ -75,7 +75,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     );
     println!(
         "  Captured in Heddle but not Git: {}",
-        style::bold("heddle commit -m '<message>'")
+        style::bold("heddle checkpoint -m '<message>'")
     );
     println!(
         "  Convert Git history to native Heddle storage: {}",

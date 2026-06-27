@@ -83,27 +83,23 @@ cargo install --path crates/cli
 
 Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
-## Quickstart
+## Getting Started
 
-New to Heddle? One command takes a fresh directory to a first
-checkpointed change:
+New to Heddle? Initialize once, set attribution if needed, then use
+`heddle commit` as the everyday save boundary:
 
 ```bash
-heddle init --quickstart --principal-name "Ada Lovelace" --principal-email ada@example.com
+heddle init
+heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
+heddle commit -m "start project"
 ```
 
-This initializes the repository, records your identity, starts a
-`quickstart` thread, makes one capture, and — in a Git-overlay repo —
-one matching Git checkpoint. Run it interactively without the
-`--principal-*` flags and Heddle prompts for your name and email; pass
-`--quickstart-thread <name>` to name the thread something other than
-`quickstart`. It finishes by pointing you at `heddle log` so you can see
-the change it just recorded. (`heddle status` on a freshly-initialized
-repo with no history suggests this command too.)
+In a Git checkout, `heddle init` creates a Heddle sidecar and leaves Git
+history in `.git`. `heddle commit` records the Heddle state and the
+matching Git checkpoint. `heddle status` always prints the next useful
+command when there is an obvious one.
 
 ### The verb-by-verb tour
-
-If you would rather drive each step yourself:
 
 ```bash
 # In an ordinary Git repo: inspect, initialize the sidecar, and verify

@@ -634,7 +634,7 @@ Projection metadata may include imported or hosted project/review fields such as
 
 ## User-facing docs tasks
 
-- Add a local discussion quickstart with JSON-first examples.
+- Add local discussion getting-started docs with JSON-first examples.
 - Add a human-oriented short workflow after the JSON examples.
 - Add a migration guide for state-attached discussions.
 - Add an explicit GitHub import/cutover guide once M8 starts.

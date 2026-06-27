@@ -1205,12 +1205,15 @@ fn raw_git_operation_recovery_hint(
 pub(crate) fn verification_blocking_mutation_advice(
     repo: &Repository,
     action: &str,
-) -> Option<RecoveryAdvice> {
+) -> anyhow::Result<Option<RecoveryAdvice>> {
     let trust = build_repository_verification_state(repo);
     if trust.status != "needs_reconcile" {
-        return None;
+        return Ok(None);
     }
-    Some(repository_verification_blocked_advice(
+    if uncheckpointed_heddle_state_is_ahead_of_git(repo)? {
+        return Ok(None);
+    }
+    Ok(Some(repository_verification_blocked_advice(
         "repository_verification_blocked",
         format!(
             "Refusing to {action}: repository verification is blocked ({})",
@@ -1225,7 +1228,28 @@ pub(crate) fn verification_blocking_mutation_advice(
         format!("{action} would write new Heddle or Git state while Git and Heddle disagree"),
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
         None,
-    ))
+    )))
+}
+
+fn uncheckpointed_heddle_state_is_ahead_of_git(repo: &Repository) -> anyhow::Result<bool> {
+    let Some(tip) = current_branch_tip(repo)? else {
+        return Ok(false);
+    };
+    let Some(mapped) = tip.mapped_change else {
+        return Ok(false);
+    };
+    let Some(current) = repo.current_state()? else {
+        return Ok(false);
+    };
+    if mapped == current.change_id {
+        return Ok(false);
+    }
+    if mapped_change_relation(repo, &mapped, &current.change_id) != "git_behind_heddle" {
+        return Ok(false);
+    }
+    Ok(repo
+        .latest_git_checkpoint_for_change(&current.change_id)?
+        .is_none())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1291,9 +1315,9 @@ pub(crate) fn plain_git_setup_advice(
         .map(|target| format!("heddle {command} {target}"))
         .unwrap_or_else(|| format!("heddle {command}"));
     let mut advice = RecoveryAdvice::safety_refusal(
-        "plain_git_not_adopted",
-        "Heddle has not adopted this Git repo",
-        format!("Run `{primary}` to import the current Git branch, then retry `{retry}`."),
+        "plain_git_needs_init",
+        "Heddle is not initialized for this Git repo",
+        format!("Run `{primary}` to create the Heddle sidecar, then retry `{retry}`."),
         format!(
             "plain Git repository at '{}' has no .heddle metadata",
             probe.root.display()
@@ -1353,7 +1377,7 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
         return Ok(Some(advice));
     }
     if preflight.check_verification
-        && let Some(advice) = verification_blocking_mutation_advice(repo, action)
+        && let Some(advice) = verification_blocking_mutation_advice(repo, action)?
     {
         return Ok(Some(advice));
     }
@@ -1487,7 +1511,7 @@ pub(crate) fn plain_git_mutation_advice(
     action: &str,
 ) -> RecoveryAdvice {
     let primary_command = if probe.trust.recommended_action.trim().is_empty() {
-        "heddle adopt".to_string()
+        "heddle init".to_string()
     } else {
         probe.trust.recommended_action.clone()
     };
@@ -1528,17 +1552,15 @@ pub(crate) fn plain_git_mutation_advice(
         )
     };
     RecoveryAdvice::safety_refusal(
-        "git_repo_needs_adoption",
-        format!("Refusing to {action}: this Git repository has not been adopted by Heddle"),
+        "git_repo_needs_init",
+        format!("Refusing to {action}: Heddle is not initialized for this Git repository"),
         format!("Run `{primary_command}` before retrying `heddle {action}`."),
         format!(
             "plain Git repository at {} has no .heddle metadata; {}",
             probe.root.display(),
             dirty_detail
         ),
-        format!(
-            "{action} would initialize Heddle metadata before the repository has been explicitly adopted"
-        ),
+        format!("{action} needs Heddle metadata before it can safely write Heddle state"),
         "Git refs, Heddle metadata, and worktree files were left unchanged",
         primary_command,
         recovery_commands,
@@ -2846,6 +2868,7 @@ fn build_git_overlay_health_inner(
             clean: false,
             summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
             recovery_commands: vec![
+                "heddle commit -m \"...\"".to_string(),
                 "heddle capture -m \"...\"".to_string(),
                 "heddle stash push -m \"...\"".to_string(),
             ],
@@ -3131,6 +3154,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                     "{changed} Heddle worktree path(s) are not captured in the current state"
                 ),
                 recovery_commands: vec![
+                    "heddle commit -m \"...\"".to_string(),
                     "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],

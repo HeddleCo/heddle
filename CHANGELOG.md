@@ -108,7 +108,7 @@ release ships signed macOS + Homebrew distribution.
 - Native ref primitives: `parse_git_ref` + `RefSpec`/`NegativeRefSpec` ported from jj; `.git/config` remotes parsed via `gix_config` instead of by hand (#296, #288)
 - Captured new files are marked intent-to-add in the colocated Git index, matching `git add -N` semantics (#300)
 - `output_kind` wire normalization across thread/operator envelopes and the read/stream paths (inspect/show, rebase JSONL, conflict-show), so `--output json` is stable end to end; an invariant lint guards the class (#671, #660, #281)
-- Help and onboarding overhaul: `heddle init --quickstart` one-command first run (#349), grouped advanced command list, single-sourced `--output` help, `help threads`/`help advanced`/Git-concept topics, and de-bloated per-command help (#663, #658, #688, #174)
+- Help and onboarding overhaul: one-command first-run onboarding (#349), grouped advanced command list, single-sourced `--output` help, `help threads`/`help advanced`/Git-concept topics, and de-bloated per-command help (#663, #658, #688, #174)
 
 ### Added
 

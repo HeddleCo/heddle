@@ -799,47 +799,6 @@ impl<'a> GitBridge<'a> {
         self.commit_parent_overrides.insert(state_id, parents);
     }
 
-    pub(crate) fn attach_checkout_to_branch_at(
-        &self,
-        thread: &str,
-        git_oid: ObjectId,
-    ) -> GitResult<()> {
-        if !self.heddle_repo.root().join(".git").exists() {
-            return Ok(());
-        }
-        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
-        let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        let branch_ref = format!("refs/heads/{thread}");
-        let previous_branch = object_repo
-            .find_reference(&branch_ref)
-            .ok()
-            .flatten()
-            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
-        if let Some(previous) = previous_branch
-            && previous != git_oid
-        {
-            return Err(GitBridgeError::Conflict(format!(
-                "branch {branch_ref} points at {previous}, expected {git_oid}"
-            )));
-        }
-        let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
-            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
-        });
-        set_reference(
-            &object_repo,
-            &branch_ref,
-            git_oid,
-            expected,
-            "heddle: quickstart attach branch",
-        )?;
-
-        let head_path = checkout_repo.git_dir().join("HEAD");
-        fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
-        fsync_path(&head_path)?;
-        fsync_path(checkout_repo.git_dir())?;
-        Ok(())
-    }
-
     pub(crate) fn with_mapping_rollback<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> GitResult<T>,

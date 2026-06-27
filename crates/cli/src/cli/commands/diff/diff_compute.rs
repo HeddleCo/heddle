@@ -99,6 +99,19 @@ pub fn cmd_diff(
             Some(&repo),
         );
     }
+    if to.is_none() && from_is_head_or_default && trust.mapping_state == "git_backed" {
+        let status = repo.git_overlay_worktree_status()?.unwrap_or_default();
+        return render_worktree_status_diff(
+            cli,
+            &status,
+            stat,
+            name_only,
+            true,
+            patch,
+            unified,
+            Some(&repo),
+        );
+    }
     let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
         && to.is_none()
         && matches!(from.as_deref(), Some("HEAD" | "@"));
