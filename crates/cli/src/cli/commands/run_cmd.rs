@@ -8,6 +8,7 @@ use repo::SessionManager;
 
 use super::{
     advice::RecoveryAdvice,
+    child_env::sanitized_child_env,
     thread_cmd::{current_thread, load_thread},
 };
 use crate::{cli::Cli, config::UserConfig};
@@ -86,15 +87,4 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
                 .unwrap_or_else(|| "signal".to_string())
         ))
     }
-}
-
-fn sanitized_child_env() -> Vec<(String, String)> {
-    std::env::vars()
-        .filter(|(key, _)| {
-            matches!(
-                key.as_str(),
-                "PATH" | "HOME" | "USER" | "LOGNAME" | "SHELL" | "TMPDIR" | "TEMP" | "TMP" | "LANG"
-            ) || key.starts_with("LC_")
-        })
-        .collect()
 }
