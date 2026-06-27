@@ -394,7 +394,7 @@ fn resolve_open_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
     {
         let state_id = ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Bootstrap git-overlay before opening discussion".to_string()),
         )?;
         return Ok(state_id.as_bytes().to_vec());

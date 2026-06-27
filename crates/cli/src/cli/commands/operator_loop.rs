@@ -63,7 +63,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
             SYNC_OPERATOR_EMISSION,
         );
     }
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Sync)?;
 
     if let Some(remote) = repo.git_remote_tracking_status()? {

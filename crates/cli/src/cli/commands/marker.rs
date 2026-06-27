@@ -112,7 +112,7 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
 fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let current = ensure_current_state(
         repo,
-        &UserConfig::load_default().unwrap_or_default(),
+        &UserConfig::load_default()?,
         Some(format!(
             "Bootstrap git-overlay before creating marker {}",
             name

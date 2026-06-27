@@ -138,7 +138,7 @@ fn create_git_checkpoint_inner(
     }
     let state_id = ensure_current_state(
         repo,
-        &UserConfig::load_default().unwrap_or_default(),
+        &UserConfig::load_default()?,
         message
             .map(ToOwned::to_owned)
             .or_else(|| Some("Bootstrap git-overlay before checkpoint".to_string())),

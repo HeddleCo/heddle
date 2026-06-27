@@ -304,7 +304,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     // Heddle-managed checkout; opening it gives us a Repository
     // pointing at the same store but anchored on the thread's HEAD.
     let thread_repo = Repository::open(&thread_path)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     let intent = format!("try: {}", display_cmd(&args.command));
     // Confidence picks up a small bump when --auto-merge is set —
     // the user is implicitly stating "I'm comfortable letting this

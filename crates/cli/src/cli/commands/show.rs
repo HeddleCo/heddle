@@ -93,7 +93,7 @@ fn cmd_show_with_output_kind(
     if matches!(state_spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
         ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Bootstrap git-overlay before showing HEAD".to_string()),
         )?;
     }

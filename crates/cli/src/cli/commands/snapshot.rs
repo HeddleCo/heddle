@@ -185,7 +185,7 @@ pub async fn cmd_snapshot(
     }
 
     let repo = Repository::open(start)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
 
     if let Some(advice) = unimported_git_history_advice(&repo, "capture")? {
         return Err(anyhow!(advice));

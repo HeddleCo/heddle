@@ -275,7 +275,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         if matches!(spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
             ensure_current_state(
                 &repo,
-                &UserConfig::load_default().unwrap_or_default(),
+                &UserConfig::load_default()?,
                 Some("Bootstrap git-overlay before viewing log".to_string()),
             )?;
         }
@@ -283,7 +283,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     } else {
         Some(ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Bootstrap git-overlay before viewing log".to_string()),
         )?)
     };
