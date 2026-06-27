@@ -49,12 +49,18 @@ fn test_operations_outside_repo() {
     assert!(result.is_err());
 }
 
+/// `capture` on a freshly-initialized repo succeeds once the worktree
+/// has eligible changes. The empty-tree case (capture refuses as a noop)
+/// is the canonical assertion in `cli_integration/hydrate.rs`; this test
+/// covers the positive path — a real change on a brand-new repo captures
+/// cleanly — which that noop test does not exercise.
 #[test]
-fn test_snapshot_empty_repo() {
+fn test_snapshot_fresh_repo_with_change() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    let result = heddle(&["capture", "-m", "Empty snapshot"], Some(temp.path()));
-    assert!(result.is_ok());
+    std::fs::write(temp.path().join("first.txt"), "first change").unwrap();
+    let result = heddle(&["capture", "-m", "First snapshot"], Some(temp.path()));
+    assert!(result.is_ok(), "capture with eligible changes must succeed: {result:?}");
 }
 
 #[test]
