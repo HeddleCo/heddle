@@ -124,6 +124,7 @@ pub(crate) fn compare_worktree_with_index_detailed(
         tree,
         ignore_matcher,
         &tracked_dirty_directories,
+        monitor,
         index,
         &mut detailed.untracked,
         &mut stats,
