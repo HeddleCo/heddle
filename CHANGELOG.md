@@ -13,12 +13,14 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
-## 0.5.1 - 2026-06-26
+## 0.5.1 - 2026-06-27
 
 ### Changed
 
-- Upgraded the native-git substrate to sley `0.3.0` and switched published
+- Upgraded the native-git substrate to sley `0.3.1` and switched published
   Heddle crates back to the crates.io dependency instead of the sibling path.
+  sley `0.3.1` adds a receive-pack input-size cap and unix-portability
+  cfg-gates.
 - Hosted Git-overlay sync now sends Git-shaped data through the Git lane as
   packs, while Heddle-native captures, state, context, discussions, and
   visibility metadata remain on the Heddle lane.
@@ -28,8 +30,28 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 ### Fixed
 
 - Heddle's Sley fetch call sites now pass the explicit `FetchOptions.atomic`
-  setting required by sley `0.3.0`, preserving the previous non-atomic fetch
+  setting required by sley `0.3.1`, preserving the previous non-atomic fetch
   behavior.
+- `.git/HEAD` symref updates are now atomic (temp-file + rename + fsync),
+  preventing a torn HEAD if the process is interrupted mid-write.
+- A corrupt or unreadable user config now fails closed with a clear error
+  instead of silently attributing captures/checkpoints to an
+  `Unknown <unknown@example.com>` identity.
+- A git-lane pull targeting a non-overlay repository now returns an error
+  instead of silently discarding the transferred data.
+- The fast short-status path now classifies staged-add-then-worktree-deleted
+  (`AD`), renames (`R`), and copies (`C`) consistently with the full status
+  path.
+- The worktree change scan now detects a new file added to an already-tracked
+  directory. Previously such a file could be missed by `status`/`capture`
+  until an unrelated change forced a rescan.
+
+### Security
+
+- `heddle try` now sanitizes the spawned command's environment —
+  `env_clear()` plus an allowlist, matching `heddle run` — so `GIT_DIR`,
+  `GIT_WORK_TREE`, and other inherited parent-process secrets no longer leak
+  into commands run via `try`.
 
 ## 0.5.0 - 2026-06-23
 
