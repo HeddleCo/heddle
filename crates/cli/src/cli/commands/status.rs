@@ -477,10 +477,26 @@ fn append_fast_status_row(changes: &mut ChangesInfo, entry: ShortStatusRow<'_>) 
     if path.is_empty() || ignored_git_overlay_status_path(&path) {
         return;
     }
-    if (entry.index == b'?' && entry.worktree == b'?') || entry.index == b'A' {
+    // Mirror the slow path's classification (Repository::git_overlay_worktree_status)
+    // exactly, branch-for-branch, so the fast short-status output never diverges
+    // from a full `heddle status`. The branch ORDER is load-bearing:
+    //   - the D check precedes the A check, so an `AD` row (staged add, then
+    //     deleted in the worktree) classifies as deleted — matching `git status -s`
+    //     and the slow path — rather than as added.
+    //   - renames (`R`) and copies (`C`) classify as added (a new path appeared),
+    //     not modified.
+    //   - `head_oid.is_none()` (path absent from HEAD) is added even when the
+    //     porcelain columns don't otherwise signal it.
+    if entry.index == b'?' && entry.worktree == b'?' {
         changes.added.push(path);
     } else if entry.index == b'D' || entry.worktree == b'D' {
         changes.deleted.push(path);
+    } else if entry.index == b'A'
+        || entry.index == b'R'
+        || entry.index == b'C'
+        || entry.head_oid.is_none()
+    {
+        changes.added.push(path);
     } else {
         changes.modified.push(path);
     }
@@ -2782,8 +2798,9 @@ mod tests {
 
     use super::{
         ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
+        PlainGitStatusOutput, RepositoryVerificationState, ShortStatusRow,
+        append_fast_status_row, assess_materialized_threads, build_status_output,
+        combined_verdict_axes, coordination_axis_clean, coordination_label,
         render_status_materialized, resolve_coordination_with_trust,
     };
 
@@ -3330,5 +3347,87 @@ mod tests {
         let value = serde_json::to_value(&output).unwrap();
         assert!(value["recommended_action"].is_null());
         assert!(value["verification"]["recommended_action"].is_null());
+    }
+
+    /// Bucket a porcelain status row the way the *slow* path does.
+    ///
+    /// This is a faithful, branch-for-branch mirror of the classification in
+    /// `repo::Repository::git_overlay_worktree_status`
+    /// (crates/repo/src/repository.rs). If that function's branch order or
+    /// conditions change, this mirror — and the agreement test below — must be
+    /// updated in lockstep. It exists so the test can compare the fast path
+    /// against the slow path's logic without standing up a full GitOverlay repo
+    /// with staged index states.
+    fn slow_path_bucket(row: &ShortStatusRow<'_>) -> &'static str {
+        if row.index == b'?' && row.worktree == b'?' {
+            "added"
+        } else if row.index == b'D' || row.worktree == b'D' {
+            "deleted"
+        } else if row.index == b'A'
+            || row.index == b'R'
+            || row.index == b'C'
+            || row.head_oid.is_none()
+        {
+            "added"
+        } else {
+            "modified"
+        }
+    }
+
+    fn fast_path_bucket(row: ShortStatusRow<'_>) -> &'static str {
+        let mut changes = ChangesInfo::default();
+        append_fast_status_row(&mut changes, row);
+        match (
+            changes.added.len(),
+            changes.deleted.len(),
+            changes.modified.len(),
+        ) {
+            (1, 0, 0) => "added",
+            (0, 1, 0) => "deleted",
+            (0, 0, 1) => "modified",
+            other => panic!("fast path produced unexpected bucket counts: {other:?}"),
+        }
+    }
+
+    fn status_row<'a>(index: u8, worktree: u8, path: &'a [u8], in_head: bool) -> ShortStatusRow<'a> {
+        ShortStatusRow {
+            index,
+            worktree,
+            path,
+            head_mode: None,
+            index_mode: None,
+            worktree_mode: None,
+            head_oid: in_head.then(|| sley::ObjectId::null(sley::ObjectFormat::Sha1)),
+            index_oid: None,
+            submodule: None,
+        }
+    }
+
+    #[test]
+    fn fast_short_status_agrees_with_slow_path_on_ad_rename_copy() {
+        // index, worktree, present-in-HEAD, what `git status -s` reports.
+        // `AD` = staged add then deleted in the worktree → git shows it as a
+        // deletion; `R`/`C` = rename/copy → git shows the new path as added.
+        let cases: &[(u8, u8, bool, &str)] = &[
+            (b'A', b'D', false, "AD: staged-add then worktree-deleted"),
+            (b'R', b' ', true, "R: renamed"),
+            (b'C', b' ', true, "C: copied"),
+            // Spot-check the unambiguous buckets stay aligned too.
+            (b'A', b' ', false, "A: staged add"),
+            (b'M', b' ', true, "M: modified"),
+            (b' ', b'M', true, "worktree-modified"),
+            (b'D', b' ', true, "D: staged delete"),
+            (b' ', b'D', true, "worktree delete"),
+            (b'?', b'?', false, "untracked"),
+        ];
+        for &(index, worktree, in_head, label) in cases {
+            let path = label.as_bytes();
+            let fast = fast_path_bucket(status_row(index, worktree, path, in_head));
+            let slow = slow_path_bucket(&status_row(index, worktree, path, in_head));
+            assert_eq!(
+                fast, slow,
+                "fast and slow short-status classification disagree for {label}",
+            );
+        }
     }
 }
