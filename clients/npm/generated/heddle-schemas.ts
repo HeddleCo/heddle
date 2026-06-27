@@ -3,7 +3,7 @@
 // (`heddle schemas <verb>` / `crates/cli/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.5.0" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.5.1" as const;
 
 export interface AbortSchema {
   action: string;
@@ -282,6 +282,33 @@ export interface AgentStopSchema {
 export type Array_of_ThreadApprovalSchema = ThreadApprovalSchema[];
 
 export type Array_of_ThreadCaptureEntrySchema = ThreadCaptureEntrySchema[];
+
+export interface AuthCreateServiceTokenSchema {
+  expires_in_days: number;
+  name: string;
+  namespace: string;
+  output_kind: "auth_create_service_token";
+  private_key_pem: string;
+  scope: string;
+  token: string;
+}
+
+export interface AuthLogoutSchema {
+  device_identity_removed: boolean;
+  output_kind: "auth_logout";
+  removed: boolean;
+  server: string;
+}
+
+export interface AuthStatusSchema {
+  authenticated: boolean;
+  credential_id?: string | null;
+  expires_at?: string | null;
+  output_kind: "auth_status";
+  recommended_action?: string | null;
+  server: string;
+  subject?: string | null;
+}
 
 export interface AvailableGitRefSchema {
   git_commit: string;
@@ -2071,6 +2098,46 @@ export interface StatusSchema {
   worktree_changed_path_count: number;
 }
 
+export interface SupportAccessListSchema {
+  grants: SupportAccessSchema[];
+  output_kind: "support_list";
+}
+
+export interface SupportAccessSchema {
+  expires_at: number;
+  granted_at: number;
+  granted_by: string;
+  id: string;
+  namespace_path: string;
+  operator_email: string;
+  reason: string;
+  repo_path: string;
+  revoked_at: number;
+  revoked_by: string;
+  role: string;
+}
+
+export interface SupportGrantSchema {
+  expires_at: number;
+  granted_at: number;
+  granted_by: string;
+  id: string;
+  namespace_path: string;
+  operator_email: string;
+  output_kind: "support_grant";
+  reason: string;
+  repo_path: string;
+  revoked_at: number;
+  revoked_by: string;
+  role: string;
+}
+
+export interface SupportRevokeSchema {
+  id: string;
+  output_kind: "support_revoke";
+  revoked: boolean;
+}
+
 export interface SwitchCheckoutSchema {
   action?: string | null;
   execution_path?: string | null;
@@ -2928,6 +2995,9 @@ export interface HeddleVerbOutputs {
   "agent serve": AgentServeSchema;
   "agent status": AgentDaemonStatusSchema;
   "agent stop": AgentStopSchema;
+  "auth create-service-token": AuthCreateServiceTokenSchema;
+  "auth logout": AuthLogoutSchema;
+  "auth status": AuthStatusSchema;
   "bridge git export": BridgeExportSchema;
   "bridge git import": BridgeImportSchema;
   "bridge git init": BridgeInitSchema;
@@ -3038,6 +3108,9 @@ export interface HeddleVerbOutputs {
   "stash push": StashPushSchema;
   "stash show": StashShowSchema;
   status: StatusSchema;
+  "support grant": SupportGrantSchema;
+  "support list": SupportAccessListSchema;
+  "support revoke": SupportRevokeSchema;
   switch: SwitchCheckoutSchema;
   sync: SyncSchema;
   "thread absorb": ThreadAbsorbSchema;
@@ -3101,6 +3174,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent serve",
   "agent status",
   "agent stop",
+  "auth create-service-token",
+  "auth logout",
+  "auth status",
   "bridge git export",
   "bridge git import",
   "bridge git init",
@@ -3211,6 +3287,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "stash push",
   "stash show",
   "status",
+  "support grant",
+  "support list",
+  "support revoke",
   "switch",
   "sync",
   "thread absorb",

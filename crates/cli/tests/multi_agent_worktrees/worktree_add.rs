@@ -215,9 +215,23 @@ fn test_snapshot_excludes_nested_thread_worktrees() {
         added
     );
 
-    // Snapshot from main: must be a no-op (no new state created on
-    // top of init, OR the new state must not pull in the nested file).
-    heddle(&["capture", "-m", "post-nested"], Some(main.path())).unwrap();
+    // Snapshot from main: the only change anywhere lives inside the
+    // nested child worktree, which the parent scan correctly excludes.
+    // From main's POV there is nothing eligible to capture, so capture
+    // must refuse cleanly as a no-op (matching cli_integration/hydrate.rs).
+    let capture = heddle_output(&["capture", "-m", "post-nested"], Some(main.path()))
+        .expect("capture command should run");
+    assert!(
+        !capture.status.success(),
+        "capture from main must be a no-op: the only change is in the nested child worktree"
+    );
+    let capture_stderr = str::from_utf8(&capture.stderr).unwrap_or("");
+    assert!(
+        capture_stderr.contains("nothing to capture"),
+        "no-op capture should report nothing to capture; got:\n{capture_stderr}"
+    );
+    // The refusal already guarantees the nested child's file was not
+    // pulled into a new state; assert the log never mentions it either.
     let log = heddle(&["--output", "json", "log"], Some(main.path())).unwrap();
     assert!(
         !log.contains("agent-only.txt"),
