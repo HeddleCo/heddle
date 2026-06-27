@@ -13,6 +13,7 @@ mod blame;
 mod bridge;
 mod checkpoint;
 mod cherry_pick;
+mod child_env;
 mod clean;
 mod clone;
 mod collapse;

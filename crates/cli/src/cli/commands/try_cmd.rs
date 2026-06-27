@@ -43,6 +43,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    child_env::sanitized_child_env,
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::action_templates,
     merge::merge_thread_into_current,
@@ -192,10 +193,28 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("Could not determine ephemeral thread checkout path"))?;
 
     // Run the cmd inside the thread's checkout.
+    //
+    // The child gets a sanitized environment (`env_clear()` + the
+    // shared allowlist) so no inherited `GIT_*` overlay var or ambient
+    // secret leaks into the user's command — mirrors `heddle run`.
+    // Heddle's own thread/session context is re-injected explicitly.
     let started = Instant::now();
-    let status = Command::new(&args.command[0])
+    let mut child = Command::new(&args.command[0]);
+    child
         .args(&args.command[1..])
         .current_dir(&thread_path)
+        .env_clear()
+        .envs(sanitized_child_env())
+        .env("HEDDLE_THREAD_NAME", &thread_name);
+    if let Some(summary) = &start_output.thread {
+        if let Some(session) = &summary.session_id {
+            child.env("HEDDLE_SESSION_ID", session);
+        }
+        if let Some(heddle_session) = &summary.heddle_session_id {
+            child.env("HEDDLE_SESSION_SEGMENT", heddle_session);
+        }
+    }
+    let status = child
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
