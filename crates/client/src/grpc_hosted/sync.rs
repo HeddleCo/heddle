@@ -2189,7 +2189,10 @@ fn accept_git_lane_pull_transfer(
     transfer: GitLaneTransfer,
 ) -> Result<(), ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
+        return Err(ProtocolError::InvalidState(format!(
+            "received git-lane pull transfer for non-GitOverlay repository (capability {:?})",
+            repo.capability()
+        )));
     }
     match transfer.body {
         Some(git_lane_transfer::Body::Pack(pack)) => {
@@ -2821,6 +2824,35 @@ mod tests {
         state.ensure_idle().expect("stream should finish");
         let object = dest.read_object(&blob_oid).expect("read installed object");
         assert_eq!(object.body.as_slice(), b"streamed pull pack\n");
+    }
+
+    #[test]
+    fn accept_git_lane_pull_transfer_errors_for_non_overlay_repo() {
+        let (_dir, repo) = temp_repo();
+        assert_ne!(
+            repo.capability(),
+            RepositoryCapability::GitOverlay,
+            "init_default repo must be non-GitOverlay for this guard test",
+        );
+        let mut git_repo = None;
+        let mut state = GitPackPullInstallState::default();
+        let transfer = GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::Pack(GitPackTransfer {
+                transfer_id: "git-pack:test".to_string(),
+                offset: 0,
+                chunk_index: 0,
+                is_final_chunk: true,
+                pack_size: 0,
+                pack_chunk: Vec::new().into(),
+                pack_id: Vec::new().into(),
+            })),
+        };
+        let err = accept_git_lane_pull_transfer(&repo, &mut git_repo, &mut state, transfer)
+            .expect_err("git-lane pull to a non-GitOverlay repo must fail loud, not silently drop");
+        assert!(
+            matches!(err, ProtocolError::InvalidState(_)),
+            "expected InvalidState protocol error, got {err:?}",
+        );
     }
 
     fn git_ref_update_from_message(message: &PushMessage) -> &GitRefUpdateTransfer {
