@@ -43,7 +43,10 @@ use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
         GitBridge,
-        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference},
+        git_core::{
+            clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference,
+            write_head_symref,
+        },
         git_ingest::import_git_history,
     },
     cli::{Cli, should_output_json, style},
@@ -916,7 +919,7 @@ fn read_git_head_branch(git_dir: &Path) -> Option<String> {
 /// future `Repository::open` reads the same branch heddle attached to,
 /// rather than the init-time default Sley wrote (typically `main`).
 fn write_git_head_branch(git_dir: &Path, branch: &str) -> Result<()> {
-    fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+    write_head_symref(git_dir, &format!("refs/heads/{branch}"))?;
     Ok(())
 }
 

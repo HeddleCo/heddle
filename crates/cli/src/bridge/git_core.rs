@@ -1709,7 +1709,10 @@ impl<'a> GitBridge<'a> {
 
         let write_result = (|| -> GitResult<()> {
             copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
-            fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
+            // Atomic temp+rename so a torn write can't leave HEAD in a
+            // self-inconsistent state mid-write-through (the rollback
+            // path below restores previous_head on any later failure).
+            write_head_symref(&git_dir, &branch_ref)?;
 
             let commit = object_repo.read_commit(&git_oid).map_err(git_err)?;
             let mut index = object_repo.index_from_tree(&commit.tree).map_err(git_err)?;
@@ -2981,6 +2984,29 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
     Ok(())
 }
 
+/// Atomically write `git_dir/HEAD` as a symbolic ref pointing at
+/// `branch_ref` (e.g. `refs/heads/main`). The content is
+/// `ref: <branch_ref>\n`.
+///
+/// A bare `fs::write(HEAD, ...)` is not crash-atomic: a power loss
+/// mid-write can leave a truncated or empty `HEAD`, which a subsequent
+/// `Repository::open` reads as a detached/garbage symref. We instead
+/// write to `HEAD.tmp` and `fs::rename` it over `HEAD` (rename is
+/// atomic within a directory), mirroring `write_exported_refs_at`.
+/// Both the file and its parent directory are fsync'd so the dirent is
+/// durably committed — a file-level fsync alone doesn't persist the
+/// rename on most filesystems.
+pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitResult<()> {
+    let head_path = git_dir.join("HEAD");
+    let tmp = head_path.with_extension("tmp");
+    fs::write(&tmp, format!("ref: {branch_ref}\n"))?;
+    fsync_path(&tmp)?;
+    fs::rename(&tmp, &head_path)?;
+    fsync_path(&head_path)?;
+    fsync_path(git_dir)?;
+    Ok(())
+}
+
 /// Heddle's exported-refs record for `target_repo` (full ref name → last-published
 /// tip OID), the local-path destination record. See [`read_exported_refs_at`].
 pub(crate) fn read_exported_refs(
@@ -3592,17 +3618,14 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
         .and_then(|head| head.branch_name().map(str::to_owned))
         .filter(|branch| copied_branches.contains(branch.as_str()));
     if let Some(branch) = source_head_branch {
-        fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+        write_head_symref(dest, &format!("refs/heads/{branch}"))?;
     } else if copied_branches.contains("main") {
-        fs::write(dest.join("HEAD"), b"ref: refs/heads/main\n")?;
+        write_head_symref(dest, "refs/heads/main")?;
     } else if let Some(first_branch) = updates
         .iter()
         .find(|update| update.namespace == RefNamespace::Branch)
     {
-        fs::write(
-            dest.join("HEAD"),
-            format!("ref: refs/heads/{}\n", first_branch.name),
-        )?;
+        write_head_symref(dest, &format!("refs/heads/{}", first_branch.name))?;
     }
     Ok(())
 }
@@ -3662,7 +3685,7 @@ pub fn clone_url_to_bare(
     if let Some(branch) = default_branch
         && bare_branch_exists(dest, &branch)?
     {
-        fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+        write_head_symref(dest, &format!("refs/heads/{branch}"))?;
     }
     Ok(())
 }
@@ -4181,6 +4204,41 @@ mod tests {
             "dest HEAD must mirror the remote's symref (trunk), not sley's \
              init-time default and not the alphabetically-first branch \
              (abc-feature) — see heddle#141"
+        );
+    }
+
+    #[test]
+    fn write_head_symref_is_atomic_and_round_trips() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git_dir = tmp.path();
+
+        write_head_symref(git_dir, "refs/heads/feature/x").expect("write HEAD symref");
+
+        // (a) No leftover temp file — the rename consumed it.
+        assert!(
+            !git_dir.join("HEAD.tmp").exists(),
+            "atomic writer must not leave HEAD.tmp behind"
+        );
+
+        // (b) Exact content, including the trailing newline.
+        let contents = std::fs::read_to_string(git_dir.join("HEAD")).expect("read HEAD");
+        assert_eq!(contents, "ref: refs/heads/feature/x\n");
+
+        // (c) Round-trips through the same symref parse `read_git_head_branch`
+        // (clone.rs) and `detect_git_head` use.
+        let branch = contents
+            .trim()
+            .strip_prefix("ref: ")
+            .and_then(|s| s.strip_prefix("refs/heads/"))
+            .expect("HEAD parses as a branch symref");
+        assert_eq!(branch, "feature/x");
+
+        // Overwriting an existing HEAD is also clean.
+        write_head_symref(git_dir, "refs/heads/main").expect("rewrite HEAD symref");
+        assert!(!git_dir.join("HEAD.tmp").exists());
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
         );
     }
 }
