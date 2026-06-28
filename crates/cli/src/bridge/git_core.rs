@@ -4054,6 +4054,49 @@ mod tests {
     }
 
     #[test]
+    fn local_path_from_url_rejects_hosted_heddle_scheme() {
+        // Regression (push-routing no-op): a `heddle://` hosted remote that
+        // reaches the git-overlay exporter must be a HARD ERROR, never a
+        // silent no-op success. The git network pusher cannot speak the
+        // hosted protocol, so classifying a `heddle://` URL here must fail
+        // loudly rather than fall through to `ResolvedRemote::Url` (which
+        // would "reconcile" locally and report success without ever
+        // contacting the server).
+        let err = local_path_from_url("heddle://weft.local:8421/org/repo")
+            .expect_err("heddle:// must be rejected by the git exporter classifier");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heddle://") && msg.contains("hosted"),
+            "error should explain the hosted scheme cannot be pushed via the git-overlay exporter, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn local_path_from_url_still_accepts_file_and_git_urls() {
+        // The guard must not regress legitimate transports: `file://` still
+        // resolves to a local path, and ordinary git URLs (https/ssh) still
+        // pass through as "not local" (Ok(None)) for the network git pusher.
+        assert!(
+            local_path_from_url("file:///tmp/repo.git")
+                .expect("file url ok")
+                .is_some(),
+            "file:// must still resolve to a local path"
+        );
+        assert!(
+            local_path_from_url("https://example.com/org/repo.git")
+                .expect("https url ok")
+                .is_none(),
+            "https git url must pass through as a network URL"
+        );
+        assert!(
+            local_path_from_url("git@github.com:org/repo.git")
+                .expect("ssh url ok")
+                .is_none(),
+            "ssh git url must pass through as a network URL"
+        );
+    }
+
+    #[test]
     fn refspec_forced_round_trips_git_format() {
         let spec =
             RefSpec::forced("refs/heads/main", "refs/heads/main").expect("valid forced refspec");
