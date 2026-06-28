@@ -2710,6 +2710,20 @@ fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
 }
 
 fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
+    // Defense in depth (push-routing no-op): the git-overlay exporter speaks
+    // only the local/git network transports. A `heddle://` hosted URL must
+    // NEVER reach this classifier — the hosted-sync path
+    // (`GrpcHostedClient`) is the only thing that can push to it. If routing
+    // upstream is correct this is unreachable; making it a hard error here
+    // means a `heddle://` slipping into the git exporter can never again be a
+    // silent success (it would otherwise fall through as a generic network
+    // URL, "reconcile" locally, and report success without contacting the
+    // server).
+    if url.starts_with("heddle://") {
+        return Err(GitBridgeError::Git(format!(
+            "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
+        )));
+    }
     let Some(raw_path) = url.strip_prefix("file://") else {
         return Ok(None);
     };
