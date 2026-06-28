@@ -771,7 +771,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         build_git_overlay_health_with_worktree_status(&repo, &git_worktree_status_result);
     let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
     let verification_start = Instant::now();
-    let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
+    // Reuse the worktree status already computed above (line ~767) instead of
+    // re-walking inside `from_health`. Behaviour-identical; just one fewer pass.
+    let trust = RepositoryVerificationState::from_health_with_worktree_status(
+        &repo,
+        git_overlay_health.clone(),
+        &git_worktree_status_result,
+    );
     let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));

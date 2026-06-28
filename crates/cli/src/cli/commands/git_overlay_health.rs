@@ -226,6 +226,29 @@ impl GitOverlayHealth {
 
 impl RepositoryVerificationState {
     pub(crate) fn from_health(repo: &Repository, health: GitOverlayHealth) -> Self {
+        Self::from_health_inner(repo, health, None)
+    }
+
+    /// Verification-state build that reuses an already-computed git-overlay
+    /// worktree status instead of re-walking + re-SHA-1ing every tracked file.
+    /// `worktree_status` must be the exact `Result` from
+    /// `git_overlay_worktree_status()` so the dirty/clean classification stays
+    /// byte-identical to [`from_health`]. Callers that already hold the status
+    /// (e.g. the `status`/`verify`/`thread list` read paths, which compute it to
+    /// build `health`) thread it through here to avoid a second full walk.
+    pub(crate) fn from_health_with_worktree_status(
+        repo: &Repository,
+        health: GitOverlayHealth,
+        worktree_status: &repo::Result<Option<WorktreeStatus>>,
+    ) -> Self {
+        Self::from_health_inner(repo, health, Some(worktree_status))
+    }
+
+    fn from_health_inner(
+        repo: &Repository,
+        health: GitOverlayHealth,
+        precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
+    ) -> Self {
         let git_branch = repo.git_overlay_current_branch().ok().flatten();
         let heddle_thread = repo.current_lane().ok().flatten();
         let active_operation = repo.operation_status().ok().flatten().map(|operation| {
@@ -267,10 +290,25 @@ impl RepositoryVerificationState {
         let health_worktree_dirty = health.checks.iter().any(|check| {
             matches!(check.name.as_str(), "worktree" | "heddle_worktree") && check.status != "clean"
         });
-        let git_worktree_status = repo.git_overlay_worktree_status().ok().flatten();
-        let git_worktree_dirty = git_worktree_status
-            .as_ref()
-            .is_some_and(|status| !status.is_clean());
+        // Reuse the caller's already-computed status when threaded; otherwise
+        // fall back to a fresh walk. `.ok().flatten()` preserves the original
+        // dirty/clean classification exactly.
+        // Reuse the caller's already-computed status when threaded; otherwise
+        // fall back to a fresh walk. Hold a borrow (`WorktreeStatus` is not
+        // `Clone`) so the dirty/clean classification stays byte-identical.
+        let computed_worktree_status;
+        let worktree_status_ref: &repo::Result<Option<WorktreeStatus>> =
+            match precomputed_worktree_status {
+                Some(result) => result,
+                None => {
+                    computed_worktree_status = repo.git_overlay_worktree_status();
+                    &computed_worktree_status
+                }
+            };
+        let git_worktree_dirty = matches!(
+            worktree_status_ref,
+            Ok(Some(status)) if !status.is_clean()
+        );
         let worktree_dirty = health_worktree_dirty || git_worktree_dirty;
         let ready_threads = ready_thread_actions(repo);
         let actionable_ready_threads = ready_threads
@@ -1125,8 +1163,19 @@ fn verification_check(
 pub(crate) fn build_repository_verification_state(
     repo: &Repository,
 ) -> RepositoryVerificationState {
-    let health = build_git_overlay_health(repo);
-    RepositoryVerificationState::from_health(repo, health)
+    // Compute the git-overlay worktree status ONCE and thread it through both
+    // consumers (the health build + the `from_health` dirty classification).
+    // `git_overlay_worktree_status` re-reads + SHA-1s every tracked file
+    // (~340ms on the ghostty 5.7k-file worktree); previously the verification
+    // state paid that twice (here and again inside `from_health`). For
+    // non-git-overlay repos the status is `Ok(None)`, so the walk is skipped.
+    let worktree_status = if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        repo.git_overlay_worktree_status()
+    } else {
+        Ok(None)
+    };
+    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status)
 }
 
 /// Verification-state build that reuses an already-computed git-overlay worktree
@@ -1140,7 +1189,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
     let health = build_git_overlay_health_with_worktree_status(repo, worktree_status);
-    RepositoryVerificationState::from_health(repo, health)
+    RepositoryVerificationState::from_health_with_worktree_status(repo, health, worktree_status)
 }
 
 pub(crate) fn unimported_git_history_advice(

@@ -57,7 +57,9 @@ use crate::{
         worktree_status_options,
     },
     config::{UserConfig, UserThreadWorkspaceMode},
+    perf::{ProfileField, emit_profile, profile_enabled},
 };
+use std::time::Instant;
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 
@@ -1282,10 +1284,15 @@ fn available_git_ref_from_summary(summary: &ThreadSummary) -> AvailableGitRef {
 }
 
 pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs) -> Result<()> {
+    let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
     let current = repo.current_lane()?;
+    let collect_start = Instant::now();
     let mut summaries = collect_thread_summaries(repo)?;
+    let collect_summaries_ms = collect_start.elapsed().as_millis();
+    let verification_start = Instant::now();
     let mut trust = build_repository_verification_state(repo);
+    let verification_ms = verification_start.elapsed().as_millis();
     if !args.include_auto {
         // Always keep the current thread visible even if it's auto:
         // hiding it from the user who is *standing in it* would be
@@ -1402,6 +1409,17 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         }
         render_thread_sections(&output.threads, cli.verbose > 0);
         render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
+    }
+
+    if profile_enabled() {
+        emit_profile(
+            "thread list phases",
+            &[
+                ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
+                ProfileField::millis("verification_ms", verification_ms),
+                ProfileField::duration("command_body_ms", body_start.elapsed()),
+            ],
+        );
     }
 
     Ok(())
