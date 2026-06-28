@@ -1129,6 +1129,20 @@ pub(crate) fn build_repository_verification_state(
     RepositoryVerificationState::from_health(repo, health)
 }
 
+/// Verification-state build that reuses an already-computed git-overlay worktree
+/// status instead of re-walking + re-SHA-1ing every tracked file. Used by the
+/// `checkpoint` hot path, where the same status would otherwise be recomputed
+/// across the preflight, the verification preflight, and the output build. The
+/// classification is byte-identical to [`build_repository_verification_state`]
+/// because it threads the exact `Result` from `git_overlay_worktree_status()`.
+pub(crate) fn build_repository_verification_state_with_worktree_status(
+    repo: &Repository,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> RepositoryVerificationState {
+    let health = build_git_overlay_health_with_worktree_status(repo, worktree_status);
+    RepositoryVerificationState::from_health(repo, health)
+}
+
 pub(crate) fn unimported_git_history_advice(
     repo: &Repository,
     action: &str,
@@ -1206,7 +1220,18 @@ pub(crate) fn verification_blocking_mutation_advice(
     repo: &Repository,
     action: &str,
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
-    let trust = build_repository_verification_state(repo);
+    verification_blocking_mutation_advice_with_trust(
+        repo,
+        action,
+        build_repository_verification_state(repo),
+    )
+}
+
+fn verification_blocking_mutation_advice_with_trust(
+    repo: &Repository,
+    action: &str,
+    trust: RepositoryVerificationState,
+) -> anyhow::Result<Option<RecoveryAdvice>> {
     if trust.status != "needs_reconcile" {
         return Ok(None);
     }
@@ -1360,6 +1385,28 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
     action: &str,
     preflight: GitOverlayMutationPreflight,
 ) -> anyhow::Result<Option<RecoveryAdvice>> {
+    git_overlay_mutation_preflight_advice_inner(repo, action, preflight, None)
+}
+
+/// `checkpoint` hot-path variant of [`git_overlay_mutation_preflight_advice`]
+/// that reuses an already-computed git-overlay worktree status for the
+/// `check_verification` branch instead of re-walking the worktree. All other
+/// branches and the resulting advice are identical.
+pub(crate) fn git_overlay_mutation_preflight_advice_with_worktree_status(
+    repo: &Repository,
+    action: &str,
+    preflight: GitOverlayMutationPreflight,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> anyhow::Result<Option<RecoveryAdvice>> {
+    git_overlay_mutation_preflight_advice_inner(repo, action, preflight, Some(worktree_status))
+}
+
+fn git_overlay_mutation_preflight_advice_inner(
+    repo: &Repository,
+    action: &str,
+    preflight: GitOverlayMutationPreflight,
+    worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
+) -> anyhow::Result<Option<RecoveryAdvice>> {
     if repo.capability() != repo::RepositoryCapability::GitOverlay {
         return Ok(None);
     }
@@ -1376,10 +1423,18 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
     {
         return Ok(Some(advice));
     }
-    if preflight.check_verification
-        && let Some(advice) = verification_blocking_mutation_advice(repo, action)?
-    {
-        return Ok(Some(advice));
+    if preflight.check_verification {
+        let advice = match worktree_status {
+            Some(status) => verification_blocking_mutation_advice_with_trust(
+                repo,
+                action,
+                build_repository_verification_state_with_worktree_status(repo, status),
+            )?,
+            None => verification_blocking_mutation_advice(repo, action)?,
+        };
+        if let Some(advice) = advice {
+            return Ok(Some(advice));
+        }
     }
     Ok(None)
 }
