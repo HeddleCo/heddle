@@ -1708,7 +1708,31 @@ impl<'a> GitBridge<'a> {
             .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
 
         let write_result = (|| -> GitResult<()> {
-            copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
+            // Incremental object copy (perf): copying the new commit's full
+            // reachable closure from the mirror into the checkout re-walks +
+            // delta-compresses the ENTIRE tree every checkpoint — ~115s of the
+            // ~140s on the ~6k-object ghostty tree, scaling with total history
+            // rather than the change. But the checkout already holds the prior
+            // HEAD (`previous_branch`) and its whole closure. So exclude that
+            // closure from the copy: only objects genuinely new since the parent
+            // are walked + packed. Excluding the parent COMMIT alone is not enough
+            // — the new commit's tree re-reaches the parent's unchanged
+            // trees/blobs, so they would not be pruned. Compute the parent's FULL
+            // closure from the DESTINATION (cheap: those objects are local and
+            // already packed) and exclude all of it. Byte-identical result — every
+            // pruned object was already present in the checkout; only the transfer
+            // is smaller (O(changed) not O(history)). First checkpoint on a thread
+            // has no previous branch, so the exclude set is empty (full copy).
+            let excluded: HashSet<ObjectId> = match previous_branch {
+                Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
+                    object_repo.objects().as_ref(),
+                    object_repo.object_format(),
+                    [parent],
+                )
+                .map_err(|error| GitBridgeError::Git(error.to_string()))?,
+                None => HashSet::new(),
+            };
+            copy_reachable_objects_excluding(&mirror_repo, &object_repo, [git_oid], &excluded)?;
             // Atomic temp+rename so a torn write can't leave HEAD in a
             // self-inconsistent state mid-write-through (the rollback
             // path below restores previous_head on any later failure).
@@ -3766,6 +3790,48 @@ pub(crate) fn copy_reachable_objects(
 ) -> GitResult<()> {
     let roots = roots.into_iter().collect::<Vec<_>>();
     target.copy_reachable_from(source, &roots).map_err(git_err)
+}
+
+/// Incremental variant of [`copy_reachable_objects`]: copy the closure
+/// reachable from `roots`, skipping every object in `excluded`.
+///
+/// INVARIANT: every OID in `excluded` MUST already be present in `target` — the
+/// walk neither visits nor copies an excluded object (nor anything reachable only
+/// through it), so excluding an object the target is missing would silently drop
+/// it. Callers satisfy this by computing `excluded` as the reachable closure of
+/// something already in `target`. Used by checkpoint write-through, which passes
+/// the prior checkout HEAD's full closure (already entirely in the checkout's
+/// object DB): the new commit's tree re-reaches the parent's unchanged
+/// trees/blobs, so excluding the whole closure — not just the parent commit —
+/// prunes them all, turning per-checkpoint object transfer from O(total history)
+/// into O(objects new since the parent). Output is byte-identical — the same
+/// objects end up in `target`; the pruned ones were already there.
+pub(crate) fn copy_reachable_objects_excluding(
+    source: &SleyRepository,
+    target: &SleyRepository,
+    roots: impl IntoIterator<Item = ObjectId>,
+    excluded: &HashSet<ObjectId>,
+) -> GitResult<()> {
+    if excluded.is_empty() {
+        return copy_reachable_objects(source, target, roots);
+    }
+    if source.object_format() != target.object_format() {
+        // Mismatched formats can't share objects; fall back to the plain copy so
+        // its existing format-mismatch error surfaces unchanged.
+        return copy_reachable_objects(source, target, roots);
+    }
+    sley::plumbing::sley_odb::install_reachable_pack_excluding(
+        source.objects().as_ref(),
+        target.objects().as_ref(),
+        target.object_format(),
+        roots,
+        excluded,
+    )
+    .map_err(|error| GitBridgeError::Git(error.to_string()))?;
+    // Make the freshly-installed pack visible to subsequent reads on `target`,
+    // mirroring what `copy_reachable_from` does internally.
+    target.refresh_objects();
+    Ok(())
 }
 
 fn fetch_network_remote(
