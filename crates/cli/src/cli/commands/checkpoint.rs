@@ -115,7 +115,30 @@ pub(crate) fn create_git_checkpoint(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true, None)
+    create_git_checkpoint_inner(repo, message, status_options, true, None, None)
+}
+
+/// Variant of [`create_git_checkpoint`] that reuses an already-computed
+/// git-overlay worktree status for checkpoint's two PRE-mutation preflights
+/// instead of re-walking the worktree. Used by `commit`, which has already
+/// computed the same pre-mutation status for its own preflights — no Git
+/// mutation happens between commit's walk and checkpoint's preflights, so they
+/// observe the same git state and the gating decision is byte-identical to
+/// [`create_git_checkpoint`].
+pub(crate) fn create_git_checkpoint_with_worktree_status(
+    repo: &Repository,
+    message: Option<&str>,
+    status_options: repo::WorktreeStatusOptions,
+    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
+) -> Result<GitCheckpointRecord> {
+    create_git_checkpoint_inner(
+        repo,
+        message,
+        status_options,
+        true,
+        None,
+        Some(worktree_status),
+    )
 }
 
 pub(crate) fn create_git_checkpoint_from_index_snapshot(
@@ -123,7 +146,7 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false, None)
+    create_git_checkpoint_inner(repo, message, status_options, false, None, None)
 }
 
 fn create_git_checkpoint_inner(
@@ -132,6 +155,7 @@ fn create_git_checkpoint_inner(
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
     git_parent_override: Option<Vec<ObjectId>>,
+    precomputed_worktree_status: Option<&repo::Result<Option<objects::worktree::WorktreeStatus>>>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(native_checkpoint_unavailable_advice(repo)));
@@ -145,13 +169,22 @@ fn create_git_checkpoint_inner(
     // the checkpoint advances the Git ref — see `run`). Threading the exact
     // `Result` keeps the clean/dirty classification byte-identical, and both
     // consumers observe the SAME pre-mutation git state, so reuse is sound.
-    let worktree_status = repo.git_overlay_worktree_status();
-    preflight_git_checkpoint_ref_update_with_worktree_status(repo, "checkpoint", &worktree_status)?;
+    // A caller that has already computed this pre-mutation status (e.g. `commit`)
+    // passes it in so checkpoint does not re-walk the worktree.
+    let computed_worktree_status;
+    let worktree_status = match precomputed_worktree_status {
+        Some(status) => status,
+        None => {
+            computed_worktree_status = repo.git_overlay_worktree_status();
+            &computed_worktree_status
+        }
+    };
+    preflight_git_checkpoint_ref_update_with_worktree_status(repo, "checkpoint", worktree_status)?;
     if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
         repo,
         "checkpoint",
         GitOverlayMutationPreflight::checkpoint_like(),
-        &worktree_status,
+        worktree_status,
     )? {
         return Err(anyhow!(advice));
     }

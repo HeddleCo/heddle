@@ -27,12 +27,14 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::{
         create_git_checkpoint, create_git_checkpoint_from_index_snapshot,
-        preflight_git_checkpoint_ref_update,
+        create_git_checkpoint_with_worktree_status, preflight_git_checkpoint_ref_update,
     },
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
+        git_overlay_mutation_preflight_advice_with_worktree_status,
         override_trust_recommended_action, plain_git_mutation_preflight_advice,
         repository_verification_blocked_advice,
     },
@@ -138,10 +140,20 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
-    if let Some(advice) = git_overlay_mutation_preflight_advice(
+    // Compute the git-overlay worktree status ONCE up front. The commit mutation
+    // preflight here is PRE-mutation and shared by every commit path; the clean
+    // fast-path below reuses the same status for its verification preflight and
+    // for the checkpoint it triggers, all of which observe the same pre-mutation
+    // git state (no Git ref moves until `create_git_checkpoint`). This is the
+    // exact `Result` from a full worktree walk that re-reads + SHA-1s every
+    // tracked file — before this, the clean fast-path paid that walk 3× before
+    // the ref ever moved.
+    let worktree_status = repo.git_overlay_worktree_status();
+    if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
         &repo,
         "commit",
         GitOverlayMutationPreflight::commit_like(),
+        &worktree_status,
     )? {
         return Err(anyhow!(advice));
     }
@@ -164,7 +176,11 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             && repo.capability() == RepositoryCapability::GitOverlay
             && !git_index_intent_for_repo(&repo)?.staged_paths.is_empty();
         if status.is_clean() && !has_staged_index_intent {
-            let trust = build_repository_verification_state(&repo);
+            // Reuse the pre-mutation git-overlay worktree status computed at the
+            // top: no Git ref has moved on this fast-path, so the verification
+            // state is byte-identical to a fresh walk here.
+            let trust =
+                build_repository_verification_state_with_worktree_status(&repo, &worktree_status);
             // `--no-all` forces an index-only commit and must never auto-commit
             // the captured worktree state. On this fast-path the worktree is
             // clean and the index has no staged intent, so an index-only commit
@@ -176,10 +192,15 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             if trust.status == "needs_checkpoint" {
                 preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
                 let git_previous_commit = git_head_oid(repo.root());
-                let record = create_git_checkpoint(
+                // Thread the same pre-mutation status into the checkpoint so it
+                // does not re-run its own pre-mutation worktree walk. The
+                // checkpoint then advances the Git ref, so the post-checkpoint
+                // `build_repository_verification_state` below stays a FRESH walk.
+                let record = create_git_checkpoint_with_worktree_status(
                     &repo,
                     Some(message.as_str()),
                     worktree_status_options(Some(repo.config())),
+                    &worktree_status,
                 )?;
                 let trust = commit_safe_trust(build_repository_verification_state(&repo));
                 let output = CommitCompatOutput {
