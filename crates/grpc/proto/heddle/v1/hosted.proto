@@ -13,6 +13,7 @@ service HostedUserService {
   rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
   rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
+  rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
   rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
   rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
@@ -175,6 +176,13 @@ message UpdateNamespaceRequest {
   string client_operation_id = 15;
 }
 
+message SetNamespaceVisibilityRequest {
+  string full_path = 1;
+  SpoolVisibility visibility = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
 message DeleteNamespaceRequest {
   string full_path = 1;
   // Idempotency (audit-idempotency enforces tag 15).
@@ -244,6 +252,10 @@ message HostedNamespace {
   string parent_id = 5;
   string display_name = 6;
   SpoolSettings settings = 7;
+  // Current effective visibility of the namespace's spool. Mirrors
+  // `settings.visibility` for top-level reads; populated on every response
+  // builder so SetNamespaceVisibility callers see the applied value.
+  SpoolVisibility visibility = 8;
 }
 
 message HostedRepository {
