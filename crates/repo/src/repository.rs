@@ -1287,6 +1287,19 @@ impl Repository {
         graph.is_ancestor(ancestor, descendant).unwrap_or(false)
     }
 
+    /// Git-overlay worktree status, compared against the **Git index** (distinct
+    /// from `compare_worktree_cached*`, which compares against heddle's own index).
+    ///
+    /// The expensive part — deciding whether each tracked file changed since it
+    /// was staged — is handled by sley's `stream_short_status_with_options`, which
+    /// honors git's racy-clean stat cache: when a file's mode + size + mtime match
+    /// its Git index entry (and the entry is not racily clean), sley reuses the
+    /// staged OID and SKIPS re-reading + SHA-1ing the file (`reuse_tracked_entry`),
+    /// falling back to a full content hash whenever the stat is ambiguous. On a
+    /// warm worktree this turns the walk from "hash every file" into "stat every
+    /// file" (~0.35s vs minutes on the ~6k-file ghostty tree). This stat-cache
+    /// MUST be preserved across sley bumps — a sley that re-hashes unconditionally
+    /// would silently reintroduce the pathological checkpoint cost.
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
