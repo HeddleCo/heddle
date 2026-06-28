@@ -2710,6 +2710,20 @@ fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
 }
 
 fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
+    // Defense in depth (push-routing no-op): the git-overlay exporter speaks
+    // only the local/git network transports. A `heddle://` hosted URL must
+    // NEVER reach this classifier — the hosted-sync path
+    // (`GrpcHostedClient`) is the only thing that can push to it. If routing
+    // upstream is correct this is unreachable; making it a hard error here
+    // means a `heddle://` slipping into the git exporter can never again be a
+    // silent success (it would otherwise fall through as a generic network
+    // URL, "reconcile" locally, and report success without contacting the
+    // server).
+    if url.starts_with("heddle://") {
+        return Err(GitBridgeError::Git(format!(
+            "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
+        )));
+    }
     let Some(raw_path) = url.strip_prefix("file://") else {
         return Ok(None);
     };
@@ -4051,6 +4065,49 @@ mod tests {
         assert_eq!(parse_git_ref("refs/remotes/git/feature/x"), None);
         assert!(is_reserved_git_remote_name(REMOTE_NAME_FOR_LOCAL_GIT_REPO));
         assert!(!is_reserved_git_remote_name("origin"));
+    }
+
+    #[test]
+    fn local_path_from_url_rejects_hosted_heddle_scheme() {
+        // Regression (push-routing no-op): a `heddle://` hosted remote that
+        // reaches the git-overlay exporter must be a HARD ERROR, never a
+        // silent no-op success. The git network pusher cannot speak the
+        // hosted protocol, so classifying a `heddle://` URL here must fail
+        // loudly rather than fall through to `ResolvedRemote::Url` (which
+        // would "reconcile" locally and report success without ever
+        // contacting the server).
+        let err = local_path_from_url("heddle://weft.local:8421/org/repo")
+            .expect_err("heddle:// must be rejected by the git exporter classifier");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heddle://") && msg.contains("hosted"),
+            "error should explain the hosted scheme cannot be pushed via the git-overlay exporter, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn local_path_from_url_still_accepts_file_and_git_urls() {
+        // The guard must not regress legitimate transports: `file://` still
+        // resolves to a local path, and ordinary git URLs (https/ssh) still
+        // pass through as "not local" (Ok(None)) for the network git pusher.
+        assert!(
+            local_path_from_url("file:///tmp/repo.git")
+                .expect("file url ok")
+                .is_some(),
+            "file:// must still resolve to a local path"
+        );
+        assert!(
+            local_path_from_url("https://example.com/org/repo.git")
+                .expect("https url ok")
+                .is_none(),
+            "https git url must pass through as a network URL"
+        );
+        assert!(
+            local_path_from_url("git@github.com:org/repo.git")
+                .expect("ssh url ok")
+                .is_none(),
+            "ssh git url must pass through as a network URL"
+        );
     }
 
     #[test]

@@ -287,6 +287,87 @@ fn native_push_and_pull_reject_direct_git_remote_before_native_sync() {
     }
 }
 
+/// Regression (push-routing silent no-op): a `heddle://` HOSTED remote on a
+/// git-overlay repo whose `[hosted]` config block is EMPTY must route to the
+/// native hosted-sync path, NOT the local git-overlay refs exporter. The bug:
+/// the exporter treats `heddle://` as a generic git network URL, "reconciles"
+/// refs locally, and returns `{"transport":"git","success":true,"refs_written":[]}`
+/// without ever contacting the server — a silent no-op reported as success.
+///
+/// No live server runs in CI, so we assert on the ROUTING DECISION, not an
+/// end-to-end push: a correctly-routed hosted push fails LOUDLY trying to reach
+/// the (absent) server; the bug-signature is a `transport:"git"` SUCCESS
+/// envelope. We accept any loud failure (or a non-git transport) and reject the
+/// silent-git-success signature specifically.
+#[test]
+fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
+    let source = TempDir::new().unwrap();
+
+    // Build a real git-overlay repo (git init + heddle adopt) — `capability()`
+    // is GitOverlay and `[hosted]` is empty (hosted_enabled() == false), which
+    // is exactly the buggy predicate's input.
+    git_ok(&["init", "-b", "main"], source.path());
+    git_ok(&["config", "user.name", "Heddle Test"], source.path());
+    git_ok(
+        &["config", "user.email", "heddle@example.com"],
+        source.path(),
+    );
+    std::fs::write(source.path().join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], source.path());
+    git_ok(&["commit", "-m", "seed"], source.path());
+    heddle(&["adopt", "--ref", "main"], Some(source.path())).expect("adopt source Git repo");
+
+    // A hosted heddle:// remote pointing at a port nothing is listening on,
+    // exercised through BOTH invocation forms that resolve to it:
+    //   1. inline URL:        `heddle push heddle://...`
+    //   2. named remote:      `heddle push origin`  (origin -> heddle://)
+    // The named-remote form is the common real-world repro and resolves the
+    // URL via RemoteConfig, so it must route identically.
+    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    heddle(
+        &["remote", "add", "origin", hosted_url],
+        Some(source.path()),
+    )
+    .expect("add hosted origin remote");
+
+    for push_arg in [hosted_url, "origin"] {
+        let output = heddle_output(
+            &["--output", "json", "push", push_arg],
+            Some(source.path()),
+        )
+        .expect("spawn heddle push");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The exact bug signature: a SUCCESS via the git exporter. If the push
+        // routed to the git-overlay exporter, stdout carries
+        // {"transport":"git","success":true,...}. That must never happen for a
+        // heddle:// remote regardless of how it was named.
+        if let Ok(envelope) = serde_json::from_str::<Value>(stdout.trim()) {
+            let transport = envelope["transport"].as_str().unwrap_or_default();
+            let success = envelope["success"].as_bool().unwrap_or(false);
+            assert!(
+                !(transport == "git" && success),
+                "`heddle push {push_arg}` silently no-opped via the git-overlay \
+                 exporter (transport=git, success=true) instead of routing to the \
+                 hosted path: {envelope}"
+            );
+        }
+
+        // Positively, a hosted push that cannot reach a server must FAIL loudly
+        // (non-zero exit) rather than report success of any kind — proving it
+        // reached the hosted transport (dead-port connect error, or a
+        // `client`-feature-less build's `network_feature_unavailable`) instead
+        // of the git-overlay exporter's silent local reconcile.
+        assert!(
+            !output.status.success(),
+            "`heddle push {push_arg}` to an unreachable hosted remote must fail \
+             loudly, not succeed (silent no-op). stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn test_cli_remote_show_missing_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
