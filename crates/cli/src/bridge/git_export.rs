@@ -450,6 +450,24 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 && has_git_fidelity(&state)
             {
                 let mapped = bridge.mapping.get_git(&state_id);
+                // Incremental-export fast path (perf, latent O(history) fix): the
+                // regenerate-from-state step below is purely a #567 idempotent
+                // re-write — it rebuilds the commit object from state and writes it
+                // so a correct export no longer DEPENDS on the mirror's verbatim
+                // bytes. But when the mapped commit object is ALREADY in the mirror,
+                // that re-write is a no-op (sley hashes-then-skips), preceded by
+                // `reconstruct_commit_bytes`'s FULL recursive tree re-walk + re-hash.
+                // On a deep imported history every already-mapped commit hits this
+                // branch on every export, so that re-walk is paid once per historical
+                // commit per export — O(total history). Skipping when the object is
+                // present makes it O(commits whose object is missing), with
+                // byte-identical output: the served object, its OID, and the mapping
+                // are all unchanged. The reconstruct still runs (and the safety net
+                // still guards the write) for any mapped commit whose object is NOT
+                // yet in the mirror — the case #567/#568 actually need it for.
+                if mapped.is_some_and(|oid| repo.read_object(&oid).is_ok()) {
+                    continue;
+                }
                 // mirror still required for non-byte-faithful commits (non-UTF8
                 // identities, --lossy); #568 mirror elimination must account for
                 // these, and full de-lossy needs byte-preserving identities (#564
