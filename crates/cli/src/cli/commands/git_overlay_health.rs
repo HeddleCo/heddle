@@ -291,9 +291,6 @@ impl RepositoryVerificationState {
             matches!(check.name.as_str(), "worktree" | "heddle_worktree") && check.status != "clean"
         });
         // Reuse the caller's already-computed status when threaded; otherwise
-        // fall back to a fresh walk. `.ok().flatten()` preserves the original
-        // dirty/clean classification exactly.
-        // Reuse the caller's already-computed status when threaded; otherwise
         // fall back to a fresh walk. Hold a borrow (`WorktreeStatus` is not
         // `Clone`) so the dirty/clean classification stays byte-identical.
         let computed_worktree_status;
