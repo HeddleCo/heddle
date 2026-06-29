@@ -44,8 +44,7 @@ use crate::{
     bridge::{
         GitBridge,
         git_core::{
-            clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference,
-            write_head_symref,
+            clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
         },
         git_ingest::import_git_history,
     },

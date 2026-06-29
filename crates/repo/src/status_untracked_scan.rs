@@ -93,7 +93,9 @@ fn scan_directory(
     // changed path falls under `dir_key`, and returns false when the monitor is not
     // usable). Without fsmonitor we must descend so nested additions are seen; the
     // descent is cheap because tracked-file hashing stays cached by stat-freshness.
-    if ctx.monitor.can_skip_directory(rel_path, Some(tree), ctx.index)
+    if ctx
+        .monitor
+        .can_skip_directory(rel_path, Some(tree), ctx.index)
         && !ctx.tracked_dirty_directories.contains(dir_key)
         && ctx.index.get_directory(dir_key).is_some_and(|cached| {
             cached.child_names_match(

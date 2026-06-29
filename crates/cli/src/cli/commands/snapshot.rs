@@ -4,8 +4,10 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use objects::object::{Agent, Attribution, ChangeId, Principal, Tree};
-use objects::worktree::WorktreeStatus;
+use objects::{
+    object::{Agent, Attribution, ChangeId, Principal, Tree},
+    worktree::WorktreeStatus,
+};
 use repo::{
     Hook, HookContext, HookManager, Repository, SessionManager, SnapshotProfile, format_confidence,
     refresh_active_thread_metadata,

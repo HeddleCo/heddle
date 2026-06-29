@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository verification proof surface.
 
+use std::time::Instant;
+
 use anyhow::{Result, anyhow};
 use repo::Repository;
 use serde::Serialize;
@@ -17,7 +19,6 @@ use crate::{
     cli::{Cli, should_output_json, style},
     perf::{ProfileField, emit_profile, profile_enabled},
 };
-use std::time::Instant;
 
 #[derive(Debug, Serialize)]
 struct VerifyOutput {
@@ -39,27 +40,26 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let plain_git_probe_ms = probe_start.elapsed().as_millis();
     let mut repo_open_ms = 0u128;
     let mut verification_ms = 0u128;
-    let (trust, presentation, repo_config) =
-        if let Some(probe) = plain_git_probe {
-            (
-                probe.trust,
-                crate::cli::render::RepositoryPresentation {
-                    label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-                    context: None,
-                },
-                None,
-            )
-        } else {
-            let repo_open_start = Instant::now();
-            let repo = Repository::open(start)?;
-            repo_open_ms = repo_open_start.elapsed().as_millis();
-            let verification_start = Instant::now();
-            let trust = build_repository_verification_state(&repo);
-            verification_ms = verification_start.elapsed().as_millis();
-            let presentation = crate::cli::render::repository_presentation(&repo, None, None);
-            let config = repo.config().clone();
-            (trust, presentation, Some(config))
-        };
+    let (trust, presentation, repo_config) = if let Some(probe) = plain_git_probe {
+        (
+            probe.trust,
+            crate::cli::render::RepositoryPresentation {
+                label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+                context: None,
+            },
+            None,
+        )
+    } else {
+        let repo_open_start = Instant::now();
+        let repo = Repository::open(start)?;
+        repo_open_ms = repo_open_start.elapsed().as_millis();
+        let verification_start = Instant::now();
+        let trust = build_repository_verification_state(&repo);
+        verification_ms = verification_start.elapsed().as_millis();
+        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
+        let config = repo.config().clone();
+        (trust, presentation, Some(config))
+    };
     if profile_enabled() {
         emit_profile(
             "verify phases",
