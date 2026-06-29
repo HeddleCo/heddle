@@ -94,7 +94,11 @@ fn capture_fails_closed_on_corrupt_user_config() {
         &[("HEDDLE_CONFIG", good_config.to_str().unwrap())],
     )
     .expect("run init");
-    assert!(init.status.success(), "init should succeed: {}", stderr(&init));
+    assert!(
+        init.status.success(),
+        "init should succeed: {}",
+        stderr(&init)
+    );
 
     // Now corrupt the user config and capture: the identity load must
     // error instead of attributing the snapshot to the Unknown default.

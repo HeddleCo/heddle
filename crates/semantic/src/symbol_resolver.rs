@@ -10,7 +10,10 @@
 
 use std::path::Path;
 
-use crate::{parser::Language, symbol_extraction::find_definitions};
+use crate::{
+    parser::{Language, ParsedFile},
+    symbol_extraction::find_definitions,
+};
 
 /// Result of resolving a symbol to lines in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,28 +95,19 @@ pub fn extract_definitions(
     source: &[u8],
     path: &Path,
 ) -> Result<Vec<Definition>, SymbolResolveError> {
-    let language = Language::from_path(path).parser_handle().ok_or_else(|| {
+    let language = Language::from_path(path);
+    language.parser_handle().ok_or_else(|| {
         SymbolResolveError::UnsupportedLanguage(
             path.extension()
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "<none>".to_string()),
         )
     })?;
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language)
-        .map_err(|_| SymbolResolveError::ParseFailed)?;
-
-    let tree = parser
-        .parse(source, None)
-        .ok_or(SymbolResolveError::ParseFailed)?;
-    if tree.root_node().has_error() {
-        return Err(SymbolResolveError::ParseFailed);
-    }
+    let source_text = std::str::from_utf8(source).map_err(|_| SymbolResolveError::ParseFailed)?;
+    let parsed = ParsedFile::parse(source_text, language).ok_or(SymbolResolveError::ParseFailed)?;
 
     let mut out = Vec::new();
-    walk_definitions(&tree.root_node(), source, None, &mut out);
+    walk_definitions(&parsed.root_node(), source, None, &mut out);
     Ok(out)
 }
 
@@ -400,22 +394,16 @@ pub fn resolve_symbol_lines(
     path: &Path,
     symbol: &str,
 ) -> Result<(u32, u32), SymbolResolveError> {
-    let language = Language::from_path(path).parser_handle().ok_or_else(|| {
+    let language = Language::from_path(path);
+    language.parser_handle().ok_or_else(|| {
         SymbolResolveError::UnsupportedLanguage(
             path.extension()
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "<none>".to_string()),
         )
     })?;
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language)
-        .map_err(|_| SymbolResolveError::ParseFailed)?;
-
-    let tree = parser
-        .parse(source, None)
-        .ok_or(SymbolResolveError::ParseFailed)?;
+    let source_text = std::str::from_utf8(source).map_err(|_| SymbolResolveError::ParseFailed)?;
+    let parsed = ParsedFile::parse(source_text, language).ok_or(SymbolResolveError::ParseFailed)?;
 
     // Split qualified name: "Repository::open" -> parent="Repository", target="open"
     let (parent_filter, target_name) = if let Some(pos) = symbol.rfind("::") {
@@ -424,7 +412,7 @@ pub fn resolve_symbol_lines(
         (None, symbol)
     };
 
-    let definitions = find_definitions(&tree.root_node(), source, target_name);
+    let definitions = find_definitions(&parsed.root_node(), source, target_name);
 
     // If a parent filter is specified, prefer matches where the parent matches.
     let matched = if let Some(parent) = parent_filter {
@@ -456,22 +444,16 @@ pub fn resolve_all_symbols(
     path: &Path,
     symbol: &str,
 ) -> Result<Vec<ResolvedSymbol>, SymbolResolveError> {
-    let language = Language::from_path(path).parser_handle().ok_or_else(|| {
+    let language = Language::from_path(path);
+    language.parser_handle().ok_or_else(|| {
         SymbolResolveError::UnsupportedLanguage(
             path.extension()
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "<none>".to_string()),
         )
     })?;
-
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&language)
-        .map_err(|_| SymbolResolveError::ParseFailed)?;
-
-    let tree = parser
-        .parse(source, None)
-        .ok_or(SymbolResolveError::ParseFailed)?;
+    let source_text = std::str::from_utf8(source).map_err(|_| SymbolResolveError::ParseFailed)?;
+    let parsed = ParsedFile::parse(source_text, language).ok_or(SymbolResolveError::ParseFailed)?;
 
     let (parent_filter, target_name) = if let Some(pos) = symbol.rfind("::") {
         (Some(&symbol[..pos]), &symbol[pos + 2..])
@@ -479,7 +461,7 @@ pub fn resolve_all_symbols(
         (None, symbol)
     };
 
-    let definitions = find_definitions(&tree.root_node(), source, target_name);
+    let definitions = find_definitions(&parsed.root_node(), source, target_name);
 
     if let Some(parent) = parent_filter {
         let filtered: Vec<_> = definitions

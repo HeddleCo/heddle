@@ -331,11 +331,8 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
     .expect("add hosted origin remote");
 
     for push_arg in [hosted_url, "origin"] {
-        let output = heddle_output(
-            &["--output", "json", "push", push_arg],
-            Some(source.path()),
-        )
-        .expect("spawn heddle push");
+        let output = heddle_output(&["--output", "json", "push", push_arg], Some(source.path()))
+            .expect("spawn heddle push");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

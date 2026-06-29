@@ -538,7 +538,10 @@ fn pack_objects_then_prune_leaves_no_loose_packed_duplicates() {
     let (packed, _saved) = store.pack_objects(false).unwrap();
     assert!(packed >= 20, "pack_objects should pack the loose corpus");
     let (pruned, _freed) = store.prune_loose_objects().unwrap();
-    assert!(pruned >= 20, "prune should remove the now-packed loose copies");
+    assert!(
+        pruned >= 20,
+        "prune should remove the now-packed loose copies"
+    );
 
     // The consolidation invariant: nothing is left both loose and packed.
     let loose_after = count_loose_objects(&store);

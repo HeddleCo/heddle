@@ -25,7 +25,8 @@ use super::{
     command_catalog::ActionTemplate,
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, build_repository_verification_state_with_worktree_status,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
     },

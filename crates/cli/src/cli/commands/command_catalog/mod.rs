@@ -1232,10 +1232,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
     ),
-    entry(
-        &["auth"],
-        category(feature_gated(GROUP, "client"), "repo"),
-    ),
+    entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
     entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
     entry(
         &["auth", "logout"],
@@ -3118,7 +3115,11 @@ fn append_feature_gated_command_entries(
         if clap_command_path_exists(root, entry.path) {
             continue;
         }
-        out.push(feature_gated_catalog_entry(&owned_path, entry.contract, op_id_option));
+        out.push(feature_gated_catalog_entry(
+            &owned_path,
+            entry.contract,
+            op_id_option,
+        ));
     }
 }
 
@@ -3149,7 +3150,9 @@ fn feature_gated_catalog_entry(
             .canonical_command
             .map(std::string::ToString::to_string),
         canonical_action: canonical_action(contract),
-        command_action: contract.advertised_action.map(command_action_from_advertised),
+        command_action: contract
+            .advertised_action
+            .map(command_action_from_advertised),
         summary: String::new(),
         has_subcommands: false,
         supports_json: contract.supports_json,

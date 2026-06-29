@@ -564,10 +564,9 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert_eq!(dynamic_clone.required_inputs, vec!["path"]);
     assert!(!dynamic_clone.agent_may_fill);
 
-    let import = recommended_action_template(
-        "heddle bridge git import --path <full-git-repo> --ref <ref>",
-    )
-    .expect("shallow import recovery placeholder should resolve");
+    let import =
+        recommended_action_template("heddle bridge git import --path <full-git-repo> --ref <ref>")
+            .expect("shallow import recovery placeholder should resolve");
     assert_eq!(
         import.argv_template,
         vec![
@@ -718,9 +717,8 @@ fn recommended_action_parser_supports_shell_quoted_arguments() {
         ["merge", "feature with spaces", "--preview"]
     );
 
-    let template =
-        recommended_action_template("heddle merge 'feature '\\''quoted'\\''' --preview")
-            .expect("shell-quoted apostrophe should resolve to a template");
+    let template = recommended_action_template("heddle merge 'feature '\\''quoted'\\''' --preview")
+        .expect("shell-quoted apostrophe should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
         ["merge", "feature 'quoted'", "--preview"]
@@ -731,8 +729,8 @@ fn recommended_action_parser_supports_shell_quoted_arguments() {
 fn checked_action_builder_quotes_and_validates_from_argv() {
     let action = heddle_action(["merge", "feature with spaces", "--preview"]);
     assert_eq!(action, "heddle merge 'feature with spaces' --preview");
-    let template = recommended_action_template(&action)
-        .expect("built action should resolve to a template");
+    let template =
+        recommended_action_template(&action).expect("built action should resolve to a template");
     assert_eq!(
         template.argv_template[1..],
         ["merge", "feature with spaces", "--preview"]
@@ -933,8 +931,7 @@ fn contract_paths_with_children(
         .iter()
         .filter(|candidate| {
             entries.iter().any(|entry| {
-                entry.path.len() > candidate.path.len()
-                    && entry.path.starts_with(candidate.path)
+                entry.path.len() > candidate.path.len() && entry.path.starts_with(candidate.path)
             })
         })
         .map(|entry| entry.path.to_vec())
@@ -1225,8 +1222,7 @@ fn hidden_clap_flags_are_present_in_machine_catalog() {
     let mut failures = Vec::new();
     for (display, id) in hidden_flags {
         if display.is_empty() {
-            let Some(option) = catalog.global_options.iter().find(|option| option.id == id)
-            else {
+            let Some(option) = catalog.global_options.iter().find(|option| option.id == id) else {
                 failures.push(format!("global hidden flag `{id}` missing from catalog"));
                 continue;
             };
@@ -1239,9 +1235,8 @@ fn hidden_clap_flags_are_present_in_machine_catalog() {
         }
 
         let Some(entry) = catalog.command_by_display(&display) else {
-            if command_contract_removed_alias_root(
-                display.split_whitespace().next().unwrap_or(""),
-            ) {
+            if command_contract_removed_alias_root(display.split_whitespace().next().unwrap_or(""))
+            {
                 continue;
             }
             failures.push(format!(
@@ -1997,5 +1992,8 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    assert_eq!(feature_gated_command_roots(), &["auth", "presence", "support"]);
+    assert_eq!(
+        feature_gated_command_roots(),
+        &["auth", "presence", "support"]
+    );
 }

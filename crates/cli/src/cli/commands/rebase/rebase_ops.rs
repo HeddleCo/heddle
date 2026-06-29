@@ -555,9 +555,8 @@ fn auto_merge_text_lines(
     };
 
     #[cfg(feature = "semantic")]
-    let outcome = semantic::merge_driver::semantic_three_way_merge(
-        base, current, incoming, path, markers,
-    );
+    let outcome =
+        semantic::merge_driver::semantic_three_way_merge(base, current, incoming, path, markers);
     #[cfg(not(feature = "semantic"))]
     let outcome = {
         let _ = path;
@@ -1233,7 +1232,10 @@ fn f() { 6 }
             !merged.contains("<<<<<<<"),
             "no conflict markers expected: {merged}"
         );
-        assert!(merged.contains("fn c() { 333 }"), "theirs c-edit lost: {merged}");
+        assert!(
+            merged.contains("fn c() { 333 }"),
+            "theirs c-edit lost: {merged}"
+        );
         assert!(merged.contains("fn f() { 6 }"), "theirs add lost: {merged}");
         for name in ["fn a", "fn b", "fn c", "fn d", "fn e"] {
             assert!(merged.contains(name), "missing {name}: {merged}");

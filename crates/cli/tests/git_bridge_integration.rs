@@ -1208,9 +1208,10 @@ fn both_engines_fail_hard_on_default_rerun_after_lossy() {
 /// lands the byte-identical OID with nothing in the mirror to copy.
 #[test]
 fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
+    use std::collections::HashSet;
+
     use cli::bridge::git_reconstruct::commit_object_id;
     use objects::object::{Attribution, Principal, State};
-    use std::collections::HashSet;
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -1299,8 +1300,9 @@ fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
 /// MUST hard-error rather than silently materialize a wrong-OID checkout.
 #[test]
 fn checkout_materialization_hard_errors_on_oid_mismatch() {
-    use objects::object::{Attribution, Principal, State};
     use std::collections::HashSet;
+
+    use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -1363,8 +1365,9 @@ fn checkout_materialization_hard_errors_on_oid_mismatch() {
 /// mirror (not the checkout) and confirming the lossy state still materializes.
 #[test]
 fn checkout_materialization_backstops_lossy_commit_from_mirror() {
-    use objects::object::{Attribution, Principal, State};
     use std::collections::HashSet;
+
+    use objects::object::{Attribution, Principal, State};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");

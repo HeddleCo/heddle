@@ -370,10 +370,7 @@ fn try_does_not_leak_parent_env_into_child() {
     let script_path = probe_dir.path().join("dump-env.sh");
     fs::write(
         &script_path,
-        format!(
-            "#!/bin/sh\nenv > '{}'\n",
-            env_dump.to_str().unwrap()
-        ),
+        format!("#!/bin/sh\nenv > '{}'\n", env_dump.to_str().unwrap()),
     )
     .unwrap();
     #[cfg(unix)]

@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     process,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -59,7 +60,6 @@ use crate::{
     config::{UserConfig, UserThreadWorkspaceMode},
     perf::{ProfileField, emit_profile, profile_enabled},
 };
-use std::time::Instant;
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 

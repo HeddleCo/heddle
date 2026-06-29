@@ -60,7 +60,10 @@ fn test_snapshot_fresh_repo_with_change() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("first.txt"), "first change").unwrap();
     let result = heddle(&["capture", "-m", "First snapshot"], Some(temp.path()));
-    assert!(result.is_ok(), "capture with eligible changes must succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "capture with eligible changes must succeed: {result:?}"
+    );
 }
 
 #[test]

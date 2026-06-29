@@ -107,7 +107,11 @@ fn mount_fixture(repo: Repository) -> (BackgroundSession, TempDir) {
 /// serving repeated reads (cached mode, heddle#87).
 fn mount_fixture_with_read_counter(
     repo: Repository,
-) -> (BackgroundSession, TempDir, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+) -> (
+    BackgroundSession,
+    TempDir,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
     let mount = ContentAddressedMount::new(repo, "main").expect("open mount");
     let mountpoint = TempDir::new().expect("tempdir for mountpoint");
     let shell = FuseShell::new(mount);

@@ -6775,12 +6775,7 @@ fn semantic_eof_byte(base: &str, ours: &str, theirs: &str) -> Option<u8> {
 }
 
 fn text_outcome(base: &str, ours: &str, theirs: &str) -> MergeOutcome {
-    text_hunk_merge_with_markers(
-        base.as_bytes(),
-        ours.as_bytes(),
-        theirs.as_bytes(),
-        MARKERS,
-    )
+    text_hunk_merge_with_markers(base.as_bytes(), ours.as_bytes(), theirs.as_bytes(), MARKERS)
 }
 
 #[test]

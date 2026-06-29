@@ -99,8 +99,9 @@ mod tests {
     use grpc::heddle::v1::{
         CompareSummary, DiffForThreadRequest, DiffForThreadResponse, FileDiff, LogForThreadRequest,
         LogForThreadResponse, StateSummary, StatusForThreadRequest, StatusForThreadResponse,
-        ThreadPathSet, Treeish, treeish,
+        ThreadPathSet, Treeish,
         tree_edit_service_server::{TreeEditService, TreeEditServiceServer},
+        treeish,
     };
     use tonic::{Request, Response, Status, transport::Server};
 
