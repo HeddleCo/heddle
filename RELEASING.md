@@ -204,8 +204,45 @@ Set these GitHub Actions variables as well:
 | `HEDDLE_DEVELOPER_ID_APPLICATION` | Codesigning identity, e.g. `Developer ID Application: HeddleCo, LLC (33V6242M8S)` |
 
 The release-publisher GitHub App should be installed only on
-`homebrew-heddle` and granted only `Contents: write` and
-`Pull requests: write`.
+`homebrew-heddle` and `scoop-heddle` and granted only `Contents: write`
+and `Pull requests: write`.
+
+## Scoop manifest publication
+
+The Windows install path is:
+
+```bash
+scoop bucket add heddle https://github.com/HeddleCo/scoop-heddle
+scoop install heddle
+```
+
+The bucket repository is `HeddleCo/scoop-heddle`; Scoop reads manifests
+from its `bucket/` directory. Stable releases render `bucket/heddle.json`
+from the Windows zip line(s) in the release `SHA256SUMS` via
+`scripts/render-scoop-manifest.sh`. The manifest declares:
+
+- `architecture.64bit.url` / `.hash` — the `x86_64-pc-windows-msvc.zip`
+  archive and its sha256
+- `bin` / `shortcuts` pointing at `heddle.exe` inside the extracted
+  archive directory
+- `checkver` + `autoupdate` so the bucket can self-update to future
+  stable tags
+- `notes` with the cosign keyless verification command (the `.sig` +
+  `.pem` are published alongside the archive on the GitHub Release)
+
+Only **x64** is shipped today. `aarch64-pc-windows-msvc` is parked
+because `sigstore/cosign-installer@v3` has no Windows-arm64 asset, so the
+release build matrix omits it (see the matrix comment in `release.yml`
+and #347). When that target re-enters the matrix, add an
+`aarch64-pc-windows-msvc` row to `ARCHES` in the renderer and Scoop picks
+up the new architecture block automatically.
+
+Like the Homebrew cask, the manifest is not pushed directly: the
+`publish-manifests` job uses the same release-publisher App token to open
+or refresh a PR against `scoop-heddle`, which a maintainer merges after
+bucket CI passes. The wiring (renderer present, `bucket/heddle.json`
+path, App token, `HeddleCo/scoop-heddle` target) is asserted by
+`scripts/check-release-pipeline.sh`.
 
 ### Linux glibc floor
 
