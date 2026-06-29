@@ -76,19 +76,28 @@ needs:
 4. **The `fuse` cargo feature**, propagated through
    `heddle-cli`'s `mount` feature.
 
-5. **Linux 5.16+ for shared `mmap` on mounted files.** The shell
-   hands back `FOPEN_DIRECT_IO` on every `open` so kernel page-cache
-   reads don't shadow hot-tier writes (see
-   [`crate::fuse::FuseShell::open`]). Under default kernel semantics
-   that disables `mmap(MAP_SHARED, ...)` on every fd — calls return
-   `ENODEV`. The shell opts out of that restriction by requesting
-   the `FUSE_DIRECT_IO_ALLOW_MMAP` capability in `init`; the kernel
-   bit was added in 5.16. On older kernels the cap is silently
-   dropped and shared mmap fails with `ENODEV` — rust-analyzer,
-   cargo (when reading dep-info files via `mmap`), IDEs, and
-   `grep --mmap` will misbehave on heddle-mounted trees. The mount
-   itself still works; only the mmap path is affected. Upgrade the
-   kernel or use clients that fall back to `read(2)`.
+5. **No kernel-version floor for caching or shared `mmap`.** The
+   shell runs in the kernel's default **cached** mode (heddle#87): it
+   does *not* return `FOPEN_DIRECT_IO`, and instead hands back
+   `FOPEN_KEEP_CACHE` from `open`/`create` so the page cache stays
+   live across opens (see [`crate::fuse::FuseShell::open`]). Repeated
+   reads of unchanged content are served straight from the page cache
+   without a FUSE round-trip, and shared `mmap(MAP_SHARED, ...)` works
+   out of the box — no `FUSE_DIRECT_IO_ALLOW_MMAP` capability, hence
+   no Linux 5.16+ requirement. rust-analyzer, cargo, IDEs, and
+   `grep --mmap` all work on heddle-mounted trees on any FUSE-capable
+   kernel.
+
+   Coherence comes from **active invalidation**, the same model FSKit
+   uses on macOS: every content-changing callback (`write`, `setattr`)
+   pushes a `notify_inval_inode` to the kernel, and every dentry-
+   changing callback (`create`/`mkdir`/`mknod`/`symlink`/`unlink`/
+   `rmdir`/`rename`) pushes a `notify_inval_entry`, so the kernel can
+   never serve stale cached bytes, attrs, or dentries. Those
+   notifications are dispatched from a dedicated invalidator thread
+   (never inline from a callback — that deadlocks on the kernel inode
+   lock); see the `fuse.rs` module docs ("Invalidation contract") for
+   the per-callback mapping.
 
 ### Cleaning up a stale FUSE mount
 
