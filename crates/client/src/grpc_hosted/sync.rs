@@ -707,21 +707,22 @@ impl HostedGrpcClient {
     ) -> Result<PullExchange, ProtocolError> {
         let exchange_start = Instant::now();
         let mut exclude_states = Vec::new();
-        if let Some(local_thread) = options.local_thread {
-            if let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))? {
-                exclude_states.push(head);
-            }
-        } else if let Some(head) =
+        // Whether the head comes from an explicit `--local-thread` or is
+        // inferred from the bare remote thread, it is advertised as
+        // `exclude_states` ONLY when its full object closure is provably
+        // present locally. The server trusts `exclude_states` blindly and
+        // prunes the advertised closure — so advertising a head whose closure
+        // we lack (a partial/lazy clone, an interrupted prior pull) would make
+        // the server omit those objects and silently leave us with an
+        // incomplete repo. Both branches therefore share the same completeness
+        // gate; when it refuses, we fall back to the correct (slower)
+        // empty-exclude full pull.
+        let advertised_head = if let Some(local_thread) = options.local_thread {
+            locally_complete_local_thread_head(repo, local_thread, options.target_state)?
+        } else {
             locally_complete_pull_head(repo, remote_thread, options.target_state)?
-        {
-            // Bare pull (no explicit `--local-thread`): advertise the head we
-            // already hold for the thread we're about to update so the server
-            // can prune to the delta (and fire the zero-delta short-circuit
-            // when we're already at the remote tip). `locally_complete_pull_head`
-            // only returns a head whose full object closure is provably present
-            // locally — advertising a head whose closure we lack would make the
-            // server omit those objects and silently leave us with an
-            // incomplete repo.
+        };
+        if let Some(head) = advertised_head {
             exclude_states.push(head);
         }
         let allow_partial_fetch = options.materialization.allows_partial_fetch();
@@ -1366,6 +1367,49 @@ fn locally_complete_pull_head(
     remote_thread: &str,
     target_state: Option<ChangeId>,
 ) -> Result<Option<ChangeId>, ProtocolError> {
+    locally_complete_thread_head(repo, remote_thread, target_state)
+}
+
+/// Same completeness gate for an explicit `--local-thread`: the user named the
+/// local thread whose head should be advertised as already-held. The cardinal
+/// risk is identical to the bare path — advertising a head whose closure we do
+/// NOT fully hold makes the server prune objects we lack and silently leaves us
+/// with an incomplete repo. A `--local-thread` pointed at a partial/lazy clone
+/// or an interrupted prior pull is exactly that hazard, so it must clear the
+/// same checks (no target-state override, no recorded missing blobs, full
+/// closure present) before it may be advertised.
+fn locally_complete_local_thread_head(
+    repo: &Repository,
+    local_thread: &str,
+    target_state: Option<ChangeId>,
+) -> Result<Option<ChangeId>, ProtocolError> {
+    locally_complete_thread_head(repo, local_thread, target_state)
+}
+
+/// Shared completeness gate: given the name of a thread whose head we are about
+/// to advertise as an `exclude_states` entry, return that head ONLY when its
+/// full object closure is provably present locally; otherwise `None` (caller
+/// falls back to the correct, slower empty-exclude full pull).
+///
+/// Advertising state S asserts "I already hold S's FULL object closure
+/// locally." If we advertise a head whose closure we do NOT fully have, the
+/// server omits those objects and we silently end up with an incomplete repo.
+/// The server trusts this assertion blindly, so the entire correctness burden
+/// is here. We therefore advertise a head ONLY when:
+///
+/// 1. A target-state override is not in play (the override drives the want
+///    plan directly; advertising the thread head would be unrelated).
+/// 2. The local repo holds no recorded missing blobs (a partial/lazy clone
+///    can hold a state's metadata while its blobs were never fetched — never
+///    advertise such a head).
+/// 3. The named thread resolves to a local head whose ENTIRE object closure is
+///    present locally — proven by walking it with `enumerate_state_closure`,
+///    which errors `ObjectNotFound` on the first absent state/tree/blob.
+fn locally_complete_thread_head(
+    repo: &Repository,
+    thread: &str,
+    target_state: Option<ChangeId>,
+) -> Result<Option<ChangeId>, ProtocolError> {
     // A target-state override pulls a specific state, not the thread tip;
     // advertising the thread head here would not match what's being fetched.
     if target_state.is_some() {
@@ -1376,7 +1420,7 @@ fn locally_complete_pull_head(
     if !repo.missing_blobs()?.is_empty() {
         return Ok(None);
     }
-    let Some(head) = repo.refs().get_thread(&ThreadName::from(remote_thread))? else {
+    let Some(head) = repo.refs().get_thread(&ThreadName::from(thread))? else {
         // Fresh local repo (no local head for this thread) — nothing to
         // advertise; the server sends the full closure as before.
         return Ok(None);
@@ -4028,6 +4072,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn locally_complete_local_thread_head_advertises_fully_present_thread_head() {
+        // The explicit `--local-thread` happy path: the named thread's head
+        // closure is fully local, so it may be advertised (fast delta path).
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &head)
+            .expect("set thread");
+
+        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
+            .expect("completeness check");
+        assert_eq!(
+            advertised,
+            Some(head),
+            "an explicit local-thread head whose full closure is present must be advertised"
+        );
+    }
+
+    #[test]
+    fn locally_complete_local_thread_head_skips_unknown_thread() {
+        // `--local-thread` naming a thread with no local head: nothing to
+        // advertise, falls back to a full closure.
+        let (_dir, repo) = temp_repo_unseeded();
+        let advertised = locally_complete_local_thread_head(&repo, "nonexistent", None)
+            .expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_local_thread_head_skips_when_target_state_override_in_play() {
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &head)
+            .expect("set thread");
+
+        // A target-state override drives the want plan directly; the explicit
+        // thread head is unrelated and must not be advertised.
+        let advertised = locally_complete_local_thread_head(&repo, "feature", Some(head))
+            .expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_local_thread_head_skips_repo_with_missing_blobs() {
+        // A partial/lazy clone named via `--local-thread`: holds metadata but
+        // records known-missing blobs. The gate must refuse.
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &head)
+            .expect("set thread");
+        repo.record_missing_blob(ContentHash::from_bytes([88u8; 32]))
+            .expect("record missing blob");
+
+        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
+            .expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "a repo carrying missing blobs must never advertise an explicit local-thread head"
+        );
+    }
+
+    #[test]
+    fn locally_complete_local_thread_head_skips_head_with_incomplete_closure() {
+        // The cardinal case for the explicit branch: the named thread's head
+        // state is present, but a parent state in its closure is absent — an
+        // interrupted prior pull or partial clone. Advertising this head would
+        // make the server prune objects we lack. The gate must refuse.
+        let (_dir, repo) = temp_repo();
+        let absent_parent = ChangeId::generate();
+        let blob = Blob::from("orphan");
+        let blob_hash = repo.store().put_blob(&blob).expect("put blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("orphan.txt", blob_hash, false).expect("tree entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let child = State::new_snapshot(tree_hash, vec![absent_parent], sample_attribution());
+        let child_id = child.change_id;
+        repo.store().put_state(&child).expect("put child state");
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &child_id)
+            .expect("set thread");
+
+        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
+            .expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "an explicit local-thread head whose closure has an absent parent must not be advertised"
+        );
+    }
+
     /// Mock pull service that mimics the weft server's `exclude_states`
     /// contract: it captures the inbound `exclude_states`, fires the
     /// zero-delta short-circuit when the remote tip is advertised, and
@@ -4458,6 +4595,178 @@ mod tests {
         assert!(
             wire::enumerate_state_closure(repo.store(), remote).is_ok(),
             "fresh pull must install the complete closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_local_thread_incomplete_closure_does_not_advertise_and_repairs() {
+        // The footgun this PR closes: a user passes `--local-thread` against a
+        // repo whose named thread head has an INCOMPLETE closure (an absent
+        // parent state — a partial clone or interrupted prior pull). The
+        // explicit branch must NOT advertise it (that would make the server
+        // prune objects the client lacks and silently leave it corrupt). The
+        // completeness gate refuses, the pull falls back to the full closure,
+        // and the client ends COMPLETE.
+        //
+        // Build parent + child in the SOURCE repo (the server's view).
+        let (_src_dir, src_repo) = temp_repo_unseeded();
+        let parent = put_state_with_blob(&src_repo, "base", vec![]);
+        let child = put_state_with_blob(&src_repo, "feature", vec![parent]);
+        let child_closure =
+            wire::enumerate_state_closure(src_repo.store(), child).expect("child closure");
+        let full_pack =
+            wire::build_native_pack(src_repo.store(), &child_closure).expect("full pack");
+
+        // The CLIENT's `feature` thread points at `child`, but the client only
+        // holds child's own metadata, NOT the parent closure — an incomplete
+        // local closure. Copy just the child-specific objects (closure minus
+        // parent) so the parent state is genuinely absent.
+        let (_dir, repo) = temp_repo_unseeded();
+        let child_only = wire::enumerate_state_closure_with_options(
+            src_repo.store(),
+            child,
+            wire::StateClosureOptions {
+                depth: None,
+                exclude_states: vec![parent],
+            },
+        )
+        .expect("child-only objects");
+        let child_only_pack =
+            wire::build_native_pack(src_repo.store(), &child_only).expect("child-only pack");
+        wire::install_received_pack(
+            repo.store(),
+            &child_only_pack.pack_data,
+            &child_only_pack.index_data,
+        )
+        .expect("install child-only objects");
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &child)
+            .expect("set local thread to child");
+        // Sanity: the named thread's closure is INCOMPLETE locally (parent
+        // state absent), exactly the dangerous over-advertise setup.
+        assert!(
+            matches!(
+                wire::enumerate_state_closure(repo.store(), child),
+                Err(ProtocolError::ObjectNotFound(_))
+            ),
+            "the explicit thread head's closure must start incomplete"
+        );
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: child,
+            full_closure: child_closure.clone(),
+            delta_objects: Vec::new(),
+            known_parent: parent,
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: Some("feature"),
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("explicit-thread pull must not hang")
+        .expect("explicit-thread pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert!(
+            advertised.is_empty(),
+            "an explicit --local-thread with an incomplete closure must advertise nothing, \
+             falling back to a full pull (got {advertised:?})"
+        );
+        assert!(exchange.result.success);
+        // The repair: the client must now hold the COMPLETE child closure.
+        let reassembled = wire::enumerate_state_closure(repo.store(), child)
+            .expect("the client must hold the complete child closure after the fallback full pull");
+        assert_eq!(
+            reassembled.len(),
+            child_closure.len(),
+            "the full-pull fallback must leave the client with the complete closure, no gaps"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_local_thread_complete_closure_advertises_and_fires_short_circuit() {
+        // Fast path preserved: an explicit `--local-thread` whose head closure
+        // IS fully local must still advertise that head, so the server can
+        // prune to the delta (here the zero-delta short-circuit, since the
+        // client is at the remote tip).
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "tip", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("feature"), &head)
+            .expect("set local thread");
+        // Sanity: the named thread's closure is fully present locally.
+        wire::enumerate_state_closure(repo.store(), head)
+            .expect("client holds the complete thread closure");
+
+        let full_closure =
+            wire::enumerate_state_closure(repo.store(), head).expect("enumerate closure");
+        let full_pack =
+            wire::build_native_pack(repo.store(), &full_closure).expect("build full pack");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: head,
+            full_closure,
+            delta_objects: Vec::new(),
+            known_parent: ChangeId::generate(),
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: Some("feature"),
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("explicit-thread pull must not hang")
+        .expect("explicit-thread pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            advertised,
+            vec![head.to_string_full()],
+            "an explicit --local-thread with a complete closure must advertise its head"
+        );
+        assert!(exchange.result.success);
+        assert_eq!(
+            exchange.object_count, 0,
+            "advertising the complete head must fire the zero-delta short-circuit, not a full pull"
         );
     }
 }
