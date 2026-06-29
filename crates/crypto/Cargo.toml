@@ -13,7 +13,7 @@ categories.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.5" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
 p256.workspace = true
 pkcs8.workspace = true
 rsa.workspace = true

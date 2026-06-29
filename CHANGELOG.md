@@ -13,6 +13,95 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.6.0 - Unreleased
+
+### Added
+
+- **Debian/Ubuntu apt distribution.** The `heddle` CLI now ships as a signed
+  apt channel (`.deb` for amd64 and arm64) alongside the existing Homebrew
+  cask, built on the shared publish-manifest substrate. Includes a
+  `heddle-archive-keyring` trust anchor and a GPG-signed pool. (#234, #806)
+- **Scoop (Windows) distribution.** A Scoop manifest (`bucket/heddle.json`,
+  x64) rides the same publish-manifest substrate as Homebrew and apt, so
+  Windows users can install and upgrade `heddle` from a Scoop bucket.
+  (#233, #802)
+- **FUSE mount uses the kernel page cache.** The Linux FUSE shell switched
+  from cache-bypass (`FOPEN_DIRECT_IO`) to active inode invalidation: mounts
+  run in the kernel's cached mode and push invalidations when heddle mutates
+  backing content. Shared `mmap` now works on any FUSE-capable kernel (no
+  Linux 5.16+ floor) and reads can use the page cache while staying coherent.
+  (#87, #810)
+
+### Changed
+
+- **Dependency refresh.** Upgraded `rusqlite` (0.32 → 0.39), `sqlx`
+  (0.8 → 0.9), and `reqwest` (0.13.2 → 0.13.4), plus syntax-indexing
+  improvements in the semantic parser (a dedicated parser pool and syntax
+  index). (#820)
+- **Merge preview matches apply.** The content-merge strategy is now decided
+  exactly once per merge attempt and read back by both the preview report and
+  the apply path, so `merge`'s preview can no longer diverge from what apply
+  actually does. (#503)
+- **Worktree checkout reconstructs from heddle state.** `bridge git checkout`
+  now rebuilds each byte-faithful commit's git objects directly from heddle
+  state instead of copying them out of the eager `.heddle/git` mirror, with a
+  loud OID-equality gate that hard-errors rather than materializing a
+  wrong-SHA checkout. The mirror now backstops only the lossy residual
+  (`--lossy` imports, non-UTF8 identities). First step of the mirror
+  demotion. (#568)
+
+### Fixed
+
+- **Rebase auto-merge uses the semantic driver.** `heddle rebase`'s content
+  auto-merge now routes through the function-level semantic merge driver
+  instead of the line-level text path, so structural reshapes (function
+  reorder/add/delete) resolve cleanly instead of emitting a wide conflict
+  block. (#116)
+- **Semantic merge matches the text engine on trailing newlines.** The
+  semantic merge driver now carries the trailing-newline state of the side
+  that authored the final line (a 3-way one-bit merge) instead of a
+  context-free majority vote, matching the text engine's EOF-newline
+  behavior. (#123)
+- **`heddle://` hosted push on git-overlay repos.** A `heddle://` hosted
+  remote on a git-overlay repo with an empty `[hosted]` config block no
+  longer silently routes through the generic git pusher and no-ops; hosted
+  push routing is hardened to take the hosted lane. (#794)
+- **`maintenance gc` consolidates the object store.** `heddle maintenance gc`
+  previously packed loose objects into a new pack without pruning the
+  now-redundant loose copies or consolidating pre-existing packs, leaving the
+  object store with *more* sources to search and regressing read
+  performance. It now consolidates instead of duplicating. (#796)
+- **Malformed credentials surface a real error.** A malformed
+  `credentials.toml` (e.g. a missing `subject` field) now reports the actual
+  parse error instead of falling through to an unauthenticated request that
+  the server rejects with an opaque "missing authorization metadata". `fetch`
+  and thread-approval now use the same proof-of-possession-capable auth path
+  as push/pull/clone. (#788)
+
+### Performance
+
+- **Pull is sub-second on the common path.** A bare `heddle pull` now
+  advertises its locally-held head so the hosted server prunes to the delta
+  and fires the zero-delta short-circuit; a warm pull of a ~6000-object repo
+  that previously paid the full-closure cost to transfer ~4 objects now
+  transfers only the delta. The advertise is gated on local-closure
+  completeness — both the bare-pull and explicit `--local-thread` paths
+  refuse to over-advertise against an incomplete (partial/interrupted) local
+  repo and fall back to a correct full pull, so the optimization can never
+  corrupt a repo with missing objects. (#821, #822)
+- **Read-only commands compute worktree status once.** `status`, `verify`,
+  `diff`, `thread-list`, `capture`, `commit`, `ready`, and `checkpoint`
+  previously re-walked and re-hashed every tracked file two or three times
+  per invocation. They now compute the git-overlay worktree status once and
+  share it (the second full walk on a 5.7k-file worktree cost ~340ms), plus
+  incremental object copy that skips re-copying objects already present in
+  the mirror. (#793, #795)
+
+### Security
+
+- Bumped `anyhow` 1.0.102 → 1.0.103 to clear RUSTSEC-2026-0190 (an
+  `Error::downcast_mut()` unsoundness advisory). (#817)
+
 ## 0.5.1 - 2026-06-27
 
 ### Changed
