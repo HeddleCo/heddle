@@ -1,29 +1,44 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
+    io::{self, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use grpc::heddle::v1::{
-    GetBlobRequest, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer, GitRefKind,
+    GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
     RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
     ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
-    pull_message, push_message,
+    git_lane_transfer, pull_message, push_message,
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
-    store::{ObjectStore, PackObjectId},
+    store::{AnyStore, ObjectStore, PackObjectId},
 };
-use wire::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
-use repo::{Repository, SyncedThreadMetadata, ThreadManager};
+use repo::{
+    GitCheckpointRecord, Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
+    ThreadManager,
+};
+use sley::{
+    ObjectId as GitObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
+use wire::{
+    ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete, PushComplete, RefEntry,
+    RefUpdated,
+};
 
 use super::{
     HostedGrpcClient, PullMaterialization,
     helpers::{
-        descriptor_id, descriptor_id_from_info, object_descriptor_with_status,
+        descriptor_id, descriptor_id_from_info, object_descriptor_with_status, object_type_name,
         parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
         transport_mode_name,
     },
@@ -45,6 +60,27 @@ struct PullWantPlan {
 
 type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
 
+struct GitLanePushPlan {
+    local_revision_address: String,
+    pack: GitPackPushPlan,
+    ref_update: PushMessage,
+}
+
+#[derive(Clone)]
+struct GitPackPushPlan {
+    transfer_id: String,
+    pack_id: Vec<u8>,
+    pack_size: u64,
+    root: GitObjectId,
+    git_repo: SleyRepository,
+}
+
+const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
+const PULL_PACK_SPOOL_OBJECT_THRESHOLD: usize = 512;
+const NATIVE_PACK_DRAIN_OBJECT_INTERVAL: usize = 32;
+const NATIVE_PACK_OBJECT_PREFETCH_LIMIT: usize = 32;
+const NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT: usize = 8;
+
 #[derive(Debug, Clone, Default)]
 pub struct PullObjectMix {
     pub blobs: usize,
@@ -53,6 +89,14 @@ pub struct PullObjectMix {
     pub actions: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostedRefEntry {
+    pub name: String,
+    pub change_id: ChangeId,
+    pub is_thread: bool,
+    pub revision_address: String,
 }
 
 impl PullObjectMix {
@@ -97,6 +141,22 @@ pub struct PullProfile {
 
 impl HostedGrpcClient {
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
+        Ok(self
+            .list_refs_with_revision_addresses(repo_path)
+            .await?
+            .into_iter()
+            .map(|entry| RefEntry {
+                name: entry.name,
+                change_id: entry.change_id,
+                is_thread: entry.is_thread,
+            })
+            .collect())
+    }
+
+    pub async fn list_refs_with_revision_addresses(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
         let mut request = Request::new(ListRefsRequest {
             repo_path: repo_path.to_string(),
         });
@@ -111,11 +171,12 @@ impl HostedGrpcClient {
             .refs
             .into_iter()
             .map(|entry| {
-                Ok(RefEntry {
+                Ok(HostedRefEntry {
                     name: entry.name,
                     change_id: ChangeId::try_from_slice(&entry.change_id)
                         .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
                     is_thread: entry.is_thread,
+                    revision_address: entry.revision_address,
                 })
             })
             .collect()
@@ -142,6 +203,8 @@ impl HostedGrpcClient {
                 .unwrap_or_default(),
             new_value: new_value.to_string_full(),
             thread_metadata: thread_metadata.map(to_proto_thread_metadata),
+            old_revision_address: old_value.map(native_revision_address).unwrap_or_default(),
+            new_revision_address: native_revision_address(new_value),
             client_operation_id: String::new(),
         });
         self.apply_auth(&mut request)?;
@@ -173,11 +236,69 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
     ) -> Result<PushComplete, ProtocolError> {
+        self.push_with_revision(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            native_revision_address(local_state),
+            None,
+        )
+        .await
+    }
+
+    pub async fn push_git_overlay_checkpoint(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: ChangeId,
+        target_thread: &str,
+        force: bool,
+    ) -> Result<PushComplete, ProtocolError> {
+        let git_lane = build_git_lane_push_plan(
+            repo,
+            local_state,
+            target_thread,
+            self.transport.chunk_size.max(1),
+        )?;
+        let local_revision_address = git_lane.local_revision_address.clone();
+        self.push_with_revision(
+            repo,
+            repo_path,
+            local_state,
+            target_thread,
+            force,
+            local_revision_address,
+            Some(git_lane),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_with_revision(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        local_state: ChangeId,
+        target_thread: &str,
+        force: bool,
+        local_revision_address: String,
+        mut git_lane: Option<GitLanePushPlan>,
+    ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let objects = wire::enumerate_state_closure(repo.store(), local_state)?;
+        let object_plan = wire::enumerate_state_closure_plan(repo.store(), local_state)?;
+        let full_objects = if object_plan.len() <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
+            Some(wire::enumerate_state_closure(repo.store(), local_state)?)
+        } else {
+            None
+        };
+        let object_count = full_objects
+            .as_ref()
+            .map_or(object_plan.len(), std::vec::Vec::len);
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
-        let transport_mode = preferred_transport_mode(&self.transport, objects.len());
+        let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
         let request_message = PushMessage {
             body: Some(push_message::Body::Request(PushRequest {
@@ -186,7 +307,10 @@ impl HostedGrpcClient {
                 target_thread: target_thread.to_string(),
                 create_thread: true,
                 force,
-                objects: objects.iter().map(to_proto_object_info).collect(),
+                objects: full_objects.as_ref().map_or_else(
+                    || object_plan.iter().map(to_proto_planned_object).collect(),
+                    |objects| objects.iter().map(to_proto_object_info).collect(),
+                ),
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
                     transfer_id.clone(),
                     transport_mode,
@@ -198,6 +322,7 @@ impl HostedGrpcClient {
                 allow_partial_fetch: true,
                 thread_metadata: thread_metadata
                     .map(|metadata| to_proto_thread_metadata(&metadata)),
+                local_revision_address,
                 client_operation_id: String::new(),
             })),
         };
@@ -225,11 +350,25 @@ impl HostedGrpcClient {
                 ));
             }
         };
+        if let Some(git_lane) = git_lane.as_mut() {
+            apply_git_ref_expectation(&mut git_lane.ref_update, &ready.remote_revision_address)?;
+        }
 
-        let object_index = objects
-            .into_iter()
-            .map(|info| (descriptor_id_from_info(&info), info))
-            .collect::<HashMap<_, _>>();
+        let object_index = match full_objects {
+            Some(objects) => objects
+                .into_iter()
+                .map(|info| (descriptor_id_from_info(&info), info))
+                .collect::<HashMap<_, _>>(),
+            None => object_plan
+                .into_iter()
+                .map(|object| {
+                    (
+                        descriptor_id_from_plan(&object),
+                        object_info_from_plan(&object),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        };
 
         let ready_transport_mode = ready
             .transfer
@@ -258,23 +397,29 @@ impl HostedGrpcClient {
             .partition(|info| is_out_of_pack_transfer_object_type(info.obj_type));
 
         if !wanted_packable.is_empty() {
-            let bundle = wire::build_native_pack(repo.store(), &wanted_packable)?;
-            for message in encode_native_pack_messages(
-                &bundle,
+            send_native_pack_streaming_messages(
+                &tx,
+                repo,
+                &wanted_packable,
                 &transfer_id,
                 self.transport.chunk_size.max(1),
                 &self.transport,
                 ready_transport_mode,
-            )? {
-                tx.send(message).await.map_err(|_| {
-                    ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
-                })?;
-            }
+            )
+            .await?;
         }
 
         for info in wanted_sidecars {
             let message = sidecar_push_message(repo, info)?;
             tx.send(message).await.map_err(|_| {
+                ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
+            })?;
+        }
+
+        if let Some(git_lane) = git_lane {
+            send_git_pack_streaming_messages(&tx, &git_lane.pack, self.transport.chunk_size.max(1))
+                .await?;
+            tx.send(git_lane.ref_update).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
         }
@@ -562,9 +707,21 @@ impl HostedGrpcClient {
     ) -> Result<PullExchange, ProtocolError> {
         let exchange_start = Instant::now();
         let mut exclude_states = Vec::new();
-        if let Some(local_thread) = options.local_thread
-            && let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))?
+        if let Some(local_thread) = options.local_thread {
+            if let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))? {
+                exclude_states.push(head);
+            }
+        } else if let Some(head) =
+            locally_complete_pull_head(repo, remote_thread, options.target_state)?
         {
+            // Bare pull (no explicit `--local-thread`): advertise the head we
+            // already hold for the thread we're about to update so the server
+            // can prune to the delta (and fire the zero-delta short-circuit
+            // when we're already at the remote tip). `locally_complete_pull_head`
+            // only returns a head whose full object closure is provably present
+            // locally — advertising a head whose closure we lack would make the
+            // server omit those objects and silently leave us with an
+            // incomplete repo.
             exclude_states.push(head);
         }
         let allow_partial_fetch = options.materialization.allows_partial_fetch();
@@ -602,6 +759,10 @@ impl HostedGrpcClient {
                 partial_fetch_status: partial_fetch_status_for_repo(repo),
                 allow_partial_fetch,
                 fresh_full_pull,
+                target_revision_address: options
+                    .target_state
+                    .map(native_revision_address)
+                    .unwrap_or_default(),
                 client_operation_id: String::new(),
             })),
         };
@@ -635,6 +796,7 @@ impl HostedGrpcClient {
         };
         let remote_state = ChangeId::parse(&ready.remote_state)
             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+        let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
             wants,
             wanted_types,
@@ -666,7 +828,15 @@ impl HostedGrpcClient {
         drop(tx);
 
         let receive_start = Instant::now();
+        let use_pack_spool = advertised_object_count > PULL_PACK_SPOOL_OBJECT_THRESHOLD;
         let mut pack_state = wire::PackChunkState::default();
+        let mut pack_spool = if use_pack_spool {
+            Some(wire::PackChunkSpool::new_in(repo.heddle_dir())?)
+        } else {
+            None
+        };
+        let mut git_lane_repo = None;
+        let mut git_pack_state = GitPackPullInstallState::default();
         let mut received = 0usize;
         while let Some(message) = response.message().await.map_err(status_to_protocol_error)? {
             match message.body {
@@ -688,15 +858,26 @@ impl HostedGrpcClient {
                         ));
                     }
                     let decode_start = Instant::now();
-                    wire::receive_pack_chunk(
-                        &mut pack_state,
-                        stream_kind == PackStreamKind::Index,
-                        transfer.resume_offset,
-                        transfer.chunk_index,
-                        transfer.is_complete,
-                        &chunk.data,
-                        chunk.is_final_chunk,
-                    )?;
+                    if let Some(pack_spool) = pack_spool.as_mut() {
+                        pack_spool.receive_chunk(
+                            stream_kind == PackStreamKind::Index,
+                            transfer.resume_offset,
+                            transfer.chunk_index,
+                            transfer.is_complete,
+                            &chunk.data,
+                            chunk.is_final_chunk,
+                        )?;
+                    } else {
+                        wire::receive_pack_chunk(
+                            &mut pack_state,
+                            stream_kind == PackStreamKind::Index,
+                            transfer.resume_offset,
+                            transfer.chunk_index,
+                            transfer.is_complete,
+                            &chunk.data,
+                            chunk.is_final_chunk,
+                        )?;
+                    }
                     let decode_elapsed = decode_start.elapsed();
                     profile.pack_decode += decode_elapsed;
                     profile.pack_decode_apply += decode_elapsed;
@@ -759,8 +940,23 @@ impl HostedGrpcClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
+                Some(pull_message::Body::GitLane(transfer)) => {
+                    let decode_start = Instant::now();
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(git_lane_transfer_size(&transfer));
+                    accept_git_lane_pull_transfer(
+                        repo,
+                        &mut git_lane_repo,
+                        &mut git_pack_state,
+                        transfer,
+                    )?;
+                    let decode_elapsed = decode_start.elapsed();
+                    profile.store_receive_object += decode_elapsed;
+                }
                 Some(pull_message::Body::Complete(complete)) => {
                     profile.receive_and_apply = receive_start.elapsed();
+                    git_pack_state.ensure_idle()?;
                     let final_state = if complete.new_state.is_empty() {
                         None
                     } else {
@@ -772,17 +968,28 @@ impl HostedGrpcClient {
 
                     if complete.success {
                         if native_pack_required {
-                            if !pack_state.is_complete() {
-                                return Err(ProtocolError::InvalidState(
-                                    "pull completed before native pack stream finished".to_string(),
-                                ));
-                            }
                             let store_start = Instant::now();
-                            let installed_ids = wire::install_received_pack(
-                                repo.store(),
-                                &pack_state.pack_data,
-                                &pack_state.index_data,
-                            )?;
+                            let installed_ids = if let Some(pack_spool) = pack_spool.as_mut() {
+                                if !pack_spool.is_complete() {
+                                    return Err(ProtocolError::InvalidState(
+                                        "pull completed before native pack stream finished"
+                                            .to_string(),
+                                    ));
+                                }
+                                pack_spool.install_into(repo.store())?
+                            } else {
+                                if !pack_state.is_complete() {
+                                    return Err(ProtocolError::InvalidState(
+                                        "pull completed before native pack stream finished"
+                                            .to_string(),
+                                    ));
+                                }
+                                wire::install_received_pack(
+                                    repo.store(),
+                                    &pack_state.pack_data,
+                                    &pack_state.index_data,
+                                )?
+                            };
                             profile.store_receive_object += store_start.elapsed();
                             received = installed_ids.len();
                             for id in installed_ids {
@@ -954,7 +1161,7 @@ fn redaction_push_message(
     Ok(PushMessage {
         body: Some(push_message::Body::Redaction(RedactionTransfer {
             blob_hash: hex,
-            redactions_blob: bytes,
+            redactions_blob: bytes.into(),
         })),
     })
 }
@@ -973,6 +1180,31 @@ fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedT
             .flatten()
             .copied()
             .any(wire::is_native_packable_object_type)
+}
+
+fn object_info_from_plan(object: &PlannedObject) -> ObjectInfo {
+    ObjectInfo {
+        id: object.id.clone(),
+        obj_type: object.obj_type,
+        size: 0,
+        delta_base: None,
+    }
+}
+
+fn to_proto_planned_object(object: &PlannedObject) -> ObjectDescriptor {
+    object_descriptor_with_status(
+        &object_info_from_plan(object),
+        ObjectAvailabilityStatus::Present,
+        "",
+    )
+}
+
+fn descriptor_id_from_plan(object: &PlannedObject) -> (String, String) {
+    let id = match &object.id {
+        wire::ObjectId::Hash(hash) => hash.to_hex(),
+        wire::ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+    };
+    (id, object_type_name(object.obj_type).to_string())
 }
 
 fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj_type: ObjectType) {
@@ -1032,7 +1264,7 @@ fn state_visibility_push_message(
         body: Some(push_message::Body::StateVisibility(
             StateVisibilityTransfer {
                 state_id,
-                state_visibility_blob: bytes,
+                state_visibility_blob: bytes.into(),
             },
         )),
     })
@@ -1105,6 +1337,59 @@ fn supports_compact_full_pull(
         return Ok(false);
     }
     repo_looks_fresh(repo)
+}
+
+/// For a bare `pull` (no explicit `--local-thread`), determine which locally
+/// held head — if any — is safe to advertise to the server as an
+/// `exclude_states` entry so the server prunes its closure to the delta.
+///
+/// Advertising state S asserts "I already hold S's FULL object closure
+/// locally." If we advertise a head whose closure we do NOT fully have, the
+/// server omits those objects and we silently end up with an incomplete repo.
+/// The server trusts this assertion blindly, so the entire correctness burden
+/// is here. We therefore advertise a head ONLY when:
+///
+/// 1. A target-state override is not in play (the override drives the want
+///    plan directly; advertising the thread head would be unrelated).
+/// 2. The local repo holds no recorded missing blobs (a partial/lazy clone
+///    can hold a state's metadata while its blobs were never fetched — never
+///    advertise such a head).
+/// 3. The thread we're about to update (`remote_thread`) resolves to a local
+///    head whose ENTIRE object closure is present locally — proven by walking
+///    it with `enumerate_state_closure`, which errors `ObjectNotFound` on the
+///    first absent state/tree/blob.
+///
+/// When any check fails we return `None` and the caller falls back to the
+/// (correct, just slower) empty-exclude full pull. Correctness > speed.
+fn locally_complete_pull_head(
+    repo: &Repository,
+    remote_thread: &str,
+    target_state: Option<ChangeId>,
+) -> Result<Option<ChangeId>, ProtocolError> {
+    // A target-state override pulls a specific state, not the thread tip;
+    // advertising the thread head here would not match what's being fetched.
+    if target_state.is_some() {
+        return Ok(None);
+    }
+    // A repo carrying known-missing blobs is partial/lazy: it may hold a
+    // state's metadata while lacking its blob content. Never advertise.
+    if !repo.missing_blobs()?.is_empty() {
+        return Ok(None);
+    }
+    let Some(head) = repo.refs().get_thread(&ThreadName::from(remote_thread))? else {
+        // Fresh local repo (no local head for this thread) — nothing to
+        // advertise; the server sends the full closure as before.
+        return Ok(None);
+    };
+    // Prove the head's closure is fully present locally. `enumerate_state_closure`
+    // loads every state, tree, and blob in the closure and errors `ObjectNotFound`
+    // on the first absent object. A clean `Ok` is the completeness guarantee that
+    // makes advertising this head safe.
+    match wire::enumerate_state_closure(repo.store(), head) {
+        Ok(_) => Ok(Some(head)),
+        Err(ProtocolError::ObjectNotFound(_)) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 fn should_request_full_closure(
@@ -1279,6 +1564,11 @@ fn mark_missing_blobs_for_state(
     if let Some(context_root) = state.context.as_ref() {
         missing.extend(collect_missing_blobs(repo, context_root)?);
     }
+    if let Some(discussions_blob) = state.discussions.as_ref()
+        && !repo.store().has_blob(discussions_blob)?
+    {
+        missing.push(*discussions_blob);
+    }
     missing
         .into_iter()
         .try_for_each(|hash| repo.record_missing_blob(hash).map_err(ProtocolError::from))
@@ -1295,6 +1585,9 @@ fn clear_missing_blobs_for_state(
     let mut missing = collect_missing_blobs(repo, &state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
         missing.extend(collect_missing_blobs(repo, context_root)?);
+    }
+    if let Some(discussions_blob) = state.discussions.as_ref() {
+        missing.push(*discussions_blob);
     }
     missing
         .into_iter()
@@ -1375,64 +1668,935 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
     )
 }
 
-fn encode_native_pack_messages(
-    bundle: &wire::NativePackBundle,
+fn native_revision_address(change_id: ChangeId) -> String {
+    RevisionAddress::heddle(change_id).to_string()
+}
+
+fn git_revision_address(commit_oid: &GitObjectId) -> String {
+    RevisionAddress::git_commit(commit_oid.to_hex()).to_string()
+}
+
+fn build_git_lane_push_plan(
+    repo: &Repository,
+    local_state: ChangeId,
+    target_thread: &str,
+    chunk_size: usize,
+) -> Result<GitLanePushPlan, ProtocolError> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Err(ProtocolError::InvalidState(
+            "Git lane pushes require a git-overlay repository".to_string(),
+        ));
+    }
+    let checkpoint = repo
+        .latest_git_checkpoint_for_change(&local_state)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "state {} has no Git checkpoint; run `heddle checkpoint` before pushing this git-overlay spool",
+                local_state.short()
+            ))
+        })?;
+    let git_repo = repo
+        .git_overlay_sley_repository()
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("git-overlay repository has no Git store".to_string())
+        })?;
+    let commit_oid = GitObjectId::from_hex(git_repo.object_format(), &checkpoint.git_commit)
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!(
+                "checkpoint {} has invalid Git commit oid: {err}",
+                checkpoint.git_commit
+            ))
+        })?;
+    git_repo.read_commit(&commit_oid).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} is not a readable Git commit: {err}",
+            checkpoint.git_commit
+        ))
+    })?;
+
+    let pack = build_git_lane_pack_plan(&git_repo, commit_oid, chunk_size)?;
+    let ref_update = git_ref_update_message(local_state, target_thread, commit_oid, &checkpoint)?;
+
+    Ok(GitLanePushPlan {
+        local_revision_address: git_revision_address(&commit_oid),
+        pack,
+        ref_update,
+    })
+}
+
+fn build_git_lane_pack_plan(
+    git_repo: &SleyRepository,
+    root: GitObjectId,
+    chunk_size: usize,
+) -> Result<GitPackPushPlan, ProtocolError> {
+    let objects = git_repo.objects();
+    let mut sink = io::sink();
+    let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
+        objects.as_ref(),
+        git_repo.object_format(),
+        [root],
+        &HashSet::new(),
+        &mut sink,
+    )
+    .map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "plan reachable Git pack stream for {}: {err}",
+            root.to_hex()
+        ))
+    })?
+    .ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} did not produce a reachable Git pack",
+            root.to_hex()
+        ))
+    })?;
+    if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git pack exceeds maximum transfer size of {} bytes",
+            wire::MAX_RECEIVED_GIT_PACK_SIZE
+        )));
+    }
+    let chunk_size = chunk_size.max(1) as u64;
+    let chunk_count = pack.pack_size.div_ceil(chunk_size);
+    if chunk_count > u32::MAX as u64 {
+        return Err(ProtocolError::InvalidState(
+            "Git pack chunk count exceeds u32".to_string(),
+        ));
+    }
+    Ok(GitPackPushPlan {
+        transfer_id: format!("git-pack:{}", root.to_hex()),
+        pack_id: pack.checksum.as_bytes().to_vec(),
+        pack_size: pack.pack_size,
+        root,
+        git_repo: git_repo.clone(),
+    })
+}
+
+async fn send_git_pack_streaming_messages(
+    tx: &mpsc::Sender<PushMessage>,
+    pack: &GitPackPushPlan,
+    chunk_size: usize,
+) -> Result<(), ProtocolError> {
+    let tx = tx.clone();
+    let pack = pack.clone();
+    tokio::task::spawn_blocking(move || stream_git_pack_messages_blocking(tx, pack, chunk_size))
+        .await
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}"))
+        })?
+}
+
+fn stream_git_pack_messages_blocking(
+    tx: mpsc::Sender<PushMessage>,
+    pack: GitPackPushPlan,
+    chunk_size: usize,
+) -> Result<(), ProtocolError> {
+    let objects = pack.git_repo.objects();
+    let mut writer = GitPackPushMessageWriter::new(
+        tx,
+        pack.transfer_id.clone(),
+        pack.pack_id.clone(),
+        pack.pack_size,
+        chunk_size,
+    );
+    let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
+        objects.as_ref(),
+        pack.git_repo.object_format(),
+        [pack.root],
+        &HashSet::new(),
+        &mut writer,
+    )
+    .map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "stream reachable Git pack for {}: {err}",
+            pack.root.to_hex()
+        ))
+    })?
+    .ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "checkpoint {} did not produce a reachable Git pack",
+            pack.root.to_hex()
+        ))
+    })?;
+    writer.finish()?;
+    if summary.pack_size != pack.pack_size || summary.checksum.as_bytes() != pack.pack_id.as_slice()
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git pack stream changed while sending {}; expected {} bytes/{}, got {} bytes/{}",
+            pack.root.to_hex(),
+            pack.pack_size,
+            hex::encode(&pack.pack_id),
+            summary.pack_size,
+            summary.checksum.to_hex()
+        )));
+    }
+    Ok(())
+}
+
+struct GitPackPushMessageWriter {
+    tx: mpsc::Sender<PushMessage>,
+    transfer_id: String,
+    pack_id: Vec<u8>,
+    pack_size: u64,
+    chunk_size: usize,
+    buffer: Vec<u8>,
+    offset: u64,
+    chunk_index: u32,
+}
+
+impl GitPackPushMessageWriter {
+    fn new(
+        tx: mpsc::Sender<PushMessage>,
+        transfer_id: String,
+        pack_id: Vec<u8>,
+        pack_size: u64,
+        chunk_size: usize,
+    ) -> Self {
+        let chunk_size = chunk_size.max(1);
+        Self {
+            tx,
+            transfer_id,
+            pack_id,
+            pack_size,
+            chunk_size,
+            buffer: Vec::with_capacity(chunk_size),
+            offset: 0,
+            chunk_index: 0,
+        }
+    }
+
+    fn send_buffer(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buffer);
+        let next_offset = self.offset.checked_add(chunk.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Git pack offset overflow")
+        })?;
+        if next_offset > self.pack_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Git pack stream exceeded planned size {}; got at least {}",
+                    self.pack_size, next_offset
+                ),
+            ));
+        }
+        let is_final_chunk = next_offset == self.pack_size;
+        self.tx
+            .blocking_send(git_lane_push_message(git_lane_transfer::Body::Pack(
+                GitPackTransfer {
+                    transfer_id: self.transfer_id.clone(),
+                    offset: self.offset,
+                    chunk_index: self.chunk_index,
+                    is_final_chunk,
+                    pack_size: self.pack_size,
+                    pack_chunk: chunk.into(),
+                    pack_id: self.pack_id.clone().into(),
+                },
+            )))
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "push stream closed unexpectedly")
+            })?;
+        self.offset = next_offset;
+        self.chunk_index = self.chunk_index.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk index overflow")
+        })?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), ProtocolError> {
+        self.send_buffer().map_err(|err| {
+            ProtocolError::InvalidState(format!("send final Git pack chunk: {err}"))
+        })?;
+        if self.offset != self.pack_size {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack stream length mismatch: expected {}, got {}",
+                self.pack_size, self.offset
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Write for GitPackPushMessageWriter {
+    fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
+        let written = buf.len();
+        while !buf.is_empty() {
+            if self.offset == self.pack_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Git pack stream wrote past planned size {}", self.pack_size),
+                ));
+            }
+            let capacity = self
+                .chunk_size
+                .checked_sub(self.buffer.len())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk buffer overflow")
+                })?;
+            let take = capacity.min(buf.len());
+            self.buffer.extend_from_slice(&buf[..take]);
+            buf = &buf[take..];
+            if self.buffer.len() == self.chunk_size {
+                self.send_buffer()?;
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn git_ref_update_message(
+    local_state: ChangeId,
+    target_thread: &str,
+    commit_oid: GitObjectId,
+    checkpoint: &GitCheckpointRecord,
+) -> Result<PushMessage, ProtocolError> {
+    let metadata_json = serde_json::json!({
+        "source": "heddle-checkpoint",
+        "summary": checkpoint.summary,
+        "committed_at": checkpoint.committed_at,
+    })
+    .to_string();
+    Ok(git_lane_push_message(git_lane_transfer::Body::RefUpdate(
+        GitRefUpdateTransfer {
+            name: format!("refs/heads/{target_thread}"),
+            kind: GitRefKind::Branch as i32,
+            target_oid: commit_oid.as_bytes().to_vec().into(),
+            peeled_oid: Vec::new().into(),
+            expected_missing: false,
+            expected_target_oid: Vec::new().into(),
+            checkpoint: Some(GitCheckpointTransfer {
+                heddle_change_id: local_state.as_bytes().to_vec().into(),
+                git_commit_oid: commit_oid.as_bytes().to_vec().into(),
+                thread: target_thread.to_string(),
+                metadata_json,
+            }),
+        },
+    )))
+}
+
+fn apply_git_ref_expectation(
+    message: &mut PushMessage,
+    remote_revision_address: &str,
+) -> Result<(), ProtocolError> {
+    let expectation = parse_git_ref_expectation(remote_revision_address)?;
+    let Some(push_message::Body::GitLane(GitLaneTransfer {
+        body: Some(git_lane_transfer::Body::RefUpdate(update)),
+    })) = message.body.as_mut()
+    else {
+        return Err(ProtocolError::InvalidState(
+            "Git lane push plan missing ref update message".to_string(),
+        ));
+    };
+    match &expectation {
+        GitRefRemoteExpectation::Missing => {
+            update.expected_missing = true;
+            update.expected_target_oid = Vec::new().into();
+        }
+        GitRefRemoteExpectation::Value(oid) => {
+            update.expected_missing = false;
+            update.expected_target_oid = oid.clone().into();
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GitRefRemoteExpectation {
+    Missing,
+    Value(Vec<u8>),
+}
+
+fn parse_git_ref_expectation(
+    remote_revision_address: &str,
+) -> Result<GitRefRemoteExpectation, ProtocolError> {
+    if remote_revision_address.is_empty() || remote_revision_address.starts_with("heddle:") {
+        return Ok(GitRefRemoteExpectation::Missing);
+    }
+    let Some(hex_oid) = remote_revision_address.strip_prefix("git:") else {
+        return Err(ProtocolError::InvalidState(format!(
+            "server returned unsupported remote_revision_address {remote_revision_address:?}"
+        )));
+    };
+    let oid = hex::decode(hex_oid).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "server returned invalid Git remote_revision_address: {err}"
+        ))
+    })?;
+    match oid.len() {
+        20 | 32 => Ok(GitRefRemoteExpectation::Value(oid)),
+        len => Err(ProtocolError::InvalidState(format!(
+            "server returned Git remote_revision_address with {len} bytes; expected SHA-1 or SHA-256"
+        ))),
+    }
+}
+
+fn git_lane_push_message(body: git_lane_transfer::Body) -> PushMessage {
+    PushMessage {
+        body: Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(body),
+        })),
+    }
+}
+
+fn git_lane_transfer_size(transfer: &GitLaneTransfer) -> usize {
+    match transfer.body.as_ref() {
+        Some(git_lane_transfer::Body::Pack(pack)) => pack.pack_chunk.len(),
+        Some(git_lane_transfer::Body::RefUpdate(update)) => update
+            .target_oid
+            .len()
+            .saturating_add(update.peeled_oid.len())
+            .saturating_add(update.expected_target_oid.len())
+            .saturating_add(
+                update
+                    .checkpoint
+                    .as_ref()
+                    .map(git_checkpoint_transfer_size)
+                    .unwrap_or_default(),
+            ),
+        Some(git_lane_transfer::Body::Checkpoint(checkpoint)) => {
+            git_checkpoint_transfer_size(checkpoint)
+        }
+        None => 0,
+    }
+}
+
+fn git_checkpoint_transfer_size(checkpoint: &GitCheckpointTransfer) -> usize {
+    checkpoint
+        .heddle_change_id
+        .len()
+        .saturating_add(checkpoint.git_commit_oid.len())
+        .saturating_add(checkpoint.thread.len())
+        .saturating_add(checkpoint.metadata_json.len())
+}
+
+#[derive(Default)]
+struct GitPackPullInstallState {
+    active: Option<GitPackPullInstall>,
+}
+
+impl GitPackPullInstallState {
+    fn ensure_idle(&self) -> Result<(), ProtocolError> {
+        if self.active.is_none() {
+            Ok(())
+        } else {
+            Err(ProtocolError::InvalidState(
+                "Git pack transfer ended before final chunk".to_string(),
+            ))
+        }
+    }
+
+    fn receive_chunk(
+        &mut self,
+        git_repo: &SleyRepository,
+        pack: GitPackTransfer,
+    ) -> Result<(), ProtocolError> {
+        if pack.transfer_id.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack transfer_id is required".to_string(),
+            ));
+        }
+        if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack exceeds maximum transfer size of {} bytes",
+                wire::MAX_RECEIVED_GIT_PACK_SIZE
+            )));
+        }
+        if pack.pack_chunk.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk must not be empty".to_string(),
+            ));
+        }
+        let pack_id =
+            GitObjectId::from_raw(git_repo.object_format(), &pack.pack_id).map_err(|err| {
+                ProtocolError::InvalidState(format!("GitPackTransfer.pack_id: {err}"))
+            })?;
+        if self.active.is_none() {
+            if pack.offset != 0 {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack offset mismatch: expected 0, got {}",
+                    pack.offset
+                )));
+            }
+            if pack.chunk_index != 0 {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack chunk index mismatch: expected 0, got {}",
+                    pack.chunk_index
+                )));
+            }
+            let writer = git_repo
+                .objects()
+                .begin_raw_pack_install(pack_id, pack.pack_size)
+                .map_err(|err| {
+                    ProtocolError::InvalidState(format!("begin Git pack install: {err}"))
+                })?;
+            self.active = Some(GitPackPullInstall {
+                transfer_id: pack.transfer_id.clone(),
+                pack_id,
+                pack_size: pack.pack_size,
+                next_offset: 0,
+                next_chunk_index: 0,
+                writer,
+            });
+        }
+
+        let active = self.active.as_mut().ok_or_else(|| {
+            ProtocolError::InvalidState("Git pack install not active".to_string())
+        })?;
+        active.receive_chunk(&pack, pack_id)?;
+        if pack.is_final_chunk {
+            let active = self.active.take().ok_or_else(|| {
+                ProtocolError::InvalidState("Git pack install not active".to_string())
+            })?;
+            active.finish()?;
+            git_repo.refresh_objects();
+        }
+        Ok(())
+    }
+}
+
+struct GitPackPullInstall {
+    transfer_id: String,
+    pack_id: GitObjectId,
+    pack_size: u64,
+    next_offset: u64,
+    next_chunk_index: u32,
+    writer: sley::plumbing::sley_odb::RawPackStreamingInstall,
+}
+
+impl GitPackPullInstall {
+    fn receive_chunk(
+        &mut self,
+        pack: &GitPackTransfer,
+        pack_id: GitObjectId,
+    ) -> Result<(), ProtocolError> {
+        if self.transfer_id != pack.transfer_id {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack transfer id changed from {:?} to {:?}",
+                self.transfer_id, pack.transfer_id
+            )));
+        }
+        if self.pack_id != pack_id {
+            return Err(ProtocolError::InvalidState(
+                "Git pack id changed during transfer".to_string(),
+            ));
+        }
+        if self.pack_size != pack.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack size changed during transfer".to_string(),
+            ));
+        }
+        if pack.offset != self.next_offset {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack offset mismatch: expected {}, got {}",
+                self.next_offset, pack.offset
+            )));
+        }
+        if pack.chunk_index != self.next_chunk_index {
+            return Err(ProtocolError::InvalidState(format!(
+                "Git pack chunk index mismatch: expected {}, got {}",
+                self.next_chunk_index, pack.chunk_index
+            )));
+        }
+        let chunk_len = u64::try_from(pack.pack_chunk.len()).map_err(|_| {
+            ProtocolError::InvalidState("Git pack chunk length exceeds u64".to_string())
+        })?;
+        let next_offset = self
+            .next_offset
+            .checked_add(chunk_len)
+            .ok_or_else(|| ProtocolError::InvalidState("Git pack offset overflow".to_string()))?;
+        if next_offset > self.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack chunk exceeds declared pack size".to_string(),
+            ));
+        }
+        self.writer.write_all(&pack.pack_chunk).map_err(|err| {
+            ProtocolError::InvalidState(format!("write streamed Git pack chunk: {err}"))
+        })?;
+        self.next_offset = next_offset;
+        self.next_chunk_index = self.next_chunk_index.checked_add(1).ok_or_else(|| {
+            ProtocolError::InvalidState("Git pack chunk index overflow".to_string())
+        })?;
+        if pack.is_final_chunk {
+            if self.next_offset != self.pack_size {
+                return Err(ProtocolError::InvalidState(format!(
+                    "Git pack final size mismatch: declared {}, received {}",
+                    self.pack_size, self.next_offset
+                )));
+            }
+        } else if self.next_offset == self.pack_size {
+            return Err(ProtocolError::InvalidState(
+                "Git pack reached declared size without final chunk marker".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), ProtocolError> {
+        self.writer
+            .finish()
+            .map_err(|err| ProtocolError::InvalidState(format!("install Git pack: {err}")))?;
+        Ok(())
+    }
+}
+
+fn accept_git_lane_pull_transfer(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    git_pack_state: &mut GitPackPullInstallState,
+    transfer: GitLaneTransfer,
+) -> Result<(), ProtocolError> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Err(ProtocolError::InvalidState(format!(
+            "received git-lane pull transfer for non-GitOverlay repository (capability {:?})",
+            repo.capability()
+        )));
+    }
+    match transfer.body {
+        Some(git_lane_transfer::Body::Pack(pack)) => {
+            accept_git_lane_pack(repo, git_repo, git_pack_state, pack)
+        }
+        Some(git_lane_transfer::Body::RefUpdate(update)) => {
+            accept_git_lane_ref_update(repo, git_repo, update)
+        }
+        Some(git_lane_transfer::Body::Checkpoint(checkpoint)) => {
+            record_git_lane_checkpoint(repo, git_lane_sley_repository(repo, git_repo)?, checkpoint)
+        }
+        None => Err(ProtocolError::InvalidState(
+            "GitLaneTransfer body is required".to_string(),
+        )),
+    }
+}
+
+fn accept_git_lane_pack(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    git_pack_state: &mut GitPackPullInstallState,
+    pack: GitPackTransfer,
+) -> Result<(), ProtocolError> {
+    let git_repo = git_lane_sley_repository(repo, git_repo)?;
+    git_pack_state.receive_chunk(git_repo, pack)?;
+    Ok(())
+}
+
+fn accept_git_lane_ref_update(
+    repo: &Repository,
+    git_repo: &mut Option<SleyRepository>,
+    update: GitRefUpdateTransfer,
+) -> Result<(), ProtocolError> {
+    let git_repo = git_lane_sley_repository(repo, git_repo)?;
+    let target = git_oid_from_bytes(
+        git_repo,
+        "GitRefUpdateTransfer.target_oid",
+        &update.target_oid,
+    )?;
+    git_repo.read_commit(&target).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "Git ref {} target commit {} is not present after pack receive: {err}",
+            update.name,
+            target.to_hex()
+        ))
+    })?;
+    let refs = git_repo.references();
+    let mut tx = refs.transaction();
+    tx.update_to(
+        update.name.clone(),
+        ReferenceTarget::Direct(target),
+        RefPrecondition::Any,
+        None,
+    );
+    tx.commit().map_err(|err| {
+        ProtocolError::InvalidState(format!("update Git ref {}: {err}", update.name))
+    })?;
+    if let Some(checkpoint) = update.checkpoint {
+        record_git_lane_checkpoint(repo, git_repo, checkpoint)?;
+    }
+    Ok(())
+}
+
+fn record_git_lane_checkpoint(
+    repo: &Repository,
+    git_repo: &SleyRepository,
+    checkpoint: GitCheckpointTransfer,
+) -> Result<(), ProtocolError> {
+    let state = ChangeId::try_from_slice(&checkpoint.heddle_change_id)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+    let commit_oid = git_oid_from_bytes(
+        git_repo,
+        "GitCheckpointTransfer.git_commit_oid",
+        &checkpoint.git_commit_oid,
+    )?;
+    let commit_hex = commit_oid.to_hex();
+    if repo
+        .latest_git_checkpoint_for_change(&state)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+        .is_some_and(|record| record.git_commit == commit_hex)
+    {
+        return Ok(());
+    }
+    let summary = serde_json::from_str::<serde_json::Value>(&checkpoint.metadata_json)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "pulled Git checkpoint".to_string());
+    repo.record_git_checkpoint(&state, commit_hex, summary)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+    Ok(())
+}
+
+fn git_lane_sley_repository<'a>(
+    repo: &Repository,
+    git_repo: &'a mut Option<SleyRepository>,
+) -> Result<&'a SleyRepository, ProtocolError> {
+    if git_repo.is_none() {
+        *git_repo = Some(
+            repo.git_overlay_sley_repository()
+                .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState(
+                        "git-overlay repository has no Git store".to_string(),
+                    )
+                })?,
+        );
+    }
+    match git_repo.as_ref() {
+        Some(git_repo) => Ok(git_repo),
+        None => Err(ProtocolError::InvalidState(
+            "git-overlay repository has no Git store".to_string(),
+        )),
+    }
+}
+
+fn git_oid_from_bytes(
+    git_repo: &SleyRepository,
+    field: &str,
+    bytes: &[u8],
+) -> Result<GitObjectId, ProtocolError> {
+    GitObjectId::from_raw(git_repo.object_format(), bytes)
+        .map_err(|err| ProtocolError::InvalidState(format!("{field}: {err}")))
+}
+
+async fn send_native_pack_streaming_messages(
+    tx: &mpsc::Sender<PushMessage>,
+    repo: &Repository,
+    objects: &[ObjectInfo],
     transfer_id: &str,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
-) -> Result<Vec<PushMessage>, ProtocolError> {
-    let mut messages = Vec::new();
-    let chunk_size = chunk_size.max(1);
+) -> Result<(), ProtocolError> {
+    let object_count = u64::try_from(objects.len()).map_err(|_| {
+        ProtocolError::InvalidState("native pack object count exceeds u64".to_string())
+    })?;
+    let mut writer = wire::NativePackStreamingWriter::new_in(repo.heddle_dir(), object_count)?;
+    let mut pack_reader = wire::GrowingPackChunkReader::open(writer.pack_path(), chunk_size)?;
+    let (loaded_tx, mut loaded_rx) = mpsc::channel::<(
+        usize,
+        Result<wire::ObjectData, ProtocolError>,
+    )>(NATIVE_PACK_OBJECT_PREFETCH_LIMIT);
+    let store = repo.store().clone();
+    let object_plan = objects.to_vec();
+    let loader = tokio::task::spawn_blocking(move || {
+        load_native_pack_objects_parallel(store, object_plan, loaded_tx);
+    });
 
-    let pack_total_chunks = wire::chunk_count(bundle.pack_data.len(), chunk_size);
-    for chunk_index in 0..pack_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
-        else {
-            break;
-        };
-        messages.push(PushMessage {
-            body: Some(push_message::Body::Pack(PackChunk {
-                stream_kind: PackStreamKind::Pack as i32,
-                data: bundle.pack_data[start..start + len].to_vec(),
-                transfer: Some(transport.transfer_checkpoint_with_mode(
-                    transfer_id,
-                    transport_mode,
-                    chunk_index as u32,
-                    start as u64,
-                    chunk_index + 1 == pack_total_chunks,
-                )),
-                chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == pack_total_chunks,
-            })),
-        });
-    }
+    let mut next_index = 0usize;
+    let mut pending = BTreeMap::new();
+    while next_index < objects.len() {
+        let (index, object) = loaded_rx.recv().await.ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "native pack object loader stopped before sending all objects".to_string(),
+            )
+        })?;
+        pending.insert(index, object);
 
-    let index_total_chunks = wire::chunk_count(bundle.index_data.len(), chunk_size);
-    for chunk_index in 0..index_total_chunks.max(1) {
-        let Some((start, len)) =
-            wire::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
-        else {
-            break;
-        };
-        messages.push(PushMessage {
-            body: Some(push_message::Body::Pack(PackChunk {
-                stream_kind: PackStreamKind::Index as i32,
-                data: bundle.index_data[start..start + len].to_vec(),
-                transfer: Some(transport.transfer_checkpoint_with_mode(
+        while let Some(object) = pending.remove(&next_index) {
+            let object = object?;
+            let should_drain = object.data.len() >= chunk_size
+                || (next_index + 1).is_multiple_of(NATIVE_PACK_DRAIN_OBJECT_INTERVAL);
+            writer.add_object_data(object)?;
+            if should_drain {
+                writer.flush_pack()?;
+                drain_growing_native_pack_stream(
+                    tx,
+                    &mut pack_reader,
+                    false,
+                    PackStreamKind::Pack,
                     transfer_id,
+                    transport,
                     transport_mode,
-                    chunk_index as u32,
-                    start as u64,
-                    chunk_index + 1 == index_total_chunks,
-                )),
-                chunk_length: len as u32,
-                is_final_chunk: chunk_index + 1 == index_total_chunks,
-            })),
-        });
+                )
+                .await?;
+            }
+            next_index += 1;
+        }
     }
-    Ok(messages)
+    loader.await.map_err(|err| {
+        ProtocolError::InvalidState(format!("native pack object loader task failed: {err}"))
+    })?;
+
+    let bundle = writer.finish()?;
+    drain_growing_native_pack_stream(
+        tx,
+        &mut pack_reader,
+        true,
+        PackStreamKind::Pack,
+        transfer_id,
+        transport,
+        transport_mode,
+    )
+    .await?;
+    send_native_pack_file_stream(
+        tx,
+        &bundle.index_path,
+        PackStreamKind::Index,
+        transfer_id,
+        chunk_size,
+        transport,
+        transport_mode,
+    )
+    .await
+}
+
+fn load_native_pack_objects_parallel(
+    store: AnyStore,
+    objects: Vec<ObjectInfo>,
+    tx: mpsc::Sender<(usize, Result<wire::ObjectData, ProtocolError>)>,
+) {
+    if objects.is_empty() {
+        return;
+    }
+    let worker_count = native_pack_object_load_worker_count(objects.len());
+    let objects = Arc::new(objects);
+    let next_index = Arc::new(AtomicUsize::new(0));
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let store = store.clone();
+            let objects = Arc::clone(&objects);
+            let next_index = Arc::clone(&next_index);
+            let tx = tx.clone();
+            scope.spawn(move || {
+                loop {
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    let Some(info) = objects.get(index) else {
+                        break;
+                    };
+                    let object = wire::load_object_data(&store, &info.id, info.obj_type);
+                    if tx.blocking_send((index, object)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn native_pack_object_load_worker_count(object_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    object_count
+        .min(available)
+        .clamp(1, NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT)
+}
+
+async fn drain_growing_native_pack_stream(
+    tx: &mpsc::Sender<PushMessage>,
+    reader: &mut wire::GrowingPackChunkReader,
+    final_stream: bool,
+    stream_kind: PackStreamKind,
+    transfer_id: &str,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+) -> Result<(), ProtocolError> {
+    while let Some((offset, chunk_index, data, is_final_chunk)) =
+        reader.next_available_chunk(final_stream)?
+    {
+        send_pack_chunk(
+            tx,
+            stream_kind,
+            data,
+            transfer_id,
+            transport,
+            transport_mode,
+            chunk_index,
+            offset,
+            is_final_chunk,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn send_native_pack_file_stream(
+    tx: &mpsc::Sender<PushMessage>,
+    path: &std::path::Path,
+    stream_kind: PackStreamKind,
+    transfer_id: &str,
+    chunk_size: usize,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+) -> Result<(), ProtocolError> {
+    let mut reader = wire::PackFileChunkReader::open(path, chunk_size)?;
+    while let Some((offset, chunk_index, data, is_final_chunk)) = reader.next_chunk()? {
+        send_pack_chunk(
+            tx,
+            stream_kind,
+            data,
+            transfer_id,
+            transport,
+            transport_mode,
+            chunk_index,
+            offset,
+            is_final_chunk,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_pack_chunk(
+    tx: &mpsc::Sender<PushMessage>,
+    stream_kind: PackStreamKind,
+    data: Vec<u8>,
+    transfer_id: &str,
+    transport: &super::helpers::HostedTransportPolicy,
+    transport_mode: TransportMode,
+    chunk_index: u32,
+    offset: u64,
+    is_final_chunk: bool,
+) -> Result<(), ProtocolError> {
+    let chunk_length = data.len().min(u32::MAX as usize) as u32;
+    tx.send(PushMessage {
+        body: Some(push_message::Body::Pack(PackChunk {
+            stream_kind: stream_kind as i32,
+            data: data.into(),
+            transfer: Some(transport.transfer_checkpoint_with_mode(
+                transfer_id,
+                transport_mode,
+                chunk_index,
+                offset,
+                is_final_chunk,
+            )),
+            chunk_length,
+            is_final_chunk,
+        })),
+    })
+    .await
+    .map_err(|_| ProtocolError::InvalidState("push stream closed unexpectedly".to_string()))
 }
 
 fn preferred_transport_mode(
@@ -1460,15 +2624,25 @@ mod tests {
         },
         store::ObjectStore,
     };
-    use wire::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
     use tonic::{Response, Status, transport::Server};
+    use wire::{ObjectId, ObjectInfo};
 
     use super::*;
+    use crate::grpc_hosted::helpers::{descriptor_id_from_info, to_proto_object_info};
 
     fn temp_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().expect("tempdir");
         let repo = Repository::init_default(dir.path()).expect("init repo");
+        (dir, repo)
+    }
+
+    /// An unseeded repo with no thread heads — the shape `heddle clone`
+    /// creates locally before its first pull (`Repository::init`, not
+    /// `init_default`).
+    fn temp_repo_unseeded() -> (TempDir, Repository) {
+        let dir = TempDir::new().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init repo");
         (dir, repo)
     }
 
@@ -1517,6 +2691,252 @@ mod tests {
                 "keying path must stay byte-identical to the throwaway-encode path",
             );
         }
+    }
+
+    #[test]
+    fn git_lane_messages_pack_reachable_commit_graph_and_attach_checkpoint() {
+        let dir = TempDir::new().expect("tempdir");
+        let git = sley::Repository::init(dir.path()).expect("init git");
+        let blob_oid = git.write_blob(b"hello\n").expect("write blob");
+        let tree = sley::TreeObject {
+            entries: vec![sley::plumbing::sley_object::TreeEntry {
+                mode: 0o100644,
+                name: sley::BString::from(b"hello.txt"),
+                oid: blob_oid,
+            }],
+        };
+        let tree_oid = git
+            .write_raw_object(sley::GitObjectType::Tree, tree.write())
+            .expect("write tree");
+        let commit = sley::CommitObject {
+            tree: tree_oid,
+            parents: Vec::new(),
+            author: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            committer: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            encoding: None,
+            message: b"checkpoint\n".to_vec(),
+        };
+        let commit_oid = git
+            .write_raw_object(sley::GitObjectType::Commit, commit.write())
+            .expect("write commit");
+
+        let pack = build_git_lane_pack_plan(&git, commit_oid, 64 * 1024)
+            .expect("build git lane pack plan");
+        assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
+        let (tx, mut rx) = mpsc::channel(8);
+        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024)
+            .expect("stream git lane pack");
+        let mut pack_bytes = Vec::new();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.blocking_recv() {
+            let Some(push_message::Body::GitLane(GitLaneTransfer {
+                body: Some(git_lane_transfer::Body::Pack(pack)),
+            })) = chunk.body
+            else {
+                panic!("expected git pack chunk");
+            };
+            pack_bytes.extend_from_slice(&pack.pack_chunk);
+            chunks.push(pack);
+        }
+        assert!(!chunks.is_empty());
+        assert!(chunks.last().expect("pack chunk").is_final_chunk);
+        assert_eq!(pack_bytes.len() as u64, pack.pack_size);
+        let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
+            .expect("generated pack should index");
+        assert_eq!(indexed.pack_id.as_bytes(), pack.pack_id.as_slice());
+        assert_eq!(indexed.objects.len(), 3);
+
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let ref_message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+        let Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::RefUpdate(update)),
+        })) = ref_message.body
+        else {
+            panic!("expected git ref update message");
+        };
+        assert_eq!(update.name, "refs/heads/main");
+        assert_eq!(update.kind, GitRefKind::Branch as i32);
+        assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
+        let checkpoint = update.checkpoint.expect("checkpoint");
+        assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
+        assert_eq!(checkpoint.git_commit_oid.as_ref(), commit_oid.as_bytes());
+        assert_eq!(checkpoint.thread, "main");
+    }
+
+    #[test]
+    fn git_ref_expectation_marks_missing_when_remote_has_no_git_revision() {
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let commit_oid = GitObjectId::from_hex(
+            sley::ObjectFormat::Sha1,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("oid");
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let mut message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+
+        apply_git_ref_expectation(&mut message, "").expect("missing expectation");
+        let update = git_ref_update_from_message(&message);
+        assert!(update.expected_missing);
+        assert!(update.expected_target_oid.is_empty());
+    }
+
+    #[test]
+    fn git_ref_expectation_uses_remote_git_revision_oid() {
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let commit_oid = GitObjectId::from_hex(
+            sley::ObjectFormat::Sha1,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("oid");
+        let remote_oid = "89abcdef012345670123456789abcdef01234567";
+        let checkpoint = GitCheckpointRecord {
+            change_id: state.to_string_full(),
+            git_commit: commit_oid.to_hex(),
+            summary: "checkpoint".to_string(),
+            committed_at: "2026-06-25T00:00:00Z".to_string(),
+        };
+        let mut message =
+            git_ref_update_message(state, "main", commit_oid, &checkpoint).expect("ref update");
+
+        apply_git_ref_expectation(&mut message, &format!("git:{remote_oid}"))
+            .expect("git expectation");
+        let update = git_ref_update_from_message(&message);
+        assert!(!update.expected_missing);
+        assert_eq!(hex::encode(update.expected_target_oid.as_ref()), remote_oid);
+    }
+
+    #[test]
+    fn git_pack_stream_writer_emits_ordered_chunks() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut writer =
+            GitPackPushMessageWriter::new(tx, "git-pack:test".to_string(), vec![0x42; 20], 10, 4);
+        writer.write_all(b"abcdefghij").expect("write pack bytes");
+        writer.finish().expect("finish pack stream");
+
+        let mut chunks = Vec::new();
+        while let Some(message) = rx.blocking_recv() {
+            let Some(push_message::Body::GitLane(GitLaneTransfer {
+                body: Some(git_lane_transfer::Body::Pack(pack)),
+            })) = message.body
+            else {
+                panic!("expected git pack chunk");
+            };
+            chunks.push(pack);
+        }
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert!(!chunks[0].is_final_chunk);
+        assert_eq!(chunks[0].pack_chunk.as_ref(), b"abcd");
+        assert_eq!(chunks[1].offset, 4);
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert!(!chunks[1].is_final_chunk);
+        assert_eq!(chunks[1].pack_chunk.as_ref(), b"efgh");
+        assert_eq!(chunks[2].offset, 8);
+        assert_eq!(chunks[2].chunk_index, 2);
+        assert!(chunks[2].is_final_chunk);
+        assert_eq!(chunks[2].pack_chunk.as_ref(), b"ij");
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.pack_id.as_ref() == &[0x42; 20][..])
+        );
+    }
+
+    #[test]
+    fn git_pack_pull_install_state_streams_pack_into_sley_store() {
+        let source_dir = TempDir::new().expect("source tempdir");
+        let source = sley::Repository::init(source_dir.path()).expect("init source git");
+        let blob_oid = source.write_blob(b"streamed pull pack\n").expect("blob");
+        let pack = sley::plumbing::sley_odb::build_reachable_pack(
+            source.objects().as_ref(),
+            source.object_format(),
+            [blob_oid],
+            &HashSet::new(),
+        )
+        .expect("build pack")
+        .expect("reachable pack");
+
+        let dest_dir = TempDir::new().expect("dest tempdir");
+        let dest = sley::Repository::init(dest_dir.path()).expect("init dest git");
+        let mut state = GitPackPullInstallState::default();
+        let chunk_size = 7usize;
+        let mut offset = 0u64;
+        for (chunk_index, chunk) in pack.pack.chunks(chunk_size).enumerate() {
+            let next_offset = offset + chunk.len() as u64;
+            state
+                .receive_chunk(
+                    &dest,
+                    GitPackTransfer {
+                        transfer_id: "git-pack:test".to_string(),
+                        offset,
+                        chunk_index: chunk_index as u32,
+                        is_final_chunk: next_offset == pack.pack.len() as u64,
+                        pack_size: pack.pack.len() as u64,
+                        pack_chunk: chunk.to_vec().into(),
+                        pack_id: pack.checksum.as_bytes().to_vec().into(),
+                    },
+                )
+                .expect("receive chunk");
+            offset = next_offset;
+        }
+
+        state.ensure_idle().expect("stream should finish");
+        let object = dest.read_object(&blob_oid).expect("read installed object");
+        assert_eq!(object.body.as_slice(), b"streamed pull pack\n");
+    }
+
+    #[test]
+    fn accept_git_lane_pull_transfer_errors_for_non_overlay_repo() {
+        let (_dir, repo) = temp_repo();
+        assert_ne!(
+            repo.capability(),
+            RepositoryCapability::GitOverlay,
+            "init_default repo must be non-GitOverlay for this guard test",
+        );
+        let mut git_repo = None;
+        let mut state = GitPackPullInstallState::default();
+        let transfer = GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::Pack(GitPackTransfer {
+                transfer_id: "git-pack:test".to_string(),
+                offset: 0,
+                chunk_index: 0,
+                is_final_chunk: true,
+                pack_size: 0,
+                pack_chunk: Vec::new().into(),
+                pack_id: Vec::new().into(),
+            })),
+        };
+        let err = accept_git_lane_pull_transfer(&repo, &mut git_repo, &mut state, transfer)
+            .expect_err("git-lane pull to a non-GitOverlay repo must fail loud, not silently drop");
+        assert!(
+            matches!(err, ProtocolError::InvalidState(_)),
+            "expected InvalidState protocol error, got {err:?}",
+        );
+    }
+
+    fn git_ref_update_from_message(message: &PushMessage) -> &GitRefUpdateTransfer {
+        let Some(push_message::Body::GitLane(GitLaneTransfer {
+            body: Some(git_lane_transfer::Body::RefUpdate(update)),
+        })) = message.body.as_ref()
+        else {
+            panic!("expected git ref update message");
+        };
+        update
     }
 
     fn loose_tree_path(repo: &Repository, hash: &ContentHash) -> std::path::PathBuf {
@@ -1711,6 +3131,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 1,
+                        remote_revision_address: native_revision_address(state),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -1737,7 +3158,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
@@ -1758,6 +3179,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
+                        new_revision_address: native_revision_address(state),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -2089,6 +3511,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 2,
+                        remote_revision_address: native_revision_address(state),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -2130,7 +3553,7 @@ mod tests {
                     body: Some(pull_message::Body::StateVisibility(
                         StateVisibilityTransfer {
                             state_id: state.to_string_full(),
-                            state_visibility_blob,
+                            state_visibility_blob: state_visibility_blob.into(),
                         },
                     )),
                 };
@@ -2151,6 +3574,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
+                        new_revision_address: native_revision_address(state),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -2180,7 +3604,7 @@ mod tests {
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Pack as i32,
-                    data: bundle.pack_data[start..start + len].to_vec(),
+                    data: bundle.pack_data[start..start + len].to_vec().into(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -2205,7 +3629,7 @@ mod tests {
             messages.push(PullMessage {
                 body: Some(pull_message::Body::Pack(PackChunk {
                     stream_kind: PackStreamKind::Index as i32,
-                    data: bundle.index_data[start..start + len].to_vec(),
+                    data: bundle.index_data[start..start + len].to_vec().into(),
                     transfer: Some(TransferCheckpoint {
                         transfer_id: transfer_id.to_string(),
                         transport_mode: TransportMode::NativePack as i32,
@@ -2479,5 +3903,561 @@ mod tests {
         };
         assert_eq!(transfer.state_id, state.to_string_full());
         assert_eq!(transfer.state_visibility_blob, expected_bytes);
+    }
+
+    // ---- bare-pull head advertisement (delta sync) ----
+
+    fn sample_attribution() -> Attribution {
+        Attribution::human(Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        })
+    }
+
+    /// Put a state whose tree holds one blob into `repo`'s store. Returns the
+    /// state id. With `parents`, builds a child on top of an existing state.
+    fn put_state_with_blob(
+        repo: &Repository,
+        contents: &str,
+        parents: Vec<ChangeId>,
+    ) -> ChangeId {
+        let blob = Blob::from(contents);
+        let blob_hash = repo.store().put_blob(&blob).expect("put blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file(format!("{contents}.txt"), blob_hash, false).expect("tree entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let state = State::new_snapshot(tree_hash, parents, sample_attribution());
+        let state_id = state.change_id;
+        repo.store().put_state(&state).expect("put state");
+        state_id
+    }
+
+    #[test]
+    fn locally_complete_pull_head_advertises_fully_present_thread_head() {
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised,
+            Some(head),
+            "a thread head whose full closure is present locally must be advertised"
+        );
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_unknown_thread() {
+        // Unseeded local repo: the bare-pull thread has no local head, so
+        // there is nothing to advertise and the pull falls back to a full
+        // closure.
+        let (_dir, repo) = temp_repo_unseeded();
+        let advertised =
+            locally_complete_pull_head(&repo, "nonexistent", None).expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_when_target_state_override_in_play() {
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        // A fetch_state-style override drives the want plan directly; the
+        // thread head is unrelated to what's being fetched.
+        let advertised = locally_complete_pull_head(&repo, "main", Some(head))
+            .expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_repo_with_missing_blobs() {
+        // A partial/lazy clone records known-missing blobs: it may hold a
+        // state's metadata while lacking blob content. Advertising such a
+        // head would make the server omit objects and silently leave us with
+        // an incomplete repo — so the completeness gate must refuse.
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+        repo.record_missing_blob(ContentHash::from_bytes([88u8; 32]))
+            .expect("record missing blob");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "a repo carrying missing blobs must never advertise a head"
+        );
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_head_with_incomplete_closure() {
+        // The thread head's *state* is present, but a parent state in its
+        // closure is absent. Walking the closure surfaces `ObjectNotFound`,
+        // so the head must NOT be advertised. This is the dangerous case the
+        // cardinal correctness constraint guards against.
+        let (_dir, repo) = temp_repo();
+        let absent_parent = ChangeId::generate();
+        let blob = Blob::from("orphan");
+        let blob_hash = repo.store().put_blob(&blob).expect("put blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("orphan.txt", blob_hash, false).expect("tree entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        // Child references a parent state that is NOT in the store.
+        let child = State::new_snapshot(tree_hash, vec![absent_parent], sample_attribution());
+        let child_id = child.change_id;
+        repo.store().put_state(&child).expect("put child state");
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &child_id)
+            .expect("set thread");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "a head whose closure has an absent parent state must not be advertised"
+        );
+    }
+
+    /// Mock pull service that mimics the weft server's `exclude_states`
+    /// contract: it captures the inbound `exclude_states`, fires the
+    /// zero-delta short-circuit when the remote tip is advertised, and
+    /// otherwise sends only the objects NOT covered by an advertised
+    /// (parent) closure.
+    #[derive(Clone)]
+    struct DeltaAwarePullService {
+        remote_state: ChangeId,
+        /// Object descriptors keyed by the parent state that an advertised
+        /// `exclude_states` entry would cover. If `exclude_states` contains
+        /// `remote_state`, the delta is empty (short-circuit). If it contains
+        /// a known parent, only the child-specific objects are sent. If it
+        /// contains neither, the full closure is sent.
+        full_closure: Vec<ObjectInfo>,
+        delta_objects: Vec<ObjectInfo>,
+        known_parent: ChangeId,
+        full_pack: wire::NativePackBundle,
+        delta_pack: wire::NativePackBundle,
+        captured_exclude: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    }
+
+    #[tonic::async_trait]
+    impl RepoSyncService for DeltaAwarePullService {
+        async fn list_refs(
+            &self,
+            _request: tonic::Request<ListRefsRequest>,
+        ) -> Result<Response<ListRefsResponse>, Status> {
+            Ok(Response::new(ListRefsResponse::default()))
+        }
+
+        async fn update_ref(
+            &self,
+            _request: tonic::Request<UpdateRefRequest>,
+        ) -> Result<Response<UpdateRefResponse>, Status> {
+            Ok(Response::new(UpdateRefResponse::default()))
+        }
+
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+
+        async fn push(
+            &self,
+            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+        ) -> Result<Response<Self::PushStream>, Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
+        }
+
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+
+        async fn pull(
+            &self,
+            request: tonic::Request<tonic::Streaming<PullMessage>>,
+        ) -> Result<Response<Self::PullStream>, Status> {
+            let svc = self.clone();
+            let (tx, rx) = mpsc::channel(16);
+
+            tokio::spawn(async move {
+                let mut inbound = request.into_inner();
+                let exclude = match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Request(req)),
+                    })) => req.exclude_states,
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected pull request, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                *svc.captured_exclude.lock().unwrap() = Some(exclude.clone());
+
+                let remote_full = svc.remote_state.to_string_full();
+                let parent_full = svc.known_parent.to_string_full();
+
+                // Mirror the server contract: subtract advertised closures.
+                let (objects, pack, short_circuit) = if exclude.contains(&remote_full) {
+                    // weft#215 zero-delta short-circuit: client is at the tip.
+                    (Vec::new(), None, true)
+                } else if exclude.contains(&parent_full) {
+                    // Client is behind at `known_parent`; send only the delta.
+                    (svc.delta_objects.clone(), Some(svc.delta_pack.clone()), false)
+                } else {
+                    // No usable advertisement; send the full closure.
+                    (svc.full_closure.clone(), Some(svc.full_pack.clone()), false)
+                };
+
+                let descriptors: Vec<_> = objects
+                    .iter()
+                    .map(|info| {
+                        object_descriptor_with_status(
+                            info,
+                            ObjectAvailabilityStatus::Missing,
+                            "requested by client",
+                        )
+                    })
+                    .collect();
+
+                let ready = PullMessage {
+                    body: Some(pull_message::Body::Ready(PullReady {
+                        remote_state: remote_full.clone(),
+                        objects_to_fetch: descriptors,
+                        transfer: None,
+                        partial_fetch_status: PartialFetchStatus::Disabled as i32,
+                        missing_objects: Vec::new(),
+                        full_closure_available: false,
+                        object_count: objects.len() as u32,
+                        remote_revision_address: native_revision_address(svc.remote_state),
+                    })),
+                };
+                if tx.send(Ok(ready)).await.is_err() {
+                    return;
+                }
+
+                // Expect the client's Want.
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Want(_)),
+                    })) => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected want, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                if let Some(pack) = pack
+                    && !short_circuit
+                {
+                    for message in encode_pull_native_pack_messages(&pack, "delta-aware-test", 64) {
+                        if tx.send(Ok(message)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+
+                let complete = PullMessage {
+                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                        success: true,
+                        new_state: remote_full,
+                        error: String::new(),
+                        transfer: Some(TransferCheckpoint {
+                            transfer_id: "delta-aware-test".to_string(),
+                            transport_mode: TransportMode::NativePack as i32,
+                            resume_offset: 0,
+                            chunk_index: 0,
+                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            is_complete: true,
+                        }),
+                        new_revision_address: native_revision_address(svc.remote_state),
+                    })),
+                };
+                let _ = tx.send(Ok(complete)).await;
+            });
+
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
+        }
+    }
+
+    async fn connect_delta_aware_service(
+        service: DeltaAwarePullService,
+    ) -> Option<(HostedGrpcClient, tokio::task::JoinHandle<()>)> {
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping hosted sync local gRPC test: TCP bind denied: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind test server: {err}"),
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _addr)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(RepoSyncServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve delta-aware test service");
+        });
+        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+            .await
+            .expect("connect client");
+        Some((client, handle))
+    }
+
+    #[tokio::test]
+    async fn warm_bare_pull_advertises_head_and_fires_zero_delta_short_circuit() {
+        // Client is exactly at the remote tip. A bare pull must advertise that
+        // tip as exclude_states; the server then returns an empty delta
+        // (weft#215 short-circuit) and the client transfers nothing.
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "tip", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        let full_closure =
+            wire::enumerate_state_closure(repo.store(), head).expect("enumerate closure");
+        let full_pack =
+            wire::build_native_pack(repo.store(), &full_closure).expect("build full pack");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: head,
+            full_closure,
+            delta_objects: Vec::new(),
+            known_parent: ChangeId::generate(),
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("warm bare pull must not hang")
+        .expect("warm bare pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            advertised,
+            vec![head.to_string_full()],
+            "a bare pull at the tip must advertise that tip in exclude_states"
+        );
+        assert!(exchange.result.success);
+        assert_eq!(
+            exchange.object_count, 0,
+            "the zero-delta short-circuit must transfer no objects, not the full closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn behind_client_bare_pull_receives_exactly_the_missing_delta() {
+        // The dangerous direction: client sits at the PARENT state, remote is
+        // at the CHILD. A bare pull advertises the parent (whose closure the
+        // client fully holds); the server sends only the child-specific
+        // objects, and the client must end up with a COMPLETE repo (no object
+        // it lacked is dropped).
+        // Build parent + child in the SOURCE repo (the server's view).
+        let (_src_dir, src_repo) = temp_repo_unseeded();
+        let parent = put_state_with_blob(&src_repo, "base", vec![]);
+        let child = put_state_with_blob(&src_repo, "feature", vec![parent]);
+        let child_closure =
+            wire::enumerate_state_closure(src_repo.store(), child).expect("child closure");
+
+        // The CLIENT holds exactly the parent closure (the dangerous "behind"
+        // setup): copy the parent's objects into a fresh client store and
+        // track `main` at the parent.
+        let (_dir, repo) = temp_repo_unseeded();
+        let parent_closure =
+            wire::enumerate_state_closure(src_repo.store(), parent).expect("parent closure");
+        let parent_pack =
+            wire::build_native_pack(src_repo.store(), &parent_closure).expect("parent pack");
+        wire::install_received_pack(repo.store(), &parent_pack.pack_data, &parent_pack.index_data)
+            .expect("install parent closure into client");
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &parent)
+            .expect("set thread to parent");
+        // Sanity: the client provably holds the parent's full closure...
+        wire::enumerate_state_closure(repo.store(), parent).expect("client holds parent closure");
+        // ...but NOT the child yet.
+        assert!(
+            repo.store().get_state(&child).expect("probe child").is_none(),
+            "client must start without the child state"
+        );
+        let parent_clone = parent;
+        let full_pack =
+            wire::build_native_pack(src_repo.store(), &child_closure).expect("full pack");
+        // Delta = child closure minus the parent closure (what the server
+        // would send when the parent is advertised).
+        let delta_objects = wire::enumerate_state_closure_with_options(
+            src_repo.store(),
+            child,
+            wire::StateClosureOptions {
+                depth: None,
+                exclude_states: vec![parent_clone],
+            },
+        )
+        .expect("delta closure");
+        assert!(
+            !delta_objects.is_empty() && delta_objects.len() < child_closure.len(),
+            "delta must be a strict, non-empty subset of the full closure"
+        );
+        let delta_pack =
+            wire::build_native_pack(src_repo.store(), &delta_objects).expect("delta pack");
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: child,
+            full_closure: child_closure.clone(),
+            delta_objects: delta_objects.clone(),
+            known_parent: parent_clone,
+            full_pack,
+            delta_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("behind-client pull must not hang")
+        .expect("behind-client pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            advertised,
+            vec![parent.to_string_full()],
+            "a behind client must advertise the parent head it holds"
+        );
+        assert!(exchange.result.success);
+        // The client must now hold the COMPLETE child closure — every object
+        // in the remote's full closure must be present locally, proving the
+        // server-side parent-pruning dropped nothing the client lacked.
+        let reassembled = wire::enumerate_state_closure(repo.store(), child)
+            .expect("the client must hold the complete child closure after a delta pull");
+        assert_eq!(
+            reassembled.len(),
+            child_closure.len(),
+            "delta pull must leave the client with the full child closure, no gaps"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_bare_pull_advertises_nothing_and_gets_full_closure() {
+        // Unseeded local repo (the `heddle clone` shape): no local head for
+        // the thread, so nothing is advertised and the server sends the full
+        // closure (today's behavior).
+        let (_dir, repo) = temp_repo_unseeded();
+        let (_src_dir, src_repo) = temp_repo_unseeded();
+        let remote = put_state_with_blob(&src_repo, "seed", vec![]);
+        let full_closure =
+            wire::enumerate_state_closure(src_repo.store(), remote).expect("closure");
+        let full_pack =
+            wire::build_native_pack(src_repo.store(), &full_closure).expect("full pack");
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: remote,
+            full_closure: full_closure.clone(),
+            delta_objects: Vec::new(),
+            known_parent: ChangeId::generate(),
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("fresh bare pull must not hang")
+        .expect("fresh bare pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert!(
+            advertised.is_empty(),
+            "a fresh repo must advertise no exclude_states"
+        );
+        assert!(exchange.result.success);
+        assert_eq!(
+            exchange.object_count,
+            full_closure.len(),
+            "a fresh pull must receive the full closure, nothing wrongly excluded"
+        );
+        assert!(
+            wire::enumerate_state_closure(repo.store(), remote).is_ok(),
+            "fresh pull must install the complete closure"
+        );
     }
 }

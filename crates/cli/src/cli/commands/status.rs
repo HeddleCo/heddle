@@ -4,6 +4,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
+    path::Path,
     time::Instant,
 };
 
@@ -12,13 +13,17 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use objects::worktree::WorktreeStatus;
 use repo::{
-    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
+    AgentUsageSummary, GitRemoteTrackingStatus, RepoConfig, Repository, RepositoryCapability,
     RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory, ThreadMode,
     ThreadState, WorktreeCompareProfile, describe_thread_advice_with_initial, is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
 use serde::Serialize;
+use sley::{
+    Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
+    StreamControl,
+};
 use tokio::time::{Duration, sleep};
 #[cfg(feature = "client")]
 use tokio_tungstenite::{
@@ -248,9 +253,9 @@ struct PlainGitStatusOutput {
 /// initialized but has no user-visible history yet (the log shows only
 /// the filtered synthetic root) and the worktree is clean — i.e. there
 /// is genuinely nothing to act on yet. The repo is already initialized,
-/// so recommending `heddle init --quickstart` here read as "you
-/// initialized wrong" (heddle#644); point at the first commit instead.
-/// A dirty worktree already has its own advice (`heddle commit`), and
+/// so recommending another init shape here read as "you initialized wrong"
+/// (heddle#644); point at the first save instead.
+/// A dirty worktree already has its own advice, and
 /// Git-overlay repos have their own onboarding (import/adopt), so both
 /// are left alone.
 fn first_save_recommendation(
@@ -337,6 +342,9 @@ pub async fn cmd_status(
     if watch {
         return watch_status(cli, short, watch_iterations, watch_interval_ms).await;
     }
+    if short && cli.verbose == 0 && try_render_fast_short_status(cli)? {
+        return Ok(());
+    }
     if let Some(output) = build_plain_git_status_probe(cli)? {
         render_plain_git_status(cli, &output, short)?;
         return Ok(());
@@ -344,6 +352,245 @@ pub async fn cmd_status(
     let output = build_status_output(cli, short)?;
     render_status(cli, &output, short)?;
     Ok(())
+}
+
+fn try_render_fast_short_status(cli: &Cli) -> Result<bool> {
+    let total_start = Instant::now();
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+
+    let discover_start = Instant::now();
+    let git = match SleyRepository::discover(start) {
+        Ok(git) => git,
+        Err(_) => return Ok(false),
+    };
+    let Some(workdir) = git.workdir() else {
+        return Ok(false);
+    };
+    let discover_ms = discover_start.elapsed().as_millis();
+
+    let config_start = Instant::now();
+    let fast_repo = match fast_short_repo_kind(&workdir)? {
+        FastShortRepoKind::PlainGit => FastShortRepoKind::PlainGit,
+        FastShortRepoKind::GitOverlay { config } => {
+            if should_output_json(cli, Some(&config)) {
+                return Ok(false);
+            }
+            FastShortRepoKind::GitOverlay { config }
+        }
+        FastShortRepoKind::Fallback => return Ok(false),
+    };
+    if matches!(fast_repo, FastShortRepoKind::PlainGit) && should_output_json(cli, None) {
+        return Ok(false);
+    }
+    let config_ms = config_start.elapsed().as_millis();
+
+    let status_start = Instant::now();
+    let changes = fast_sley_changes(&git)?;
+    let status_ms = status_start.elapsed().as_millis();
+
+    let branch_start = Instant::now();
+    let branch = fast_git_branch(&git)?;
+    let subject = branch.as_deref().unwrap_or("detached");
+    let branch_ms = branch_start.elapsed().as_millis();
+
+    let remote_start = Instant::now();
+    let remote_health = match &fast_repo {
+        FastShortRepoKind::PlainGit | FastShortRepoKind::Fallback => None,
+        FastShortRepoKind::GitOverlay { .. } => branch
+            .as_deref()
+            .map(|branch| fast_remote_health(&git, branch))
+            .transpose()?
+            .flatten(),
+    };
+    let remote_ms = remote_start.elapsed().as_millis();
+
+    render_short_changes(&changes);
+    if changes.is_empty() {
+        let health = match fast_repo {
+            FastShortRepoKind::PlainGit => "setup needed",
+            FastShortRepoKind::GitOverlay { .. } | FastShortRepoKind::Fallback => {
+                remote_health.unwrap_or("clean")
+            }
+        };
+        println!("{} {}", style::bold(subject), style::thread_state(health));
+    }
+
+    if profile_enabled() {
+        emit_profile(
+            "status fast short",
+            &[
+                ProfileField::millis("git_discover_ms", discover_ms),
+                ProfileField::millis("config_ms", config_ms),
+                ProfileField::millis("sley_status_ms", status_ms),
+                ProfileField::millis("branch_ms", branch_ms),
+                ProfileField::millis("remote_ms", remote_ms),
+                ProfileField::duration("total_ms", total_start.elapsed()),
+            ],
+        );
+    }
+
+    Ok(true)
+}
+
+enum FastShortRepoKind {
+    PlainGit,
+    GitOverlay { config: Box<RepoConfig> },
+    Fallback,
+}
+
+fn fast_short_repo_kind(workdir: &Path) -> Result<FastShortRepoKind> {
+    let heddle_dir = workdir.join(".heddle");
+    if !heddle_dir.exists() {
+        return Ok(FastShortRepoKind::PlainGit);
+    }
+    if heddle_dir.join("objectstore").is_file() {
+        return Ok(FastShortRepoKind::Fallback);
+    }
+    let config_path = heddle_dir.join("config.toml");
+    if !config_path.is_file() {
+        return Ok(FastShortRepoKind::Fallback);
+    }
+    let config = RepoConfig::load(&config_path)?;
+    Ok(FastShortRepoKind::GitOverlay {
+        config: Box::new(config),
+    })
+}
+
+fn fast_sley_changes(git: &SleyRepository) -> Result<ChangesInfo> {
+    let mut changes = ChangesInfo::default();
+    git.stream_short_status_with_options(
+        ShortStatusOptions {
+            untracked_mode: StatusUntrackedMode::All,
+            ..ShortStatusOptions::default()
+        },
+        |entry| {
+            append_fast_status_row(&mut changes, entry);
+            Ok(StreamControl::Continue)
+        },
+    )?;
+    Ok(changes)
+}
+
+fn append_fast_status_row(changes: &mut ChangesInfo, entry: ShortStatusRow<'_>) {
+    let path = String::from_utf8_lossy(entry.path).into_owned();
+    if path.is_empty() || ignored_git_overlay_status_path(&path) {
+        return;
+    }
+    // Mirror the slow path's classification (Repository::git_overlay_worktree_status)
+    // exactly, branch-for-branch, so the fast short-status output never diverges
+    // from a full `heddle status`. The branch ORDER is load-bearing:
+    //   - the D check precedes the A check, so an `AD` row (staged add, then
+    //     deleted in the worktree) classifies as deleted — matching `git status -s`
+    //     and the slow path — rather than as added.
+    //   - renames (`R`) and copies (`C`) classify as added (a new path appeared),
+    //     not modified.
+    //   - `head_oid.is_none()` (path absent from HEAD) is added even when the
+    //     porcelain columns don't otherwise signal it.
+    if entry.index == b'?' && entry.worktree == b'?' {
+        changes.added.push(path);
+    } else if entry.index == b'D' || entry.worktree == b'D' {
+        changes.deleted.push(path);
+    } else if entry.index == b'A'
+        || entry.index == b'R'
+        || entry.index == b'C'
+        || entry.head_oid.is_none()
+    {
+        changes.added.push(path);
+    } else {
+        changes.modified.push(path);
+    }
+}
+
+fn ignored_git_overlay_status_path(path: &str) -> bool {
+    path == ".heddle" || path.starts_with(".heddle/")
+}
+
+fn fast_git_branch(git: &SleyRepository) -> Result<Option<String>> {
+    Ok(git
+        .head()
+        .ok()
+        .and_then(|head| head.branch_name().map(str::to_string)))
+}
+
+fn fast_remote_health(git: &SleyRepository, branch: &str) -> Result<Option<&'static str>> {
+    let Some(head) = git.head().ok().and_then(|head| head.oid) else {
+        return Ok(None);
+    };
+    if git
+        .find_reference(&format!("refs/heads/{branch}"))?
+        .is_some()
+        && let Some(tracking_ref) = fast_configured_tracking_ref(git, branch)?
+        && let Some(upstream) = fast_rev_parse(git, &tracking_ref)
+    {
+        return fast_remote_health_for_pair(git, head, upstream);
+    }
+
+    let remotes = git.remote_names()?;
+    for remote in &remotes {
+        if remote.trim().is_empty() {
+            continue;
+        }
+        let remote_ref = format!("refs/remotes/{remote}/{branch}");
+        let Some(upstream) = fast_rev_parse(git, &remote_ref) else {
+            continue;
+        };
+        if upstream == head {
+            return Ok(None);
+        }
+        return fast_remote_health_for_pair(git, head, upstream);
+    }
+
+    if remotes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some("ready to push"))
+    }
+}
+
+fn fast_configured_tracking_ref(git: &SleyRepository, branch: &str) -> Result<Option<String>> {
+    let config = git.config_snapshot()?;
+    let Some(remote) = config.get("branch", Some(branch), "remote") else {
+        return Ok(None);
+    };
+    let Some(merge) = config.get("branch", Some(branch), "merge") else {
+        return Ok(None);
+    };
+    if remote == "." {
+        return Ok(Some(merge.to_string()));
+    }
+    let Some(short) = merge.strip_prefix("refs/heads/") else {
+        return Ok(None);
+    };
+    Ok(Some(format!("refs/remotes/{remote}/{short}")))
+}
+
+fn fast_rev_parse(git: &SleyRepository, rev: &str) -> Option<sley::ObjectId> {
+    git.rev_parse(rev).ok()
+}
+
+fn fast_remote_health_for_pair(
+    git: &SleyRepository,
+    head: sley::ObjectId,
+    upstream: sley::ObjectId,
+) -> Result<Option<&'static str>> {
+    if head == upstream {
+        return Ok(None);
+    }
+    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
+    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
+        git.git_dir(),
+        git.object_format(),
+        &db,
+        &head,
+        &upstream,
+    )?;
+    Ok(match (ahead, behind) {
+        (0, 0) => None,
+        (_, 0) => Some("ready to push"),
+        (0, _) => Some("behind upstream"),
+        _ => Some("remote_diverged"),
+    })
 }
 
 pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
@@ -479,7 +726,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let repo_open_ms = repo_open_start.elapsed().as_millis();
     let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
+    let compact_json = as_json && output_is_compact(cli);
     let short_text = short && !as_json;
+    let short_path = short_text || compact_json;
 
     let current_state_start = Instant::now();
     let current_state = repo.current_state()?;
@@ -490,8 +739,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let operation_ms = operation_start.elapsed().as_millis();
     // Single gating predicate for the slower "walk every thread /
     // inspect remote tracking / populate cross-thread relations" path.
-    // JSON and `-v` text actually display the data; default text doesn't.
-    let needs_full_walk = cli.verbose > 0 || as_json;
+    // Full JSON and `-v` text display thread topology and cross-thread
+    // relations. Compact JSON is the lightweight decision surface and uses
+    // the same construction path as short text.
+    let needs_full_walk = cli.verbose > 0 || (as_json && !compact_json);
     let needs_remote_tracking = needs_full_walk || short_text;
     let remote_tracking_start = Instant::now();
     let remote_tracking = if needs_remote_tracking {
@@ -502,7 +753,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let remote_tracking_ms = remote_tracking_start.elapsed().as_millis();
 
     let import_hint_start = Instant::now();
-    let import_hint = if short_text {
+    let import_hint = if short_path {
         None
     } else {
         repo.git_overlay_import_hint().unwrap_or(None)
@@ -520,7 +771,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         build_git_overlay_health_with_worktree_status(&repo, &git_worktree_status_result);
     let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
     let verification_start = Instant::now();
-    let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
+    // Reuse the worktree status already computed above (line ~767) instead of
+    // re-walking inside `from_health`. Behaviour-identical; just one fewer pass.
+    let trust = RepositoryVerificationState::from_health_with_worktree_status(
+        &repo,
+        git_overlay_health.clone(),
+        &git_worktree_status_result,
+    );
     let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
@@ -536,6 +793,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     ) && git_worktree_status
         .as_ref()
         .is_some_and(WorktreeStatus::is_clean);
+    let git_backed_mapping = trust.mapping_state == "git_backed";
 
     // Get worktree status
     let worktree_status_start = Instant::now();
@@ -546,6 +804,14 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         && trust.status != "needs_checkpoint"
     {
         (changes_from_status(status), None)
+    } else if git_backed_mapping {
+        (
+            git_worktree_status
+                .as_ref()
+                .map(changes_from_status)
+                .unwrap_or_default(),
+            None,
+        )
     } else if let Some(ref state) = current_state {
         let tree = repo.require_tree(&state.tree)?;
         let (status, profile) =
@@ -564,7 +830,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     };
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
-    if short_text {
+    if short_path {
         let recommended_action = if trust.verified {
             primary_next_action_with_verification(
                 operation.as_ref(),
@@ -929,6 +1195,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let has_changes = !output.changes.modified.is_empty()
         || !output.changes.added.is_empty()
         || !output.changes.deleted.is_empty();
+    let git_backed_current_thread = git_backed_mapping;
     let checkpointed_clean = output.git_checkpoint.is_some() && !has_changes;
     let thread_stub = output.thread.as_ref().map(|thread| Thread {
         id: thread.clone(),
@@ -1032,17 +1299,33 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
-    // A freshly-`init`'d native repo whose log is still empty (only the
-    // synthetic root) and whose worktree is clean has nothing to act on
-    // yet — point the user at the first save.
-    let recommended_action = first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
-        .unwrap_or(recommended_action);
+    let recommended_action = if git_backed_current_thread {
+        if has_changes {
+            "heddle commit -m \"...\"".to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        // A freshly-`init`'d native repo whose log is still empty (only the
+        // synthetic root) and whose worktree is clean has nothing to act on
+        // yet — point the user at the first save.
+        first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
+            .unwrap_or(recommended_action)
+    };
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
-        advice
-            .as_ref()
-            .map(|advice| advice.thread_health.clone())
-            .unwrap_or_else(|| "clean".to_string())
+        if git_backed_current_thread {
+            if has_changes {
+                "dirty_worktree".to_string()
+            } else {
+                "clean".to_string()
+            }
+        } else {
+            advice
+                .as_ref()
+                .map(|advice| advice.thread_health.clone())
+                .unwrap_or_else(|| "clean".to_string())
+        }
     } else {
         trust.status.clone()
     };
@@ -1064,9 +1347,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
         trust_blockers.push(format!("Verification: {}", trust.summary));
     }
+    let display_thread_summary = (!git_backed_current_thread)
+        .then_some(thread_summary.as_ref())
+        .flatten();
     let worktree_changed_path_count = changes_path_count(&output.changes);
     let thread_changed_path_count =
-        captured_thread_path_count(thread_summary.as_ref(), &output.changes);
+        captured_thread_path_count(display_thread_summary, &output.changes);
     // Resolve the trust/health override against the PRE-override (genuine,
     // from `build_thread_view`) coordination status. A genuine inter-thread
     // `Blocked` captured here must survive the override and stay surfaceable.
@@ -1101,9 +1387,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         // same thread/instant (heddle#306). The verification/dirty-worktree
         // blocker is a health signal, surfaced via `coordination_status` above.
         thread_state: output.thread_state,
-        changed_paths: changed_paths(thread_summary.as_ref(), &output.changes),
+        changed_paths: changed_paths(display_thread_summary, &output.changes),
         changed_path_count: if trust.verified {
-            changed_path_count(thread_summary.as_ref(), &output.changes)
+            changed_path_count(display_thread_summary, &output.changes)
         } else {
             changes_path_count(&output.changes)
         },
@@ -1497,7 +1783,7 @@ fn render_status_operation(output: &StatusOutput) {
             println!(
                 "Git worktree: {}",
                 style::accent(
-                    "clean; .heddle metadata is present, adoption imports Git history, and the Git worktree stays clean"
+                    "clean; .heddle metadata is present, Git refs stay in Git storage, and the Git worktree stays clean"
                 )
             );
         }
@@ -2174,15 +2460,13 @@ fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> Strin
 
 fn git_index_commit_scope_text(index: &GitIndexPlan) -> &'static str {
     match index.commit_mode {
-        "staged_index" => {
-            "plain `heddle commit` checkpoints staged paths only; unstaged and untracked paths stay put"
-        }
-        "worktree_all" => "plain `heddle commit` checkpoints all unstaged and untracked paths",
+        "staged_index" => "plain `heddle commit` checkpoints staged paths only",
+        "worktree_all" => "plain `heddle commit` captures and checkpoints all current paths",
         "worktree_all_explicit" => {
-            "`heddle commit --all` checkpoints staged, unstaged, and untracked paths"
+            "`heddle commit --all` captures and checkpoints staged, unstaged, and untracked paths"
         }
         "none" => "no Git paths are ready to commit",
-        _ => "plain `heddle commit` checkpoints the listed paths",
+        _ => "`heddle commit` captures and checkpoints the current Git worktree",
     }
 }
 
@@ -2520,9 +2804,10 @@ mod tests {
 
     use super::{
         ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
-        render_status_materialized, resolve_coordination_with_trust,
+        PlainGitStatusOutput, RepositoryVerificationState, ShortStatusRow, append_fast_status_row,
+        assess_materialized_threads, build_status_output, combined_verdict_axes,
+        coordination_axis_clean, coordination_label, render_status_materialized,
+        resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -3068,5 +3353,92 @@ mod tests {
         let value = serde_json::to_value(&output).unwrap();
         assert!(value["recommended_action"].is_null());
         assert!(value["verification"]["recommended_action"].is_null());
+    }
+
+    /// Bucket a porcelain status row the way the *slow* path does.
+    ///
+    /// This is a faithful, branch-for-branch mirror of the classification in
+    /// `repo::Repository::git_overlay_worktree_status`
+    /// (crates/repo/src/repository.rs). If that function's branch order or
+    /// conditions change, this mirror — and the agreement test below — must be
+    /// updated in lockstep. It exists so the test can compare the fast path
+    /// against the slow path's logic without standing up a full GitOverlay repo
+    /// with staged index states.
+    fn slow_path_bucket(row: &ShortStatusRow<'_>) -> &'static str {
+        if row.index == b'?' && row.worktree == b'?' {
+            "added"
+        } else if row.index == b'D' || row.worktree == b'D' {
+            "deleted"
+        } else if row.index == b'A'
+            || row.index == b'R'
+            || row.index == b'C'
+            || row.head_oid.is_none()
+        {
+            "added"
+        } else {
+            "modified"
+        }
+    }
+
+    fn fast_path_bucket(row: ShortStatusRow<'_>) -> &'static str {
+        let mut changes = ChangesInfo::default();
+        append_fast_status_row(&mut changes, row);
+        match (
+            changes.added.len(),
+            changes.deleted.len(),
+            changes.modified.len(),
+        ) {
+            (1, 0, 0) => "added",
+            (0, 1, 0) => "deleted",
+            (0, 0, 1) => "modified",
+            other => panic!("fast path produced unexpected bucket counts: {other:?}"),
+        }
+    }
+
+    fn status_row<'a>(
+        index: u8,
+        worktree: u8,
+        path: &'a [u8],
+        in_head: bool,
+    ) -> ShortStatusRow<'a> {
+        ShortStatusRow {
+            index,
+            worktree,
+            path,
+            head_mode: None,
+            index_mode: None,
+            worktree_mode: None,
+            head_oid: in_head.then(|| sley::ObjectId::null(sley::ObjectFormat::Sha1)),
+            index_oid: None,
+            submodule: None,
+        }
+    }
+
+    #[test]
+    fn fast_short_status_agrees_with_slow_path_on_ad_rename_copy() {
+        // index, worktree, present-in-HEAD, what `git status -s` reports.
+        // `AD` = staged add then deleted in the worktree → git shows it as a
+        // deletion; `R`/`C` = rename/copy → git shows the new path as added.
+        let cases: &[(u8, u8, bool, &str)] = &[
+            (b'A', b'D', false, "AD: staged-add then worktree-deleted"),
+            (b'R', b' ', true, "R: renamed"),
+            (b'C', b' ', true, "C: copied"),
+            // Spot-check the unambiguous buckets stay aligned too.
+            (b'A', b' ', false, "A: staged add"),
+            (b'M', b' ', true, "M: modified"),
+            (b' ', b'M', true, "worktree-modified"),
+            (b'D', b' ', true, "D: staged delete"),
+            (b' ', b'D', true, "worktree delete"),
+            (b'?', b'?', false, "untracked"),
+        ];
+        for &(index, worktree, in_head, label) in cases {
+            let path = label.as_bytes();
+            let fast = fast_path_bucket(status_row(index, worktree, path, in_head));
+            let slow = slow_path_bucket(&status_row(index, worktree, path, in_head));
+            assert_eq!(
+                fast, slow,
+                "fast and slow short-status classification disagree for {label}",
+            );
+        }
     }
 }

@@ -8,7 +8,6 @@ Examples:
   heddle init                                  # initialize the current directory
   heddle init my-project                       # initialize a subdirectory
   heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
-  heddle init --quickstart                     # init, identity, first capture + checkpoint in one step
 ")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
@@ -21,21 +20,6 @@ pub struct InitArgs {
     /// Principal email for attribution.
     #[arg(long)]
     pub principal_email: Option<String>,
-
-    /// Walk from a fresh directory to a first checkpointed commit in one
-    /// command: after the normal init steps, resolve identity, start a
-    /// thread, make one capture, and (on Git-overlay repos) one checkpoint.
-    #[arg(long)]
-    pub quickstart: bool,
-
-    /// Name for the thread `--quickstart` starts (default: `quickstart`).
-    #[arg(long, value_name = "NAME")]
-    pub quickstart_thread: Option<String>,
-
-    /// Skip the `--quickstart` confirmation gate before writing into a
-    /// directory that already has Heddle data or non-empty Git history.
-    #[arg(long)]
-    pub yes: bool,
 
     /// Install harness integrations after init.
     #[arg(long)]
@@ -58,15 +42,17 @@ pub struct InitArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # initialize Heddle and import all Git refs
-  heddle adopt --ref main                     # adopt only one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
+  heddle adopt                                # convert all local Git refs into native Heddle storage
+  heddle adopt --ref main                     # convert one branch or tag
+  heddle adopt ../repo --ref main --ref v1.0  # convert selected refs in another repo
+
+Adoption converts Git history metadata into Heddle-native storage without modifying existing Git worktree changes.
 ")]
 pub struct AdoptArgs {
-    /// Git repository to adopt (default: current directory).
+    /// Git repository to convert into Heddle-native storage (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to import. Repeat to import selected refs; omit to import all refs.
+    /// Git branch or tag to convert. Repeat to convert selected refs; omit to convert all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }

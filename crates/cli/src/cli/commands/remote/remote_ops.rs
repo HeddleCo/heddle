@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
-    fs_atomic::write_file_atomic,
     object::{ChangeId, ThreadName, Tree},
     store::ObjectStore,
 };
@@ -21,7 +20,7 @@ use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::{
-    GitConfig, Repository as SleyRepository,
+    ConfigEdit, ConfigEditPlan, GitConfig, RemoteConfigSet, Repository as SleyRepository,
     plumbing::sley_config::{
         ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigStack, ConfigStackEntry,
     },
@@ -214,7 +213,11 @@ pub async fn cmd_pull(
             "pull"
         )));
     }
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && !repo.hosted_enabled()
+        && !pull_uses_hosted_network
+    {
         ensure_worktree_clean(&repo, "pull")?;
         let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
         let branch = repo.git_overlay_current_branch()?;
@@ -314,9 +317,10 @@ pub async fn cmd_pull(
     let (target, _server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
 
-    let remote_thread = thread.unwrap_or_else(|| "main".to_string());
+    let head_ref = repo.head_ref()?;
+    let remote_thread = default_pull_thread_name(thread, repo.capability(), &head_ref);
     let local_thread_name = local_thread.as_deref();
-    let should_materialize = match repo.head_ref()? {
+    let should_materialize = match &head_ref {
         Head::Attached { thread } => local_thread_name.is_none_or(|local| thread == local),
         Head::Detached { .. } => local_thread_name.is_none(),
     };
@@ -352,6 +356,24 @@ pub async fn cmd_pull(
     }
 
     Ok(())
+}
+
+fn default_pull_thread_name(
+    explicit_thread: Option<String>,
+    capability: RepositoryCapability,
+    head_ref: &Head,
+) -> String {
+    if let Some(thread) = explicit_thread {
+        return thread;
+    }
+
+    if capability == RepositoryCapability::GitOverlay
+        && let Head::Attached { thread } = head_ref
+    {
+        return thread.to_string();
+    }
+
+    "main".to_string()
 }
 
 async fn pull_local(
@@ -525,15 +547,46 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         .await?;
 
     if result.success {
-        let changed = result.final_state.is_some();
+        let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
+        let mut changed = false;
+        if let Some(final_state) = result.final_state {
+            let track_tn = ThreadName::new(track_to_update);
+            let pre_target = repo.refs().get_thread(&track_tn)?;
+            changed = pre_target.as_ref() != Some(&final_state);
+            if changed {
+                let head_ref = repo.head_ref()?;
+                let should_materialize = !options.lazy
+                    && match &head_ref {
+                        Head::Attached { thread } => thread == track_to_update,
+                        Head::Detached { .. } => options.local_thread.is_none(),
+                    };
+                if should_materialize {
+                    match (&head_ref, pre_target) {
+                        (Head::Attached { .. }, Some(_)) => {
+                            super::super::ff_record::record_ff_advance(
+                                repo,
+                                options.remote_thread,
+                                &final_state,
+                            )?;
+                        }
+                        (Head::Attached { .. }, None) => {
+                            repo.fast_forward_attached_from_materialized_state(&final_state, None)?;
+                        }
+                        (Head::Detached { .. }, _) => {
+                            repo.goto(&final_state)?;
+                            repo.refs().set_thread(&track_tn, &final_state)?;
+                        }
+                    }
+                } else {
+                    repo.refs().set_thread(&track_tn, &final_state)?;
+                }
+            }
+        }
         if should_output_json(options.cli, Some(repo.config())) {
             let output = heddle_pull_output(
                 changed,
                 options.remote_thread.to_string(),
-                options
-                    .local_thread
-                    .unwrap_or(options.remote_thread)
-                    .to_string(),
+                track_to_update.to_string(),
                 result.final_state.map(|state| state.to_string()),
                 None,
                 build_repository_verification_state(repo),
@@ -1167,7 +1220,7 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
     validate_git_overlay_remote_name(name)?;
     let ctx = GitConfigContext::discover(repo.root())
         .context("Git-overlay remote add requires a writable Git config")?;
-    upsert_git_remote_config(&ctx.write_file_for(name)?, name, url)
+    upsert_git_remote_config(repo.root(), &ctx.write_file_for(name)?, name, url)
 }
 
 fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
@@ -1178,7 +1231,7 @@ fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
         return Ok(());
     };
     for config_path in ctx.remove_files_for(name)? {
-        remove_git_remote_config(&config_path, name)?;
+        remove_git_remote_config(repo.root(), &config_path, name)?;
     }
     Ok(())
 }
@@ -1207,132 +1260,31 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
 /// a fresh canonical section is appended, so an upsert replaces rather than
 /// appends a duplicate that the first-seen section would win over on the next
 /// read.
-fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result<()> {
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let contents = fs::read_to_string(config_path).unwrap_or_default();
-    let mut contents = remove_git_config_named_section(&contents, "remote", name);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    let fetch = format!("+refs/heads/*:refs/remotes/{name}/*");
-    contents.push_str(&format!(
-        "[remote \"{}\"]\n\turl = {}\n\tfetch = {}\n",
-        escape_git_config_section(name),
-        quote_git_config_value(url),
-        quote_git_config_value(&fetch)
+fn upsert_git_remote_config(root: &Path, config_path: &Path, name: &str, url: &str) -> Result<()> {
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let remote = RemoteConfigSet::new(name)
+        .with_url(url)
+        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+    let plan = ConfigEditPlan::new(config_path).with_operation(ConfigEdit::replace_section(
+        "remote",
+        Some(remote.name),
+        remote.entries,
     ));
-    write_file_atomic(config_path, contents.as_bytes())?;
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
 /// Remove every `[remote "<name>"]` section from a single physical config file
 /// that uses the normal quoted subsection form. No-ops when the file is absent
 /// or defines no such remote.
-fn remove_git_remote_config(config_path: &Path, name: &str) -> Result<()> {
-    if !config_path.exists() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(config_path)
-        .with_context(|| format!("reading git config at {}", config_path.display()))?;
-    let updated = remove_git_config_named_section(&contents, "remote", name);
-    if updated == contents {
-        return Ok(());
-    }
-    write_file_atomic(config_path, updated.as_bytes())?;
+fn remove_git_remote_config(root: &Path, config_path: &Path, name: &str) -> Result<()> {
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let plan = ConfigEditPlan::new(config_path)
+        .with_operation(ConfigEdit::remove_section("remote", Some(name.to_string())));
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
-}
-
-fn remove_git_config_named_section(contents: &str, section: &str, subsection_name: &str) -> String {
-    let mut output = Vec::new();
-    let mut skipping = false;
-    for line in contents.lines() {
-        if let Some(name) = parse_git_config_subsection_name(line, section) {
-            skipping = name == subsection_name;
-        } else if is_git_config_section_header(line) {
-            skipping = false;
-        }
-        if !skipping {
-            output.push(line);
-        }
-    }
-    let mut text = output.join("\n");
-    if contents.ends_with('\n') && !text.is_empty() {
-        text.push('\n');
-    }
-    text
-}
-
-fn parse_git_config_subsection_name(line: &str, section: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let end = trimmed.find(']')?;
-    let inner = trimmed.strip_prefix('[')?[..end - 1].trim();
-    let (parsed_section, rest) = inner
-        .split_once(char::is_whitespace)
-        .map(|(section, rest)| (section, Some(rest.trim_start())))
-        .unwrap_or((inner, None));
-    if !parsed_section.eq_ignore_ascii_case(section) {
-        if let Some((dotted_section, dotted_subsection)) = inner.split_once('.')
-            && dotted_section.eq_ignore_ascii_case(section)
-        {
-            return Some(dotted_subsection.to_string());
-        }
-        return None;
-    }
-    let rest = rest?;
-    let quoted = rest.strip_prefix('"')?.strip_suffix('"')?;
-    unescape_git_config_string(quoted)
-}
-
-fn is_git_config_section_header(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with('[') && trimmed.contains(']')
-}
-
-fn escape_git_config_section(value: &str) -> String {
-    escape_git_config_value(value)
-}
-
-fn escape_git_config_value(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\u{0008}' => out.push_str("\\b"),
-            ch => out.push(ch),
-        }
-    }
-    out
-}
-
-fn quote_git_config_value(value: &str) -> String {
-    format!("\"{}\"", escape_git_config_value(value))
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
-    }
-    Some(out)
 }
 
 #[cfg(feature = "client")]
@@ -1353,6 +1305,46 @@ mod tests {
 
     fn init_git(root: &Path) {
         SleyRepository::init(root).expect("init git repo");
+    }
+
+    #[test]
+    fn default_pull_thread_uses_current_git_overlay_thread() {
+        let head = Head::Attached {
+            thread: ThreadName::new("master"),
+        };
+
+        assert_eq!(
+            default_pull_thread_name(None, RepositoryCapability::GitOverlay, &head),
+            "master"
+        );
+    }
+
+    #[test]
+    fn default_pull_thread_keeps_native_main_default() {
+        let head = Head::Attached {
+            thread: ThreadName::new("feature"),
+        };
+
+        assert_eq!(
+            default_pull_thread_name(None, RepositoryCapability::NativeHeddle, &head),
+            "main"
+        );
+    }
+
+    #[test]
+    fn default_pull_thread_honors_explicit_thread() {
+        let head = Head::Attached {
+            thread: ThreadName::new("master"),
+        };
+
+        assert_eq!(
+            default_pull_thread_name(
+                Some("release".to_string()),
+                RepositoryCapability::GitOverlay,
+                &head,
+            ),
+            "release"
+        );
     }
 
     #[test]
@@ -1479,7 +1471,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(&path, "origin").unwrap();
+            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
         }
 
         // The visible (per-worktree) remote must be gone after a remove;
@@ -1505,6 +1497,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         upsert_git_remote_config(
+            tmp.path(),
             &ctx.write_file_for("origin").unwrap(),
             "origin",
             "https://example.com/new",
@@ -1539,7 +1532,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         for path in ctx.remove_files_for("upstream").unwrap() {
-            remove_git_remote_config(&path, "upstream").unwrap();
+            remove_git_remote_config(tmp.path(), &path, "upstream").unwrap();
         }
 
         // ...and a remove must clear the section from the *included* file
@@ -1562,7 +1555,7 @@ mod tests {
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         let target = ctx.write_file_for("origin").unwrap();
         assert_eq!(target, git_dir.join("extra.config"));
-        upsert_git_remote_config(&target, "origin", "https://example.com/new").unwrap();
+        upsert_git_remote_config(tmp.path(), &target, "origin", "https://example.com/new").unwrap();
 
         assert_eq!(
             plain_git_remote_items(tmp.path())
@@ -1614,6 +1607,7 @@ mod tests {
             git_dir.join("config")
         );
         upsert_git_remote_config(
+            tmp.path(),
             &ctx.write_file_for("origin").unwrap(),
             "origin",
             "https://example.com/new",
@@ -1645,7 +1639,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(&path, "origin").unwrap();
+            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
         }
 
         // ...so a remove must actually clear it, not silently no-op against a
@@ -1669,7 +1663,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         for path in ctx.remove_files_for("origin").unwrap() {
-            remove_git_remote_config(&path, "origin").unwrap();
+            remove_git_remote_config(tmp.path(), &path, "origin").unwrap();
         }
 
         assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
@@ -1688,6 +1682,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         upsert_git_remote_config(
+            tmp.path(),
             &ctx.write_file_for("origin").unwrap(),
             "origin",
             "https://example.com/new",
@@ -1717,6 +1712,7 @@ mod tests {
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         upsert_git_remote_config(
+            tmp.path(),
             &ctx.write_file_for("origin").unwrap(),
             "origin",
             "https://example.com/new",

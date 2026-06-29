@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::object::{ContentHash, FileProvenance, Origin, OriginSet};
 
-use super::helpers::coalesce_line_spans;
+use super::{HeddleError, Result, helpers::coalesce_line_spans};
 
 #[derive(Default)]
 pub(super) struct ProvenanceBuilder {
@@ -37,6 +37,22 @@ impl ProvenanceBuilder {
             origin_indexes: indexes,
         });
         next
+    }
+
+    pub(super) fn origin_set_from_set_indexes<I>(&mut self, set_indexes: I) -> Result<u32>
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let mut origin_indexes = Vec::new();
+        for set_index in set_indexes {
+            let Some(origin_set) = self.origin_sets.get(set_index as usize) else {
+                return Err(HeddleError::InvalidObject(format!(
+                    "provenance builder origin-set index {set_index} out of bounds"
+                )));
+            };
+            origin_indexes.extend(origin_set.origin_indexes.iter().copied());
+        }
+        Ok(self.origin_set_from_indexes(origin_indexes))
     }
 
     pub(super) fn origin_index(&mut self, origin: Origin) -> u32 {

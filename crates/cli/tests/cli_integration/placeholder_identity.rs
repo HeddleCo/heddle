@@ -74,6 +74,61 @@ fn first_commit_warns_once_when_user_config_principal_is_placeholder() {
     );
 }
 
+/// A *corrupt* (un-parseable) user config must FAIL CLOSED on the
+/// identity-bearing capture path, not silently fall back to the
+/// `Unknown <unknown@example.com>` default and mis-attribute the
+/// snapshot. `UserConfig::load_default()` already maps a *missing* file
+/// to the default; only a malformed file produces an Err, and the
+/// capture path now propagates it with `?` instead of
+/// `.unwrap_or_default()`.
+#[test]
+fn capture_fails_closed_on_corrupt_user_config() {
+    let temp = TempDir::new().unwrap();
+
+    // Bootstrap the repo with a VALID config so `init` succeeds — we
+    // want to isolate the capture/identity path, not fail at init.
+    let good_config = write_user_config(&temp, "Ada Lovelace", "ada@users.test");
+    let init = heddle_output_with_env(
+        &["init"],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", good_config.to_str().unwrap())],
+    )
+    .expect("run init");
+    assert!(
+        init.status.success(),
+        "init should succeed: {}",
+        stderr(&init)
+    );
+
+    // Now corrupt the user config and capture: the identity load must
+    // error instead of attributing the snapshot to the Unknown default.
+    let bad_config = temp.path().join("corrupt-config.toml");
+    fs::write(&bad_config, "principal = [broken\n").expect("write corrupt config");
+
+    fs::write(temp.path().join("file.txt"), "content\n").expect("write file");
+    let output = heddle_output_with_env(
+        &["capture", "-m", "should-not-attribute-to-unknown"],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", bad_config.to_str().unwrap())],
+    )
+    .expect("run capture");
+
+    assert!(
+        !output.status.success(),
+        "capture must fail on a corrupt user config, not fall back to Unknown"
+    );
+    let err = stderr(&output);
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), err);
+    assert!(
+        !combined.contains("unknown@example.com"),
+        "corrupt config must not produce an Unknown-attributed snapshot: {combined}"
+    );
+    assert!(
+        err.to_lowercase().contains("config") || err.contains("corrupt-config.toml"),
+        "error should explain the config parse failure: {err}"
+    );
+}
+
 #[test]
 fn real_user_config_principal_does_not_warn_on_init_or_first_commit() {
     let temp = TempDir::new().unwrap();

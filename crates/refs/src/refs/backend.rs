@@ -147,11 +147,7 @@ mod tests {
             self.write_head(head)
         }
         async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self
-                .threads
-                .lock_or_poisoned()
-                .get(name.as_str())
-                .copied())
+            Ok(self.threads.lock_or_poisoned().get(name.as_str()).copied())
         }
         fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<(), HeddleError> {
             self.threads
@@ -186,11 +182,7 @@ mod tests {
                 .collect())
         }
         async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>, HeddleError> {
-            Ok(self
-                .markers
-                .lock_or_poisoned()
-                .get(name.as_str())
-                .copied())
+            Ok(self.markers.lock_or_poisoned().get(name.as_str()).copied())
         }
         async fn create_marker(
             &self,

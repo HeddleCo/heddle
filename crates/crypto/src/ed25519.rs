@@ -62,7 +62,7 @@ impl Ed25519Signer {
     fn from_pkcs8_pem(pem: &str) -> Result<Self, SignerError> {
         use pkcs8::DecodePrivateKey;
 
-        let signing_key = SigningKey::from_pkcs8_pem(pem)?;
+        let signing_key = SigningKey::from_pkcs8_pem(pem.trim())?;
         let cached_public_key = signing_key.verifying_key().to_bytes();
         Ok(Self {
             signing_key,

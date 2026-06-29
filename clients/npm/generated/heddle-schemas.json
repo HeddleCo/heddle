@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.5.0",
+  "schemaVersion": "0.5.1",
   "verbs": {
     "abort": {
       "$defs": {
@@ -6818,6 +6818,124 @@
         "swept_stale"
       ],
       "title": "AgentStopSchema",
+      "type": "object"
+    },
+    "auth create-service-token": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "expires_in_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "auth_create_service_token"
+          ],
+          "type": "string"
+        },
+        "private_key_pem": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "name",
+        "namespace",
+        "scope",
+        "token",
+        "private_key_pem",
+        "expires_in_days"
+      ],
+      "title": "AuthCreateServiceTokenSchema",
+      "type": "object"
+    },
+    "auth logout": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "device_identity_removed": {
+          "type": "boolean"
+        },
+        "output_kind": {
+          "enum": [
+            "auth_logout"
+          ],
+          "type": "string"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "server",
+        "removed",
+        "device_identity_removed"
+      ],
+      "title": "AuthLogoutSchema",
+      "type": "object"
+    },
+    "auth status": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "authenticated": {
+          "type": "boolean"
+        },
+        "credential_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "auth_status"
+          ],
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server": {
+          "type": "string"
+        },
+        "subject": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "server",
+        "authenticated"
+      ],
+      "title": "AuthStatusSchema",
       "type": "object"
     },
     "bridge git export": {
@@ -20749,6 +20867,178 @@
         "output_kind"
       ],
       "title": "StatusSchema",
+      "type": "object"
+    },
+    "support grant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "expires_at": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granted_at": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granted_by": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "namespace_path": {
+          "type": "string"
+        },
+        "operator_email": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "support_grant"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "repo_path": {
+          "type": "string"
+        },
+        "revoked_at": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revoked_by": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "id",
+        "operator_email",
+        "namespace_path",
+        "repo_path",
+        "role",
+        "granted_by",
+        "granted_at",
+        "expires_at",
+        "revoked_at",
+        "revoked_by",
+        "reason"
+      ],
+      "title": "SupportGrantSchema",
+      "type": "object"
+    },
+    "support list": {
+      "$defs": {
+        "SupportAccessSchema": {
+          "properties": {
+            "expires_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "granted_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "granted_by": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "namespace_path": {
+              "type": "string"
+            },
+            "operator_email": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "repo_path": {
+              "type": "string"
+            },
+            "revoked_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "revoked_by": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "operator_email",
+            "namespace_path",
+            "repo_path",
+            "role",
+            "granted_by",
+            "granted_at",
+            "expires_at",
+            "revoked_at",
+            "revoked_by",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/SupportAccessSchema"
+          },
+          "type": "array"
+        },
+        "output_kind": {
+          "enum": [
+            "support_list"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "grants"
+      ],
+      "title": "SupportAccessListSchema",
+      "type": "object"
+    },
+    "support revoke": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "support_revoke"
+          ],
+          "type": "string"
+        },
+        "revoked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "output_kind",
+        "id",
+        "revoked"
+      ],
+      "title": "SupportRevokeSchema",
       "type": "object"
     },
     "switch": {

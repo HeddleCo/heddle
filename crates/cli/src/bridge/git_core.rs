@@ -27,8 +27,9 @@ use sley::{
 };
 
 use super::{
-    git_export::{export_all, export_current_thread},
+    git_export::{commit_is_byte_faithful, export_all, export_current_thread},
     git_ingest::import_git_history,
+    git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_util::ImportStats,
 };
 
@@ -596,6 +597,14 @@ impl SyncMapping {
         self.heddle_to_git.iter()
     }
 
+    /// Whether the in-memory mapping holds no `ChangeId → git OID` entries. The
+    /// checkout-materialization path (#568 P1) uses this to decide whether it must
+    /// hydrate the mapping from disk (a standalone `bridge git checkout`) or trust
+    /// the mapping export just built in memory (a checkpoint/push).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.heddle_to_git.is_empty()
+    }
+
     pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
         let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
@@ -639,6 +648,7 @@ pub struct GitBridge<'a> {
     pub(crate) git_repo_path: Option<PathBuf>,
     pub(crate) mapping: SyncMapping,
     pub(crate) commit_message_overrides: HashMap<ChangeId, String>,
+    pub(crate) commit_parent_overrides: HashMap<ChangeId, Vec<ObjectId>>,
 }
 
 struct MappingFileSnapshot {
@@ -682,6 +692,7 @@ impl<'a> GitBridge<'a> {
             git_repo_path: None,
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
+            commit_parent_overrides: HashMap::new(),
         }
     }
 
@@ -789,12 +800,21 @@ impl<'a> GitBridge<'a> {
         self.commit_message_overrides.insert(state_id, message);
     }
 
+    pub(crate) fn set_commit_parent_override(
+        &mut self,
+        state_id: ChangeId,
+        parents: Vec<ObjectId>,
+    ) {
+        self.commit_parent_overrides.insert(state_id, parents);
+    }
+
     pub(crate) fn with_mapping_rollback<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> GitResult<T>,
     ) -> GitResult<T> {
         let mapping = self.mapping.clone();
         let commit_message_overrides = self.commit_message_overrides.clone();
+        let commit_parent_overrides = self.commit_parent_overrides.clone();
         let mapping_file = MappingFileSnapshot::read(self.mapping_path())?;
         let mapping_tmp_file = MappingFileSnapshot::read(self.mapping_tmp_path())?;
 
@@ -803,6 +823,7 @@ impl<'a> GitBridge<'a> {
             Err(error) => {
                 self.mapping = mapping;
                 self.commit_message_overrides = commit_message_overrides;
+                self.commit_parent_overrides = commit_parent_overrides;
                 if let Err(rollback_error) = mapping_file
                     .restore()
                     .and_then(|()| mapping_tmp_file.restore())
@@ -1653,6 +1674,18 @@ impl<'a> GitBridge<'a> {
         state_id: &ChangeId,
     ) -> GitResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
+        // Reconstructing a faithful commit from state (#568 P1) resolves each
+        // parent's git OID through the bridge mapping. A checkpoint/push runs
+        // export first, which leaves the in-memory mapping populated for the
+        // served set — trust it, and do NOT re-read from disk (notes vs sidecar
+        // can legitimately disagree mid-operation, e.g. a `--git-commit` merge
+        // checkpoint that has not yet flushed; clobbering the freshly-built
+        // mapping with a disk read trips the conflict guard). Only a STANDALONE
+        // checkout (`bridge git checkout`, no preceding export) starts with an
+        // empty mapping; hydrate it from disk in that case alone.
+        if self.mapping.is_empty() {
+            self.build_existing_mapping(None)?;
+        }
         let git_oid = if let Some(git_oid) = self.mapping.get_git(state_id) {
             git_oid
         } else if let Some(git_commit) = self
@@ -1695,14 +1728,55 @@ impl<'a> GitBridge<'a> {
             .flatten()
             .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
 
+        let heddle_repo = self.heddle_repo;
+        let mapping = &self.mapping;
         let write_result = (|| -> GitResult<()> {
-            copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
-            fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
+            // Incremental object materialization (perf): bringing the new commit's
+            // full reachable closure into the checkout re-walks the ENTIRE tree
+            // every checkpoint — ~115s of the ~140s on the ~6k-object ghostty tree,
+            // scaling with total history rather than the change. But the checkout
+            // already holds the prior HEAD (`previous_branch`) and its whole
+            // closure. So exclude that closure: only objects genuinely new since
+            // the parent are reconstructed/copied. Excluding the parent COMMIT
+            // alone is not enough — the new commit's tree re-reaches the parent's
+            // unchanged trees/blobs, so they would not be pruned. Compute the
+            // parent's FULL closure from the DESTINATION (cheap: those objects are
+            // local and already packed) and exclude all of it. Byte-identical
+            // result — every pruned object was already present in the checkout.
+            // First checkpoint on a thread has no previous branch, so the exclude
+            // set is empty (full materialization).
+            let excluded: HashSet<ObjectId> = match previous_branch {
+                Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
+                    object_repo.objects().as_ref(),
+                    object_repo.object_format(),
+                    [parent],
+                )
+                .map_err(|error| GitBridgeError::Git(error.to_string()))?,
+                None => HashSet::new(),
+            };
+            // #568 P1: materialize the checkout from heddle state, NOT by copying
+            // the eager `.heddle/git` mirror's verbatim objects. Each byte-faithful
+            // commit's object closure is reconstructed directly into the checkout
+            // `object_repo`; the mirror is consulted only for the lossy residual
+            // (commits whose original bytes can't be re-derived). This is the
+            // strategic flip — heddle-native store feeds the worktree, git is a
+            // derived projection — with a per-commit fallback so nothing is lost.
+            materialize_checkout_closure_from_state(
+                heddle_repo,
+                mapping,
+                &mirror_repo,
+                &object_repo,
+                state_id,
+                git_oid,
+                &excluded,
+            )?;
+            // Atomic temp+rename so a torn write can't leave HEAD in a
+            // self-inconsistent state mid-write-through (the rollback
+            // path below restores previous_head on any later failure).
+            write_head_symref(&git_dir, &branch_ref)?;
 
-            let commit = checkout_repo.read_commit(&git_oid).map_err(git_err)?;
-            let mut index = checkout_repo
-                .index_from_tree(&commit.tree)
-                .map_err(git_err)?;
+            let commit = object_repo.read_commit(&git_oid).map_err(git_err)?;
+            let mut index = object_repo.index_from_tree(&commit.tree).map_err(git_err)?;
             index.upgrade_version_for_flags();
             checkout_repo
                 .write_index(
@@ -2085,6 +2159,7 @@ fn fetch_heddle_notes_into_repo(
             record_promisor_refs: false,
             update_head_ok: false,
             ssh_options: None,
+            atomic: false,
             depth: None,
             merge_srcs: Vec::new(),
             filter: None,
@@ -2672,6 +2747,20 @@ fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
 }
 
 fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
+    // Defense in depth (push-routing no-op): the git-overlay exporter speaks
+    // only the local/git network transports. A `heddle://` hosted URL must
+    // NEVER reach this classifier — the hosted-sync path
+    // (`GrpcHostedClient`) is the only thing that can push to it. If routing
+    // upstream is correct this is unreachable; making it a hard error here
+    // means a `heddle://` slipping into the git exporter can never again be a
+    // silent success (it would otherwise fall through as a generic network
+    // URL, "reconcile" locally, and report success without contacting the
+    // server).
+    if url.starts_with("heddle://") {
+        return Err(GitBridgeError::Git(format!(
+            "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
+        )));
+    }
     let Some(raw_path) = url.strip_prefix("file://") else {
         return Ok(None);
     };
@@ -2967,6 +3056,29 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, body)?;
     fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Atomically write `git_dir/HEAD` as a symbolic ref pointing at
+/// `branch_ref` (e.g. `refs/heads/main`). The content is
+/// `ref: <branch_ref>\n`.
+///
+/// A bare `fs::write(HEAD, ...)` is not crash-atomic: a power loss
+/// mid-write can leave a truncated or empty `HEAD`, which a subsequent
+/// `Repository::open` reads as a detached/garbage symref. We instead
+/// write to `HEAD.tmp` and `fs::rename` it over `HEAD` (rename is
+/// atomic within a directory), mirroring `write_exported_refs_at`.
+/// Both the file and its parent directory are fsync'd so the dirent is
+/// durably committed — a file-level fsync alone doesn't persist the
+/// rename on most filesystems.
+pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitResult<()> {
+    let head_path = git_dir.join("HEAD");
+    let tmp = head_path.with_extension("tmp");
+    fs::write(&tmp, format!("ref: {branch_ref}\n"))?;
+    fsync_path(&tmp)?;
+    fs::rename(&tmp, &head_path)?;
+    fsync_path(&head_path)?;
+    fsync_path(git_dir)?;
     Ok(())
 }
 
@@ -3581,17 +3693,14 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
         .and_then(|head| head.branch_name().map(str::to_owned))
         .filter(|branch| copied_branches.contains(branch.as_str()));
     if let Some(branch) = source_head_branch {
-        fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+        write_head_symref(dest, &format!("refs/heads/{branch}"))?;
     } else if copied_branches.contains("main") {
-        fs::write(dest.join("HEAD"), b"ref: refs/heads/main\n")?;
+        write_head_symref(dest, "refs/heads/main")?;
     } else if let Some(first_branch) = updates
         .iter()
         .find(|update| update.namespace == RefNamespace::Branch)
     {
-        fs::write(
-            dest.join("HEAD"),
-            format!("ref: refs/heads/{}\n", first_branch.name),
-        )?;
+        write_head_symref(dest, &format!("refs/heads/{}", first_branch.name))?;
     }
     Ok(())
 }
@@ -3651,7 +3760,7 @@ pub fn clone_url_to_bare(
     if let Some(branch) = default_branch
         && bare_branch_exists(dest, &branch)?
     {
-        fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+        write_head_symref(dest, &format!("refs/heads/{branch}"))?;
     }
     Ok(())
 }
@@ -3706,6 +3815,7 @@ fn clone_url_to_bare_via_sley(
                 record_promisor_refs: false,
                 update_head_ok: false,
                 ssh_options: None,
+                atomic: false,
                 depth,
                 merge_srcs: Vec::new(),
                 filter: None,
@@ -3724,6 +3834,138 @@ fn clone_url_to_bare_via_sley(
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
 }
 
+/// Materialize the checkout `.git` object closure for the commit mapped to
+/// `tip_state_id` (`tip_oid`) — reconstructing every byte-faithful commit from
+/// heddle state, and copying only the lossy residual from the eager `.heddle/git`
+/// mirror (#568 P1).
+///
+/// Walks the heddle state DAG from `tip_state_id`. For each visited state:
+///   * its mapped git OID is already in `excluded` (the prior checkout HEAD's full
+///     closure, already on disk) ⇒ skip it AND its ancestors — that subgraph is
+///     present;
+///   * [`commit_is_byte_faithful`] ⇒ reconstruct the commit object (and, via
+///     [`reconstruct_commit_bytes`]'s [`export_tree`], its whole tree/blob closure)
+///     directly into `object_repo`, then recurse into its parents;
+///   * otherwise (lossy: `--lossy` import or non-UTF8 identity — the residual the
+///     mirror exclusively holds) ⇒ copy that commit's full reachable closure from
+///     `mirror_repo` and DO NOT recurse (the copy already brought its ancestry).
+///
+/// CRITICAL safety gate: every reconstructed commit's git OID MUST equal the
+/// mapped `git_oid`. A mismatch means reconstruction diverged from the imported
+/// bytes (an unmodeled fidelity gap), which would silently materialize a
+/// wrong-OID checkout — so this HARD-ERRORS instead. This assertion is what lets
+/// the reconstruction path be trusted as a mirror replacement.
+///
+/// Output is byte-identical to the prior `copy_reachable_objects_excluding(mirror
+/// → checkout)`: git objects are content-addressed, so a faithful reconstruction
+/// lands the exact same OID the mirror copy would have, and the lossy path copies
+/// verbatim. The exclude set keeps it O(objects new since the parent).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_checkout_closure_from_state(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    mirror_repo: &SleyRepository,
+    object_repo: &SleyRepository,
+    tip_state_id: &ChangeId,
+    tip_oid: ObjectId,
+    excluded: &HashSet<ObjectId>,
+) -> GitResult<()> {
+    // Lossy commits whose closure is copied verbatim from the mirror. Their roots
+    // are batched and copied once at the end (a single excluding pack install,
+    // matching the prior single-copy perf shape) rather than per-commit.
+    let mut lossy_roots: Vec<ObjectId> = Vec::new();
+    let mut stack: Vec<ChangeId> = vec![*tip_state_id];
+    let mut seen: HashSet<ChangeId> = HashSet::new();
+
+    while let Some(state_id) = stack.pop() {
+        if !seen.insert(state_id) {
+            continue;
+        }
+        let Some(git_oid) = resolve_mapped_git_oid(heddle_repo, mapping, &state_id, object_repo)?
+        else {
+            // No mapping for this state: it was never exported (e.g. an embargoed
+            // ancestor withheld from the served frontier). The tip itself always
+            // resolves (`tip_oid`), and a withheld ancestor's git object is, by
+            // construction, absent from both store-reconstruction and the served
+            // mirror — so there is nothing to materialize. Skip without recursing.
+            continue;
+        };
+
+        // Already on disk (this state's object is in the parent's excluded closure,
+        // or a sibling branch already materialized it): the whole subgraph beneath
+        // it is present too, so prune here.
+        if excluded.contains(&git_oid) || object_repo.read_object(&git_oid).is_ok() {
+            continue;
+        }
+
+        let state = heddle_repo
+            .store()
+            .get_state(&state_id)?
+            .ok_or(GitBridgeError::StateNotFound(state_id))?;
+
+        if commit_is_byte_faithful(&state) {
+            let content = reconstruct_commit_bytes(heddle_repo, object_repo, mapping, &state)?;
+            // The byte-exact gate (#568 P1): a faithful reconstruction MUST hash to
+            // the mapped OID. If it does not, refuse — never write a wrong-SHA
+            // object into the worktree.
+            let reconstructed = commit_object_id(&content);
+            if reconstructed != git_oid {
+                return Err(GitBridgeError::Git(format!(
+                    "checkout reconstruction OID mismatch for state {state_id}: reconstructed {reconstructed}, expected mapped {git_oid}; \
+                     refusing to materialize a wrong-OID checkout (unmodeled fidelity gap)"
+                )));
+            }
+            let written = write_commit_object(object_repo, &content)?;
+            debug_assert_eq!(written, git_oid);
+            stack.extend(state.parents.iter().copied());
+        } else {
+            // Lossy residual: the verbatim bytes live only in the mirror. Copy this
+            // commit's full closure from there and stop — the copy carries its
+            // ancestry, so we don't reconstruct (or re-copy) beneath it.
+            lossy_roots.push(git_oid);
+        }
+    }
+
+    // Ensure the requested tip is materialized even in the degenerate case where
+    // the walk skipped it (e.g. an unmapped store state that nonetheless has a
+    // mirror object): fall back to the mirror copy for it. The faithful path above
+    // already wrote it when reconstructable, and a redundant root here is pruned
+    // by the exclude set / idempotent install.
+    if object_repo.read_object(&tip_oid).is_err() && !lossy_roots.contains(&tip_oid) {
+        lossy_roots.push(tip_oid);
+    }
+
+    if !lossy_roots.is_empty() {
+        copy_reachable_objects_excluding(mirror_repo, object_repo, lossy_roots, excluded)?;
+    }
+
+    Ok(())
+}
+
+/// Resolve the git OID a heddle state maps to, preferring the in-memory bridge
+/// mapping and falling back to the git-overlay checkpoint mapping (the same
+/// resolution the checkout tip uses). Returns `None` when the state has no mapped
+/// git object at all.
+fn resolve_mapped_git_oid(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    state_id: &ChangeId,
+    object_repo: &SleyRepository,
+) -> GitResult<Option<ObjectId>> {
+    if let Some(git_oid) = mapping.get_git(state_id) {
+        return Ok(Some(git_oid));
+    }
+    if let Some(git_commit) = heddle_repo
+        .git_overlay_mapped_git_commit_for_change(state_id)
+        .map_err(|error| GitBridgeError::Git(error.to_string()))?
+    {
+        let oid = ObjectId::from_hex(object_repo.object_format(), &git_commit)
+            .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?;
+        return Ok(Some(oid));
+    }
+    Ok(None)
+}
+
 pub(crate) fn copy_reachable_objects(
     source: &SleyRepository,
     target: &SleyRepository,
@@ -3731,6 +3973,48 @@ pub(crate) fn copy_reachable_objects(
 ) -> GitResult<()> {
     let roots = roots.into_iter().collect::<Vec<_>>();
     target.copy_reachable_from(source, &roots).map_err(git_err)
+}
+
+/// Incremental variant of [`copy_reachable_objects`]: copy the closure
+/// reachable from `roots`, skipping every object in `excluded`.
+///
+/// INVARIANT: every OID in `excluded` MUST already be present in `target` — the
+/// walk neither visits nor copies an excluded object (nor anything reachable only
+/// through it), so excluding an object the target is missing would silently drop
+/// it. Callers satisfy this by computing `excluded` as the reachable closure of
+/// something already in `target`. Used by checkpoint write-through, which passes
+/// the prior checkout HEAD's full closure (already entirely in the checkout's
+/// object DB): the new commit's tree re-reaches the parent's unchanged
+/// trees/blobs, so excluding the whole closure — not just the parent commit —
+/// prunes them all, turning per-checkpoint object transfer from O(total history)
+/// into O(objects new since the parent). Output is byte-identical — the same
+/// objects end up in `target`; the pruned ones were already there.
+pub(crate) fn copy_reachable_objects_excluding(
+    source: &SleyRepository,
+    target: &SleyRepository,
+    roots: impl IntoIterator<Item = ObjectId>,
+    excluded: &HashSet<ObjectId>,
+) -> GitResult<()> {
+    if excluded.is_empty() {
+        return copy_reachable_objects(source, target, roots);
+    }
+    if source.object_format() != target.object_format() {
+        // Mismatched formats can't share objects; fall back to the plain copy so
+        // its existing format-mismatch error surfaces unchanged.
+        return copy_reachable_objects(source, target, roots);
+    }
+    sley::plumbing::sley_odb::install_reachable_pack_excluding(
+        source.objects().as_ref(),
+        target.objects().as_ref(),
+        target.object_format(),
+        roots,
+        excluded,
+    )
+    .map_err(|error| GitBridgeError::Git(error.to_string()))?;
+    // Make the freshly-installed pack visible to subsequent reads on `target`,
+    // mirroring what `copy_reachable_from` does internally.
+    target.refresh_objects();
+    Ok(())
 }
 
 fn fetch_network_remote(
@@ -3762,6 +4046,7 @@ fn fetch_network_remote(
                 record_promisor_refs: false,
                 update_head_ok: false,
                 ssh_options: None,
+                atomic: false,
                 depth: None,
                 merge_srcs: Vec::new(),
                 filter: None,
@@ -3949,6 +4234,49 @@ mod tests {
         assert_eq!(parse_git_ref("refs/remotes/git/feature/x"), None);
         assert!(is_reserved_git_remote_name(REMOTE_NAME_FOR_LOCAL_GIT_REPO));
         assert!(!is_reserved_git_remote_name("origin"));
+    }
+
+    #[test]
+    fn local_path_from_url_rejects_hosted_heddle_scheme() {
+        // Regression (push-routing no-op): a `heddle://` hosted remote that
+        // reaches the git-overlay exporter must be a HARD ERROR, never a
+        // silent no-op success. The git network pusher cannot speak the
+        // hosted protocol, so classifying a `heddle://` URL here must fail
+        // loudly rather than fall through to `ResolvedRemote::Url` (which
+        // would "reconcile" locally and report success without ever
+        // contacting the server).
+        let err = local_path_from_url("heddle://weft.local:8421/org/repo")
+            .expect_err("heddle:// must be rejected by the git exporter classifier");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heddle://") && msg.contains("hosted"),
+            "error should explain the hosted scheme cannot be pushed via the git-overlay exporter, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn local_path_from_url_still_accepts_file_and_git_urls() {
+        // The guard must not regress legitimate transports: `file://` still
+        // resolves to a local path, and ordinary git URLs (https/ssh) still
+        // pass through as "not local" (Ok(None)) for the network git pusher.
+        assert!(
+            local_path_from_url("file:///tmp/repo.git")
+                .expect("file url ok")
+                .is_some(),
+            "file:// must still resolve to a local path"
+        );
+        assert!(
+            local_path_from_url("https://example.com/org/repo.git")
+                .expect("https url ok")
+                .is_none(),
+            "https git url must pass through as a network URL"
+        );
+        assert!(
+            local_path_from_url("git@github.com:org/repo.git")
+                .expect("ssh url ok")
+                .is_none(),
+            "ssh git url must pass through as a network URL"
+        );
     }
 
     #[test]
@@ -4168,6 +4496,41 @@ mod tests {
             "dest HEAD must mirror the remote's symref (trunk), not sley's \
              init-time default and not the alphabetically-first branch \
              (abc-feature) — see heddle#141"
+        );
+    }
+
+    #[test]
+    fn write_head_symref_is_atomic_and_round_trips() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git_dir = tmp.path();
+
+        write_head_symref(git_dir, "refs/heads/feature/x").expect("write HEAD symref");
+
+        // (a) No leftover temp file — the rename consumed it.
+        assert!(
+            !git_dir.join("HEAD.tmp").exists(),
+            "atomic writer must not leave HEAD.tmp behind"
+        );
+
+        // (b) Exact content, including the trailing newline.
+        let contents = std::fs::read_to_string(git_dir.join("HEAD")).expect("read HEAD");
+        assert_eq!(contents, "ref: refs/heads/feature/x\n");
+
+        // (c) Round-trips through the same symref parse `read_git_head_branch`
+        // (clone.rs) and `detect_git_head` use.
+        let branch = contents
+            .trim()
+            .strip_prefix("ref: ")
+            .and_then(|s| s.strip_prefix("refs/heads/"))
+            .expect("HEAD parses as a branch symref");
+        assert_eq!(branch, "feature/x");
+
+        // Overwriting an existing HEAD is also clean.
+        write_head_symref(git_dir, "refs/heads/main").expect("rewrite HEAD symref");
+        assert!(!git_dir.join("HEAD.tmp").exists());
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
         );
     }
 }

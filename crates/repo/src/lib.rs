@@ -28,6 +28,7 @@ mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
+mod revision_address;
 pub use repository_state_visibility::{
     DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,
     VisibilitySidecarRestore,
@@ -70,15 +71,15 @@ pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
-pub use objects::object::{
-    BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
-    TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
-    TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
-    TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
-    TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
-};
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
+    object::{
+        BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
+        TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
+        TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
+        TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId,
+        TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
+    },
     store::{
         AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
         agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
@@ -105,6 +106,7 @@ pub use repository::{
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
+pub use revision_address::{RevisionAddress, RevisionAddressParseError};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,

@@ -97,6 +97,68 @@ service AuthService {
   // Turnstile token. See HeddleCo/weft#189 and
   // `docs/auth/anon-biscuit-spike.md` §3 + §7.1.
   rpc MintAnonBiscuit(MintAnonBiscuitRequest) returns (MintAnonBiscuitResponse);
+
+  // ── Account recovery (E2 self-sovereign-auth, weft#120 §8) ────────────────
+  // The recovery subtree lets a user who has lost every enrolled device
+  // regain control of their identity WITHOUT the server ever holding a root
+  // credential. Two phases: (1) declaration — the user opts into one or more
+  // recovery methods while still in possession of a device; (2) flow — a
+  // device-less client begins an attempt, proves entitlement via the
+  // pre-declared method, waits out a veto window, and completes a
+  // credential-revocation cascade. Handlers live in weft
+  // (weft#182/#183/#185/#186); this proto is the contract only.
+
+  // Generic entry point for declaring a recovery method. Dispatches to the
+  // per-kind completion RPCs below based on `kind`. Drives the recovery menu
+  // (weft#120 §3.3); on first successful declaration the server promotes the
+  // caller's bootstrap-scope Biscuit to full scope (the §Q2 trigger).
+  // weft#182.
+  rpc DeclareRecoveryMethod(DeclareRecoveryMethodRequest) returns (DeclareRecoveryMethodResponse);
+
+  // Register a WebAuthn recovery credential as a time-locked recovery method
+  // (`kind=time_locked_webauthn`). `window_secs` governs the veto window on a
+  // future BeginRecovery (default 7d; 0 = instant, i.e. opt out of the veto
+  // window). weft#182 §8-2 / weft#183 §8-3.
+  rpc DeclareHardwareKeyRecovery(DeclareHardwareKeyRecoveryRequest) returns (DeclareRecoveryMethodResponse);
+
+  // Declare a set of social guardians plus an M-of-N threshold
+  // (`kind=social`). No proof flow here — that rides on SubmitRecoveryProof's
+  // social variant (weft#185 §8-5). Guardian-side signing UX is a tapestry
+  // follow-up, out of scope for the server.
+  rpc DeclareSocialGuardians(DeclareSocialGuardiansRequest) returns (DeclareRecoveryMethodResponse);
+
+  // Declare a paper-code (mnemonic) recovery method (`kind=paper_code`). The
+  // plaintext mnemonic is generated client-side and NEVER leaves the client
+  // (weft#120 §3.3 / §Q3): the request carries only the argon2id-hashed
+  // verifier, its salt, and the KDF params. The server rejects any request
+  // carrying plaintext bytes. weft#186 §8-6.
+  rpc DeclarePaperCode(DeclarePaperCodeRequest) returns (DeclareRecoveryMethodResponse);
+
+  // Start a recovery attempt for a username. Surfaces a veto bearer token to
+  // all of the user's existing devices (LISTEN/NOTIFY, mirrors weft#103's
+  // `pubkey_revoked` listener). Returns the attempt id + the window deadline
+  // so the device-less client knows when CompleteRecovery becomes eligible.
+  // weft#183 §8-3.
+  rpc BeginRecovery(BeginRecoveryRequest) returns (BeginRecoveryResponse);
+
+  // Submit proof against the pre-declared recovery method for an in-flight
+  // attempt. The proof variant must match the declared method's kind:
+  // a WebAuthn assertion (`time_locked_webauthn`), M-of-N guardian signatures
+  // (`social`), or an argon2id hash of the typed mnemonic (`paper_code`).
+  // weft#183/#185/#186.
+  rpc SubmitRecoveryProof(SubmitRecoveryProofRequest) returns (SubmitRecoveryProofResponse);
+
+  // Cancel an in-flight recovery attempt. The caller presents a veto bearer
+  // token issued by BeginRecovery to one of the user's existing devices;
+  // valid only within the window. weft#183 §8-3.
+  rpc VetoRecovery(VetoRecoveryRequest) returns (VetoRecoveryResponse);
+
+  // Complete a recovery attempt after `window_secs` has elapsed without a
+  // veto and the proof has been accepted. Performs the credential-revocation
+  // cascade (revokes all existing credentials for the user, mints a fresh
+  // device_roots row from the recovery proof) and returns an AccessToken for
+  // the recovered identity. weft#183 §8-3.
+  rpc CompleteRecovery(CompleteRecoveryRequest) returns (AccessTokenResponse);
 }
 
 message BeginWebAuthnRegistrationRequest {
@@ -140,6 +202,26 @@ message RegisterPublicKeyRequest {
   bytes device_binding_client_data_json = 16;
   bytes device_binding_authenticator_data = 17;
   bytes device_binding_signature = 18;
+  // === Cross-device enrollment attestation (HeddleCo/weft#119) ===
+  // Set when this registration is being attested by an already-enrolled
+  // device (the OAuth-style localhost-loopback flow), rather than by a
+  // fresh WebAuthn `create()` on this device. Both fields are required
+  // together; both empty for the ordinary first-device / browser-only flow.
+  //
+  // `attesting_pubkey` is the raw Ed25519 public key of the existing,
+  // already-enrolled device that signed the attestation. The server
+  // verifies it chains to a known, non-revoked pubkey for the same
+  // identity and rejects unknown/revoked attesters.
+  //
+  // `cross_device_attestation` is the signature, produced by the key in
+  // `attesting_pubkey`, over the enrollment statement
+  // `enroll(new_pubkey, scope, expiry, nonce)`. The server enforces the
+  // bounded `scope` (read-only vs full), the `expiry` (max 7d on the
+  // attestation itself), and one-shot `nonce` (rejects replays). The
+  // resulting enrollment of `device_public_key` is permanent until
+  // revoked.
+  bytes attesting_pubkey = 19;
+  bytes cross_device_attestation = 20;
 }
 
 message BeginWebAuthnAuthenticationRequest {
@@ -412,6 +494,12 @@ message MintAnonBiscuitRequest {
   // (operator-flippable break-glass under coordinated abuse). Empty
   // / omitted when the flag is off.
   optional string turnstile_token = 1;
+  // Opaque long-lived continuity token from the browser's HttpOnly
+  // anon-continuity cookie. When present and valid, the server mints
+  // the new 24h anon biscuit for the same Anon(uuid) and rotates the
+  // continuity token. When absent or invalid, the server creates a
+  // fresh anon profile instead.
+  string anon_continuity_token = 2;
   string client_operation_id = 15;
 }
 
@@ -425,6 +513,16 @@ message MintAnonBiscuitResponse {
   // biscuit's internal `expires_at` fact; surfaced so callers can
   // set `Max-Age` on the cookie without parsing the token.
   google.protobuf.Timestamp expires_at = 2;
+  // New opaque continuity token for the browser to store separately
+  // from the short-lived biscuit. It is not a bearer for normal RPCs;
+  // it can only be redeemed at MintAnonBiscuit to recover the same
+  // Anon(uuid) after the biscuit cookie expires.
+  string anon_continuity_token = 3;
+  // Expiry for `anon_continuity_token`.
+  google.protobuf.Timestamp continuity_expires_at = 4;
+  // Debug/audit surface for the anon profile id the biscuit carries.
+  // UI does not need to show this.
+  string anon_id = 5;
 }
 
 message IssuedCredentialResponse {
@@ -644,4 +742,234 @@ message InvitationSummary {
   string namespace_name = 4; // may be empty if metadata has no display name
   HostedRole role = 5;
   // Intentionally NO email or invited_by — don't leak PII.
+}
+
+// ── Account recovery (E2 self-sovereign-auth, weft#120 §8) ──────────────────
+//
+// Declaration phase (weft#182) — the generic dispatcher + the per-kind
+// completion requests. All declaration RPCs return the same
+// DeclareRecoveryMethodResponse. The persisted substrate is a
+// `recovery_methods` row keyed on `(user_id, kind)` with `kind_data jsonb`,
+// `declared_at`, and `window_secs`.
+
+// Canonical recovery-method kinds. Mirrors the `recovery_methods.kind`
+// column. `RECOVERY_METHOD_KIND_UNSPECIFIED` is rejected by the server.
+enum RecoveryMethodKind {
+  RECOVERY_METHOD_KIND_UNSPECIFIED = 0;
+  // Time-locked WebAuthn recovery credential (weft#183).
+  RECOVERY_METHOD_KIND_TIME_LOCKED_WEBAUTHN = 1;
+  // Social guardians with an M-of-N threshold (weft#185).
+  RECOVERY_METHOD_KIND_SOCIAL = 2;
+  // Argon2id-hashed paper-code mnemonic (weft#186).
+  RECOVERY_METHOD_KIND_PAPER_CODE = 3;
+}
+
+// Generic declaration entry point. `kind` selects which `params` variant the
+// server reads; the body is identical to the per-kind RPC's request so a
+// caller can declare any method through this single endpoint. weft#182.
+message DeclareRecoveryMethodRequest {
+  RecoveryMethodKind kind = 1;
+  oneof params {
+    DeclareHardwareKeyRecoveryRequest hardware_key = 2;
+    DeclareSocialGuardiansRequest social = 3;
+    DeclarePaperCodeRequest paper_code = 4;
+  }
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// Shared response for all declaration RPCs. `bootstrap_promoted` is true when
+// this was the user's first declared method and the server promoted the
+// caller's bootstrap-scope Biscuit to full scope (weft#120 §Q2). When a
+// promotion occurs, `promoted_token` carries the newly-minted full-scope
+// Biscuit; empty otherwise.
+message DeclareRecoveryMethodResponse {
+  // Stable id of the persisted `recovery_methods` row.
+  string method_id = 1;
+  RecoveryMethodKind kind = 2;
+  google.protobuf.Timestamp declared_at = 3;
+  bool bootstrap_promoted = 4;
+  string promoted_token = 5;
+}
+
+// Register a WebAuthn recovery credential (`kind=time_locked_webauthn`). The
+// WebAuthn attestation fields mirror RegisterPublicKeyRequest's first-enroll
+// shape — the recovery credential is a distinct authenticator the user
+// stashes for the lost-all-devices case. weft#182 §8-2.
+message DeclareHardwareKeyRecoveryRequest {
+  string challenge_id = 1;
+  // Raw WebAuthn bytes (verbatim; the lib base64url-decodes off the wire).
+  bytes client_data_json = 2;
+  bytes attestation_object = 3;
+  // Human label for the recovery authenticator ("YubiKey 5C — backup").
+  string device_label = 4;
+  // Veto window applied to a future BeginRecovery against this credential.
+  // Default 7 days; 0 = instant (the user opts out of the veto window).
+  google.protobuf.Duration window_secs = 5;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// Declare social guardians + an M-of-N threshold (`kind=social`). weft#185.
+message DeclareSocialGuardiansRequest {
+  // The guardian identities the user nominates. Each carries the stable
+  // subject plus the guardian's signing pubkey so SubmitRecoveryProof can
+  // verify the M-of-N attestation later.
+  repeated SocialGuardian guardians = 1;
+  // M in "M of N": the number of guardian signatures required to recover.
+  // Must satisfy 1 <= threshold <= len(guardians); server rejects otherwise.
+  uint32 threshold = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// A single nominated guardian.
+message SocialGuardian {
+  // Stable subject of the guardian's Heddle identity (e.g. "user:…").
+  string subject = 1;
+  // Raw Ed25519 public key the guardian signs recovery attestations with.
+  bytes public_key = 2;
+  // Optional human label for the UI ("Alice (sister)").
+  string display_name = 3;
+}
+
+// Declare a paper-code (mnemonic) recovery method (`kind=paper_code`). The
+// plaintext mnemonic is generated client-side and NEVER transmitted — only
+// the argon2id verifier, its salt, and the KDF params are sent. The server
+// MUST reject any request that carries plaintext mnemonic bytes. weft#186.
+message DeclarePaperCodeRequest {
+  // argon2id(mnemonic, salt, params). Raw hash bytes.
+  bytes argon2id_hash = 1;
+  // Per-row random salt the client used. Stored so SubmitRecoveryProof can
+  // tell the recovering client which salt to hash against.
+  bytes salt = 2;
+  // KDF params stored alongside the hash so they can be tuned without
+  // breaking existing codes. Floor per OWASP: 64 MiB memory, 3 iterations,
+  // parallelism 4.
+  Argon2idParams params = 3;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// argon2id parameters. Stored per paper-code row so the verifier is
+// reproducible and the floor can be raised over time.
+message Argon2idParams {
+  // Memory cost in KiB (OWASP floor: 65536 = 64 MiB).
+  uint32 memory_kib = 1;
+  // Iteration / time cost (OWASP floor: 3).
+  uint32 iterations = 2;
+  // Degree of parallelism (OWASP floor: 4).
+  uint32 parallelism = 3;
+}
+
+// ── Recovery flow (weft#183/#185/#186) ──────────────────────────────────────
+
+// Start a recovery attempt for a username. weft#183 §8-3.
+message BeginRecoveryRequest {
+  string username = 1;
+  // Which declared method the client intends to prove. Lets the server scope
+  // the attempt (and the returned window) to the right `recovery_methods`
+  // row. Server rejects a kind the user has not declared.
+  RecoveryMethodKind kind = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message BeginRecoveryResponse {
+  // Stable id of the `recovery_attempts` row. Echoed back on
+  // SubmitRecoveryProof / VetoRecovery / CompleteRecovery and named inside
+  // the social attestation message to bind signatures to this attempt.
+  string recovery_attempt_id = 1;
+  // The veto window for this attempt (copied from the declared method's
+  // `window_secs`).
+  google.protobuf.Duration window_secs = 2;
+  // Wall-clock instant at which CompleteRecovery becomes eligible
+  // (started_at + window_secs).
+  google.protobuf.Timestamp completes_at = 3;
+}
+
+// Submit proof against the declared method for an in-flight attempt. The
+// proof variant must match the attempt's kind. weft#183/#185/#186.
+message SubmitRecoveryProofRequest {
+  string recovery_attempt_id = 1;
+  oneof proof {
+    WebAuthnRecoveryProof webauthn = 2;
+    SocialRecoveryProof social = 3;
+    PaperCodeRecoveryProof paper_code = 4;
+  }
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// WebAuthn assertion signed by the declared `time_locked_webauthn`
+// recovery credential. weft#183.
+message WebAuthnRecoveryProof {
+  string credential_id = 1;
+  bytes client_data_json = 2;
+  bytes authenticator_data = 3;
+  bytes signature = 4;
+  // The fresh device pubkey the recovered identity will be bound to once
+  // CompleteRecovery runs the cascade. Raw Ed25519 bytes.
+  bytes new_device_public_key = 5;
+}
+
+// M-of-N guardian signatures over a recovery attestation. weft#185. Each
+// signature is over a canonical message that names `recovery_attempt_id`, so
+// the same N signatures cannot be replayed against a different attempt.
+message SocialRecoveryProof {
+  repeated GuardianSignature signatures = 1;
+  // The fresh device pubkey the recovered identity will be bound to. Raw
+  // Ed25519 bytes.
+  bytes new_device_public_key = 2;
+}
+
+message GuardianSignature {
+  // Subject of the signing guardian (matches a declared SocialGuardian).
+  string guardian_subject = 1;
+  // Ed25519 signature over the canonical attestation bytes binding
+  // `recovery_attempt_id` (replay-bound to this attempt).
+  bytes signature = 2;
+}
+
+// argon2id hash of the user-typed mnemonic, computed client-side over the
+// stored salt + params. The server compares against the stored verifier in
+// constant time. The plaintext mnemonic is NEVER sent. weft#186.
+message PaperCodeRecoveryProof {
+  // argon2id(typed_mnemonic, stored_salt, stored_params). Raw hash bytes.
+  bytes argon2id_hash = 1;
+  // The fresh device pubkey the recovered identity will be bound to. Raw
+  // Ed25519 bytes.
+  bytes new_device_public_key = 2;
+}
+
+message SubmitRecoveryProofResponse {
+  // True once the proof is accepted and the attempt is awaiting either the
+  // window elapse or a veto. CompleteRecovery becomes callable only after
+  // both `proof_accepted` is true and the window has elapsed.
+  bool proof_accepted = 1;
+  // Echoed window deadline so the client can poll/schedule CompleteRecovery.
+  google.protobuf.Timestamp completes_at = 2;
+}
+
+// Cancel an in-flight recovery attempt from an existing device. weft#183.
+message VetoRecoveryRequest {
+  string recovery_attempt_id = 1;
+  // The veto bearer token surfaced to the user's existing devices by
+  // BeginRecovery. Authorizes the cancel; valid only within the window.
+  string veto_token = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message VetoRecoveryResponse {
+  bool vetoed = 1;
+}
+
+// Complete a recovery attempt after the window has elapsed without a veto.
+// Runs the credential-revocation cascade and returns an AccessToken bound to
+// the new device key from the accepted proof. weft#183 §8-3.
+message CompleteRecoveryRequest {
+  string recovery_attempt_id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
 }

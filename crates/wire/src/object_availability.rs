@@ -18,7 +18,12 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
     match (&info.id, info.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
-        (ObjectId::ChangeId(id), ObjectType::State) => Ok(store.has_state(id)?),
+        // State identity deliberately excludes mutable tail fields such as
+        // discussions and review signatures. A receiver may have the same
+        // ChangeId with older tail pointers, so refresh State records by id
+        // and let the store's loose-state shadowing keep the newest metadata
+        // body authoritative.
+        (ObjectId::ChangeId(_), ObjectType::State) => Ok(false),
         // Redactions are keyed by the redacted blob's hash. Two senders
         // can declare different redactions on the same blob (different
         // reason / signature / timestamp), so we conservatively report
@@ -183,6 +188,24 @@ mod tests {
         assert_eq!(plan.present_objects.len(), 1);
         assert_eq!(plan.missing_objects.len(), 1);
         assert!(!plan.is_complete());
+    }
+
+    #[test]
+    fn state_objects_are_refreshed_even_when_present_locally() {
+        let store = DummyStore::default();
+        let state = ChangeId::from_bytes([9; 16]);
+        let objects = vec![ObjectInfo {
+            id: ObjectId::ChangeId(state),
+            obj_type: ObjectType::State,
+            size: 0,
+            delta_base: None,
+        }];
+
+        let plan = plan_object_availability(&store, &objects).unwrap();
+
+        assert!(plan.have_objects.is_empty());
+        assert_eq!(plan.want_objects, vec![ObjectId::ChangeId(state)]);
+        assert_eq!(plan.missing_objects, vec![ObjectId::ChangeId(state)]);
     }
 
     #[test]

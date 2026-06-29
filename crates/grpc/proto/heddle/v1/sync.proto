@@ -30,6 +30,11 @@ message UpdateRefRequest {
   string old_value = 5;
   string new_value = 6;
   ThreadMetadata thread_metadata = 7;
+  // Explicit two-lane revision addresses. Native callers should send
+  // `heddle:<change_id>` here; git-overlay callers send `git:<commit_oid>`.
+  // `old_value` / `new_value` remain populated for Heddle-native refs.
+  string old_revision_address = 8;
+  string new_revision_address = 9;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
 }
@@ -38,6 +43,7 @@ message UpdateRefResponse {
   bool success = 1;
   string old_value = 2;
   string error = 3;
+  string old_revision_address = 4;
 }
 
 enum TransportMode {
@@ -88,6 +94,10 @@ message PushRequest {
   PartialFetchStatus partial_fetch_status = 8;
   bool allow_partial_fetch = 9;
   ThreadMetadata thread_metadata = 10;
+  // Explicit revision being published. Native repos use `heddle:<change_id>`;
+  // git-overlay repos use `git:<commit_oid>` and stream Git objects on the Git
+  // lane rather than importing the commit as a Heddle state.
+  string local_revision_address = 11;
   // Idempotency on the stream-opening message. The PushMessage
   // envelope itself isn't the operation — PushRequest is.
   string client_operation_id = 15;
@@ -100,6 +110,7 @@ message PushReady {
   TransferCheckpoint transfer = 4;
   PartialFetchStatus partial_fetch_status = 5;
   repeated ObjectDescriptor missing_objects = 6;
+  string remote_revision_address = 7;
 }
 
 // Legacy object-by-object chunking is no longer used for normal repo sync.
@@ -133,6 +144,7 @@ message PushComplete {
   string new_state = 2;
   string error = 3;
   TransferCheckpoint transfer = 4;
+  string new_revision_address = 5;
 }
 
 // Out-of-pack transport for redaction sidecars. Sidecars live
@@ -166,6 +178,49 @@ message StateVisibilityTransfer {
   bytes state_visibility_blob = 2;
 }
 
+enum GitRefKind {
+  GIT_REF_KIND_UNSPECIFIED = 0;
+  GIT_REF_KIND_BRANCH = 1;
+  GIT_REF_KIND_TAG = 2;
+  GIT_REF_KIND_NOTE = 3;
+  GIT_REF_KIND_OTHER = 4;
+}
+
+message GitPackTransfer {
+  string transfer_id = 1;
+  uint64 offset = 2;
+  uint32 chunk_index = 3;
+  bool is_final_chunk = 4;
+  uint64 pack_size = 5;
+  bytes pack_chunk = 6;
+  bytes pack_id = 7;
+}
+
+message GitRefUpdateTransfer {
+  string name = 1;
+  GitRefKind kind = 2;
+  bytes target_oid = 3;
+  bytes peeled_oid = 4;
+  bool expected_missing = 5;
+  bytes expected_target_oid = 6;
+  GitCheckpointTransfer checkpoint = 7;
+}
+
+message GitCheckpointTransfer {
+  bytes heddle_change_id = 1;
+  bytes git_commit_oid = 2;
+  string thread = 3;
+  string metadata_json = 4;
+}
+
+message GitLaneTransfer {
+  oneof body {
+    GitPackTransfer pack = 1;
+    GitRefUpdateTransfer ref_update = 2;
+    GitCheckpointTransfer checkpoint = 3;
+  }
+}
+
 message PushMessage {
   oneof body {
     PushRequest request = 1;
@@ -174,6 +229,7 @@ message PushMessage {
     PushComplete complete = 4;
     RedactionTransfer redaction = 5;
     StateVisibilityTransfer state_visibility = 6;
+    GitLaneTransfer git_lane = 8;
   }
 }
 
@@ -188,6 +244,7 @@ message PullRequest {
   PartialFetchStatus partial_fetch_status = 8;
   bool allow_partial_fetch = 9;
   bool fresh_full_pull = 10;
+  string target_revision_address = 11;
   // Idempotency on the stream-opening message. The PullMessage
   // envelope itself isn't the operation — PullRequest is.
   string client_operation_id = 15;
@@ -201,6 +258,7 @@ message PullReady {
   repeated ObjectDescriptor missing_objects = 5;
   bool full_closure_available = 6;
   uint32 object_count = 7;
+  string remote_revision_address = 8;
 }
 
 message WantObjects {
@@ -214,6 +272,7 @@ message PullComplete {
   string new_state = 2;
   string error = 3;
   TransferCheckpoint transfer = 4;
+  string new_revision_address = 5;
 }
 
 message PullMessage {
@@ -225,5 +284,6 @@ message PullMessage {
     PullComplete complete = 5;
     RedactionTransfer redaction = 6;
     StateVisibilityTransfer state_visibility = 7;
+    GitLaneTransfer git_lane = 8;
   }
 }

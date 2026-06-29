@@ -141,9 +141,15 @@ schema_registry! {
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
     (&["agent list"], AgentReservationListSchema),
+    (&["auth logout"], AuthLogoutSchema),
+    (&["auth status"], AuthStatusSchema),
+    (&["auth create-service-token"], AuthCreateServiceTokenSchema),
     (&["session start", "session end", "session show"], SessionEnvelopeSchema),
     (&["session segment"], SessionSegmentEnvelopeSchema),
     (&["session list"], SessionListSchema),
+    (&["support grant"], SupportGrantSchema),
+    (&["support list"], SupportAccessListSchema),
+    (&["support revoke"], SupportRevokeSchema),
     (&["git-overlay"], GitOverlayGuideSchema),
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
@@ -674,6 +680,80 @@ pub struct GitIndexInfoSchema {
 pub struct GenericJsonObjectSchema {
     #[serde(flatten)]
     pub fields: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthLogoutSchema {
+    pub output_kind: String,
+    pub server: String,
+    pub removed: bool,
+    pub device_identity_removed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthStatusSchema {
+    pub output_kind: String,
+    pub server: String,
+    pub authenticated: bool,
+    pub subject: Option<String>,
+    pub credential_id: Option<String>,
+    pub expires_at: Option<String>,
+    pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthCreateServiceTokenSchema {
+    pub output_kind: String,
+    pub name: String,
+    pub namespace: String,
+    pub scope: String,
+    pub token: String,
+    pub private_key_pem: String,
+    pub expires_in_days: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportAccessSchema {
+    pub id: String,
+    pub operator_email: String,
+    pub namespace_path: String,
+    pub repo_path: String,
+    pub role: String,
+    pub granted_by: String,
+    pub granted_at: u64,
+    pub expires_at: u64,
+    pub revoked_at: u64,
+    pub revoked_by: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportGrantSchema {
+    pub output_kind: String,
+    pub id: String,
+    pub operator_email: String,
+    pub namespace_path: String,
+    pub repo_path: String,
+    pub role: String,
+    pub granted_by: String,
+    pub granted_at: u64,
+    pub expires_at: u64,
+    pub revoked_at: u64,
+    pub revoked_by: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportAccessListSchema {
+    pub output_kind: String,
+    pub grants: Vec<SupportAccessSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SupportRevokeSchema {
+    pub output_kind: String,
+    pub id: String,
+    pub revoked: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

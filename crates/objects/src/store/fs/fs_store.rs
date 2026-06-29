@@ -128,6 +128,14 @@ pub struct FsStore {
     pub(super) verified_loose_blobs: RwLock<RecentObjectCache<ContentHash, ()>>,
 }
 
+impl Clone for FsStore {
+    fn clone(&self) -> Self {
+        let mut cloned = Self::with_compression(&self.root, self.compression);
+        cloned.loose_object_write_mode = self.loose_object_write_mode;
+        cloned
+    }
+}
+
 impl FsStore {
     /// Create a new filesystem store rooted at the given path.
     ///

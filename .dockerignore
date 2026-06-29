@@ -1,0 +1,4 @@
+target/
+.git/
+.heddle/
+.DS_Store

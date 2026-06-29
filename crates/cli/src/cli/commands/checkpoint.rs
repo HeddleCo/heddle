@@ -17,7 +17,7 @@ use objects::{object::ThreadName, store::ObjectStore};
 use oplog::{OpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::Repository as SleyRepository;
+use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
     action_line::print_next,
@@ -25,7 +25,9 @@ use super::{
     command_catalog::ActionTemplate,
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
+        git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
     },
     snapshot::ensure_current_state,
@@ -82,6 +84,13 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
     let state = repo
         .current_state()?
         .ok_or_else(|| anyhow!("no captured state found after checkpoint"))?;
+    // NOTE: `build_output` recomputes the verification state from scratch — it
+    // must NOT reuse the pre-checkpoint worktree status. The checkpoint just
+    // advanced the Git ref, which flips the git-overlay health from
+    // `needs_checkpoint` to `clean` (and remote drift from diverged to ahead);
+    // the post-mutation output reflects the NEW git state, so the status walk
+    // here is a different, necessary one. The redundant-walk elimination is
+    // scoped to the PRE-mutation consumers inside `create_git_checkpoint_inner`.
     let output = build_output(&repo, &state.change_id.short(), &record);
 
     if should_output_json(cli, Some(repo.config())) {
@@ -107,7 +116,30 @@ pub(crate) fn create_git_checkpoint(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true)
+    create_git_checkpoint_inner(repo, message, status_options, true, None, None)
+}
+
+/// Variant of [`create_git_checkpoint`] that reuses an already-computed
+/// git-overlay worktree status for checkpoint's two PRE-mutation preflights
+/// instead of re-walking the worktree. Used by `commit`, which has already
+/// computed the same pre-mutation status for its own preflights — no Git
+/// mutation happens between commit's walk and checkpoint's preflights, so they
+/// observe the same git state and the gating decision is byte-identical to
+/// [`create_git_checkpoint`].
+pub(crate) fn create_git_checkpoint_with_worktree_status(
+    repo: &Repository,
+    message: Option<&str>,
+    status_options: repo::WorktreeStatusOptions,
+    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
+) -> Result<GitCheckpointRecord> {
+    create_git_checkpoint_inner(
+        repo,
+        message,
+        status_options,
+        true,
+        None,
+        Some(worktree_status),
+    )
 }
 
 pub(crate) fn create_git_checkpoint_from_index_snapshot(
@@ -115,7 +147,7 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false)
+    create_git_checkpoint_inner(repo, message, status_options, false, None, None)
 }
 
 fn create_git_checkpoint_inner(
@@ -123,21 +155,43 @@ fn create_git_checkpoint_inner(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
+    git_parent_override: Option<Vec<ObjectId>>,
+    precomputed_worktree_status: Option<&repo::Result<Option<objects::worktree::WorktreeStatus>>>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(native_checkpoint_unavailable_advice(repo)));
     }
-    preflight_git_checkpoint_ref_update(repo, "checkpoint")?;
-    if let Some(advice) = git_overlay_mutation_preflight_advice(
+    // Compute the git-overlay worktree status ONCE up front and thread it through
+    // the two PRE-mutation consumers below: the ref-update preflight and the
+    // verification preflight. Both build the repository verification state, which
+    // runs `git_overlay_worktree_status` — a walk that re-reads + SHA-1s every
+    // tracked file. Before this, checkpoint paid that walk twice here (plus a
+    // third in `build_output`, which must stay a FRESH walk because it runs AFTER
+    // the checkpoint advances the Git ref — see `run`). Threading the exact
+    // `Result` keeps the clean/dirty classification byte-identical, and both
+    // consumers observe the SAME pre-mutation git state, so reuse is sound.
+    // A caller that has already computed this pre-mutation status (e.g. `commit`)
+    // passes it in so checkpoint does not re-walk the worktree.
+    let computed_worktree_status;
+    let worktree_status = match precomputed_worktree_status {
+        Some(status) => status,
+        None => {
+            computed_worktree_status = repo.git_overlay_worktree_status();
+            &computed_worktree_status
+        }
+    };
+    preflight_git_checkpoint_ref_update_with_worktree_status(repo, "checkpoint", worktree_status)?;
+    if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
         repo,
         "checkpoint",
         GitOverlayMutationPreflight::checkpoint_like(),
+        worktree_status,
     )? {
         return Err(anyhow!(advice));
     }
     let state_id = ensure_current_state(
         repo,
-        &UserConfig::load_default().unwrap_or_default(),
+        &UserConfig::load_default()?,
         message
             .map(ToOwned::to_owned)
             .or_else(|| Some("Bootstrap git-overlay before checkpoint".to_string())),
@@ -175,6 +229,9 @@ fn create_git_checkpoint_inner(
         .unwrap_or_else(|| "HEAD".to_string());
     let previous_git_oid = git_rev_parse_head(repo.root());
     let mut bridge = GitBridge::new(repo);
+    if let Some(parents) = git_parent_override {
+        bridge.set_commit_parent_override(state.change_id, parents);
+    }
     let git_commit = match bridge
         .write_through_current_checkout_with_message(state.change_id, summary.clone())?
     {
@@ -203,6 +260,30 @@ pub(crate) fn preflight_git_checkpoint_ref_update(repo: &Repository, action: &st
         return Ok(());
     }
     let trust = build_repository_verification_state(repo);
+    preflight_git_checkpoint_ref_update_with_trust(repo, action, trust)
+}
+
+/// `checkpoint` hot-path variant that reuses an already-computed git-overlay
+/// worktree status instead of re-walking the worktree to build the verification
+/// state. The gating decision is identical to
+/// [`preflight_git_checkpoint_ref_update`].
+pub(crate) fn preflight_git_checkpoint_ref_update_with_worktree_status(
+    repo: &Repository,
+    action: &str,
+    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
+) -> Result<()> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    let trust = build_repository_verification_state_with_worktree_status(repo, worktree_status);
+    preflight_git_checkpoint_ref_update_with_trust(repo, action, trust)
+}
+
+fn preflight_git_checkpoint_ref_update_with_trust(
+    repo: &Repository,
+    action: &str,
+    trust: RepositoryVerificationState,
+) -> Result<()> {
     if git_checkpoint_trust_allows_ref_update(&trust)
         || git_checkpoint_can_close_integrated_remote_gap(repo, &trust)
     {
@@ -342,6 +423,9 @@ fn build_output(
     change_id: &str,
     record: &GitCheckpointRecord,
 ) -> CheckpointOutput {
+    // Fresh verification state: this runs AFTER the checkpoint advanced the Git
+    // ref, so it must re-read the new git-overlay state (do NOT reuse the
+    // pre-checkpoint worktree status threaded into the preflights above).
     let trust = build_repository_verification_state(repo);
     let recommended_action = action_value(&trust);
     CheckpointOutput {

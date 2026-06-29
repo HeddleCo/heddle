@@ -13,6 +13,81 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.5.1 - 2026-06-27
+
+### Changed
+
+- Upgraded the native-git substrate to sley `0.3.1` and switched published
+  Heddle crates back to the crates.io dependency instead of the sibling path.
+  sley `0.3.1` adds a receive-pack input-size cap and unix-portability
+  cfg-gates.
+- Hosted Git-overlay sync now sends Git-shaped data through the Git lane as
+  packs, while Heddle-native captures, state, context, discussions, and
+  visibility metadata remain on the Heddle lane.
+- `heddle-grpc` and `@heddleco/grpc` move to `0.7.2` with the Git lane pack
+  transfer protobuf surface and hosted spool API additions.
+
+### Fixed
+
+- Heddle's Sley fetch call sites now pass the explicit `FetchOptions.atomic`
+  setting required by sley `0.3.1`, preserving the previous non-atomic fetch
+  behavior.
+- `.git/HEAD` symref updates are now atomic (temp-file + rename + fsync),
+  preventing a torn HEAD if the process is interrupted mid-write.
+- A corrupt or unreadable user config now fails closed with a clear error
+  instead of silently attributing captures/checkpoints to an
+  `Unknown <unknown@example.com>` identity.
+- A git-lane pull targeting a non-overlay repository now returns an error
+  instead of silently discarding the transferred data.
+- The fast short-status path now classifies staged-add-then-worktree-deleted
+  (`AD`), renames (`R`), and copies (`C`) consistently with the full status
+  path.
+- The worktree change scan now detects a new file added to an already-tracked
+  directory. Previously such a file could be missed by `status`/`capture`
+  until an unrelated change forced a rescan.
+
+### Security
+
+- `heddle try` now sanitizes the spawned command's environment —
+  `env_clear()` plus an allowlist, matching `heddle run` — so `GIT_DIR`,
+  `GIT_WORK_TREE`, and other inherited parent-process secrets no longer leak
+  into commands run via `try`.
+
+## 0.5.0 - 2026-06-23
+
+Native-git substrate jumps to sley 0.2.0, the storage seam lands, and the
+embeddable `heddle-core` facade takes shape.
+
+### Added
+
+- **`heddle-core` embeddable facade.** New facade crate with an
+  `ExecutionContext` and observability sinks, a query facade lifted out of
+  the CLI, and a compute→render split exemplar (`fsck` computes a
+  `FsckReport`; the CLI renders it). Groundwork for embedding heddle as a
+  library. (#775, #780, #782)
+- **New published crates `heddle-format` and `heddle-schema`**, extracted as
+  pure (behaviour-neutral) cores from `heddle-objects` and now part of the
+  crates.io publish set. (#761)
+
+### Changed
+
+- **Native-git substrate upgraded to sley `0.2.0`** (~24 parity waves since
+  `0.1.0`: multi-pack-index, reftable basics, fetch, gc, blame, worktree,
+  split-index, mergetool, the diff-format crate extraction, and more). (#784)
+- **Storage seam.** Reads now flow through an `ObjectSource` sync/async seam;
+  `query_history`/`CommitGraphIndex` are decoupled onto it with the cache as
+  an optional accelerator; staleness and context-suggestion pure cores moved
+  into `heddle-objects`. (#762, #763, #764)
+- **`clap` confined to the `heddle-cli` crate.** `heddle-ingest` and the
+  library crates no longer pull `clap`, shrinking the embeddable surface.
+  (#781, #783)
+- Faster status scans: borrow entry names instead of cloning. (#774)
+
+### Removed
+
+- The S3 object backend and its AWS dependency chain (a pre-seam leftover).
+  (#765)
+
 ## 0.4.0 - 2026-06-19
 
 ### Changed
@@ -55,7 +130,7 @@ release ships signed macOS + Homebrew distribution.
 - Native ref primitives: `parse_git_ref` + `RefSpec`/`NegativeRefSpec` ported from jj; `.git/config` remotes parsed via `gix_config` instead of by hand (#296, #288)
 - Captured new files are marked intent-to-add in the colocated Git index, matching `git add -N` semantics (#300)
 - `output_kind` wire normalization across thread/operator envelopes and the read/stream paths (inspect/show, rebase JSONL, conflict-show), so `--output json` is stable end to end; an invariant lint guards the class (#671, #660, #281)
-- Help and onboarding overhaul: `heddle init --quickstart` one-command first run (#349), grouped advanced command list, single-sourced `--output` help, `help threads`/`help advanced`/Git-concept topics, and de-bloated per-command help (#663, #658, #688, #174)
+- Help and onboarding overhaul: one-command first-run onboarding (#349), grouped advanced command list, single-sourced `--output` help, `help threads`/`help advanced`/Git-concept topics, and de-bloated per-command help (#663, #658, #688, #174)
 
 ### Added
 

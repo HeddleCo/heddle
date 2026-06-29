@@ -9,7 +9,7 @@ use super::*;
 fn git_overlay_guide_is_concise_and_actionable() {
     let help = heddle_help(&["help", "git-overlay"]);
     assert!(
-        help.contains("Git-overlay quick start")
+        help.contains("Git-overlay workflow")
             && help.contains("heddle adopt")
             && help.contains("heddle commit -m")
             && help.contains("heddle land --thread <name> --no-push"),
@@ -19,17 +19,17 @@ fn git_overlay_guide_is_concise_and_actionable() {
     let output = heddle(&["--output", "text", "git-overlay"], None).unwrap();
 
     assert!(
-        output.contains("Git-overlay quick start"),
+        output.contains("Git-overlay workflow"),
         "guide should have a clear title: {output}"
     );
     assert!(
         output.contains("heddle adopt"),
-        "guide should teach one-command adoption: {output}"
+        "guide should teach explicit native conversion: {output}"
     );
     assert!(
         output.contains("Worktree has unsaved edits")
             && output.contains("Captured in Heddle but not Git")
-            && output.contains("Git refs changed externally"),
+            && output.contains("Convert Git history to native Heddle storage"),
         "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {output}"
     );
     assert!(
@@ -60,8 +60,7 @@ fn model_help_topic_gives_short_first_time_mental_model() {
             && help.contains("Capture:")
             && help.contains("Commit:")
             && help.contains("Verify:")
-            && help.contains("heddle land --thread <name>")
-            && help.contains("heddle adopt"),
+            && help.contains("heddle land --thread <name>"),
         "model topic should explain the everyday concepts without the long thread manual: {help}"
     );
     assert!(
@@ -108,7 +107,7 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
 fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
     let help = heddle_help(&["import", "--help"]);
     assert!(
-        help.contains("Adopt the current Git repository into Heddle")
+        help.contains("Convert Git history into Heddle-native storage")
             && help.contains("heddle adopt"),
         "`heddle import --help` should route first-run import intent to adopt, not suggest an unrelated command: {help}"
     );
@@ -738,13 +737,13 @@ fn plain_git_diff_routes_to_adoption_guidance() {
     let diff_stderr = String::from_utf8_lossy(&diff.stderr);
     let envelope: Value =
         serde_json::from_str(&diff_stderr).expect("diff refusal should be JSON advice");
-    assert_eq!(envelope["kind"], "plain_git_not_adopted");
-    assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
+    assert_eq!(envelope["kind"], "plain_git_needs_init");
+    assert_eq!(envelope["primary_command"], "heddle init");
     assert_eq!(envelope["repository_capability"], "plain-git");
     assert_eq!(envelope["verification"]["repository_mode"], "plain-git");
     assert_eq!(
         envelope["verification"]["recommended_action"],
-        "heddle adopt --ref main"
+        "heddle init"
     );
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -780,10 +779,10 @@ fn init_json_names_side_effects_next_action_and_schema() {
     assert_eq!(init["principal"]["name"], "Heddle Test");
     assert_eq!(init["principal"]["email"], "heddle@example.com");
     assert_eq!(init["principal_recommended_action"], Value::Null);
-    assert_eq!(init["recommended_action"], "heddle adopt --ref main");
+    assert_eq!(init["recommended_action"], "heddle commit -m \"...\"");
     assert_eq!(
-        init["verification"]["status"], "needs_import",
-        "post-init verify should keep the first-run import blocker explicit: {init}"
+        init["verification"]["status"], "clean",
+        "post-init verify should treat clean Git history as directly readable: {init}"
     );
     assert!(
         init["side_effects"].as_array().is_some_and(|effects| {
@@ -829,8 +828,8 @@ fn init_json_names_side_effects_next_action_and_schema() {
             && text.contains("Principal: Heddle Test <heddle@example.com> from git_config")
             && text.contains(".git/info/exclude")
             && text.contains("left Git-tracked files")
-            && text.contains("Next: heddle adopt --ref main"),
-        "init text should make side effects and import next step obvious: {text}"
+            && text.contains("Next: heddle commit -m \"...\""),
+        "init text should make side effects and next save step obvious: {text}"
     );
 }
 
@@ -3297,7 +3296,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     )
     .unwrap();
     assert!(
-        capture_text.contains("Next:") && capture_text.contains("heddle commit -m \"...\""),
+        capture_text.contains("Next:") && capture_text.contains("heddle checkpoint -m \"...\""),
         "Git-overlay capture should point to the concrete checkpoint step: {capture_text}"
     );
     assert!(
@@ -3320,7 +3319,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         status["thread_state"], "blocked",
         "captured work that only needs a Git checkpoint should not rewrite lifecycle as blocked: {status}"
     );
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
     assert!(
         status["verification"]["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3329,7 +3328,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_commands"],
-        serde_json::json!(["heddle commit -m \"...\""])
+        serde_json::json!(["heddle checkpoint -m \"...\""])
     );
     assert_eq!(
         status["recovery_action_templates"], status["verification"]["recovery_action_templates"],
@@ -3337,17 +3336,17 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "templated commit recovery should be machine-fillable at top level: {status}"
+        heddle_argv_json(["checkpoint", "-m", "<message>"]),
+        "templated checkpoint recovery should be machine-fillable at top level: {status}"
     );
     let thread_list = json_value(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(
-        thread_list["recommended_action"], "heddle commit -m \"...\"",
+        thread_list["recommended_action"], "heddle checkpoint -m \"...\"",
         "thread list should use the same verification blocker as status: {thread_list}"
     );
     assert_eq!(
         thread_list["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
+        heddle_argv_json(["checkpoint", "-m", "<message>"]),
         "thread list top-level placeholder action should be machine-fillable: {thread_list}"
     );
     assert_eq!(
@@ -3356,12 +3355,12 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     let workspace = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
-        workspace["recommended_action"], "heddle commit -m \"...\"",
+        workspace["recommended_action"], "heddle checkpoint -m \"...\"",
         "workspace should use the same verification blocker as status: {workspace}"
     );
     assert_eq!(
         workspace["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
+        heddle_argv_json(["checkpoint", "-m", "<message>"]),
         "workspace top-level placeholder action should be machine-fillable: {workspace}"
     );
     assert_eq!(status["verification"]["worktree_dirty"], true);
@@ -3392,7 +3391,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "needs_checkpoint");
-    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(verify["recommended_action"], "heddle checkpoint -m \"...\"");
     assert!(
         verify["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3641,8 +3640,8 @@ fn verify_text_reports_runtime_contract_cleanly_and_blocked_checks_honestly() {
 
     let verify_output = heddle_output(&["verify", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        !verify_output.status.success(),
-        "verify should exit nonzero until import is complete"
+        verify_output.status.success(),
+        "verify should be clean after init"
     );
     let verify = String::from_utf8_lossy(&verify_output.stdout);
     assert!(
@@ -3667,8 +3666,8 @@ fn verify_text_reports_runtime_contract_cleanly_and_blocked_checks_honestly() {
     )
     .expect("verbose verify should run");
     assert!(
-        !verbose_output.status.success(),
-        "verbose verify should preserve strict exit semantics"
+        verbose_output.status.success(),
+        "verbose verify should be clean after init"
     );
     let verbose_verify = String::from_utf8_lossy(&verbose_output.stdout);
     assert!(
@@ -3697,8 +3696,8 @@ fn verify_text_reports_runtime_contract_cleanly_and_blocked_checks_honestly() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|check| { check["name"] == "Worktree" && check["status"] == "not_checked" }),
-        "verify should not report Worktree ok before the primary import blocker is resolved: {parsed}"
+            .any(|check| { check["name"] == "Worktree" && check["status"] == "clean" }),
+        "verify should report the clean worktree after init: {parsed}"
     );
 }
 
@@ -3830,7 +3829,7 @@ fn core_mutations_emit_post_verification_in_json() {
     );
     assert_eq!(
         capture["verification"]["recommended_action"],
-        "heddle commit -m \"...\""
+        "heddle checkpoint -m \"...\""
     );
     assert_eq!(
         capture["next_action"], capture["verification"]["recommended_action"],
@@ -3947,7 +3946,7 @@ fn plain_git_core_save_refusals_do_not_initialize_heddle() {
 
         assert!(
             !output.status.success(),
-            "{verb} must refuse before explicit adoption"
+            "{verb} must refuse before Heddle initialization"
         );
         assert!(
             output.stdout.is_empty(),
@@ -3966,11 +3965,11 @@ fn plain_git_core_save_refusals_do_not_initialize_heddle() {
         let stderr = std::str::from_utf8(&output.stderr).unwrap();
         let envelope: Value = serde_json::from_str(stderr)
             .unwrap_or_else(|err| panic!("{verb} stderr should be JSON: {err}: {stderr}"));
-        assert_eq!(envelope["kind"], "git_repo_needs_adoption");
-        assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
+        assert_eq!(envelope["kind"], "git_repo_needs_init");
+        assert_eq!(envelope["primary_command"], "heddle init");
         assert_eq!(
             envelope["primary_command_template"]["argv_template"],
-            heddle_argv_json(["adopt", "--ref", "main"])
+            heddle_argv_json(["init"])
         );
         assert!(
             envelope["preserved"]
@@ -3982,7 +3981,7 @@ fn plain_git_core_save_refusals_do_not_initialize_heddle() {
 }
 
 #[test]
-fn dirty_git_repo_after_init_requires_import_before_commit() {
+fn dirty_git_repo_after_init_can_save_without_adoption() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
@@ -3992,114 +3991,79 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify["status"], "needs_import");
-    assert_eq!(verify["recommended_action"], "heddle adopt --ref main");
+    assert_eq!(verify["status"], "dirty_worktree");
+    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
     assert_eq!(
         verify["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"])
+        heddle_argv_json(["commit", "-m", "<message>"])
     );
     assert_eq!(
         verify["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"])
+        heddle_argv_json(["commit", "-m", "<message>"])
     );
     assert!(
         verify["checks"].as_array().unwrap().iter().any(|check| {
-            check["name"] == "Mapping"
-                && check["status"] == "needs_import"
-                && check["recommended_action"] == "heddle adopt --ref main"
+            check["name"] == "Worktree"
+                && check["status"] == "dirty_worktree"
+                && check["recommended_action"] == "heddle commit -m \"...\""
                 && check["recommended_action_template"]["argv_template"]
-                    == heddle_argv_json(["adopt", "--ref", "main"])
+                    == heddle_argv_json(["commit", "-m", "<message>"])
         }),
-        "dirty first-run verify should block on import before worktree advice: {verify}"
+        "dirty first-run verify should recommend saving the dirty worktree: {verify}"
     );
 
     let status = json_value(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["verification"]["status"], "needs_import");
-    assert_eq!(status["recommended_action"], "heddle adopt --ref main");
+    assert_eq!(status["verification"]["status"], "dirty_worktree");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"])
+        heddle_argv_json(["commit", "-m", "<message>"])
     );
     assert_eq!(
         status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"])
+        heddle_argv_json(["commit", "-m", "<message>"])
     );
 
-    let capture = heddle_output(
-        &["--output", "json", "capture", "-m", "should fail closed"],
-        Some(temp.path()),
-    )
-    .expect("capture should run");
-    assert!(!capture.status.success(), "capture must fail before import");
-    assert!(
-        capture.stdout.is_empty(),
-        "failed JSON command should not write stdout: {}",
-        String::from_utf8_lossy(&capture.stdout)
+    let capture = json_value(
+        temp.path(),
+        &["capture", "-m", "save dirty work", "--output", "json"],
     );
-    let stderr = std::str::from_utf8(&capture.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "git_history_needs_import");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle adopt --ref main")),
-        "capture refusal should name the import recovery: {envelope}"
+    assert_eq!(capture["status"], "captured");
+    assert_eq!(capture["verification"]["status"], "needs_checkpoint");
+    assert_eq!(
+        capture["verification"]["recommended_action"],
+        "heddle checkpoint -m \"...\""
     );
+
+    let checkpoint = json_value(
+        temp.path(),
+        &["checkpoint", "-m", "save dirty work", "--output", "json"],
+    );
+    assert_eq!(checkpoint["status"], "checkpointed");
+    assert_eq!(checkpoint["verification"]["status"], "clean");
+
+    std::fs::write(temp.path().join("tracked.txt"), "dirty again\n").unwrap();
+    let commit = json_value(
+        temp.path(),
+        &["commit", "-m", "save dirty work again", "--output", "json"],
+    );
+    assert_eq!(commit["status"], "committed");
+    assert_eq!(commit["verification"]["status"], "clean");
+    assert_eq!(commit["recommended_action"], Value::Null);
 
     let start = heddle_output(
         &["--output", "json", "start", "feat/improvements"],
         Some(temp.path()),
     )
     .expect("start should run");
-    assert!(!start.status.success(), "start must fail before import");
     assert!(
-        start.stdout.is_empty(),
-        "failed JSON command should not write stdout: {}",
-        String::from_utf8_lossy(&start.stdout)
+        start.status.success(),
+        "clean direct Git-backed start should work"
     );
-    let stderr = std::str::from_utf8(&start.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("start stderr should be JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "git_history_needs_import");
-    assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
-    assert!(
-        !temp
-            .path()
-            .join(".heddle/threads/feat%2Fimprovements/root")
-            .exists(),
-        "start refusal must not create a managed checkout"
-    );
-
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-    let after_import = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(
-        after_import["status"], "dirty_worktree",
-        "after import, dirty advice should become the primary blocker: {after_import}"
-    );
-    assert_eq!(
-        after_import["recommended_action"],
-        "heddle commit -m \"...\""
-    );
-    assert!(
-        after_import["recommended_action_template"]["required_inputs"]
-            .as_array()
-            .is_some_and(|inputs| !inputs.is_empty()),
-        "templated commit advice must stay display-only until a message is supplied: {after_import}"
-    );
-    assert_eq!(
-        after_import["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "templated commit advice should expose a structured machine plan: {after_import}"
-    );
-    assert_eq!(
-        after_import["recommended_action_template"]["required_inputs"],
-        serde_json::json!(["message"])
-    );
-    assert_eq!(
-        after_import["recommended_action_template"]["agent_may_fill"],
-        true
-    );
+    let stdout = std::str::from_utf8(&start.stdout).unwrap();
+    let started: Value =
+        serde_json::from_str(stdout).unwrap_or_else(|err| panic!("start JSON: {err}: {stdout}"));
+    assert_eq!(started["status"], "completed");
 }
 
 #[test]
@@ -4135,6 +4099,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
     }
 
     heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "dirty after init\n").unwrap();
     for args in [
         vec!["status", "--output", "json"],
         vec!["doctor", "--output", "json"],
@@ -5909,7 +5874,6 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
 fn revert_empty_state_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["capture", "-m", "empty"], Some(temp.path())).unwrap();
     let target = Repository::open(temp.path())
         .unwrap()
         .current_state()
@@ -7082,12 +7046,12 @@ fn ready_plain_git_refuses_before_initializing_heddle() {
     assert!(
         ready["recommended_action"]
             .as_str()
-            .is_some_and(|action| action == "heddle adopt --ref main"),
-        "plain Git ready should point at explicit adoption/initialization: {ready}"
+            .is_some_and(|action| action == "heddle init"),
+        "plain Git ready should point at initialization: {ready}"
     );
     assert_eq!(
         ready["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "main"])
+        heddle_argv_json(["init"])
     );
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -7111,12 +7075,11 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     let verify = String::from_utf8_lossy(&output.stdout);
     assert!(
         verify.contains("Git repo detected")
-            && verify.contains("connect this branch with heddle adopt --ref main")
+            && verify.contains("initialize Heddle with heddle init")
             && verify.contains(".heddle metadata")
-            && verify.contains("Git history imported")
             && verify.contains("Git worktree stays clean")
-            && verify.contains("Next: heddle adopt --ref main"),
-        "plain Git verify should explain first-run adoption in human terms: {verify}"
+            && verify.contains("Next: heddle init"),
+        "plain Git verify should explain first-run initialization in human terms: {verify}"
     );
     assert!(
         !verify.contains("Heddle Heddle")
@@ -7128,11 +7091,10 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     let status = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
         status.contains("Git repo detected")
-            && status.contains("connect this branch with heddle adopt --ref main")
+            && status.contains("initialize Heddle with heddle init")
             && status.contains(".heddle metadata")
-            && status.contains("Git history imported")
             && status.contains("Git worktree stays clean"),
-        "plain Git status should make first-run adoption and clean Git status explicit: {status}"
+        "plain Git status should make first-run initialization and clean Git status explicit: {status}"
     );
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -7176,7 +7138,7 @@ fn verify_prioritizes_dirty_worktree_over_optional_git_only_refs() {
         .expect("git checkout main should run");
     assert!(status.success(), "git checkout main should succeed");
 
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
@@ -7188,7 +7150,7 @@ fn verify_prioritizes_dirty_worktree_over_optional_git_only_refs() {
         .iter()
         .find(|check| check["name"] == "Mapping")
         .unwrap_or_else(|| panic!("verify checks should include Mapping: {verify}"));
-    assert_eq!(mapping["status"], "available");
+    assert_eq!(mapping["status"], "clean");
     assert_eq!(mapping["clean"], true);
     let worktree = verify["checks"]
         .as_array()
@@ -7232,7 +7194,7 @@ fn verify_prioritizes_dirty_worktree_over_optional_git_only_refs() {
 }
 
 #[test]
-fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
+fn initialized_git_overlay_status_and_ready_do_not_claim_actionable_readiness() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -7240,46 +7202,36 @@ fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let status = json_value(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["verification"]["status"], "needs_import");
-    assert_eq!(status["coordination_status"], "blocked");
+    assert_eq!(status["verification"]["status"], "clean");
+    assert_eq!(status["coordination_status"], "clean");
     assert_ne!(
         status["thread_state"], "blocked",
-        "verification blocker is a health signal carried by coordination_status, not a lifecycle state: {status}"
+        "repository health must not rewrite the thread lifecycle state: {status}"
     );
-    assert!(
-        status["blockers"]
-            .as_array()
-            .is_some_and(|blockers| blockers.iter().any(|blocker| blocker
-                .as_str()
-                .is_some_and(|text| text.contains("Mapping:")))),
-        "verify-blocked status should surface verify blockers at the top level: {status}"
-    );
+    assert_eq!(status["blockers"], serde_json::json!([]));
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path()))
-        .expect("status should render blocked verify text");
+        .expect("status should render clean direct Git-backed text");
     assert!(
-        status_text.contains("Git repo detected")
-            && status_text.contains("connect this branch with heddle adopt --ref main")
-            && status_text.contains(".heddle metadata")
-            && status_text.contains("adoption imports Git history")
-            && status_text.contains("Git worktree stays clean"),
-        "initialized Git-overlay status should explain adoption without internal wording: {status_text}"
+        status_text.contains("Verdict: clean") && status_text.contains("Git + Heddle"),
+        "initialized Git-overlay status should be calm and clean: {status_text}"
     );
 
     let ready = heddle_output(&["ready", "--output", "text"], Some(temp.path()))
-        .expect("ready should render blocked verify output");
-    assert!(!ready.status.success(), "blocked ready should exit nonzero");
+        .expect("ready should render clean no-target output");
+    assert!(
+        ready.status.success(),
+        "clean no-target ready should succeed"
+    );
     let ready_stdout = String::from_utf8_lossy(&ready.stdout);
     assert!(
-        ready_stdout.contains("Setup needed")
-            && ready_stdout.contains("status: blocked")
-            && ready_stdout.contains("checks: not run"),
-        "ready should present blocked verify as setup state, not a merge verdict: {ready_stdout}"
+        ready_stdout.contains("status: clean") && ready_stdout.contains("checks: completed"),
+        "ready should present clean no-target state as a completed no-op readiness check: {ready_stdout}"
     );
     assert!(
         !ready_stdout.contains("merge type: blocked")
             && !ready_stdout.contains("freshness: not checked"),
-        "ready should not show fake readiness details while verify is blocked: {ready_stdout}"
+        "ready should not show fake blocked details when nothing needs review: {ready_stdout}"
     );
     assert!(
         !ready_stdout
@@ -7289,30 +7241,21 @@ fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
     );
 
     let threads = json_value(temp.path(), &["thread", "list", "--output", "json"]);
-    assert_eq!(threads["verification"]["status"], "needs_import");
-    assert_eq!(threads["recommended_action"], "heddle adopt --ref main");
+    assert_eq!(threads["verification"]["status"], "clean");
+    assert_eq!(threads["recommended_action"], Value::Null);
     let thread = threads["threads"]
         .as_array()
         .and_then(|threads| threads.iter().find(|thread| thread["name"] == "main"))
         .expect("main thread should be listed");
     assert_eq!(
-        thread["thread_health"], "needs_import",
-        "thread list should not report a clean/ready thread while repository verification is blocked: {threads}"
+        thread["thread_health"], "clean",
+        "thread list should report clean health after direct Git-backed init: {threads}"
     );
     assert_eq!(
-        thread["coordination_status"], "blocked",
-        "thread list should not advertise merge-ready coordination while repository verification is blocked: {threads}"
+        thread["coordination_status"], "clean",
+        "thread list should carry clean coordination after direct Git-backed init: {threads}"
     );
-    assert!(
-        thread["blockers"].as_array().is_some_and(|blockers| {
-            blockers.iter().any(|blocker| {
-                blocker
-                    .as_str()
-                    .is_some_and(|text| text.contains("Git branch"))
-            })
-        }),
-        "thread list should carry the verification blocker onto per-thread summaries: {threads}"
-    );
+    assert_eq!(thread["blockers"], serde_json::json!([]));
 
     let merge_preview = heddle_output(
         &["merge", "main", "--preview", "--output", "text"],
@@ -7320,23 +7263,13 @@ fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
     )
     .expect("merge preview should render blocked verify output");
     assert!(
-        !merge_preview.status.success(),
-        "merge preview should strictly fail when verification prevents the preview from running"
+        merge_preview.status.success(),
+        "clean self merge preview should succeed"
     );
+    let merge_stdout = String::from_utf8_lossy(&merge_preview.stdout);
     assert!(
-        merge_preview.stdout.is_empty(),
-        "strict blocked preview should not emit a success payload: {}",
-        String::from_utf8_lossy(&merge_preview.stdout)
-    );
-    let merge_stderr = String::from_utf8_lossy(&merge_preview.stderr);
-    assert!(
-        merge_stderr.contains("Repository verification is blocked; merge preview did not run"),
-        "merge preview should name the setup/verify blocker: {merge_stderr}"
-    );
-    assert!(
-        !merge_stderr.contains("Merge is up to date, but repository verify is blocked")
-            && !merge_stderr.contains("Already up to date"),
-        "blocked merge preview should not claim a merge verdict: {merge_stderr}"
+        merge_stdout.contains("Already up to date") || merge_stdout.contains("up to date"),
+        "clean self merge preview should report the no-op merge verdict: {merge_stdout}"
     );
 }
 
@@ -7352,8 +7285,8 @@ fn thread_state_agrees_across_status_and_thread_list_for_blocked_verification() 
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    // init without adopt → repository verification is blocked (needs_import),
-    // a health signal that must not rewrite the thread's lifecycle state.
+    // init should attach Heddle directly to the Git branch without manufacturing
+    // a blocked lifecycle state.
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let status = json_value(temp.path(), &["status", "--output", "json"]);
@@ -7373,14 +7306,13 @@ fn thread_state_agrees_across_status_and_thread_list_for_blocked_verification() 
         status["thread_state"], "blocked",
         "verification/dirty-worktree health is not a lifecycle state: {status:#}"
     );
-    // The blocker still surfaces through the documented health field, on both verbs.
     assert_eq!(
-        status["coordination_status"], "blocked",
-        "verification blocker should surface via status coordination_status: {status:#}"
+        status["coordination_status"], "clean",
+        "clean repository health should surface via status coordination_status: {status:#}"
     );
     assert_eq!(
-        thread["coordination_status"], "blocked",
-        "verification blocker should surface via thread list coordination_status: {threads:#}"
+        thread["coordination_status"], "clean",
+        "clean repository health should surface via thread list coordination_status: {threads:#}"
     );
 }
 
@@ -7643,29 +7575,30 @@ fn default_thread_and_workspace_cap_optional_git_only_refs() {
     }
     heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
 
-    for (label, args) in [
-        ("thread list", &["thread", "list", "--output", "text"][..]),
-        ("workspace", &["status", "--output", "text"][..]),
-    ] {
-        let text = heddle(args, Some(temp.path())).unwrap();
-        assert!(
-            text.contains("Optional Git-only branches"),
-            "{label} should still surface optional Git-only refs: {text}"
-        );
-        let visible = text.matches("[available]").count() + text.matches("(available)").count();
-        assert!(
-            visible <= 5,
-            "{label} should cap optional Git-only refs in default text: {text}"
-        );
-        assert!(
-            text.contains("more"),
-            "{label} should explain hidden optional refs: {text}"
-        );
-        assert!(
-            !text.contains("git tip:"),
-            "{label} default text should hide Git tips: {text}"
-        );
-    }
+    let text = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("Optional Git-only branches"),
+        "thread list should still surface optional Git-only refs: {text}"
+    );
+    let visible = text.matches("[available]").count() + text.matches("(available)").count();
+    assert!(
+        visible <= 5,
+        "thread list should cap optional Git-only refs in default text: {text}"
+    );
+    assert!(
+        text.contains("more"),
+        "thread list should explain hidden optional refs: {text}"
+    );
+    assert!(
+        !text.contains("git tip:"),
+        "thread list default text should hide Git tips: {text}"
+    );
+
+    let workspace = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    assert!(
+        !workspace.contains("Optional Git-only branches"),
+        "status should stay focused on the active workspace; optional refs belong on thread list: {workspace}"
+    );
 
     let thread_json = json_value(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(
@@ -8090,11 +8023,11 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
     }
     assert!(
         stdout.contains("Nearby: `heddle undo`, `heddle verify`, `heddle push`, `heddle pull`.")
-            && stdout.contains("Start here: `heddle init`, `heddle adopt`, or `heddle clone`."),
+            && stdout.contains("Start here: `heddle init`, `heddle commit`, or `heddle clone`."),
         "default help should keep adjacent commands discoverable without expanding the first-screen loop: {stdout}"
     );
     assert!(
-        stdout.contains("Existing Git: heddle status -> heddle adopt -> heddle verify -> heddle commit -m \"...\" -> heddle push")
+        stdout.contains("Existing Git: heddle status -> heddle init -> heddle verify -> heddle commit -m \"...\" -> heddle push")
             && stdout
                 .contains("Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"),
         "default help should connect first-run adoption and isolated work to the same product loop: {stdout}"

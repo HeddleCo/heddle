@@ -335,6 +335,54 @@ fn merge_strategy_for(use_semantic: bool) -> MergeStrategy {
     }
 }
 
+/// Strategy + target decided **once per merge attempt** and reused by
+/// preview, refresh, apply, and diff (HeddleCo/heddle#503).
+///
+/// Before this seam existed, `merge_thread_into_current` computed the
+/// content-merge strategy independently for the preview report and for
+/// the apply `MergePlan` (two separate `merge_strategy_for(use_semantic)`
+/// calls). They agreed only by construction — and a Codex r13 P2 finding
+/// documented a real preview-vs-actual divergence regression caused by
+/// exactly that kind of duplicated, drift-prone strategy state. Routing
+/// every consumer through one decision makes "preview == apply" an
+/// invariant the type system enforces rather than a discipline each call
+/// site must remember.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MergeAttemptPlan {
+    strategy: MergeStrategy,
+    /// Whether semantic analysis feeds the `--with-diff` / symbol-delta
+    /// payload. Derived from the same `use_semantic` decision as
+    /// `strategy`, so the diff path can't drift from the content-merge
+    /// path either.
+    use_semantic: bool,
+}
+
+impl MergeAttemptPlan {
+    /// Decide the strategy for one `heddle merge` invocation. This is the
+    /// single point where `no_semantic` becomes a `MergeStrategy`; every
+    /// downstream consumer reads it back off the plan.
+    pub(crate) fn decide(no_semantic: bool) -> Self {
+        let use_semantic = semantic_merge_enabled(no_semantic);
+        Self {
+            strategy: merge_strategy_for(use_semantic),
+            use_semantic,
+        }
+    }
+
+    /// The content-merge strategy for this attempt. Consumed identically
+    /// by the preview report's 3-way merge and the apply `MergePlan`, so
+    /// the two cannot select different strategies.
+    pub(crate) fn strategy(&self) -> MergeStrategy {
+        self.strategy
+    }
+
+    /// Whether semantic analysis is active for this attempt's diff
+    /// payload. Mirrors `strategy() == Semantic`.
+    pub(crate) fn use_semantic(&self) -> bool {
+        self.use_semantic
+    }
+}
+
 fn merge_already_in_progress_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "merge_already_in_progress",
@@ -363,7 +411,13 @@ pub(crate) fn merge_thread_into_current(
     no_semantic: bool,
     git_commit: bool,
 ) -> Result<MergeOutput> {
-    let use_semantic = semantic_merge_enabled(no_semantic);
+    // Strategy + diff-semantics decided ONCE per merge attempt
+    // (HeddleCo/heddle#503). Preview, refresh, apply, and diff all read
+    // their strategy back off this single plan instead of re-deriving it
+    // — so the preview can't pick a different content-merge strategy than
+    // the apply path, which is the documented Codex r13 divergence class.
+    let attempt = MergeAttemptPlan::decide(no_semantic);
+    let use_semantic = attempt.use_semantic();
     let registry = AgentRegistry::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = thread_manager.find_by_thread(track_name)?;
@@ -419,8 +473,8 @@ pub(crate) fn merge_thread_into_current(
     // match the strategy the actual merge plan (below) will use, so
     // the `preview_summary` lines don't contradict the real outcome
     // (e.g. reporting `conflicts: 1 path conflict(s)` on a structural
-    // reshape that semantic resolves cleanly).
-    let preview_strategy = merge_strategy_for(use_semantic);
+    // reshape that semantic resolves cleanly). Both now read the SAME
+    // decision off `attempt` (#503), so they cannot diverge.
     let current_thread = repo
         .current_lane()?
         .unwrap_or_else(|| "detached".to_string());
@@ -437,7 +491,7 @@ pub(crate) fn merge_thread_into_current(
             &mut graph,
             thread,
             preview,
-            preview_strategy,
+            attempt.strategy(),
             Some(PreviewTarget {
                 label: &current_thread,
                 change_id: current_state.change_id,
@@ -468,7 +522,7 @@ pub(crate) fn merge_thread_into_current(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
-            strategy: merge_strategy_for(use_semantic),
+            strategy: attempt.strategy(),
         },
     )?;
 
@@ -730,11 +784,6 @@ pub(crate) fn merge_thread_into_current(
                         .any(|blocker| is_real_merge_blocker(blocker))
                 {
                     Some(report.recommended_action.clone())
-                } else if preview_report
-                    .as_ref()
-                    .is_some_and(preview_needs_readiness_review)
-                {
-                    None
                 } else {
                     Some(land_local_command(&thread.id))
                 }
@@ -2030,14 +2079,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         // command. `land` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        if input
-            .preview_report
-            .is_some_and(preview_needs_readiness_review)
-        {
-            None
-        } else {
-            input.thread.as_ref().map(|t| land_local_command(&t.id))
-        }
+        input.thread.as_ref().map(|t| land_local_command(&t.id))
     } else {
         // Clean apply: nothing to do.
         None
@@ -2594,19 +2636,9 @@ fn render_merge_output(cli: &Cli, repo: &Repository, output: MergeOutput) -> Res
 /// real merge blocker (something that prevents `heddle merge` from
 /// advancing state) versus a non-blocking nudge.
 ///
-/// Real blockers are conflict-shaped strings ("path conflict(s) need
-/// manual resolution") or explicit policy gates such as heavy-impact
-/// review. Lower-confidence review nudges remain advisory; treating
-/// every "needs attention" string as a blocker causes the "merge
-/// succeeded but status:blocked" contradiction that this helper exists
-/// to prevent.
-fn preview_needs_readiness_review(report: &ThreadPreviewReport) -> bool {
-    report.thread_state != ThreadState::Ready.to_string() && !report.heavy_impact_paths.is_empty()
-}
-
 fn is_real_merge_blocker(advisory: &str) -> bool {
     let lower = advisory.to_lowercase();
-    lower.contains("path conflict") || lower.contains("heavy-impact change")
+    lower.contains("path conflict")
 }
 
 fn thread_paths(thread: &Option<Thread>) -> Vec<String> {
@@ -2761,6 +2793,70 @@ fn merge_relation_summary(result: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression-lock for HeddleCo/heddle#503 (guards the documented
+    /// Codex r13 preview-vs-actual divergence class).
+    ///
+    /// Strategy is decided **once per merge attempt** via
+    /// `MergeAttemptPlan::decide`; preview and apply both read the
+    /// strategy back off that single plan. This test pins two things:
+    ///
+    /// 1. The decision is internally consistent — `strategy()` and
+    ///    `use_semantic()` never disagree (a `Semantic` strategy with
+    ///    `use_semantic == false`, or vice versa, would let the diff
+    ///    payload contradict the content merge).
+    /// 2. `merge_thread_into_current` no longer recomputes the strategy
+    ///    independently for preview and apply. We enforce this at the
+    ///    source level: the body must contain exactly ONE
+    ///    `MergeAttemptPlan::decide(` call and ZERO bare
+    ///    `merge_strategy_for(use_semantic)` call sites — the old
+    ///    duplicated form the issue flagged. If a future edit
+    ///    reintroduces a second, drift-prone strategy decision, this
+    ///    assertion fails.
+    #[test]
+    fn merge_strategy_is_decided_once_preview_equals_apply() {
+        // (1) The decision object is self-consistent for both flags.
+        for no_semantic in [false, true] {
+            let plan = MergeAttemptPlan::decide(no_semantic);
+            let semantic_active = plan.strategy() == MergeStrategy::Semantic;
+            assert_eq!(
+                semantic_active,
+                plan.use_semantic(),
+                "MergeAttemptPlan strategy and use_semantic must agree (no_semantic={no_semantic})"
+            );
+            assert_eq!(
+                plan.strategy(),
+                merge_strategy_for(semantic_merge_enabled(no_semantic)),
+                "decide() must select the same strategy the legacy derivation would"
+            );
+        }
+
+        // (2) Source-level invariant: the merge-attempt flow decides the
+        // strategy exactly once and never re-derives it independently for
+        // preview vs apply. The preview report and the apply MergePlan
+        // must consume the SAME plan, so there is one `decide(` call and
+        // no surviving `merge_strategy_for(use_semantic)` call sites in
+        // `merge_thread_into_current`.
+        let source = include_str!("mod.rs");
+        let body = source
+            .split_once("pub(crate) fn merge_thread_into_current(")
+            .expect("merge_thread_into_current must exist")
+            .1
+            .split_once("\nfn mark_merge_previewed(")
+            .expect("merge_thread_into_current must be delimited by mark_merge_previewed")
+            .0;
+        let decide_calls = body.matches("MergeAttemptPlan::decide(").count();
+        assert_eq!(
+            decide_calls, 1,
+            "merge_thread_into_current must decide the merge strategy exactly once \
+             (found {decide_calls} MergeAttemptPlan::decide call sites)"
+        );
+        assert!(
+            !body.contains("merge_strategy_for(use_semantic)"),
+            "preview and apply must consume the single MergeAttemptPlan, not re-derive \
+             the strategy via merge_strategy_for(use_semantic)"
+        );
+    }
 
     #[test]
     fn merge_in_progress_refusal_uses_typed_recovery_advice() {

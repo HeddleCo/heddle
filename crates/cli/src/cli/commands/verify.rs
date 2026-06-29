@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository verification proof surface.
 
+use std::time::Instant;
+
 use anyhow::{Result, anyhow};
 use repo::Repository;
 use serde::Serialize;
@@ -13,7 +15,10 @@ use super::{
         build_repository_verification_state, repository_setup_guidance,
     },
 };
-use crate::cli::{Cli, should_output_json, style};
+use crate::{
+    cli::{Cli, should_output_json, style},
+    perf::{ProfileField, emit_profile, profile_enabled},
+};
 
 #[derive(Debug, Serialize)]
 struct VerifyOutput {
@@ -27,25 +32,45 @@ struct VerifyOutput {
 }
 
 pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
+    let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let (trust, presentation, repo_config) =
-        if let Some(probe) = build_plain_git_verification_probe(start)? {
-            (
-                probe.trust,
-                crate::cli::render::RepositoryPresentation {
-                    label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-                    context: None,
-                },
-                None,
-            )
-        } else {
-            let repo = Repository::open(start)?;
-            let trust = build_repository_verification_state(&repo);
-            let presentation = crate::cli::render::repository_presentation(&repo, None, None);
-            let config = repo.config().clone();
-            (trust, presentation, Some(config))
-        };
+    let probe_start = Instant::now();
+    let plain_git_probe = build_plain_git_verification_probe(start)?;
+    let plain_git_probe_ms = probe_start.elapsed().as_millis();
+    let mut repo_open_ms = 0u128;
+    let mut verification_ms = 0u128;
+    let (trust, presentation, repo_config) = if let Some(probe) = plain_git_probe {
+        (
+            probe.trust,
+            crate::cli::render::RepositoryPresentation {
+                label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+                context: None,
+            },
+            None,
+        )
+    } else {
+        let repo_open_start = Instant::now();
+        let repo = Repository::open(start)?;
+        repo_open_ms = repo_open_start.elapsed().as_millis();
+        let verification_start = Instant::now();
+        let trust = build_repository_verification_state(&repo);
+        verification_ms = verification_start.elapsed().as_millis();
+        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
+        let config = repo.config().clone();
+        (trust, presentation, Some(config))
+    };
+    if profile_enabled() {
+        emit_profile(
+            "verify phases",
+            &[
+                ProfileField::millis("plain_git_probe_ms", plain_git_probe_ms),
+                ProfileField::millis("repo_open_ms", repo_open_ms),
+                ProfileField::millis("verification_ms", verification_ms),
+                ProfileField::duration("command_body_ms", body_start.elapsed()),
+            ],
+        );
+    }
     let output = VerifyOutput {
         output_kind: "verify",
         clean: trust.verified,

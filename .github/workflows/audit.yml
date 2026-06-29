@@ -56,6 +56,24 @@ jobs:
           # this, cargo-deny errors out before policy checks run.
           rust-version: stable
 
+  cli-dep-count:
+    name: cli transitive dep count (heddle#604)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Guards the heddle-cli transitive-dependency closure against silent
+      # regrowth after the gix removal (IMPROVEMENT_PLAN section 8 / P4 cut a
+      # ~277-dep subtree). Pure `cargo metadata` — no crate build — so it
+      # stays cheap on the PR path. Fails if the live count exceeds the
+      # committed baseline + slack; raise the baseline JSON in the same PR for
+      # an intentional addition.
+      - name: Assert CLI transitive dep count within baseline
+        run: bash scripts/check-cli-dep-count.sh
+
   cargo-audit:
     name: cargo-audit
     if: github.event_name != 'pull_request'

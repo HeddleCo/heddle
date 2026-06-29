@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/sync.proto.
  */
 export const file_heddle_v1_sync: GenFile = /*@__PURE__*/
-  fileDesc("ChRoZWRkbGUvdjEvc3luYy5wcm90bxIJaGVkZGxlLnYxIiQKD0xpc3RSZWZzUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkiXgoQTGlzdFJlZnNSZXNwb25zZRITCgtoZWFkX3RocmVhZBgBIAEoCRISCgpoZWFkX3N0YXRlGAIgASgMEiEKBHJlZnMYAyADKAsyEy5oZWRkbGUudjEuUmVmRW50cnkizAEKEFVwZGF0ZVJlZlJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEgwKBG5hbWUYAiABKAkSEQoJaXNfdGhyZWFkGAMgASgIEg0KBWZvcmNlGAQgASgIEhEKCW9sZF92YWx1ZRgFIAEoCRIRCgluZXdfdmFsdWUYBiABKAkSMgoPdGhyZWFkX21ldGFkYXRhGAcgASgLMhkuaGVkZGxlLnYxLlRocmVhZE1ldGFkYXRhEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiRgoRVXBkYXRlUmVmUmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIRCglvbGRfdmFsdWUYAiABKAkSDQoFZXJyb3IYAyABKAkisAEKElRyYW5zZmVyQ2hlY2twb2ludBITCgt0cmFuc2Zlcl9pZBgBIAEoCRIwCg50cmFuc3BvcnRfbW9kZRgCIAEoDjIYLmhlZGRsZS52MS5UcmFuc3BvcnRNb2RlEhUKDXJlc3VtZV9vZmZzZXQYAyABKAQSEwoLY2h1bmtfaW5kZXgYBCABKA0SEgoKY2hlY2twb2ludBgFIAEoDBITCgtpc19jb21wbGV0ZRgGIAEoCCKQAQoQT2JqZWN0RGVzY3JpcHRvchIKCgJpZBgBIAEoCRITCgtvYmplY3RfdHlwZRgCIAEoCRJAChNhdmFpbGFiaWxpdHlfc3RhdHVzGAMgASgOMiMuaGVkZGxlLnYxLk9iamVjdEF2YWlsYWJpbGl0eVN0YXR1cxIZChFhdmFpbGFiaWxpdHlfbm90ZRgEIAEoCSL8AgoLUHVzaFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhMKC2xvY2FsX3N0YXRlGAIgASgJEhUKDXRhcmdldF90aHJlYWQYAyABKAkSFQoNY3JlYXRlX3RocmVhZBgEIAEoCBINCgVmb3JjZRgFIAEoCBIsCgdvYmplY3RzGAYgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISLwoIdHJhbnNmZXIYByABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EjsKFHBhcnRpYWxfZmV0Y2hfc3RhdHVzGAggASgOMh0uaGVkZGxlLnYxLlBhcnRpYWxGZXRjaFN0YXR1cxIbChNhbGxvd19wYXJ0aWFsX2ZldGNoGAkgASgIEjIKD3RocmVhZF9tZXRhZGF0YRgKIAEoCzIZLmhlZGRsZS52MS5UaHJlYWRNZXRhZGF0YRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJIqoCCglQdXNoUmVhZHkSEwoLcmVtb3RlX2hlYWQYASABKAkSMQoMaGF2ZV9vYmplY3RzGAIgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISMQoMd2FudF9vYmplY3RzGAMgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISLwoIdHJhbnNmZXIYBCABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EjsKFHBhcnRpYWxfZmV0Y2hfc3RhdHVzGAUgASgOMh0uaGVkZGxlLnYxLlBhcnRpYWxGZXRjaFN0YXR1cxI0Cg9taXNzaW5nX29iamVjdHMYBiADKAsyGy5oZWRkbGUudjEuT2JqZWN0RGVzY3JpcHRvciKtAQoLT2JqZWN0Q2h1bmsSCgoCaWQYASABKAkSEwoLb2JqZWN0X3R5cGUYAiABKAkSDAoEZGF0YRgDIAEoDBIQCghpc19kZWx0YRgEIAEoCBIvCgh0cmFuc2ZlchgFIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQSFAoMY2h1bmtfbGVuZ3RoGAYgASgNEhYKDmlzX2ZpbmFsX2NodW5rGAcgASgIIqgBCglQYWNrQ2h1bmsSLgoLc3RyZWFtX2tpbmQYASABKA4yGS5oZWRkbGUudjEuUGFja1N0cmVhbUtpbmQSDAoEZGF0YRgCIAEoDBIvCgh0cmFuc2ZlchgDIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQSFAoMY2h1bmtfbGVuZ3RoGAQgASgNEhYKDmlzX2ZpbmFsX2NodW5rGAUgASgIInIKDFB1c2hDb21wbGV0ZRIPCgdzdWNjZXNzGAEgASgIEhEKCW5ld19zdGF0ZRgCIAEoCRINCgVlcnJvchgDIAEoCRIvCgh0cmFuc2ZlchgEIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQiPwoRUmVkYWN0aW9uVHJhbnNmZXISEQoJYmxvYl9oYXNoGAEgASgJEhcKD3JlZGFjdGlvbnNfYmxvYhgCIAEoDCJKChdTdGF0ZVZpc2liaWxpdHlUcmFuc2ZlchIQCghzdGF0ZV9pZBgBIAEoCRIdChVzdGF0ZV92aXNpYmlsaXR5X2Jsb2IYAiABKAwirQIKC1B1c2hNZXNzYWdlEikKB3JlcXVlc3QYASABKAsyFi5oZWRkbGUudjEuUHVzaFJlcXVlc3RIABIlCgVyZWFkeRgCIAEoCzIULmhlZGRsZS52MS5QdXNoUmVhZHlIABIkCgRwYWNrGAMgASgLMhQuaGVkZGxlLnYxLlBhY2tDaHVua0gAEisKCGNvbXBsZXRlGAQgASgLMhcuaGVkZGxlLnYxLlB1c2hDb21wbGV0ZUgAEjEKCXJlZGFjdGlvbhgFIAEoCzIcLmhlZGRsZS52MS5SZWRhY3Rpb25UcmFuc2ZlckgAEj4KEHN0YXRlX3Zpc2liaWxpdHkYBiABKAsyIi5oZWRkbGUudjEuU3RhdGVWaXNpYmlsaXR5VHJhbnNmZXJIAEIGCgRib2R5IssCCgtQdWxsUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkSFQoNcmVtb3RlX3RocmVhZBgCIAEoCRIUCgxsb2NhbF90aHJlYWQYAyABKAkSFAoMdGFyZ2V0X3N0YXRlGAQgASgJEg0KBWRlcHRoGAUgASgNEhYKDmV4Y2x1ZGVfc3RhdGVzGAYgAygJEi8KCHRyYW5zZmVyGAcgASgLMh0uaGVkZGxlLnYxLlRyYW5zZmVyQ2hlY2twb2ludBI7ChRwYXJ0aWFsX2ZldGNoX3N0YXR1cxgIIAEoDjIdLmhlZGRsZS52MS5QYXJ0aWFsRmV0Y2hTdGF0dXMSGwoTYWxsb3dfcGFydGlhbF9mZXRjaBgJIAEoCBIXCg9mcmVzaF9mdWxsX3B1bGwYCiABKAgSGwoTY2xpZW50X29wZXJhdGlvbl9pZBgPIAEoCSKyAgoJUHVsbFJlYWR5EhQKDHJlbW90ZV9zdGF0ZRgBIAEoCRI1ChBvYmplY3RzX3RvX2ZldGNoGAIgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISLwoIdHJhbnNmZXIYAyABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EjsKFHBhcnRpYWxfZmV0Y2hfc3RhdHVzGAQgASgOMh0uaGVkZGxlLnYxLlBhcnRpYWxGZXRjaFN0YXR1cxI0Cg9taXNzaW5nX29iamVjdHMYBSADKAsyGy5oZWRkbGUudjEuT2JqZWN0RGVzY3JpcHRvchIeChZmdWxsX2Nsb3N1cmVfYXZhaWxhYmxlGAYgASgIEhQKDG9iamVjdF9jb3VudBgHIAEoDSKHAQoLV2FudE9iamVjdHMSLAoHb2JqZWN0cxgBIAMoCzIbLmhlZGRsZS52MS5PYmplY3REZXNjcmlwdG9yEi8KCHRyYW5zZmVyGAIgASgLMh0uaGVkZGxlLnYxLlRyYW5zZmVyQ2hlY2twb2ludBIZChF3YW50X2Z1bGxfY2xvc3VyZRgDIAEoCCJyCgxQdWxsQ29tcGxldGUSDwoHc3VjY2VzcxgBIAEoCBIRCgluZXdfc3RhdGUYAiABKAkSDQoFZXJyb3IYAyABKAkSLwoIdHJhbnNmZXIYBCABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50ItUCCgtQdWxsTWVzc2FnZRIpCgdyZXF1ZXN0GAEgASgLMhYuaGVkZGxlLnYxLlB1bGxSZXF1ZXN0SAASJQoFcmVhZHkYAiABKAsyFC5oZWRkbGUudjEuUHVsbFJlYWR5SAASJgoEd2FudBgDIAEoCzIWLmhlZGRsZS52MS5XYW50T2JqZWN0c0gAEiQKBHBhY2sYBCABKAsyFC5oZWRkbGUudjEuUGFja0NodW5rSAASKwoIY29tcGxldGUYBSABKAsyFy5oZWRkbGUudjEuUHVsbENvbXBsZXRlSAASMQoJcmVkYWN0aW9uGAYgASgLMhwuaGVkZGxlLnYxLlJlZGFjdGlvblRyYW5zZmVySAASPgoQc3RhdGVfdmlzaWJpbGl0eRgHIAEoCzIiLmhlZGRsZS52MS5TdGF0ZVZpc2liaWxpdHlUcmFuc2ZlckgAQgYKBGJvZHkqTwoNVHJhbnNwb3J0TW9kZRIeChpUUkFOU1BPUlRfTU9ERV9VTlNQRUNJRklFRBAAEh4KGlRSQU5TUE9SVF9NT0RFX05BVElWRV9QQUNLEAEq5QEKGE9iamVjdEF2YWlsYWJpbGl0eVN0YXR1cxIqCiZPQkpFQ1RfQVZBSUxBQklMSVRZX1NUQVRVU19VTlNQRUNJRklFRBAAEiYKIk9CSkVDVF9BVkFJTEFCSUxJVFlfU1RBVFVTX1BSRVNFTlQQARImCiJPQkpFQ1RfQVZBSUxBQklMSVRZX1NUQVRVU19NSVNTSU5HEAISKAokT0JKRUNUX0FWQUlMQUJJTElUWV9TVEFUVVNfUkVTVU1BQkxFEAMSIwofT0JKRUNUX0FWQUlMQUJJTElUWV9TVEFUVVNfTEFaWRAEKqIBChJQYXJ0aWFsRmV0Y2hTdGF0dXMSJAogUEFSVElBTF9GRVRDSF9TVEFUVVNfVU5TUEVDSUZJRUQQABIhCh1QQVJUSUFMX0ZFVENIX1NUQVRVU19ESVNBQkxFRBABEiAKHFBBUlRJQUxfRkVUQ0hfU1RBVFVTX0VOQUJMRUQQAhIhCh1QQVJUSUFMX0ZFVENIX1NUQVRVU19SRVFVSVJFRBADKmkKDlBhY2tTdHJlYW1LaW5kEiAKHFBBQ0tfU1RSRUFNX0tJTkRfVU5TUEVDSUZJRUQQABIZChVQQUNLX1NUUkVBTV9LSU5EX1BBQ0sQARIaChZQQUNLX1NUUkVBTV9LSU5EX0lOREVYEAIylgIKD1JlcG9TeW5jU2VydmljZRJDCghMaXN0UmVmcxIaLmhlZGRsZS52MS5MaXN0UmVmc1JlcXVlc3QaGy5oZWRkbGUudjEuTGlzdFJlZnNSZXNwb25zZRJGCglVcGRhdGVSZWYSGy5oZWRkbGUudjEuVXBkYXRlUmVmUmVxdWVzdBocLmhlZGRsZS52MS5VcGRhdGVSZWZSZXNwb25zZRI6CgRQdXNoEhYuaGVkZGxlLnYxLlB1c2hNZXNzYWdlGhYuaGVkZGxlLnYxLlB1c2hNZXNzYWdlKAEwARI6CgRQdWxsEhYuaGVkZGxlLnYxLlB1bGxNZXNzYWdlGhYuaGVkZGxlLnYxLlB1bGxNZXNzYWdlKAEwAWIGcHJvdG8z", [file_heddle_v1_common, file_heddle_v1_threads]);
+  fileDesc("ChRoZWRkbGUvdjEvc3luYy5wcm90bxIJaGVkZGxlLnYxIiQKD0xpc3RSZWZzUmVxdWVzdBIRCglyZXBvX3BhdGgYASABKAkiXgoQTGlzdFJlZnNSZXNwb25zZRITCgtoZWFkX3RocmVhZBgBIAEoCRISCgpoZWFkX3N0YXRlGAIgASgMEiEKBHJlZnMYAyADKAsyEy5oZWRkbGUudjEuUmVmRW50cnkiiAIKEFVwZGF0ZVJlZlJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEgwKBG5hbWUYAiABKAkSEQoJaXNfdGhyZWFkGAMgASgIEg0KBWZvcmNlGAQgASgIEhEKCW9sZF92YWx1ZRgFIAEoCRIRCgluZXdfdmFsdWUYBiABKAkSMgoPdGhyZWFkX21ldGFkYXRhGAcgASgLMhkuaGVkZGxlLnYxLlRocmVhZE1ldGFkYXRhEhwKFG9sZF9yZXZpc2lvbl9hZGRyZXNzGAggASgJEhwKFG5ld19yZXZpc2lvbl9hZGRyZXNzGAkgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiZAoRVXBkYXRlUmVmUmVzcG9uc2USDwoHc3VjY2VzcxgBIAEoCBIRCglvbGRfdmFsdWUYAiABKAkSDQoFZXJyb3IYAyABKAkSHAoUb2xkX3JldmlzaW9uX2FkZHJlc3MYBCABKAkisAEKElRyYW5zZmVyQ2hlY2twb2ludBITCgt0cmFuc2Zlcl9pZBgBIAEoCRIwCg50cmFuc3BvcnRfbW9kZRgCIAEoDjIYLmhlZGRsZS52MS5UcmFuc3BvcnRNb2RlEhUKDXJlc3VtZV9vZmZzZXQYAyABKAQSEwoLY2h1bmtfaW5kZXgYBCABKA0SEgoKY2hlY2twb2ludBgFIAEoDBITCgtpc19jb21wbGV0ZRgGIAEoCCKQAQoQT2JqZWN0RGVzY3JpcHRvchIKCgJpZBgBIAEoCRITCgtvYmplY3RfdHlwZRgCIAEoCRJAChNhdmFpbGFiaWxpdHlfc3RhdHVzGAMgASgOMiMuaGVkZGxlLnYxLk9iamVjdEF2YWlsYWJpbGl0eVN0YXR1cxIZChFhdmFpbGFiaWxpdHlfbm90ZRgEIAEoCSKcAwoLUHVzaFJlcXVlc3QSEQoJcmVwb19wYXRoGAEgASgJEhMKC2xvY2FsX3N0YXRlGAIgASgJEhUKDXRhcmdldF90aHJlYWQYAyABKAkSFQoNY3JlYXRlX3RocmVhZBgEIAEoCBINCgVmb3JjZRgFIAEoCBIsCgdvYmplY3RzGAYgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISLwoIdHJhbnNmZXIYByABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EjsKFHBhcnRpYWxfZmV0Y2hfc3RhdHVzGAggASgOMh0uaGVkZGxlLnYxLlBhcnRpYWxGZXRjaFN0YXR1cxIbChNhbGxvd19wYXJ0aWFsX2ZldGNoGAkgASgIEjIKD3RocmVhZF9tZXRhZGF0YRgKIAEoCzIZLmhlZGRsZS52MS5UaHJlYWRNZXRhZGF0YRIeChZsb2NhbF9yZXZpc2lvbl9hZGRyZXNzGAsgASgJEhsKE2NsaWVudF9vcGVyYXRpb25faWQYDyABKAkiywIKCVB1c2hSZWFkeRITCgtyZW1vdGVfaGVhZBgBIAEoCRIxCgxoYXZlX29iamVjdHMYAiADKAsyGy5oZWRkbGUudjEuT2JqZWN0RGVzY3JpcHRvchIxCgx3YW50X29iamVjdHMYAyADKAsyGy5oZWRkbGUudjEuT2JqZWN0RGVzY3JpcHRvchIvCgh0cmFuc2ZlchgEIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQSOwoUcGFydGlhbF9mZXRjaF9zdGF0dXMYBSABKA4yHS5oZWRkbGUudjEuUGFydGlhbEZldGNoU3RhdHVzEjQKD21pc3Npbmdfb2JqZWN0cxgGIAMoCzIbLmhlZGRsZS52MS5PYmplY3REZXNjcmlwdG9yEh8KF3JlbW90ZV9yZXZpc2lvbl9hZGRyZXNzGAcgASgJIq0BCgtPYmplY3RDaHVuaxIKCgJpZBgBIAEoCRITCgtvYmplY3RfdHlwZRgCIAEoCRIMCgRkYXRhGAMgASgMEhAKCGlzX2RlbHRhGAQgASgIEi8KCHRyYW5zZmVyGAUgASgLMh0uaGVkZGxlLnYxLlRyYW5zZmVyQ2hlY2twb2ludBIUCgxjaHVua19sZW5ndGgYBiABKA0SFgoOaXNfZmluYWxfY2h1bmsYByABKAgiqAEKCVBhY2tDaHVuaxIuCgtzdHJlYW1fa2luZBgBIAEoDjIZLmhlZGRsZS52MS5QYWNrU3RyZWFtS2luZBIMCgRkYXRhGAIgASgMEi8KCHRyYW5zZmVyGAMgASgLMh0uaGVkZGxlLnYxLlRyYW5zZmVyQ2hlY2twb2ludBIUCgxjaHVua19sZW5ndGgYBCABKA0SFgoOaXNfZmluYWxfY2h1bmsYBSABKAgikAEKDFB1c2hDb21wbGV0ZRIPCgdzdWNjZXNzGAEgASgIEhEKCW5ld19zdGF0ZRgCIAEoCRINCgVlcnJvchgDIAEoCRIvCgh0cmFuc2ZlchgEIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQSHAoUbmV3X3JldmlzaW9uX2FkZHJlc3MYBSABKAkiPwoRUmVkYWN0aW9uVHJhbnNmZXISEQoJYmxvYl9oYXNoGAEgASgJEhcKD3JlZGFjdGlvbnNfYmxvYhgCIAEoDCJKChdTdGF0ZVZpc2liaWxpdHlUcmFuc2ZlchIQCghzdGF0ZV9pZBgBIAEoCRIdChVzdGF0ZV92aXNpYmlsaXR5X2Jsb2IYAiABKAwimwEKD0dpdFBhY2tUcmFuc2ZlchITCgt0cmFuc2Zlcl9pZBgBIAEoCRIOCgZvZmZzZXQYAiABKAQSEwoLY2h1bmtfaW5kZXgYAyABKA0SFgoOaXNfZmluYWxfY2h1bmsYBCABKAgSEQoJcGFja19zaXplGAUgASgEEhIKCnBhY2tfY2h1bmsYBiABKAwSDwoHcGFja19pZBgHIAEoDCLeAQoUR2l0UmVmVXBkYXRlVHJhbnNmZXISDAoEbmFtZRgBIAEoCRIjCgRraW5kGAIgASgOMhUuaGVkZGxlLnYxLkdpdFJlZktpbmQSEgoKdGFyZ2V0X29pZBgDIAEoDBISCgpwZWVsZWRfb2lkGAQgASgMEhgKEGV4cGVjdGVkX21pc3NpbmcYBSABKAgSGwoTZXhwZWN0ZWRfdGFyZ2V0X29pZBgGIAEoDBI0CgpjaGVja3BvaW50GAcgASgLMiAuaGVkZGxlLnYxLkdpdENoZWNrcG9pbnRUcmFuc2ZlciJwChVHaXRDaGVja3BvaW50VHJhbnNmZXISGAoQaGVkZGxlX2NoYW5nZV9pZBgBIAEoDBIWCg5naXRfY29tbWl0X29pZBgCIAEoDBIOCgZ0aHJlYWQYAyABKAkSFQoNbWV0YWRhdGFfanNvbhgEIAEoCSK0AQoPR2l0TGFuZVRyYW5zZmVyEioKBHBhY2sYASABKAsyGi5oZWRkbGUudjEuR2l0UGFja1RyYW5zZmVySAASNQoKcmVmX3VwZGF0ZRgCIAEoCzIfLmhlZGRsZS52MS5HaXRSZWZVcGRhdGVUcmFuc2ZlckgAEjYKCmNoZWNrcG9pbnQYAyABKAsyIC5oZWRkbGUudjEuR2l0Q2hlY2twb2ludFRyYW5zZmVySABCBgoEYm9keSLdAgoLUHVzaE1lc3NhZ2USKQoHcmVxdWVzdBgBIAEoCzIWLmhlZGRsZS52MS5QdXNoUmVxdWVzdEgAEiUKBXJlYWR5GAIgASgLMhQuaGVkZGxlLnYxLlB1c2hSZWFkeUgAEiQKBHBhY2sYAyABKAsyFC5oZWRkbGUudjEuUGFja0NodW5rSAASKwoIY29tcGxldGUYBCABKAsyFy5oZWRkbGUudjEuUHVzaENvbXBsZXRlSAASMQoJcmVkYWN0aW9uGAUgASgLMhwuaGVkZGxlLnYxLlJlZGFjdGlvblRyYW5zZmVySAASPgoQc3RhdGVfdmlzaWJpbGl0eRgGIAEoCzIiLmhlZGRsZS52MS5TdGF0ZVZpc2liaWxpdHlUcmFuc2ZlckgAEi4KCGdpdF9sYW5lGAggASgLMhouaGVkZGxlLnYxLkdpdExhbmVUcmFuc2ZlckgAQgYKBGJvZHki7AIKC1B1bGxSZXF1ZXN0EhEKCXJlcG9fcGF0aBgBIAEoCRIVCg1yZW1vdGVfdGhyZWFkGAIgASgJEhQKDGxvY2FsX3RocmVhZBgDIAEoCRIUCgx0YXJnZXRfc3RhdGUYBCABKAkSDQoFZGVwdGgYBSABKA0SFgoOZXhjbHVkZV9zdGF0ZXMYBiADKAkSLwoIdHJhbnNmZXIYByABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EjsKFHBhcnRpYWxfZmV0Y2hfc3RhdHVzGAggASgOMh0uaGVkZGxlLnYxLlBhcnRpYWxGZXRjaFN0YXR1cxIbChNhbGxvd19wYXJ0aWFsX2ZldGNoGAkgASgIEhcKD2ZyZXNoX2Z1bGxfcHVsbBgKIAEoCBIfChd0YXJnZXRfcmV2aXNpb25fYWRkcmVzcxgLIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGA8gASgJItMCCglQdWxsUmVhZHkSFAoMcmVtb3RlX3N0YXRlGAEgASgJEjUKEG9iamVjdHNfdG9fZmV0Y2gYAiADKAsyGy5oZWRkbGUudjEuT2JqZWN0RGVzY3JpcHRvchIvCgh0cmFuc2ZlchgDIAEoCzIdLmhlZGRsZS52MS5UcmFuc2ZlckNoZWNrcG9pbnQSOwoUcGFydGlhbF9mZXRjaF9zdGF0dXMYBCABKA4yHS5oZWRkbGUudjEuUGFydGlhbEZldGNoU3RhdHVzEjQKD21pc3Npbmdfb2JqZWN0cxgFIAMoCzIbLmhlZGRsZS52MS5PYmplY3REZXNjcmlwdG9yEh4KFmZ1bGxfY2xvc3VyZV9hdmFpbGFibGUYBiABKAgSFAoMb2JqZWN0X2NvdW50GAcgASgNEh8KF3JlbW90ZV9yZXZpc2lvbl9hZGRyZXNzGAggASgJIocBCgtXYW50T2JqZWN0cxIsCgdvYmplY3RzGAEgAygLMhsuaGVkZGxlLnYxLk9iamVjdERlc2NyaXB0b3ISLwoIdHJhbnNmZXIYAiABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EhkKEXdhbnRfZnVsbF9jbG9zdXJlGAMgASgIIpABCgxQdWxsQ29tcGxldGUSDwoHc3VjY2VzcxgBIAEoCBIRCgluZXdfc3RhdGUYAiABKAkSDQoFZXJyb3IYAyABKAkSLwoIdHJhbnNmZXIYBCABKAsyHS5oZWRkbGUudjEuVHJhbnNmZXJDaGVja3BvaW50EhwKFG5ld19yZXZpc2lvbl9hZGRyZXNzGAUgASgJIoUDCgtQdWxsTWVzc2FnZRIpCgdyZXF1ZXN0GAEgASgLMhYuaGVkZGxlLnYxLlB1bGxSZXF1ZXN0SAASJQoFcmVhZHkYAiABKAsyFC5oZWRkbGUudjEuUHVsbFJlYWR5SAASJgoEd2FudBgDIAEoCzIWLmhlZGRsZS52MS5XYW50T2JqZWN0c0gAEiQKBHBhY2sYBCABKAsyFC5oZWRkbGUudjEuUGFja0NodW5rSAASKwoIY29tcGxldGUYBSABKAsyFy5oZWRkbGUudjEuUHVsbENvbXBsZXRlSAASMQoJcmVkYWN0aW9uGAYgASgLMhwuaGVkZGxlLnYxLlJlZGFjdGlvblRyYW5zZmVySAASPgoQc3RhdGVfdmlzaWJpbGl0eRgHIAEoCzIiLmhlZGRsZS52MS5TdGF0ZVZpc2liaWxpdHlUcmFuc2ZlckgAEi4KCGdpdF9sYW5lGAggASgLMhouaGVkZGxlLnYxLkdpdExhbmVUcmFuc2ZlckgAQgYKBGJvZHkqTwoNVHJhbnNwb3J0TW9kZRIeChpUUkFOU1BPUlRfTU9ERV9VTlNQRUNJRklFRBAAEh4KGlRSQU5TUE9SVF9NT0RFX05BVElWRV9QQUNLEAEq5QEKGE9iamVjdEF2YWlsYWJpbGl0eVN0YXR1cxIqCiZPQkpFQ1RfQVZBSUxBQklMSVRZX1NUQVRVU19VTlNQRUNJRklFRBAAEiYKIk9CSkVDVF9BVkFJTEFCSUxJVFlfU1RBVFVTX1BSRVNFTlQQARImCiJPQkpFQ1RfQVZBSUxBQklMSVRZX1NUQVRVU19NSVNTSU5HEAISKAokT0JKRUNUX0FWQUlMQUJJTElUWV9TVEFUVVNfUkVTVU1BQkxFEAMSIwofT0JKRUNUX0FWQUlMQUJJTElUWV9TVEFUVVNfTEFaWRAEKqIBChJQYXJ0aWFsRmV0Y2hTdGF0dXMSJAogUEFSVElBTF9GRVRDSF9TVEFUVVNfVU5TUEVDSUZJRUQQABIhCh1QQVJUSUFMX0ZFVENIX1NUQVRVU19ESVNBQkxFRBABEiAKHFBBUlRJQUxfRkVUQ0hfU1RBVFVTX0VOQUJMRUQQAhIhCh1QQVJUSUFMX0ZFVENIX1NUQVRVU19SRVFVSVJFRBADKmkKDlBhY2tTdHJlYW1LaW5kEiAKHFBBQ0tfU1RSRUFNX0tJTkRfVU5TUEVDSUZJRUQQABIZChVQQUNLX1NUUkVBTV9LSU5EX1BBQ0sQARIaChZQQUNLX1NUUkVBTV9LSU5EX0lOREVYEAIqiAEKCkdpdFJlZktpbmQSHAoYR0lUX1JFRl9LSU5EX1VOU1BFQ0lGSUVEEAASFwoTR0lUX1JFRl9LSU5EX0JSQU5DSBABEhQKEEdJVF9SRUZfS0lORF9UQUcQAhIVChFHSVRfUkVGX0tJTkRfTk9URRADEhYKEkdJVF9SRUZfS0lORF9PVEhFUhAEMpYCCg9SZXBvU3luY1NlcnZpY2USQwoITGlzdFJlZnMSGi5oZWRkbGUudjEuTGlzdFJlZnNSZXF1ZXN0GhsuaGVkZGxlLnYxLkxpc3RSZWZzUmVzcG9uc2USRgoJVXBkYXRlUmVmEhsuaGVkZGxlLnYxLlVwZGF0ZVJlZlJlcXVlc3QaHC5oZWRkbGUudjEuVXBkYXRlUmVmUmVzcG9uc2USOgoEUHVzaBIWLmhlZGRsZS52MS5QdXNoTWVzc2FnZRoWLmhlZGRsZS52MS5QdXNoTWVzc2FnZSgBMAESOgoEUHVsbBIWLmhlZGRsZS52MS5QdWxsTWVzc2FnZRoWLmhlZGRsZS52MS5QdWxsTWVzc2FnZSgBMAFiBnByb3RvMw", [file_heddle_v1_common, file_heddle_v1_threads]);
 
 /**
  * @generated from message heddle.v1.ListRefsRequest
@@ -100,6 +100,20 @@ export type UpdateRefRequest = Message<"heddle.v1.UpdateRefRequest"> & {
   threadMetadata?: ThreadMetadata | undefined;
 
   /**
+   * Explicit two-lane revision addresses. Native callers should send
+   * `heddle:<change_id>` here; git-overlay callers send `git:<commit_oid>`.
+   * `old_value` / `new_value` remain populated for Heddle-native refs.
+   *
+   * @generated from field: string old_revision_address = 8;
+   */
+  oldRevisionAddress: string;
+
+  /**
+   * @generated from field: string new_revision_address = 9;
+   */
+  newRevisionAddress: string;
+
+  /**
    * Idempotency (audit-idempotency enforces tag 15).
    *
    * @generated from field: string client_operation_id = 15;
@@ -132,6 +146,11 @@ export type UpdateRefResponse = Message<"heddle.v1.UpdateRefResponse"> & {
    * @generated from field: string error = 3;
    */
   error: string;
+
+  /**
+   * @generated from field: string old_revision_address = 4;
+   */
+  oldRevisionAddress: string;
 };
 
 /**
@@ -270,6 +289,15 @@ export type PushRequest = Message<"heddle.v1.PushRequest"> & {
   threadMetadata?: ThreadMetadata | undefined;
 
   /**
+   * Explicit revision being published. Native repos use `heddle:<change_id>`;
+   * git-overlay repos use `git:<commit_oid>` and stream Git objects on the Git
+   * lane rather than importing the commit as a Heddle state.
+   *
+   * @generated from field: string local_revision_address = 11;
+   */
+  localRevisionAddress: string;
+
+  /**
    * Idempotency on the stream-opening message. The PushMessage
    * envelope itself isn't the operation — PushRequest is.
    *
@@ -318,6 +346,11 @@ export type PushReady = Message<"heddle.v1.PushReady"> & {
    * @generated from field: repeated heddle.v1.ObjectDescriptor missing_objects = 6;
    */
   missingObjects: ObjectDescriptor[];
+
+  /**
+   * @generated from field: string remote_revision_address = 7;
+   */
+  remoteRevisionAddress: string;
 };
 
 /**
@@ -437,6 +470,11 @@ export type PushComplete = Message<"heddle.v1.PushComplete"> & {
    * @generated from field: heddle.v1.TransferCheckpoint transfer = 4;
    */
   transfer?: TransferCheckpoint | undefined;
+
+  /**
+   * @generated from field: string new_revision_address = 5;
+   */
+  newRevisionAddress: string;
 };
 
 /**
@@ -514,6 +552,167 @@ export const StateVisibilityTransferSchema: GenMessage<StateVisibilityTransfer> 
   messageDesc(file_heddle_v1_sync, 12);
 
 /**
+ * @generated from message heddle.v1.GitPackTransfer
+ */
+export type GitPackTransfer = Message<"heddle.v1.GitPackTransfer"> & {
+  /**
+   * @generated from field: string transfer_id = 1;
+   */
+  transferId: string;
+
+  /**
+   * @generated from field: uint64 offset = 2;
+   */
+  offset: bigint;
+
+  /**
+   * @generated from field: uint32 chunk_index = 3;
+   */
+  chunkIndex: number;
+
+  /**
+   * @generated from field: bool is_final_chunk = 4;
+   */
+  isFinalChunk: boolean;
+
+  /**
+   * @generated from field: uint64 pack_size = 5;
+   */
+  packSize: bigint;
+
+  /**
+   * @generated from field: bytes pack_chunk = 6;
+   */
+  packChunk: Uint8Array;
+
+  /**
+   * @generated from field: bytes pack_id = 7;
+   */
+  packId: Uint8Array;
+};
+
+/**
+ * Describes the message heddle.v1.GitPackTransfer.
+ * Use `create(GitPackTransferSchema)` to create a new message.
+ */
+export const GitPackTransferSchema: GenMessage<GitPackTransfer> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_sync, 13);
+
+/**
+ * @generated from message heddle.v1.GitRefUpdateTransfer
+ */
+export type GitRefUpdateTransfer = Message<"heddle.v1.GitRefUpdateTransfer"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: heddle.v1.GitRefKind kind = 2;
+   */
+  kind: GitRefKind;
+
+  /**
+   * @generated from field: bytes target_oid = 3;
+   */
+  targetOid: Uint8Array;
+
+  /**
+   * @generated from field: bytes peeled_oid = 4;
+   */
+  peeledOid: Uint8Array;
+
+  /**
+   * @generated from field: bool expected_missing = 5;
+   */
+  expectedMissing: boolean;
+
+  /**
+   * @generated from field: bytes expected_target_oid = 6;
+   */
+  expectedTargetOid: Uint8Array;
+
+  /**
+   * @generated from field: heddle.v1.GitCheckpointTransfer checkpoint = 7;
+   */
+  checkpoint?: GitCheckpointTransfer | undefined;
+};
+
+/**
+ * Describes the message heddle.v1.GitRefUpdateTransfer.
+ * Use `create(GitRefUpdateTransferSchema)` to create a new message.
+ */
+export const GitRefUpdateTransferSchema: GenMessage<GitRefUpdateTransfer> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_sync, 14);
+
+/**
+ * @generated from message heddle.v1.GitCheckpointTransfer
+ */
+export type GitCheckpointTransfer = Message<"heddle.v1.GitCheckpointTransfer"> & {
+  /**
+   * @generated from field: bytes heddle_change_id = 1;
+   */
+  heddleChangeId: Uint8Array;
+
+  /**
+   * @generated from field: bytes git_commit_oid = 2;
+   */
+  gitCommitOid: Uint8Array;
+
+  /**
+   * @generated from field: string thread = 3;
+   */
+  thread: string;
+
+  /**
+   * @generated from field: string metadata_json = 4;
+   */
+  metadataJson: string;
+};
+
+/**
+ * Describes the message heddle.v1.GitCheckpointTransfer.
+ * Use `create(GitCheckpointTransferSchema)` to create a new message.
+ */
+export const GitCheckpointTransferSchema: GenMessage<GitCheckpointTransfer> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_sync, 15);
+
+/**
+ * @generated from message heddle.v1.GitLaneTransfer
+ */
+export type GitLaneTransfer = Message<"heddle.v1.GitLaneTransfer"> & {
+  /**
+   * @generated from oneof heddle.v1.GitLaneTransfer.body
+   */
+  body: {
+    /**
+     * @generated from field: heddle.v1.GitPackTransfer pack = 1;
+     */
+    value: GitPackTransfer;
+    case: "pack";
+  } | {
+    /**
+     * @generated from field: heddle.v1.GitRefUpdateTransfer ref_update = 2;
+     */
+    value: GitRefUpdateTransfer;
+    case: "refUpdate";
+  } | {
+    /**
+     * @generated from field: heddle.v1.GitCheckpointTransfer checkpoint = 3;
+     */
+    value: GitCheckpointTransfer;
+    case: "checkpoint";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message heddle.v1.GitLaneTransfer.
+ * Use `create(GitLaneTransferSchema)` to create a new message.
+ */
+export const GitLaneTransferSchema: GenMessage<GitLaneTransfer> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_sync, 16);
+
+/**
  * @generated from message heddle.v1.PushMessage
  */
 export type PushMessage = Message<"heddle.v1.PushMessage"> & {
@@ -556,6 +755,12 @@ export type PushMessage = Message<"heddle.v1.PushMessage"> & {
      */
     value: StateVisibilityTransfer;
     case: "stateVisibility";
+  } | {
+    /**
+     * @generated from field: heddle.v1.GitLaneTransfer git_lane = 8;
+     */
+    value: GitLaneTransfer;
+    case: "gitLane";
   } | { case: undefined; value?: undefined };
 };
 
@@ -564,7 +769,7 @@ export type PushMessage = Message<"heddle.v1.PushMessage"> & {
  * Use `create(PushMessageSchema)` to create a new message.
  */
 export const PushMessageSchema: GenMessage<PushMessage> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 13);
+  messageDesc(file_heddle_v1_sync, 17);
 
 /**
  * @generated from message heddle.v1.PullRequest
@@ -621,6 +826,11 @@ export type PullRequest = Message<"heddle.v1.PullRequest"> & {
   freshFullPull: boolean;
 
   /**
+   * @generated from field: string target_revision_address = 11;
+   */
+  targetRevisionAddress: string;
+
+  /**
    * Idempotency on the stream-opening message. The PullMessage
    * envelope itself isn't the operation — PullRequest is.
    *
@@ -634,7 +844,7 @@ export type PullRequest = Message<"heddle.v1.PullRequest"> & {
  * Use `create(PullRequestSchema)` to create a new message.
  */
 export const PullRequestSchema: GenMessage<PullRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 14);
+  messageDesc(file_heddle_v1_sync, 18);
 
 /**
  * @generated from message heddle.v1.PullReady
@@ -674,6 +884,11 @@ export type PullReady = Message<"heddle.v1.PullReady"> & {
    * @generated from field: uint32 object_count = 7;
    */
   objectCount: number;
+
+  /**
+   * @generated from field: string remote_revision_address = 8;
+   */
+  remoteRevisionAddress: string;
 };
 
 /**
@@ -681,7 +896,7 @@ export type PullReady = Message<"heddle.v1.PullReady"> & {
  * Use `create(PullReadySchema)` to create a new message.
  */
 export const PullReadySchema: GenMessage<PullReady> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 15);
+  messageDesc(file_heddle_v1_sync, 19);
 
 /**
  * @generated from message heddle.v1.WantObjects
@@ -708,7 +923,7 @@ export type WantObjects = Message<"heddle.v1.WantObjects"> & {
  * Use `create(WantObjectsSchema)` to create a new message.
  */
 export const WantObjectsSchema: GenMessage<WantObjects> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 16);
+  messageDesc(file_heddle_v1_sync, 20);
 
 /**
  * @generated from message heddle.v1.PullComplete
@@ -733,6 +948,11 @@ export type PullComplete = Message<"heddle.v1.PullComplete"> & {
    * @generated from field: heddle.v1.TransferCheckpoint transfer = 4;
    */
   transfer?: TransferCheckpoint | undefined;
+
+  /**
+   * @generated from field: string new_revision_address = 5;
+   */
+  newRevisionAddress: string;
 };
 
 /**
@@ -740,7 +960,7 @@ export type PullComplete = Message<"heddle.v1.PullComplete"> & {
  * Use `create(PullCompleteSchema)` to create a new message.
  */
 export const PullCompleteSchema: GenMessage<PullComplete> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 17);
+  messageDesc(file_heddle_v1_sync, 21);
 
 /**
  * @generated from message heddle.v1.PullMessage
@@ -791,6 +1011,12 @@ export type PullMessage = Message<"heddle.v1.PullMessage"> & {
      */
     value: StateVisibilityTransfer;
     case: "stateVisibility";
+  } | {
+    /**
+     * @generated from field: heddle.v1.GitLaneTransfer git_lane = 8;
+     */
+    value: GitLaneTransfer;
+    case: "gitLane";
   } | { case: undefined; value?: undefined };
 };
 
@@ -799,7 +1025,7 @@ export type PullMessage = Message<"heddle.v1.PullMessage"> & {
  * Use `create(PullMessageSchema)` to create a new message.
  */
 export const PullMessageSchema: GenMessage<PullMessage> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_sync, 18);
+  messageDesc(file_heddle_v1_sync, 22);
 
 /**
  * @generated from enum heddle.v1.TransportMode
@@ -916,6 +1142,42 @@ export enum PackStreamKind {
  */
 export const PackStreamKindSchema: GenEnum<PackStreamKind> = /*@__PURE__*/
   enumDesc(file_heddle_v1_sync, 3);
+
+/**
+ * @generated from enum heddle.v1.GitRefKind
+ */
+export enum GitRefKind {
+  /**
+   * @generated from enum value: GIT_REF_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: GIT_REF_KIND_BRANCH = 1;
+   */
+  BRANCH = 1,
+
+  /**
+   * @generated from enum value: GIT_REF_KIND_TAG = 2;
+   */
+  TAG = 2,
+
+  /**
+   * @generated from enum value: GIT_REF_KIND_NOTE = 3;
+   */
+  NOTE = 3,
+
+  /**
+   * @generated from enum value: GIT_REF_KIND_OTHER = 4;
+   */
+  OTHER = 4,
+}
+
+/**
+ * Describes the enum heddle.v1.GitRefKind.
+ */
+export const GitRefKindSchema: GenEnum<GitRefKind> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_sync, 4);
 
 /**
  * @generated from service heddle.v1.RepoSyncService

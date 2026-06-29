@@ -17,7 +17,10 @@ use std::{fs, str};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{assert_json_recovery_advice_fields, heddle, heddle_argv_json, heddle_output};
+use super::{
+    assert_json_recovery_advice_fields, heddle, heddle_argv_json, heddle_output,
+    heddle_output_with_env,
+};
 
 /// Bootstrap a minimal repo with a single capture so the parent has
 /// a HEAD. Tests then run `heddle try` against this seeded state and
@@ -347,6 +350,85 @@ fn try_with_explicit_name_uses_that_name() {
     .expect("heddle try with --name should succeed");
     let value: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(value["thread"], "my-explicit-try");
+}
+
+/// The command `heddle try` runs MUST NOT inherit the parent's
+/// environment. A poisoned parent env (`GIT_DIR` pointing at a bogus
+/// dir, plus a secret) must be invisible to the child — the spawn site
+/// `env_clear()`s and rebuilds from the shared allowlist. Without that,
+/// the child would see Heddle's git-overlay `GIT_*` plumbing and any
+/// inherited credential.
+#[test]
+fn try_does_not_leak_parent_env_into_child() {
+    let temp = setup_repo();
+
+    // A probe script that dumps its full environment to a file OUTSIDE
+    // the repo worktree, so reading it back doesn't perturb the
+    // worktree-invariant accounting. Then exit 0.
+    let probe_dir = TempDir::new().unwrap();
+    let env_dump = probe_dir.path().join("child-env.txt");
+    let script_path = probe_dir.path().join("dump-env.sh");
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\nenv > '{}'\n", env_dump.to_str().unwrap()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let output = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "try",
+            "--",
+            "sh",
+            script_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+        &[
+            ("GIT_DIR", "/poison"),
+            ("GIT_WORK_TREE", "/poison-wt"),
+            ("AWS_SECRET", "super-secret-value"),
+        ],
+    )
+    .expect("spawn heddle try with poisoned parent env");
+    assert!(
+        output.status.success(),
+        "heddle try -- sh dump-env should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dumped = fs::read_to_string(&env_dump).expect("probe should have written its env");
+
+    assert!(
+        !dumped.contains("GIT_DIR="),
+        "child inherited GIT_DIR from parent env:\n{dumped}"
+    );
+    assert!(
+        !dumped.contains("GIT_WORK_TREE="),
+        "child inherited GIT_WORK_TREE from parent env:\n{dumped}"
+    );
+    assert!(
+        !dumped.contains("AWS_SECRET=") && !dumped.contains("super-secret-value"),
+        "child inherited the AWS_SECRET secret from parent env:\n{dumped}"
+    );
+
+    // Sanity: the allowlist still provides the basics the child needs,
+    // and Heddle's own thread context is injected explicitly.
+    assert!(
+        dumped.contains("PATH="),
+        "allowlisted PATH should still reach the child:\n{dumped}"
+    );
+    assert!(
+        dumped.contains("HEDDLE_THREAD_NAME="),
+        "try should inject its thread context into the child:\n{dumped}"
+    );
 }
 
 /// `heddle try --name <existing>` must refuse rather than resume the

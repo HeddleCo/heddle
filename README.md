@@ -14,8 +14,8 @@ Heddle is an AI-native version control CLI written in Rust. It keeps its own sta
 ```bash
 cargo install heddle-cli
 cd /path/to/your/git/repo
-heddle status            # inspect Git safely; Heddle will print the exact adopt command
-heddle adopt --ref main  # initialize Heddle and import the active branch
+heddle status            # inspect Git safely; Heddle will print the exact init command
+heddle init              # initialize Heddle sidecar metadata for this Git checkout
 heddle verify
 ```
 
@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to adopt the repo
 
-Run the exact `heddle adopt --ref <branch>` command printed by `heddle status` to create Heddle's local data and import the active Git branch in one step. After adoption, `heddle status`, `heddle verify`, `heddle thread list`, and `heddle status` all report from the same verification state. Lower-level `heddle bridge git ...` commands are available for explicit Git-adapter import/export/sync work, not the default first-run path.
+Run the exact `heddle init` command printed by `heddle status` to create Heddle's local sidecar data for the active Git checkout. In Git-overlay mode, Git commits, trees, branches, tags, and packs stay in `.git`; Heddle stores captures, threads, provenance, discussions, and other native metadata in `.heddle`. Lower-level `heddle bridge git ...` commands remain available for explicit Git-adapter import/export/sync work, and `heddle adopt` is the deliberate conversion path when you want Git history copied into native Heddle storage.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -46,7 +46,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Semantic diff and compare
 - Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
-- Git adapter/bridge: adopt, import, export, sync
+- Git adapter/bridge: sidecar overlay, explicit native adoption, import, export, sync
 - Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
@@ -83,32 +83,28 @@ cargo install --path crates/cli
 
 Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
-## Quickstart
+## Getting Started
 
-New to Heddle? One command takes a fresh directory to a first
-checkpointed change:
+New to Heddle? Initialize once, set attribution if needed, then use
+`heddle commit` as the everyday save boundary:
 
 ```bash
-heddle init --quickstart --principal-name "Ada Lovelace" --principal-email ada@example.com
+heddle init
+heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
+heddle commit -m "start project"
 ```
 
-This initializes the repository, records your identity, starts a
-`quickstart` thread, makes one capture, and — in a Git-overlay repo —
-one matching Git checkpoint. Run it interactively without the
-`--principal-*` flags and Heddle prompts for your name and email; pass
-`--quickstart-thread <name>` to name the thread something other than
-`quickstart`. It finishes by pointing you at `heddle log` so you can see
-the change it just recorded. (`heddle status` on a freshly-initialized
-repo with no history suggests this command too.)
+In a Git checkout, `heddle init` creates a Heddle sidecar and leaves Git
+history in `.git`. `heddle commit` records the Heddle state and the
+matching Git checkpoint. `heddle status` always prints the next useful
+command when there is an obvious one.
 
 ### The verb-by-verb tour
 
-If you would rather drive each step yourself:
-
 ```bash
-# In an ordinary Git repo: inspect, adopt, and verify
+# In an ordinary Git repo: inspect, initialize the sidecar, and verify
 heddle status
-heddle adopt --ref main
+heddle init
 heddle verify
 
 # Save work as one verified Heddle change plus a matching Git commit

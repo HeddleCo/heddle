@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     process,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -20,7 +21,7 @@ use repo::{
     Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
-    ThreadView, describe_thread_advice,
+    ThreadView, describe_thread_advice, shell_quote,
 };
 use serde::Serialize;
 use sley::Repository as SleyRepository;
@@ -31,9 +32,9 @@ use super::{
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, canonical_adopt_ref_command,
-        canonical_bridge_reconcile_ref_preview_command, git_overlay_mutation_preflight_advice,
-        override_trust_recommended_action, serialize_empty_action_as_null,
+        build_repository_verification_state, canonical_bridge_reconcile_ref_preview_command,
+        git_overlay_mutation_preflight_advice, override_trust_recommended_action,
+        serialize_empty_action_as_null,
     },
     mount_lifecycle,
     next_action::{
@@ -57,6 +58,7 @@ use crate::{
         worktree_status_options,
     },
     config::{UserConfig, UserThreadWorkspaceMode},
+    perf::{ProfileField, emit_profile, profile_enabled},
 };
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
@@ -620,21 +622,20 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         if let Some(branch_tip) = branch_tips.get(&summary.name)
             && !has_heddle_tip
         {
-            if branch_tip.history_imported {
-                summary.blockers.clear();
-                if !summary.is_current {
-                    summary.recommended_action = canonical_adopt_ref_command(&branch_tip.branch);
-                }
+            summary.blockers.clear();
+            summary.thread_health = if branch_tip.history_imported {
+                "imported".to_string()
             } else {
-                summary.thread_health = "tip_only".to_string();
-                summary.recommended_action = canonical_adopt_ref_command(&branch_tip.branch);
-                if summary.is_current {
-                    summary.blockers = vec![
-                        "Heddle has not imported this Git branch history yet; import before using history-oriented commands".to_string(),
-                    ];
+                "git_backed".to_string()
+            };
+            if summary.is_current {
+                summary.recommended_action.clear();
+            } else {
+                summary.recommended_action = if branch_tip.branch.starts_with('-') {
+                    format!("heddle switch -- {}", shell_quote(&branch_tip.branch))
                 } else {
-                    summary.blockers.clear();
-                }
+                    format!("heddle switch {}", shell_quote(&branch_tip.branch))
+                };
             }
         }
         if summary.history_imported
@@ -942,7 +943,7 @@ fn build_thread_view(
         let mut runtime = view.runtime.clone();
         if runtime.attach_reason.is_none() {
             runtime.attach_reason = Some(format!(
-                "auto-adopted Git branch tip {}",
+                "using Git-backed branch tip {}",
                 branch_tip.git_commit
             ));
         }
@@ -1283,10 +1284,15 @@ fn available_git_ref_from_summary(summary: &ThreadSummary) -> AvailableGitRef {
 }
 
 pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs) -> Result<()> {
+    let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
     let current = repo.current_lane()?;
+    let collect_start = Instant::now();
     let mut summaries = collect_thread_summaries(repo)?;
+    let collect_summaries_ms = collect_start.elapsed().as_millis();
+    let verification_start = Instant::now();
     let mut trust = build_repository_verification_state(repo);
+    let verification_ms = verification_start.elapsed().as_millis();
     if !args.include_auto {
         // Always keep the current thread visible even if it's auto:
         // hiding it from the user who is *standing in it* would be
@@ -1403,6 +1409,17 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         }
         render_thread_sections(&output.threads, cli.verbose > 0);
         render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
+    }
+
+    if profile_enabled() {
+        emit_profile(
+            "thread list phases",
+            &[
+                ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
+                ProfileField::millis("verification_ms", verification_ms),
+                ProfileField::duration("command_body_ms", body_start.elapsed()),
+            ],
+        );
     }
 
     Ok(())
@@ -3677,9 +3694,8 @@ mod tests {
     /// Action-field presence contract (HeddleCo/heddle#645): an empty
     /// `recommended_action` must serialize as `null`, never `""` — the
     /// serialization-boundary walker hard-fails the whole command on a
-    /// raw empty. `AvailableGitRef` is non-empty by construction today
-    /// (available refs always get `canonical_adopt_ref_command`); this
-    /// pins the safe-by-construction wire shape regardless.
+    /// raw empty. Current Git-backed refs may legitimately have no primary
+    /// action (for example the active branch); this pins the wire shape.
     #[test]
     fn available_git_ref_serializes_empty_recommended_action_as_null() {
         let value = serde_json::to_value(AvailableGitRef {

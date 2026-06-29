@@ -13,6 +13,7 @@ service HostedUserService {
   rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
   rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
+  rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
   rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
   rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
@@ -22,6 +23,13 @@ service HostedUserService {
   rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
   rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant);
   rpc DeleteGrant(DeleteGrantRequest) returns (DeleteResponse);
+
+  // Resolve opaque subjects (from grants/annotations) to human display
+  // info. Today only WhoAmI exists (current session); this is the batch
+  // subject-resolution surface the grant/member UIs need so they can render
+  // a name + handle instead of the raw subject. Backend impl lives in weft
+  // (a follow-up); this is the contract only.
+  rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse);
 
   // ── Thread merge approvals ───────────────────────────────────────
   rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval);
@@ -63,6 +71,15 @@ service HostedUserService {
   rpc GrantSupportAccess(GrantSupportAccessRequest) returns (SupportAccessGrant);
   rpc ListSupportAccessGrants(ListSupportAccessGrantsRequest) returns (ListSupportAccessGrantsResponse);
   rpc RevokeSupportAccess(RevokeSupportAccessRequest) returns (DeleteResponse);
+
+  // ── Caller-owned bookmarks ───────────────────────────────────────
+  // Accepts both user and anonymous biscuits. Anonymous callers can
+  // only write their own bookmark rows; promotion migrates those rows
+  // to the eventual user account without granting repo/namespace write
+  // permissions.
+  rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse);
+  rpc UpsertBookmark(UpsertBookmarkRequest) returns (Bookmark);
+  rpc DeleteBookmark(DeleteBookmarkRequest) returns (DeleteResponse);
 }
 
 // Namespace kinds in the hosted control plane. `USER` namespaces are
@@ -75,6 +92,74 @@ enum NamespaceKind {
   NAMESPACE_KIND_TEAM = 3;
 }
 
+enum SpoolVisibility {
+  SPOOL_VISIBILITY_UNSPECIFIED = 0;
+  SPOOL_VISIBILITY_PRIVATE = 1;
+  SPOOL_VISIBILITY_PUBLIC = 2;
+}
+
+enum SpoolStateVisibility {
+  SPOOL_STATE_VISIBILITY_UNSPECIFIED = 0;
+  SPOOL_STATE_VISIBILITY_PUBLIC = 1;
+  SPOOL_STATE_VISIBILITY_INTERNAL = 2;
+  SPOOL_STATE_VISIBILITY_PRIVATE = 3;
+}
+
+enum SpoolBootstrapKind {
+  SPOOL_BOOTSTRAP_KIND_UNSPECIFIED = 0;
+  SPOOL_BOOTSTRAP_KIND_EMPTY = 1;
+  SPOOL_BOOTSTRAP_KIND_GIT_REMOTE = 2;
+  SPOOL_BOOTSTRAP_KIND_TEMPLATE = 3;
+}
+
+enum SpoolBootstrapSyncDirection {
+  SPOOL_BOOTSTRAP_SYNC_DIRECTION_UNSPECIFIED = 0;
+  SPOOL_BOOTSTRAP_SYNC_DIRECTION_PULL = 1;
+  SPOOL_BOOTSTRAP_SYNC_DIRECTION_PUSH = 2;
+  SPOOL_BOOTSTRAP_SYNC_DIRECTION_BIDI = 3;
+}
+
+enum SpoolWritePolicy {
+  SPOOL_WRITE_POLICY_UNSPECIFIED = 0;
+  SPOOL_WRITE_POLICY_DEVELOPERS = 1;
+  SPOOL_WRITE_POLICY_MAINTAINERS = 2;
+  SPOOL_WRITE_POLICY_OWNER_ONLY = 3;
+}
+
+enum SpoolChildPolicy {
+  SPOOL_CHILD_POLICY_UNSPECIFIED = 0;
+  SPOOL_CHILD_POLICY_MAINTAINERS = 1;
+  SPOOL_CHILD_POLICY_DEVELOPERS = 2;
+  SPOOL_CHILD_POLICY_DISABLED = 3;
+}
+
+enum SpoolSyncBehavior {
+  SPOOL_SYNC_BEHAVIOR_UNSPECIFIED = 0;
+  SPOOL_SYNC_BEHAVIOR_MANUAL = 1;
+  SPOOL_SYNC_BEHAVIOR_HEDDLE_START = 2;
+  SPOOL_SYNC_BEHAVIOR_HEDDLE_START_WITH_PRESENCE = 3;
+}
+
+message SpoolInitialTooling {
+  bool readme = 1;
+  string license = 2;
+  string gitignore = 3;
+  string language_preset = 4;
+}
+
+message SpoolSettings {
+  SpoolVisibility visibility = 1;
+  SpoolStateVisibility default_state_visibility = 2;
+  SpoolBootstrapKind bootstrap_kind = 3;
+  string bootstrap_source = 4;
+  SpoolWritePolicy write_policy = 5;
+  SpoolChildPolicy child_policy = 6;
+  SpoolInitialTooling initial_tooling = 7;
+  SpoolSyncBehavior sync_behavior = 8;
+  SpoolBootstrapSyncDirection bootstrap_sync_direction = 9;
+  string description = 10;
+}
+
 message ListNamespacesRequest {}
 
 message GetCurrentUserNamespaceRequest {}
@@ -84,6 +169,7 @@ message CreateNamespaceRequest {
   string slug = 2;
   string parent_path = 3;
   string display_name = 4;
+  SpoolSettings settings = 5;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
 }
@@ -93,6 +179,13 @@ message UpdateNamespaceRequest {
   string new_slug = 2;
   string display_name = 3;
   bool clear_display_name = 4;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message SetNamespaceVisibilityRequest {
+  string full_path = 1;
+  SpoolVisibility visibility = 2;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
 }
@@ -165,6 +258,11 @@ message HostedNamespace {
   string full_path = 4;
   string parent_id = 5;
   string display_name = 6;
+  SpoolSettings settings = 7;
+  // Current effective visibility of the namespace's spool. Mirrors
+  // `settings.visibility` for top-level reads; populated on every response
+  // builder so SetNamespaceVisibility callers see the applied value.
+  SpoolVisibility visibility = 8;
 }
 
 message HostedRepository {
@@ -173,6 +271,40 @@ message HostedRepository {
   string slug = 3;
   string path = 4;
   string full_path = 5;
+}
+
+message Bookmark {
+  string id = 1;
+  // "repo" | "namespace" for the current web UI. Kept as a string so
+  // future bookmarkable resource kinds can ship without enum churn.
+  string resource_kind = 2;
+  string full_path = 3;
+  string name = 4;
+  string folder = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+message ListBookmarksRequest {}
+
+message ListBookmarksResponse {
+  repeated Bookmark bookmarks = 1;
+}
+
+message UpsertBookmarkRequest {
+  string resource_kind = 1;
+  string full_path = 2;
+  string name = 3;
+  string folder = 4;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message DeleteBookmarkRequest {
+  string resource_kind = 1;
+  string full_path = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
 }
 
 message HostedGrant {
@@ -299,4 +431,29 @@ message ListRepositoriesResponse {
 
 message ListGrantsResponse {
   repeated HostedGrant grants = 1;
+}
+
+// ── Subject resolution ──────────────────────────────────────────────────────
+// Batch subject→display-name resolution. The grant/member UIs hold opaque
+// subjects (from HostedGrant.subject / MemberEntry.Grant.subject) and today
+// render them raw; this lets a consumer enrich a whole grant/member list in a
+// single round trip. Backend impl is a weft follow-up.
+message ResolveSubjectsRequest {
+  // Opaque subjects, e.g. "user:<uuid>" / "ops-alice".
+  repeated string subjects = 1;
+}
+
+message ResolveSubjectsResponse {
+  repeated ResolvedPrincipal principals = 1;
+}
+
+message ResolvedPrincipal {
+  // Echo of the requested subject (the join key for the caller).
+  string subject = 1;
+  // Human display name; empty when unresolved.
+  string display_name = 2;
+  // Username / handle; empty when unresolved.
+  string handle = 3;
+  // False when the subject couldn't be resolved (display_name + handle empty).
+  bool resolved = 4;
 }

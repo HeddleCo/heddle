@@ -135,7 +135,12 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
 fn test_undo_refuses_when_untracked_file_present() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
+    // A fresh worktree has nothing to capture: `capture` now refuses an
+    // empty/clean tree as a noop. Write tracked content first so the
+    // baseline capture has something to save (two states are needed so
+    // `undo -n 1` has a prior snapshot to target).
+    std::fs::write(temp.path().join("seed.txt"), "seed").unwrap();
+    heddle_must_succeed(&["capture", "-m", "seed"], temp.path());
     std::fs::write(temp.path().join("a.txt"), "a").unwrap();
     heddle_must_succeed(&["capture", "-m", "tracked"], temp.path());
 
@@ -161,7 +166,10 @@ fn test_undo_refuses_when_untracked_file_present() {
 fn test_undo_refuses_when_tracked_file_modified() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
+    // `capture` refuses an empty/clean tree as a noop, so seed tracked
+    // content for the baseline before the tracked-file capture below.
+    std::fs::write(temp.path().join("seed.txt"), "seed").unwrap();
+    heddle_must_succeed(&["capture", "-m", "seed"], temp.path());
     std::fs::write(temp.path().join("a.txt"), "original").unwrap();
     heddle_must_succeed(&["capture", "-m", "tracked"], temp.path());
 
@@ -2406,8 +2414,11 @@ fn test_undo_pull_local_restores_thread_ref() {
     heddle_must_succeed(&["capture", "-m", "source v1"], source.path());
 
     // Target repo: start from a baseline capture so `main` exists
-    // locally. Pull then advances it.
+    // locally. `capture` refuses an empty tree as a noop, so seed
+    // tracked content first; the local pull overwrites this baseline
+    // thread ref with the pulled state regardless of divergence.
     heddle_must_succeed(&["init"], target.path());
+    std::fs::write(target.path().join("target.txt"), "target init").unwrap();
     heddle_must_succeed(&["capture", "-m", "target init"], target.path());
     let source_path = source.path().to_str().unwrap().to_string();
     heddle_must_succeed(&["pull", &source_path, "--thread", "main"], target.path());
@@ -2673,7 +2684,10 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     std::fs::write(source.path().join("a.txt"), "v1").unwrap();
     heddle_must_succeed(&["capture", "-m", "source v1"], source.path());
 
+    // `capture` refuses an empty tree as a noop, so seed tracked content
+    // for the target's baseline before the pull overwrites it.
     heddle_must_succeed(&["init"], target.path());
+    std::fs::write(target.path().join("target.txt"), "target init").unwrap();
     heddle_must_succeed(&["capture", "-m", "target init"], target.path());
     let source_path = source.path().to_str().unwrap().to_string();
     heddle_must_succeed(&["pull", &source_path, "--thread", "main"], target.path());

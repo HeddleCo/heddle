@@ -68,7 +68,7 @@ fn git_overlay_interop_bridge_shorthand_imports_current_branch() {
 }
 
 #[test]
-fn git_overlay_interop_native_git_commit_then_heddle_import_adopts_tip() {
+fn git_overlay_interop_native_git_commit_stays_direct_backed_until_import() {
     let temp = TempDir::new().unwrap();
     init_git(temp.path());
     let first_tip = commit_file(temp.path(), "story.txt", "one\n", "seed");
@@ -83,9 +83,11 @@ fn git_overlay_interop_native_git_commit_then_heddle_import_adopts_tip() {
     assert_ne!(first_tip, second_tip);
     let before_import = status_json(temp.path());
     assert_eq!(
-        before_import["recommended_action"], "heddle adopt --ref main",
-        "native git commit should require importing the active Git tip before more Heddle work: {before_import}"
+        before_import["recommended_action"],
+        Value::Null,
+        "native git commit should remain directly readable without forcing import: {before_import}"
     );
+    assert_eq!(before_import["git_overlay_health"]["status"], "clean");
 
     heddle(&["bridge", "import", "--ref", "main"], Some(temp.path())).unwrap();
     let after_import = status_json(temp.path());

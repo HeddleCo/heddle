@@ -7,8 +7,8 @@ use grpc::heddle::v1::{
     TransferCheckpoint, TransportMode,
 };
 use objects::object::{ChangeId, ContentHash};
-use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 use tonic::Status;
+use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostedTransportPolicy {
@@ -163,6 +163,7 @@ pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
             ProtocolError::AuthorizationFailed(status.message().to_string())
         }
         tonic::Code::NotFound => ProtocolError::ObjectNotFound(status.message().to_string()),
+        tonic::Code::AlreadyExists => ProtocolError::AlreadyExists(status.message().to_string()),
         tonic::Code::InvalidArgument => ProtocolError::InvalidState(status.message().to_string()),
         _ => ProtocolError::Remote(status.message().to_string()),
     }

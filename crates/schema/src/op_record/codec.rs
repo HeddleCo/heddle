@@ -120,10 +120,7 @@ pub fn schema_version_from_u32(version: u32) -> Result<OpRecordSchemaVersion> {
     }
 }
 
-pub fn decode_versioned_record(
-    bytes: &[u8],
-    version: OpRecordSchemaVersion,
-) -> Result<OpRecord> {
+pub fn decode_versioned_record(bytes: &[u8], version: OpRecordSchemaVersion) -> Result<OpRecord> {
     match version {
         OpRecordSchemaVersion::PreAtomic => PreAtomicOpRecordSchema::decode(bytes),
         OpRecordSchemaVersion::AtomicNoHead => AtomicNoHeadOpRecordSchema::decode(bytes),

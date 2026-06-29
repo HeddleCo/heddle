@@ -117,10 +117,19 @@ fn hydrate_preserves_gitignore_only_ignores_in_isolated_checkout() {
         "hydrated node_modules must stay ignored in a .gitignore-only overlay; got:\n{status}"
     );
 
-    // Capture must not choke on the absolute, out-of-checkout link
-    // target — the ignored link is pruned before capture follows it.
-    heddle(&["capture", "-m", "iso work"], Some(&thread_path))
-        .expect("capture in the hydrated checkout must succeed");
+    // A no-op capture should refuse cleanly: the ignored link is pruned before
+    // capture considers worktree changes, so there is nothing to save.
+    let capture = heddle_output(&["capture", "-m", "iso work"], Some(&thread_path))
+        .expect("capture command should run");
+    assert!(
+        !capture.status.success(),
+        "capture in the clean hydrated checkout should be a noop"
+    );
+    let capture = String::from_utf8_lossy(&capture.stderr);
+    assert!(
+        capture.contains("nothing to capture"),
+        "clean hydrated checkout should refuse as a noop, got:\n{capture}"
+    );
 }
 
 #[test]
@@ -209,9 +218,19 @@ fn hydrate_does_not_dirty_a_tracked_heddleignore() {
         "hydrated node_modules must stay ignored in the checkout; got:\n{status}"
     );
 
-    // Capture must not choke on the absolute, out-of-checkout link target.
-    heddle(&["capture", "-m", "iso work"], Some(&thread_path))
-        .expect("capture in the hydrated checkout must succeed");
+    // A no-op capture should refuse cleanly: the ignored link is pruned before
+    // capture considers worktree changes, so there is nothing to save.
+    let capture = heddle_output(&["capture", "-m", "iso work"], Some(&thread_path))
+        .expect("capture command should run");
+    assert!(
+        !capture.status.success(),
+        "capture in the clean hydrated checkout should be a noop"
+    );
+    let capture = String::from_utf8_lossy(&capture.stderr);
+    assert!(
+        capture.contains("nothing to capture"),
+        "clean hydrated checkout should refuse as a noop, got:\n{capture}"
+    );
 }
 
 #[test]

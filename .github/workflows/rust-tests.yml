@@ -150,15 +150,18 @@ jobs:
           printf '%s\n' "$diff_output" > changed-paths.txt
 
           # docs_only: EVERY changed path is a non-build doc path that the
-          # Rust suite does not validate. The catch: `check-and-test` runs
-          # `doctor docs --all` (which natively walks the repo and scans
-          # EVERY `.md` except those under `docs/spikes/` — see
-          # IGNORE_PATTERNS in crates/cli/src/cli/commands/doctor_docs.rs)
-          # and `doctor schemas` (which parses `docs/json-schemas.md`). So
-          # top-level READMEs and any other `docs/*.md` DO feed those gates
-          # and are NOT doc-only — only `docs/spikes/**` is exempt there,
-          # making it the sole doc-only prefix. Fail-safe: any path outside
-          # it ⇒ not doc-only ⇒ rust=true (run the suite).
+          # Rust suite does not validate. The catch: the `heddle-cli`
+          # integration tests assert `doctor docs --all` (which natively
+          # walks the repo and scans EVERY `.md` except those under
+          # `docs/spikes/` — see IGNORE_PATTERNS in
+          # crates/cli/src/cli/commands/doctor_docs.rs) and `doctor
+          # schemas` (which parses `docs/json-schemas.md`) stay clean, and
+          # `check-and-test`'s `Doctor schemas drift gate` step reruns the
+          # built binary's `doctor schemas` against `docs/json-schemas.md`.
+          # So top-level READMEs and any other `docs/*.md` DO feed those
+          # gates and are NOT doc-only — only `docs/spikes/**` is exempt
+          # there, making it the sole doc-only prefix. Fail-safe: any path
+          # outside it ⇒ not doc-only ⇒ rust=true (run the suite).
           if ! printf '%s\n' "$diff_output" | grep -vE '^(docs/spikes/|[[:space:]]*$)' \
               > /dev/null; then
             docs_only=true
@@ -406,12 +409,24 @@ jobs:
           set -euo pipefail
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+          cargo check --locked -p heddle-cli --features client
           # Assert the default `cargo install -p heddle-cli` flow produces
           # `heddle-fuse-worker` so the sibling-binary lookup in
           # `mount::worker::default_worker_binary` resolves on a stock
           # install; otherwise Linux mounts silently fall back to NFS
           # (heddle#190 r5 / Codex PR #225 P2).
           bash scripts/check-default-install-ships-worker.sh
+
+      # Assert `heddle doctor schemas` reports no drift between the
+      # generated schema mirrors and the documented `--output json`
+      # samples in `docs/json-schemas.md`. IMPROVEMENT_PLAN §7's DoD
+      # requires this surface stay clean after any Principal/output-
+      # boundary change (heddle#593); the script builds `heddle` from
+      # this checkout, runs `doctor schemas`, and propagates its
+      # non-zero exit on drift (heddle#605).
+      - name: Doctor schemas drift gate
+        if: needs.changes.outputs.cli_checks == 'true'
+        run: bash scripts/check-doctor-schemas-clean.sh
 
       - name: sccache stats
         run: sccache --show-stats

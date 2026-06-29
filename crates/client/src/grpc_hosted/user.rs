@@ -9,8 +9,8 @@ use grpc::heddle::v1::{
     UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
     grant_target_ref::Target as GrantTargetKind,
 };
-use wire::ProtocolError;
 use tonic::Request;
+use wire::ProtocolError;
 
 use super::{
     HostedGrpcClient,
@@ -39,6 +39,26 @@ macro_rules! authed_call {
             .map_err(status_to_protocol_error)?
             .into_inner()
     }};
+}
+
+fn default_spool_settings_request() -> grpc::heddle::v1::SpoolSettings {
+    use grpc::heddle::v1::{
+        SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolInitialTooling,
+        SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior, SpoolVisibility, SpoolWritePolicy,
+    };
+
+    SpoolSettings {
+        visibility: SpoolVisibility::Private as i32,
+        default_state_visibility: SpoolStateVisibility::Internal as i32,
+        bootstrap_kind: SpoolBootstrapKind::Empty as i32,
+        bootstrap_source: String::new(),
+        write_policy: SpoolWritePolicy::Developers as i32,
+        child_policy: SpoolChildPolicy::Maintainers as i32,
+        initial_tooling: Some(SpoolInitialTooling::default()),
+        sync_behavior: SpoolSyncBehavior::Manual as i32,
+        bootstrap_sync_direction: SpoolBootstrapSyncDirection::Pull as i32,
+        description: String::new(),
+    }
 }
 
 impl HostedGrpcClient {
@@ -100,6 +120,7 @@ impl HostedGrpcClient {
                 slug: slug.to_string(),
                 parent_path: parent_path.unwrap_or_default().to_string(),
                 display_name: display_name.unwrap_or_default(),
+                settings: Some(default_spool_settings_request()),
                 client_operation_id: String::new(),
             }
         );

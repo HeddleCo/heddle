@@ -141,7 +141,7 @@ fn cmd_blame_with_output_kind(
         if matches!(state_id.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
             ensure_current_state(
                 &repo,
-                &UserConfig::load_default().unwrap_or_default(),
+                &UserConfig::load_default()?,
                 Some(format!("Bootstrap git-overlay before blaming {}", file)),
             )?;
         }
@@ -149,7 +149,7 @@ fn cmd_blame_with_output_kind(
     } else {
         ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some(format!("Bootstrap git-overlay before blaming {}", file)),
         )?
     };

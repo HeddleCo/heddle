@@ -135,7 +135,7 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
   MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
     cargo build --release --locked -p heddle-mount --features fskit --target "$target"
   MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
-    cargo build --release --locked -p heddle-cli --bin heddle --features mount --target "$target"
+    cargo build --release --locked -p heddle-cli --bin heddle --features mount,client --target "$target"
 done
 
 mkdir -p "$(dirname "$CLI_PATH")"

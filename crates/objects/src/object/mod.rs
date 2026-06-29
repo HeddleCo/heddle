@@ -17,13 +17,13 @@ mod redaction;
 mod risk_signal;
 mod semantic_change;
 mod session;
+mod staleness_core;
 mod state_attribution;
 mod state_context;
 mod state_core;
 mod state_provenance;
 mod state_review;
 mod state_visibility;
-mod staleness_core;
 mod structured_conflict;
 mod suggestion_core;
 mod timeline;
@@ -52,6 +52,10 @@ pub use risk_signal::{
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
 pub use session::{Session, SessionSegment, generate_session_id};
+pub use staleness_core::{
+    StalenessStatus, annotation_status_for_source,
+    annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
+};
 pub use state_attribution::{Agent, Attribution, Principal};
 pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContextBlob,
@@ -69,17 +73,13 @@ pub use state_visibility::{
     STATE_VISIBILITY_SIGNING_PAYLOAD_VERSION_TAG, StateVisibility, StateVisibilityBlob,
     StateVisibilityError,
 };
-pub use staleness_core::{
-    StalenessStatus, annotation_status_for_source,
-    annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
-};
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
 };
 pub use suggestion_core::{
     ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
-    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
-    SuggestionInputs, SuggestionSignal, score_suggestions,
+    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW, SuggestionInputs,
+    SuggestionSignal, score_suggestions,
 };
 pub use timeline::{
     BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,

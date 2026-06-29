@@ -6,6 +6,11 @@
 
 use std::{collections::HashMap, path::Path};
 
+pub use objects::object::{
+    StalenessStatus, annotation_status_for_source, extract_line_range, resolve_current_symbol,
+};
+#[cfg(feature = "async-source")]
+use objects::store::AsyncObjectSource;
 use objects::{
     object::{
         Annotation, Blob, ContextTarget, State, Tree,
@@ -14,14 +19,7 @@ use objects::{
     store::ObjectSource,
 };
 
-#[cfg(feature = "async-source")]
-use objects::store::AsyncObjectSource;
-
 use crate::Repository;
-
-pub use objects::object::{
-    StalenessStatus, annotation_status_for_source, extract_line_range, resolve_current_symbol,
-};
 
 /// Check a single annotation's staleness against current code.
 ///
@@ -239,20 +237,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::{
         object::{AnnotationScope, ContentHash},
         store::ObjectStore,
     };
-
     #[cfg(feature = "async-source")]
     use objects::{
         object::{
-            Blob, ChangeId, DiffKind, EntryType, FileChange, FileMode, TreeEntry,
-            diff_trees_visit, diff_trees_visit_async,
+            Blob, ChangeId, DiffKind, EntryType, FileChange, FileMode, TreeEntry, diff_trees_visit,
+            diff_trees_visit_async,
         },
         store::{AsyncObjectSource, InMemoryStore},
     };
+
+    use super::*;
 
     fn make_annotation(scope: AnnotationScope, source_hash: Option<ContentHash>) -> Annotation {
         Annotation::new(
@@ -335,53 +333,26 @@ mod tests {
         let async_store = AsyncInMemorySource(&store);
 
         let from_nested = create_blob(&store, b"old nested");
-        let from_nested_tree = create_tree(
-            &store,
-            vec![("c.txt", from_nested, EntryType::Blob)],
-        );
+        let from_nested_tree = create_tree(&store, vec![("c.txt", from_nested, EntryType::Blob)]);
         let to_nested = create_blob(&store, b"new nested");
         let to_nested_tree = create_tree(&store, vec![("b.txt", to_nested, EntryType::Blob)]);
 
         let from_hash = create_tree(
             &store,
             vec![
-                (
-                    "a.txt",
-                    create_blob(&store, b"old a"),
-                    EntryType::Blob,
-                ),
+                ("a.txt", create_blob(&store, b"old a"), EntryType::Blob),
                 ("dir", from_nested_tree, EntryType::Tree),
-                (
-                    "same.txt",
-                    create_blob(&store, b"same"),
-                    EntryType::Blob,
-                ),
-                (
-                    "z.txt",
-                    create_blob(&store, b"old z"),
-                    EntryType::Blob,
-                ),
+                ("same.txt", create_blob(&store, b"same"), EntryType::Blob),
+                ("z.txt", create_blob(&store, b"old z"), EntryType::Blob),
             ],
         );
         let to_hash = create_tree(
             &store,
             vec![
-                (
-                    "b.txt",
-                    create_blob(&store, b"new b"),
-                    EntryType::Blob,
-                ),
+                ("b.txt", create_blob(&store, b"new b"), EntryType::Blob),
                 ("dir", to_nested_tree, EntryType::Tree),
-                (
-                    "same.txt",
-                    create_blob(&store, b"same"),
-                    EntryType::Blob,
-                ),
-                (
-                    "z.txt",
-                    create_blob(&store, b"new z"),
-                    EntryType::Blob,
-                ),
+                ("same.txt", create_blob(&store, b"same"), EntryType::Blob),
+                ("z.txt", create_blob(&store, b"new z"), EntryType::Blob),
             ],
         );
 

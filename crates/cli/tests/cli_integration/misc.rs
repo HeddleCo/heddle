@@ -71,7 +71,7 @@ fn test_cli_diagnose_json_profile() {
 /// impression. Label it `uncaptured` instead. The recommended action
 /// (`heddle capture`) stays the same. See heddle#160.
 #[test]
-fn status_reports_uncaptured_for_freshly_initialized_repo() {
+fn status_reports_clean_for_freshly_initialized_git_overlay_repo() {
     let temp = TempDir::new().unwrap();
 
     let status = Command::new("git")
@@ -110,16 +110,17 @@ fn status_reports_uncaptured_for_freshly_initialized_repo() {
     let json = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
     assert_eq!(
-        parsed["thread_health"], "needs_import",
-        "freshly-initialized Git-overlay worktree should fail closed when Git and Heddle are not reconciled: {parsed}"
+        parsed["thread_health"], "clean",
+        "freshly-initialized Git-overlay worktree should read clean Git history directly: {parsed}"
     );
     assert_eq!(
-        parsed["git_overlay_health"]["status"], "needs_import",
+        parsed["git_overlay_health"]["status"], "clean",
         "thread health and Git-overlay health should agree: {parsed}"
     );
     assert_eq!(
-        parsed["recommended_action"], "heddle adopt --ref main",
-        "unimported initial state should recommend the exact import command: {parsed}"
+        parsed["recommended_action"],
+        Value::Null,
+        "clean direct-backed Git state should not invent a required action: {parsed}"
     );
 }
 

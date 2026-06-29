@@ -525,6 +525,45 @@ fn test_compare_worktree_cached_does_not_store_added_file_blob() {
 }
 
 #[test]
+fn test_compare_worktree_cached_detects_new_file_in_already_tracked_directory() {
+    // Regression: a new file added to an already-tracked directory must be
+    // detected even after a prior scan marked that subtree clean. The prior
+    // scan populates the directory cache with a `clean_tree_hash`; a parent-level
+    // whole-subtree skip keyed on that hash plus the parent's child-name digest
+    // is unsound, because adding `src/c.txt` changes neither the parent's child
+    // list nor the committed tree hash, so the addition would be silently missed
+    // (status reports clean / capture refuses). Without an fsmonitor vouching for
+    // the subtree, the scan must descend and surface the new file.
+    let (temp_dir, repo) = create_test_repo();
+
+    let tracked_dir = temp_dir.path().join("src");
+    fs::create_dir(&tracked_dir).unwrap();
+    fs::write(tracked_dir.join("a.txt"), "a").unwrap();
+    let state = repo.snapshot(Some("base".to_string()), None).unwrap();
+    let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+
+    // First scan: populates the directory cache and marks src/ subtree clean.
+    let first = repo.compare_worktree_cached(&tree).unwrap();
+    assert_eq!(first.added, Vec::<std::path::PathBuf>::new());
+    assert_eq!(first.modified, Vec::<std::path::PathBuf>::new());
+    assert_eq!(first.deleted, Vec::<std::path::PathBuf>::new());
+
+    // Add a new file inside the already-tracked directory. This leaves src/'s
+    // entry in the committed tree (and the root's child list) unchanged.
+    fs::write(tracked_dir.join("c.txt"), "c").unwrap();
+
+    // Second scan: the new file must be detected, not skipped by the cache.
+    let second = repo.compare_worktree_cached(&tree).unwrap();
+    assert_eq!(
+        second.added,
+        vec![std::path::PathBuf::from("src/c.txt")],
+        "new file in an already-tracked directory must be detected on rescan"
+    );
+    assert_eq!(second.modified, Vec::<std::path::PathBuf>::new());
+    assert_eq!(second.deleted, Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
 fn test_compare_worktree_cached_marks_tracked_file_replaced_by_directory_modified() {
     let (temp_dir, repo) = create_test_repo();
     let path = temp_dir.path().join("tracked.txt");

@@ -13,6 +13,7 @@ use objects::{
 
 use crate::{
     Repository, Result, WorktreeIndex,
+    fsmonitor::ChangeMonitorSession,
     repository::repository_worktree_status::{
         UntrackedSet, UntrackedSubtree, WorktreeCompareStats,
     },
@@ -25,16 +26,19 @@ struct UntrackedScanContext<'a> {
     repo: &'a Repository,
     ignore_matcher: &'a WorktreeIgnoreMatcher,
     tracked_dirty_directories: &'a BTreeSet<String>,
+    monitor: &'a ChangeMonitorSession,
     index: &'a mut WorktreeIndex,
     untracked: &'a mut UntrackedSet,
     stats: &'a mut WorktreeCompareStats,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_untracked_paths(
     repo: &Repository,
     tree: &Tree,
     ignore_matcher: &WorktreeIgnoreMatcher,
     tracked_dirty_directories: &BTreeSet<String>,
+    monitor: &ChangeMonitorSession,
     index: &mut WorktreeIndex,
     untracked: &mut UntrackedSet,
     stats: &mut WorktreeCompareStats,
@@ -43,6 +47,7 @@ pub(crate) fn scan_untracked_paths(
         repo,
         ignore_matcher,
         tracked_dirty_directories,
+        monitor,
         index,
         untracked,
         stats,
@@ -77,16 +82,31 @@ fn scan_directory(
 
     let tree = tree.expect("tracked-tree scan requires a tree");
     let cache_compare_start = Instant::now();
-    if let Some(cached) = ctx.index.get_directory(dir_key)
+    // A whole-subtree early-skip is only sound when we can prove nothing changed
+    // *anywhere* below `dir_key`. The directory's own child-name digest and the
+    // committed `clean_tree_hash` cannot establish that: a new file added inside an
+    // unchanged-named subdirectory leaves both this directory's child list and the
+    // committed tree hash untouched (the committed tree is invariant to uncommitted
+    // worktree edits), so neither signal observes the addition. Only an fsmonitor
+    // that tracks per-path changes can vouch for the entire subtree; gate the skip
+    // on it via `can_skip_directory` (which checks `clean_tree_hash` + that no
+    // changed path falls under `dir_key`, and returns false when the monitor is not
+    // usable). Without fsmonitor we must descend so nested additions are seen; the
+    // descent is cheap because tracked-file hashing stays cached by stat-freshness.
+    if ctx
+        .monitor
+        .can_skip_directory(rel_path, Some(tree), ctx.index)
         && !ctx.tracked_dirty_directories.contains(dir_key)
-        && cached.clean_tree_hash.as_ref() == Some(&tree.hash())
-        && cached.child_names_match(
-            entries.iter().map(|entry| entry.name.as_str()),
-            entries.len(),
-        )
+        && ctx.index.get_directory(dir_key).is_some_and(|cached| {
+            cached.child_names_match(
+                entries.iter().map(|entry| entry.name.as_str()),
+                entries.len(),
+            )
+        })
     {
         ctx.stats.directory_cache_compare_ms += cache_compare_start.elapsed().as_millis();
         ctx.stats.directories_skipped += 1;
+        ctx.stats.monitor_skipped_directories += 1;
         ctx.stats.cache_hits += 1;
         return Ok(false);
     }

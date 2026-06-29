@@ -7,13 +7,12 @@
 use std::ops::ControlFlow;
 
 use super::FileChangeSet;
+#[cfg(feature = "async-source")]
+use crate::store::AsyncObjectSource;
 use crate::{
     object::{DiffKind, EntryType, FileChange, Tree, TreeEntry},
     store::ObjectSource,
 };
-
-#[cfg(feature = "async-source")]
-use crate::store::AsyncObjectSource;
 
 /// Collect all file changes between two trees.
 ///

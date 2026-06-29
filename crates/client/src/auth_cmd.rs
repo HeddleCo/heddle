@@ -3,12 +3,15 @@
 use anyhow::{Result, bail};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
-    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthorizationResponse,
-    ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest,
-    WaitForDeviceAuthorizationRequest, auth_service_client::AuthServiceClient,
+    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
+    DeviceAuthorizationResponse, ExchangeDeviceAuthorizationRequest,
+    IssueServiceAccountCredentialRequest, MintBiscuitRequest, WaitForDeviceAuthorizationRequest,
+    auth_service_client::AuthServiceClient, mint_biscuit_request::Proof,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tonic::{
+    Request,
     metadata::MetadataValue,
     transport::{Channel, Endpoint},
 };
@@ -50,8 +53,15 @@ struct ServiceTokenOutput {
     namespace: String,
     scope: String,
     token: String,
+    private_key_pem: String,
     expires_in_days: u32,
 }
+
+const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
+const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
+const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
+const ISSUE_SA_PROOF_TS_HEADER: &str = "x-heddle-issue-sa-proof-ts";
+const ISSUE_SA_PROOF_SIG_HEADER: &str = "x-heddle-issue-sa-proof-sig-bin";
 
 pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
@@ -273,6 +283,9 @@ async fn cmd_create_service_token(
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
     let public_key_bytes = signer.public_key().to_vec();
+    let private_key_pem = signer
+        .to_pem()
+        .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
 
     let channel = connect_channel(&server).await?;
 
@@ -306,21 +319,23 @@ async fn cmd_create_service_token(
     );
 
     // 2. Issue a credential (token) for the service account.
+    let credential_request = IssueServiceAccountCredentialRequest {
+        service_account_id: sa_response.service_account_id,
+        public_key: public_key_bytes,
+        scope: scope.clone(),
+        // CLI-issued tokens retain their pre-TTL behaviour: 30-day
+        // expiry from the server's default (applied when ttl_secs == 0
+        // in the handler is "never expires", so pass 30 days here
+        // explicitly to preserve prior semantics).
+        ttl_secs: Some(prost_types::Duration {
+            seconds: SERVICE_TOKEN_TTL_SECS,
+            nanos: 0,
+        }),
+        client_operation_id: String::new(),
+    };
+    let credential_request = issue_service_account_credential_request(credential_request, &signer)?;
     let issued = auth_client
-        .issue_service_account_credential(IssueServiceAccountCredentialRequest {
-            service_account_id: sa_response.service_account_id,
-            public_key: public_key_bytes,
-            scope: scope.clone(),
-            // CLI-issued tokens retain their pre-TTL behaviour: 30-day
-            // expiry from the server's default (applied when ttl_secs == 0
-            // in the handler is "never expires", so pass 30 days here
-            // explicitly to preserve prior semantics).
-            ttl_secs: Some(prost_types::Duration {
-                seconds: 30 * 24 * 3600,
-                nanos: 0,
-            }),
-            client_operation_id: String::new(),
-        })
+        .issue_service_account_credential(credential_request)
         .await
         .map_err(|status| {
             anyhow::anyhow!(
@@ -337,7 +352,8 @@ async fn cmd_create_service_token(
             namespace,
             scope,
             token: issued.token,
-            expires_in_days: 30,
+            private_key_pem,
+            expires_in_days: SERVICE_TOKEN_TTL_DAYS,
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
@@ -346,11 +362,89 @@ async fn cmd_create_service_token(
         println!();
         println!("Token: {}", issued.token);
         println!();
-        println!("Set this as HEDDLE_REMOTE_TOKEN in your CI environment.");
+        println!("Private key PEM:");
+        println!("{private_key_pem}");
+        println!("This token is proof-of-possession bound to the private key above.");
+        println!("Set the token as HEDDLE_REMOTE_TOKEN in your CI environment.");
+        println!("Configure remote.auth_proof_key_pem_path to a file containing the private key.");
         println!("This token is scoped to the {namespace} namespace.");
     }
 
     Ok(())
+}
+
+fn issue_service_account_credential_request(
+    request: IssueServiceAccountCredentialRequest,
+    signer: &Ed25519Signer,
+) -> Result<Request<IssueServiceAccountCredentialRequest>> {
+    let timestamp = current_unix_timestamp_i64()?;
+    issue_service_account_credential_request_at(request, signer, timestamp)
+}
+
+fn issue_service_account_credential_request_at(
+    request: IssueServiceAccountCredentialRequest,
+    signer: &Ed25519Signer,
+    timestamp: i64,
+) -> Result<Request<IssueServiceAccountCredentialRequest>> {
+    let signature = issue_service_account_credential_signature(
+        signer,
+        timestamp,
+        &request.service_account_id,
+        &request.public_key,
+    )?;
+    let mut request = Request::new(request);
+    request.metadata_mut().insert(
+        ISSUE_SA_PROOF_TS_HEADER,
+        timestamp
+            .to_string()
+            .parse()
+            .map_err(|err| anyhow::anyhow!("invalid proof timestamp metadata: {err}"))?,
+    );
+    request.metadata_mut().insert_bin(
+        ISSUE_SA_PROOF_SIG_HEADER,
+        MetadataValue::from_bytes(&signature),
+    );
+    Ok(request)
+}
+
+fn issue_service_account_credential_signature(
+    signer: &Ed25519Signer,
+    timestamp: i64,
+    service_account_id: &str,
+    public_key: &[u8],
+) -> Result<Vec<u8>> {
+    let canonical = derive_issue_service_account_credential_canonical(
+        timestamp,
+        service_account_id,
+        public_key,
+    );
+    signer
+        .sign(&canonical)
+        .map_err(|e| anyhow::anyhow!("failed to sign service-account proof: {e}"))
+}
+
+fn derive_issue_service_account_credential_canonical(
+    timestamp: i64,
+    service_account_id: &str,
+    public_key: &[u8],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(ISSUE_SA_PROOF_DOMAIN);
+    hasher.update([0u8]);
+    hasher.update(timestamp.to_be_bytes());
+    hasher.update([0u8]);
+    hasher.update(service_account_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(public_key);
+    hasher.finalize().into()
+}
+
+fn current_unix_timestamp_i64() -> Result<i64> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| anyhow::anyhow!("system clock is before unix epoch: {err}"))?
+        .as_secs();
+    i64::try_from(secs).map_err(|_| anyhow::anyhow!("system clock exceeds i64 unix timestamp"))
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +506,7 @@ fn infer_server_uri(server: &str) -> String {
     }
 }
 
-/// Poll `ExchangeDeviceAuthorization` until the device code is approved or
+/// Poll `MintBiscuit(DeviceAuthProof)` until the device code is approved or
 /// the authorization expires.
 async fn poll_for_approval(
     client: &mut AuthServiceClient<Channel>,
@@ -421,10 +515,7 @@ async fn poll_for_approval(
     signer: &Ed25519Signer,
     expires_at: Option<prost_types::Timestamp>,
 ) -> Result<AccessToken> {
-    let proof_data = format!("device:{device_code}");
-    let proof_bytes = signer
-        .sign(proof_data.as_bytes())
-        .map_err(|e| anyhow::anyhow!("failed to sign proof: {e}"))?;
+    let proof_bytes = device_authorization_signature(device_code, signer)?;
 
     let expires_at_secs = expires_at
         .as_ref()
@@ -476,11 +567,57 @@ async fn poll_for_approval(
         }
     }
 
+    match mint_biscuit_with_device_auth(client, device_code, public_key, proof_bytes.clone()).await
+    {
+        Ok(token) => Ok(token),
+        Err(status) if should_fallback_to_exchange_device_authorization(&status) => {
+            tracing::debug!(
+                status = %status.message(),
+                "falling back to ExchangeDeviceAuthorization for lagging auth server"
+            );
+            exchange_device_authorization(client, device_code, public_key, proof_bytes).await
+        }
+        Err(status) => Err(anyhow::anyhow!(
+            "device authorization failed: {}",
+            status.message()
+        )),
+    }
+}
+
+async fn mint_biscuit_with_device_auth(
+    client: &mut AuthServiceClient<Channel>,
+    device_code: &str,
+    public_key: &[u8],
+    signature: Vec<u8>,
+) -> std::result::Result<AccessToken, tonic::Status> {
+    let inner = client
+        .mint_biscuit(device_auth_mint_biscuit_request(
+            device_code,
+            public_key,
+            signature,
+        ))
+        .await?
+        .into_inner();
+
+    Ok(AccessToken {
+        token: inner.token,
+        subject: inner.subject,
+        expires_at: inner.expires_at,
+        credential_id: inner.credential_id,
+    })
+}
+
+async fn exchange_device_authorization(
+    client: &mut AuthServiceClient<Channel>,
+    device_code: &str,
+    public_key: &[u8],
+    proof: Vec<u8>,
+) -> Result<AccessToken> {
     let inner = client
         .exchange_device_authorization(ExchangeDeviceAuthorizationRequest {
             device_code: device_code.to_string(),
             device_public_key: public_key.to_vec(),
-            proof: proof_bytes,
+            proof,
         })
         .await
         .map_err(|status| anyhow::anyhow!("device authorization failed: {}", status.message()))?
@@ -492,6 +629,37 @@ async fn poll_for_approval(
         expires_at: inner.expires_at,
         credential_id: inner.credential_id,
     })
+}
+
+fn device_auth_mint_biscuit_request(
+    device_code: &str,
+    public_key: &[u8],
+    signature: Vec<u8>,
+) -> MintBiscuitRequest {
+    MintBiscuitRequest {
+        subject: String::new(),
+        requested_scope: String::new(),
+        user_agent: String::new(),
+        ip: String::new(),
+        proof: Some(Proof::DeviceAuth(DeviceAuthProof {
+            device_code: device_code.to_string(),
+            device_public_key: public_key.to_vec(),
+            signature,
+        })),
+        client_operation_id: String::new(),
+    }
+}
+
+fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> Result<Vec<u8>> {
+    signer
+        .sign(format!("device:{device_code}").as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to sign proof: {e}"))
+}
+
+fn should_fallback_to_exchange_device_authorization(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unimplemented
+        && status.message().contains("DeviceAuthProof")
+        && status.message().contains("ExchangeDeviceAuthorization")
 }
 
 /// Extracted token fields from `AccessTokenResponse`.
@@ -559,6 +727,129 @@ mod tests {
             infer_server_uri("https://grpc.heddle.sh"),
             "https://grpc.heddle.sh"
         );
+    }
+
+    #[test]
+    fn device_auth_mint_request_uses_device_auth_proof_variant() {
+        let request =
+            device_auth_mint_biscuit_request("device-123", &[1, 2, 3, 4], vec![5, 6, 7, 8]);
+
+        assert!(request.subject.is_empty());
+        assert!(request.requested_scope.is_empty());
+        match request.proof.expect("proof variant") {
+            Proof::DeviceAuth(proof) => {
+                assert_eq!(proof.device_code, "device-123");
+                assert_eq!(proof.device_public_key, vec![1, 2, 3, 4]);
+                assert_eq!(proof.signature, vec![5, 6, 7, 8]);
+            }
+            Proof::Keypair(_) => panic!("device login must use DeviceAuthProof"),
+        }
+    }
+
+    #[test]
+    fn device_authorization_signature_signs_device_code_challenge() {
+        let signer = Ed25519Signer::generate().expect("signer");
+        let signature =
+            device_authorization_signature("device-123", &signer).expect("device proof");
+
+        Ed25519Signer::verify_with_public_key(
+            b"device:device-123",
+            signer.public_key(),
+            &signature,
+        )
+        .expect("signature must verify against device challenge");
+        assert!(
+            Ed25519Signer::verify_with_public_key(
+                b"device:other",
+                signer.public_key(),
+                &signature,
+            )
+            .is_err(),
+            "signature must commit to the device code",
+        );
+    }
+
+    #[test]
+    fn issue_service_account_request_attaches_pop_metadata() {
+        let signer = Ed25519Signer::generate().expect("signer");
+        let public_key = signer.public_key().to_vec();
+        let request = IssueServiceAccountCredentialRequest {
+            service_account_id: "sa-123".to_string(),
+            public_key: public_key.clone(),
+            scope: "repo:heddle/platform/*".to_string(),
+            ttl_secs: Some(prost_types::Duration {
+                seconds: SERVICE_TOKEN_TTL_SECS,
+                nanos: 0,
+            }),
+            client_operation_id: "op-1".to_string(),
+        };
+
+        let timestamp = 1_700_000_000;
+        let request = issue_service_account_credential_request_at(request, &signer, timestamp)
+            .expect("request with proof");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get(ISSUE_SA_PROOF_TS_HEADER)
+                .expect("proof timestamp")
+                .to_str()
+                .expect("ascii timestamp"),
+            timestamp.to_string(),
+        );
+        let signature = request
+            .metadata()
+            .get_bin(ISSUE_SA_PROOF_SIG_HEADER)
+            .expect("proof signature")
+            .to_bytes()
+            .expect("binary signature");
+        let canonical =
+            derive_issue_service_account_credential_canonical(timestamp, "sa-123", &public_key);
+        Ed25519Signer::verify_with_public_key(&canonical, &public_key, signature.as_ref())
+            .expect("proof must be signed by the new service-account key");
+
+        let body = request.get_ref();
+        assert_eq!(body.service_account_id, "sa-123");
+        assert_eq!(body.public_key, public_key);
+        assert_eq!(body.scope, "repo:heddle/platform/*");
+    }
+
+    #[test]
+    fn issue_service_account_canonical_commits_to_each_field() {
+        let public_key = vec![0xAA; 32];
+        let base =
+            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &public_key);
+
+        assert_ne!(
+            base,
+            derive_issue_service_account_credential_canonical(1_700_000_001, "sa-1", &public_key,),
+        );
+        assert_ne!(
+            base,
+            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-2", &public_key,),
+        );
+        assert_ne!(
+            base,
+            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &[0xBB; 32],),
+        );
+    }
+
+    #[test]
+    fn device_auth_fallback_is_limited_to_lagging_weft_stub() {
+        let lagging = tonic::Status::unimplemented(
+            "MintBiscuit DeviceAuthProof is not implemented yet; use ExchangeDeviceAuthorization for now",
+        );
+        assert!(should_fallback_to_exchange_device_authorization(&lagging));
+
+        let unrelated = tonic::Status::unimplemented("some other endpoint is missing");
+        assert!(!should_fallback_to_exchange_device_authorization(
+            &unrelated
+        ));
+
+        let denied = tonic::Status::permission_denied(
+            "MintBiscuit DeviceAuthProof signature verification failed",
+        );
+        assert!(!should_fallback_to_exchange_device_authorization(&denied));
     }
 
     /// Minimal `CliContext` for the logout tests — text output, no repo.

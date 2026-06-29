@@ -51,7 +51,7 @@ mod status_tracked_refresh;
 mod status_untracked_scan;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -74,7 +74,7 @@ use objects::{
     object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
-    worktree::{WorktreeStatus, should_ignore as should_ignore_path},
+    worktree::WorktreeStatus,
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
@@ -106,10 +106,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sley::{
     ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
-    Repository as SleyRepository,
+    Repository as SleyRepository, ShortStatusOptions as SleyShortStatusOptions,
+    StatusUntrackedMode as SleyStatusUntrackedMode, StreamControl as SleyStreamControl,
 };
-
-use crate::git_worktree_status::GitWorktreeEntryState;
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
@@ -1073,72 +1072,11 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-
-        let current_branch = match self.git_overlay_current_branch()? {
-            Some(branch) => branch,
-            None => return Ok(None),
-        };
-        let branch_tips = self.git_overlay_branch_tips()?;
-        let imported_threads: std::collections::HashSet<ThreadName> =
-            self.refs().list_threads()?.into_iter().collect();
-        let threads_with_real_history: std::collections::HashSet<String> = imported_threads
-            .iter()
-            .filter_map(|thread| {
-                self.refs()
-                    .get_thread(thread)
-                    .ok()
-                    .flatten()
-                    .and_then(|change| self.store.get_state(&change).ok())
-                    .flatten()
-                    .filter(|state| !is_synthetic_root(state))
-                    .map(|_| thread.to_string())
-            })
-            .collect();
-        let mut missing_branches = branch_tips
-            .into_iter()
-            .filter(|tip| {
-                !(tip.history_imported
-                    || threads_with_real_history.contains(&tip.branch)
-                        && tip.mapped_change.is_some())
-            })
-            .map(|tip| tip.branch)
-            .collect::<Vec<_>>();
-        missing_branches.sort_by(|left, right| {
-            match (left == &current_branch, right == &current_branch) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => left.cmp(right),
-            }
-        });
-        missing_branches.dedup();
-
-        if missing_branches.is_empty() {
-            return Ok(None);
-        }
-
-        let missing_tags = self
-            .git_overlay_tag_tips()?
-            .into_iter()
-            .any(|tip| !tip.history_imported);
-        let recommended_command = if missing_branches.len() > 1 || missing_tags {
-            "heddle adopt".to_string()
-        } else if missing_branches
-            .iter()
-            .any(|branch| branch == &current_branch)
-        {
-            format!("heddle adopt --ref {current_branch}")
-        } else if missing_branches.len() == 1 {
-            format!("heddle adopt --ref {}", missing_branches[0])
-        } else {
-            "heddle adopt".to_string()
-        };
-
-        Ok(Some(GitOverlayImportHint {
-            current_branch,
-            missing_branch_count: missing_branches.len(),
-            missing_branches,
-            recommended_command,
-        }))
+        // Git-overlay treats Git refs and commits as Git-owned storage that
+        // Heddle reads directly. Missing Git->Heddle state mappings are not an
+        // everyday "needs adopt" condition; `adopt` is reserved for explicit
+        // conversion into Heddle-native storage.
+        Ok(None)
     }
 
     pub fn git_overlay_branch_tips(&self) -> Result<Vec<GitOverlayBranchTip>> {
@@ -1349,6 +1287,19 @@ impl Repository {
         graph.is_ancestor(ancestor, descendant).unwrap_or(false)
     }
 
+    /// Git-overlay worktree status, compared against the **Git index** (distinct
+    /// from `compare_worktree_cached*`, which compares against heddle's own index).
+    ///
+    /// The expensive part — deciding whether each tracked file changed since it
+    /// was staged — is handled by sley's `stream_short_status_with_options`, which
+    /// honors git's racy-clean stat cache: when a file's mode + size + mtime match
+    /// its Git index entry (and the entry is not racily clean), sley reuses the
+    /// staged OID and SKIPS re-reading + SHA-1ing the file (`reuse_tracked_entry`),
+    /// falling back to a full content hash whenever the stat is ambiguous. On a
+    /// warm worktree this turns the walk from "hash every file" into "stat every
+    /// file" (~0.35s vs minutes on the ~6k-file ghostty tree). This stat-cache
+    /// MUST be preserved across sley bumps — a sley that re-hashes unconditionally
+    /// would silently reintroduce the pathological checkpoint cost.
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
@@ -1361,119 +1312,52 @@ impl Repository {
             return Ok(None);
         }
 
-        let index = git_repo.open_index().map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git index at '{}': {}",
-                self.root.display(),
-                error
-            ))
-        })?;
-        let index = index.unwrap_or_else(|| sley::Index {
-            version: 2,
-            entries: Vec::new(),
-            extensions: Vec::new(),
-            checksum: None,
-        });
-        let head_tree = match git_repo
-            .head()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect Git HEAD tree at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-            .oid
-        {
-            Some(head) => {
-                git_repo
-                    .read_commit(&head)
-                    .map_err(|error| {
-                        HeddleError::Config(format!(
-                            "failed to inspect Git HEAD commit at '{}': {}",
-                            self.root.display(),
-                            error
-                        ))
-                    })?
-                    .tree
-            }
-            None => sley::ObjectId::empty_tree(git_repo.object_format()),
-        };
-        let head_index = git_repo.index_from_tree(&head_tree).map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git HEAD tree at '{}': {}",
-                self.root.display(),
-                error
-            ))
-        })?;
-
-        let mut head_entries = BTreeMap::new();
-        for entry in head_index.entries {
-            let path = git_path(entry.path.as_bytes());
-            head_entries.insert(path, (entry.oid, entry.mode));
-        }
-        let mut index_entries = BTreeMap::new();
-        let index_path = sley::plumbing::sley_worktree::repository_index_path(git_repo.git_dir());
-        for entry in index.entries {
-            let path = git_path(entry.path.as_bytes());
-            let probe = crate::git_worktree_status::IndexStatProbe::from_index_entry_and_index_path(
-                entry.clone(),
-                &index_path,
-            );
-            index_entries.insert(path, (entry.oid, entry.mode, probe));
-        }
-
         let mut added = BTreeSet::new();
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
-
-        for (path, (oid, mode, _probe)) in &index_entries {
-            if ignored_git_overlay_status_path(path) {
-                continue;
-            }
-            match head_entries.get(path) {
-                None => {
-                    added.insert(PathBuf::from(path));
-                }
-                Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                    modified.insert(PathBuf::from(path));
-                }
-                Some(_) => {}
-            }
-        }
-        for path in head_entries.keys() {
-            if !ignored_git_overlay_status_path(path) && !index_entries.contains_key(path) {
-                deleted.insert(PathBuf::from(path));
-            }
-        }
-
-        for (path, (oid, mode, probe)) in &index_entries {
-            if ignored_git_overlay_status_path(path) {
-                continue;
-            }
-            match crate::git_worktree_status::git_worktree_entry_state_in_repo(
-                &git_repo,
-                &self.root,
-                path,
-                *oid,
-                *mode,
-                Some(probe.clone()),
-            )? {
-                GitWorktreeEntryState::Clean => {}
-                GitWorktreeEntryState::Deleted => {
-                    deleted.insert(PathBuf::from(path));
-                }
-                GitWorktreeEntryState::Modified => {
-                    modified.insert(PathBuf::from(path));
-                }
-            }
-        }
-
         let ignore_patterns = self.ignore_patterns()?;
-        let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
-        for path in git_overlay_untracked_paths(&self.root, &tracked_paths, &ignore_patterns)? {
-            added.insert(PathBuf::from(path));
-        }
+        let ignore_matcher = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+
+        git_repo
+            .stream_short_status_with_options(
+                SleyShortStatusOptions {
+                    untracked_mode: SleyStatusUntrackedMode::All,
+                    ..SleyShortStatusOptions::default()
+                },
+                |entry| {
+                    let path = git_path(entry.path);
+                    if ignored_git_overlay_status_path(&path) {
+                        return Ok(SleyStreamControl::Continue);
+                    }
+                    let path = PathBuf::from(path);
+
+                    if entry.index == b'?' && entry.worktree == b'?' {
+                        if git_overlay_untracked_path_ignored(&ignore_matcher, &path) {
+                            return Ok(SleyStreamControl::Continue);
+                        }
+                        added.insert(path);
+                    } else if entry.index == b'D' || entry.worktree == b'D' {
+                        deleted.insert(path);
+                    } else if entry.index == b'A'
+                        || entry.index == b'R'
+                        || entry.index == b'C'
+                        || entry.head_oid.is_none()
+                    {
+                        added.insert(path);
+                    } else {
+                        modified.insert(path);
+                    }
+
+                    Ok(SleyStreamControl::Continue)
+                },
+            )
+            .map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to inspect Git worktree status at '{}': {}",
+                    self.root.display(),
+                    error
+                ))
+            })?;
 
         Ok(Some(WorktreeStatus {
             modified: modified.into_iter().collect(),
@@ -2656,91 +2540,23 @@ fn git_config_principal(root: &Path) -> Option<Principal> {
     Some(Principal::new(&name, &email))
 }
 
-fn git_overlay_untracked_paths(
-    root: &Path,
-    tracked_paths: &BTreeSet<&str>,
-    ignore_patterns: &[String],
-) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
-    let filter_root = root.to_path_buf();
-    let filter_ignore_patterns = ignore_patterns.to_vec();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .filter_entry(move |entry| {
-            should_descend_for_git_overlay_status(
-                &filter_root,
-                entry.path(),
-                &filter_ignore_patterns,
-            )
-        })
-        .build();
-    for entry in walker {
-        let entry = entry.map_err(|error| HeddleError::Config(error.to_string()))?;
-        let file_type = entry.file_type();
-        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
-            continue;
-        }
-        let path = repo_relative_git_path(root, entry.path())?;
-        if !tracked_paths.contains(path.as_str())
-            && !ignored_git_overlay_status_path(&path)
-            && !should_ignore_path(Path::new(&path), ignore_patterns)
-        {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
-}
-
-fn should_descend_for_git_overlay_status(
-    root: &Path,
-    path: &Path,
-    ignore_patterns: &[String],
-) -> bool {
-    if is_git_or_heddle_dir(path) {
-        return false;
-    }
-    let Ok(relative) = path.strip_prefix(root) else {
-        return true;
-    };
-    if relative.as_os_str().is_empty() {
-        return true;
-    }
-    !should_ignore_path(relative, ignore_patterns)
-}
-
-fn is_git_or_heddle_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".git" || name == ".heddle")
-}
-
-fn repo_relative_git_path(root: &Path, path: &Path) -> Result<String> {
-    let relative = path.strip_prefix(root).map_err(|error| {
-        HeddleError::Config(format!(
-            "failed to relativize Git worktree path '{}': {}",
-            path.display(),
-            error
-        ))
-    })?;
-    Ok(path_to_git_path(relative))
-}
-
-fn path_to_git_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn git_path(path: &[u8]) -> String {
     String::from_utf8_lossy(path).into_owned()
 }
 
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
+}
+
+fn git_overlay_untracked_path_ignored(
+    ignore_matcher: &crate::worktree_ignore::WorktreeIgnoreMatcher,
+    path: &Path,
+) -> bool {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    ignore_matcher.should_prune_directory_child(parent, name)
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {

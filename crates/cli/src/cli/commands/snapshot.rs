@@ -4,7 +4,10 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use objects::object::{Agent, Attribution, ChangeId, Principal, Tree};
+use objects::{
+    object::{Agent, Attribution, ChangeId, Principal, Tree},
+    worktree::WorktreeStatus,
+};
 use repo::{
     Hook, HookContext, HookManager, Repository, SessionManager, SnapshotProfile, format_confidence,
     refresh_active_thread_metadata,
@@ -26,6 +29,7 @@ use super::{
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
     next_action::{NextActionValidationContext, write_command_json},
@@ -36,7 +40,7 @@ use super::{
 use crate::{
     attribution::clean_attribution_value,
     bridge::GitBridge,
-    cli::{Cli, output_is_compact, should_output_json, style},
+    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -185,12 +189,11 @@ pub async fn cmd_snapshot(
     }
 
     let repo = Repository::open(start)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
 
     if let Some(advice) = unimported_git_history_advice(&repo, "capture")? {
         return Err(anyhow!(advice));
     }
-    preflight_large_capture(&repo, force)?;
     let complete_thread_resolution =
         repo.merge_state_manager()
             .load()?
@@ -200,7 +203,29 @@ pub async fn cmd_snapshot(
                     .iter()
                     .all(|path| merge_state.resolved.contains(path))
             });
-    let mut output = match create_snapshot(&repo, &user_config, Some(intent), confidence, agent) {
+    if !complete_thread_resolution && !capture_has_worktree_changes(&repo)? {
+        return Err(anyhow!(nothing_to_capture_advice()));
+    }
+    // Compute the git-overlay worktree status ONCE and thread it through both
+    // PRE-mutation consumers: the large-capture safety preflight and the
+    // capture mutation preflight inside `create_snapshot`. Both build from a
+    // full worktree walk that re-reads + SHA-1s every tracked file; before this
+    // the non-`--force` git-overlay capture path paid that walk twice here
+    // (plus a third, post-capture verification walk that must stay FRESH — the
+    // capture advances the Heddle state and flips the git-overlay health
+    // classification, so it is NOT threaded). Both pre-mutation consumers
+    // observe the same pre-capture git state, so reuse is sound and the
+    // classification stays byte-identical.
+    let worktree_status = repo.git_overlay_worktree_status();
+    preflight_large_capture_with_status(force, &worktree_status)?;
+    let mut output = match create_snapshot_with_worktree_status(
+        &repo,
+        &user_config,
+        Some(intent),
+        confidence,
+        agent,
+        &worktree_status,
+    ) {
         Ok(output) => output,
         Err(err) => {
             // ENOSPC is the only mid-capture failure where the user's
@@ -354,6 +379,36 @@ fn missing_capture_intent_advice() -> RecoveryAdvice {
     )
 }
 
+fn nothing_to_capture_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "nothing_to_commit",
+        "nothing to capture: worktree has no changes eligible for Heddle capture",
+        "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
+        "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",
+        "capture would not create a meaningful Heddle state",
+        "repository state was left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
+fn capture_has_worktree_changes(repo: &Repository) -> Result<bool> {
+    if repo.current_state()?.is_none()
+        && let Some(status) = repo.git_overlay_worktree_status()?
+    {
+        return Ok(!status.is_clean());
+    }
+    let tree = match repo.current_state()? {
+        Some(state) => repo.require_tree(&state.tree)?,
+        None => Tree::new(),
+    };
+    let status = repo.compare_worktree_cached_with_options(
+        &tree,
+        &worktree_status_options(Some(repo.config())),
+    )?;
+    Ok(!status.is_clean())
+}
+
 fn missing_capture_identity_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "capture_identity_required",
@@ -392,8 +447,22 @@ fn preflight_large_capture(repo: &Repository, force: bool) -> Result<()> {
     if force {
         return Ok(());
     }
+    preflight_large_capture_with_status(force, &repo.git_overlay_worktree_status())
+}
 
-    let Ok(Some(status)) = repo.git_overlay_worktree_status() else {
+/// Variant of [`preflight_large_capture`] that reuses an already-computed
+/// git-overlay worktree status instead of re-walking the worktree. The
+/// large-capture classification is byte-identical because it reads the same
+/// `WorktreeStatus`; only the redundant walk is removed.
+fn preflight_large_capture_with_status(
+    force: bool,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+
+    let Ok(Some(status)) = worktree_status else {
         return Ok(());
     };
 
@@ -470,6 +539,31 @@ pub(crate) fn create_snapshot(
     create_snapshot_profiled(repo, user_config, intent, confidence, agent).map(|(output, _)| output)
 }
 
+/// Variant of [`create_snapshot`] that reuses an already-computed git-overlay
+/// worktree status for the PRE-mutation capture preflight instead of re-walking
+/// the worktree. The snapshot result is byte-identical; only the redundant
+/// pre-mutation status walk is removed. The post-mutation verification state
+/// built after the capture is still computed FRESH (the capture advances the
+/// Heddle state, which flips the git-overlay health classification).
+pub(crate) fn create_snapshot_with_worktree_status(
+    repo: &Repository,
+    user_config: &UserConfig,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: SnapshotAgentOverrides,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> Result<SnapshotOutput> {
+    create_snapshot_profiled_inner(
+        repo,
+        user_config,
+        intent,
+        confidence,
+        agent,
+        Some(worktree_status),
+    )
+    .map(|(output, _)| output)
+}
+
 pub(crate) fn create_snapshot_from_tree(
     repo: &Repository,
     user_config: &UserConfig,
@@ -518,13 +612,33 @@ pub(crate) fn create_snapshot_profiled(
     confidence: Option<f32>,
     agent: SnapshotAgentOverrides,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    create_snapshot_profiled_inner(repo, user_config, intent, confidence, agent, None)
+}
+
+fn create_snapshot_profiled_inner(
+    repo: &Repository,
+    user_config: &UserConfig,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: SnapshotAgentOverrides,
+    worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot");
 
-    if let Some(advice) = git_overlay_mutation_preflight_advice(
-        repo,
-        "capture",
-        GitOverlayMutationPreflight::capture_like(),
-    )? {
+    let preflight_advice = match worktree_status {
+        Some(status) => git_overlay_mutation_preflight_advice_with_worktree_status(
+            repo,
+            "capture",
+            GitOverlayMutationPreflight::capture_like(),
+            status,
+        )?,
+        None => git_overlay_mutation_preflight_advice(
+            repo,
+            "capture",
+            GitOverlayMutationPreflight::capture_like(),
+        )?,
+    };
+    if let Some(advice) = preflight_advice {
         return Err(anyhow!(advice));
     }
 

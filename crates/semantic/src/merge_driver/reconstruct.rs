@@ -45,6 +45,129 @@ const N_SIDES: usize = 3;
 /// (heddle#468 r5: the duplicate-import class the positional path produced).
 type MatchKey = (ItemKey, usize);
 
+/// Cross-region item moves that should still be resolved as one semantic item.
+///
+/// C++ is the motivating shape: an inline class method lives inside the class
+/// body region, while the out-of-class definition (`void A::foo()`) lives in
+/// the enclosing region. The normal per-region matcher cannot see across that
+/// boundary, so it treats the inline method as deleted and the out-of-class
+/// definition as added. This table promotes the unique out-of-region item to
+/// merge against its unique in-scope counterparts, and marks those in-scope
+/// counterparts as consumed so the class body keeps only the declaration/trivia.
+#[derive(Default)]
+struct CrossRegionMoves<'a> {
+    promoted: BTreeMap<ItemKey, [Option<&'a Item>; N_SIDES]>,
+    consumed_in_scope: BTreeSet<ItemKey>,
+}
+
+#[derive(Default)]
+struct MoveCandidates<'a> {
+    direct: BTreeMap<ItemKey, Vec<&'a Item>>,
+    in_scope: BTreeMap<ItemKey, Vec<&'a Item>>,
+}
+
+impl<'a> CrossRegionMoves<'a> {
+    fn new(base: &'a [Item], ours: &'a [Item], theirs: &'a [Item]) -> Self {
+        let mut candidates = [
+            MoveCandidates::default(),
+            MoveCandidates::default(),
+            MoveCandidates::default(),
+        ];
+        for (items, candidate) in [base, ours, theirs].into_iter().zip(candidates.iter_mut()) {
+            collect_move_candidates(items, &[], candidate);
+        }
+
+        let mut keys = BTreeSet::new();
+        for candidate in &candidates {
+            keys.extend(candidate.direct.keys().cloned());
+            keys.extend(candidate.in_scope.keys().cloned());
+        }
+
+        let mut promoted = BTreeMap::new();
+        let mut consumed_in_scope = BTreeSet::new();
+        for key in keys {
+            let mut refs: [Option<&Item>; N_SIDES] = [None; N_SIDES];
+            let mut has_direct = false;
+            let mut has_in_scope = false;
+            let mut valid = true;
+
+            for side in 0..N_SIDES {
+                let direct = unique_item(candidates[side].direct.get(&key).map(Vec::as_slice));
+                let in_scope = unique_item(candidates[side].in_scope.get(&key).map(Vec::as_slice));
+                if direct.is_some() && in_scope.is_some() {
+                    valid = false;
+                    break;
+                }
+                has_direct |= direct.is_some();
+                has_in_scope |= in_scope.is_some();
+                refs[side] = direct.or(in_scope);
+            }
+
+            if valid && has_direct && has_in_scope && refs[0].is_some() {
+                consumed_in_scope.insert(key.clone());
+                promoted.insert(key, refs);
+            }
+        }
+
+        Self {
+            promoted,
+            consumed_in_scope,
+        }
+    }
+}
+
+fn unique_item<'a>(items: Option<&[&'a Item]>) -> Option<&'a Item> {
+    match items {
+        Some(items) if items.len() == 1 => Some(items[0]),
+        _ => None,
+    }
+}
+
+fn collect_move_candidates<'a>(
+    items: &'a [Item],
+    region_scope: &[String],
+    candidates: &mut MoveCandidates<'a>,
+) {
+    for item in items {
+        if matches!(item.key.kind, ItemKind::Function) {
+            if is_out_of_region_scoped_item(item, region_scope) {
+                candidates
+                    .direct
+                    .entry(item.key.clone())
+                    .or_default()
+                    .push(item);
+            } else if item.key.scope == region_scope {
+                candidates
+                    .in_scope
+                    .entry(item.key.clone())
+                    .or_default()
+                    .push(item);
+            }
+        }
+
+        if let Some(body) = &item.body {
+            let child_scope = child_region_scope(item);
+            collect_move_candidates(&body.items, &child_scope, candidates);
+        }
+    }
+}
+
+fn child_region_scope(item: &Item) -> Vec<String> {
+    let mut scope = item.key.scope.clone();
+    scope.push(item.key.name.clone());
+    scope
+}
+
+fn is_out_of_region_scoped_item(item: &Item, region_scope: &[String]) -> bool {
+    item.key.scope.len() > region_scope.len()
+        && item
+            .key
+            .scope
+            .iter()
+            .zip(region_scope.iter())
+            .all(|(a, b)| a == b)
+}
+
 /// Stitch three sides together via recursive per-region tree merge.
 ///
 /// The whole file is the outermost region; each matched container body is a
@@ -65,9 +188,17 @@ pub(crate) fn reconstruct_merged_file(
     // (`emit_addadd_conflict`) when the conflicting item bodies carry zero
     // EOL observations (Codex r8, cid 3256283857).
     let sides = SideSources::new(base, ours, theirs);
+    let cross_region_moves = CrossRegionMoves::new(
+        &base_segments.items,
+        &ours_segments.items,
+        &theirs_segments.items,
+    );
+    let root_scope = Vec::new();
 
     let (mut output, total_conflicts) = merge_region(
         sides,
+        &cross_region_moves,
+        &root_scope,
         &base_segments.items,
         &ours_segments.items,
         &theirs_segments.items,
@@ -102,6 +233,8 @@ pub(crate) fn reconstruct_merged_file(
 #[allow(clippy::too_many_arguments)]
 fn merge_region(
     sides: SideSources<'_>,
+    cross_region_moves: &CrossRegionMoves<'_>,
+    region_scope: &[String],
     base_items: &[Item],
     ours_items: &[Item],
     theirs_items: &[Item],
@@ -153,13 +286,31 @@ fn merge_region(
         if key.0.kind == ItemKind::Use {
             continue;
         }
-        let resolution = resolve_node(
-            sides,
-            base_map.get(*key).copied(),
-            ours_map.get(*key).copied(),
-            theirs_map.get(*key).copied(),
-            markers,
-        );
+        let base_item = base_map.get(*key).copied();
+        let ours_item = ours_map.get(*key).copied();
+        let theirs_item = theirs_map.get(*key).copied();
+        let has_direct_item = [base_item, ours_item, theirs_item]
+            .into_iter()
+            .flatten()
+            .any(|item| is_out_of_region_scoped_item(item, region_scope));
+        let resolution = if key.1 == 0
+            && cross_region_moves.consumed_in_scope.contains(&key.0)
+            && !has_direct_item
+        {
+            (None, 0)
+        } else {
+            let promoted = (key.1 == 0)
+                .then(|| cross_region_moves.promoted.get(&key.0))
+                .flatten();
+            resolve_node(
+                sides,
+                cross_region_moves,
+                base_item.or_else(|| promoted.and_then(|items| items[0])),
+                ours_item.or_else(|| promoted.and_then(|items| items[1])),
+                theirs_item.or_else(|| promoted.and_then(|items| items[2])),
+                markers,
+            )
+        };
         total_conflicts += resolution.1;
         resolved.insert((*key).clone(), resolution);
     }
@@ -219,29 +370,37 @@ fn merge_region(
     let mut output: Vec<u8> = Vec::new();
 
     for key in &item_emit_order {
+        // A clean-deleted item emits no bytes, so its leading gap should not be
+        // emitted in that now-empty slot. The side that deleted the item carries
+        // any surviving standalone trivia into the next sibling gap or the
+        // postamble; emitting the deleted item's old gap as well duplicates it.
+        let clean_deleted =
+            matches!(resolved.get(key), Some((None, 0))) && key.0.kind != ItemKind::Use;
         let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
-        for s in 0..N_SIDES {
-            // A side contributes the gap PRECEDING `key` only if it actually
-            // has `key`. A side that lacks `key` (an item added on another
-            // side, or one this side deleted) contributes nothing for this
-            // slot — its surrounding content flows with its own items and its
-            // trailing content stays in the postamble. Bridging a lacking
-            // side to "the gap after its nearest prior item" used to pull the
-            // postamble (or a mid-sequence gap) in early, duplicating it —
-            // the heddle#484 Bug 1 (`// MARK` woven twice) / Bug 2 (module
-            // duplicated) class.
-            if let Some(&r) = side_idx_maps[s].get(key)
-                && emitted[s].insert(r)
-            {
-                segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
+        if !clean_deleted {
+            for s in 0..N_SIDES {
+                // A side contributes the gap PRECEDING `key` only if it actually
+                // has `key`. A side that lacks `key` (an item added on another
+                // side, or one this side deleted) contributes nothing for this
+                // slot — its surrounding content flows with its own items and its
+                // trailing content stays in the postamble. Bridging a lacking
+                // side to "the gap after its nearest prior item" used to pull the
+                // postamble (or a mid-sequence gap) in early, duplicating it —
+                // the heddle#484 Bug 1 (`// MARK` woven twice) / Bug 2 (module
+                // duplicated) class.
+                if let Some(&r) = side_idx_maps[s].get(key)
+                    && emitted[s].insert(r)
+                {
+                    segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
+                }
             }
-        }
-        let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
-        output.extend_from_slice(&seg_bytes);
-        total_conflicts += seg_conflicts;
+            let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
+            output.extend_from_slice(&seg_bytes);
+            total_conflicts += seg_conflicts;
 
-        if let Some((Some(item_bytes), _)) = resolved.get(key) {
-            output.extend_from_slice(item_bytes);
+            if let Some((Some(item_bytes), _)) = resolved.get(key) {
+                output.extend_from_slice(item_bytes);
+            }
         }
     }
 
@@ -688,6 +847,7 @@ fn footer_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
 /// P2).
 fn resolve_node(
     sides: SideSources<'_>,
+    cross_region_moves: &CrossRegionMoves<'_>,
     base_item: Option<&Item>,
     ours_item: Option<&Item>,
     theirs_item: Option<&Item>,
@@ -699,7 +859,14 @@ fn resolve_node(
         .peekable();
     let all_containers = present.peek().is_some() && present.all(|i| i.body.is_some());
     if all_containers {
-        resolve_container(sides, base_item, ours_item, theirs_item, markers)
+        resolve_container(
+            sides,
+            cross_region_moves,
+            base_item,
+            ours_item,
+            theirs_item,
+            markers,
+        )
     } else {
         resolve_item(sides, base_item, ours_item, theirs_item, markers)
     }
@@ -715,6 +882,7 @@ fn resolve_node(
 /// by construction.
 fn resolve_container(
     sides: SideSources<'_>,
+    cross_region_moves: &CrossRegionMoves<'_>,
     base_item: Option<&Item>,
     ours_item: Option<&Item>,
     theirs_item: Option<&Item>,
@@ -780,7 +948,7 @@ fn resolve_container(
             } else if tw == bw || ow == tw {
                 (Some(ow.to_vec()), 0)
             } else {
-                merge_container_3way(sides, b, o, t, markers)
+                merge_container_3way(sides, cross_region_moves, b, o, t, markers)
             }
         }
     }
@@ -796,6 +964,7 @@ fn resolve_container(
 /// recursion without an anchor — heddle#490 r5).
 fn merge_container_3way(
     sides: SideSources<'_>,
+    cross_region_moves: &CrossRegionMoves<'_>,
     base: &Item,
     ours: &Item,
     theirs: &Item,
@@ -819,6 +988,7 @@ fn merge_container_3way(
     let bb = base.body.as_ref().expect("container");
     let ob = ours.body.as_ref().expect("container");
     let tb = theirs.body.as_ref().expect("container");
+    let child_scope = child_region_scope(base);
 
     // The body's STRUCTURAL opening/closing delimiters (`{` / `}` for brace
     // languages; empty for delimiter-less Python `block`s) are merged ONCE
@@ -838,6 +1008,8 @@ fn merge_container_3way(
     );
     let (body, bc) = merge_region(
         sides,
+        cross_region_moves,
+        &child_scope,
         &bb.items,
         &ob.items,
         &tb.items,
@@ -1123,17 +1295,33 @@ fn count_eols(s: &[u8]) -> (usize, usize) {
     (crlf, lf)
 }
 
-/// Match the trailing-newline state of `output` to the majority of the
-/// three input sides. `text_hunk_merge` preserves whatever its line
-/// splitter sees on the last line; the semantic path used to force a
-/// trailing `\n` unconditionally, which dirtied files that ended
-/// without one on every side (Codex r3 P2 #2).
+/// Match the trailing-newline state of `output` to what the textual
+/// engine (`text_hunk_merge`) would emit. `text_hunk_merge` carries the
+/// trailing-newline state of the side that AUTHORED the final line; the
+/// semantic path used to force a trailing `\n` unconditionally
+/// (Codex r3 P2 #2), and then a context-free 3-side MAJORITY vote
+/// (heddle#114) — both of which silently dirty the EOF byte relative to
+/// the text engine.
 ///
-/// Rule: count how many of `base`, `ours`, `theirs` end with `\n`. If
-/// the majority do, ensure output ends with `\n`; otherwise strip any
-/// `\n` we may have inherited from a single side's content. Empty
-/// inputs are not counted (they have no opinion on trailing-newline
-/// state).
+/// Rule (heddle#123): 3-way merge the trailing-newline as a one-bit
+/// field — exactly what the text engine does line-locally. Counting
+/// votes ignores WHICH side touched the trailing line; a 3-way bit merge
+/// honours it. Let `b`/`o`/`t` be whether `base`/`ours`/`theirs` end
+/// with `\n` (an empty side has no opinion and inherits `base`'s bit):
+///
+/// - `o == b` → the trailing line is unchanged on ours, so `theirs`'
+///   bit wins (whether theirs kept or changed it).
+/// - `t == b` → symmetric; `ours`' bit wins.
+/// - both changed the bit away from base → a genuine two-sided
+///   trailing-newline edit; the text engine surfaces that hunk as a
+///   CONFLICT (no clean text answer to mirror), so the semantic path is
+///   free to resolve it — we AND the two (newline only if both want one)
+///   to bias toward the no-trailing-newline that git's `\ No newline`
+///   convention treats as the meaningful state.
+///
+/// This collapses to the old "majority" answer on every shape where the
+/// editor is NOT in the minority, and corrects the four minority-editor
+/// shapes the differential audit (`eof_parity_table`) pins.
 ///
 /// CRLF is treated as a single unit on BOTH the pop and push paths:
 /// when popping a trailing `\n`, an immediately-preceding `\r` is
@@ -1146,7 +1334,7 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, sides: SideSources<'_>) {
     if out.is_empty() {
         return;
     }
-    let want_newline = majority_ends_with_newline(sides.base, sides.ours, sides.theirs);
+    let want_newline = merge_trailing_newline_bit(sides.base, sides.ours, sides.theirs);
     let has_newline = *out.last().unwrap() == b'\n';
     match (want_newline, has_newline) {
         (true, false) => {
@@ -1162,22 +1350,47 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, sides: SideSources<'_>) {
     }
 }
 
-fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
-    let mut with = 0u8;
-    let mut total = 0u8;
-    for s in [base, ours, theirs] {
+/// 3-way merge of the trailing-newline bit. Mirrors the text engine's
+/// final-line-author behaviour (heddle#123). See
+/// [`reconcile_trailing_newline`] for the rule. An empty side has no
+/// trailing-newline opinion and inherits `base`'s bit; if `base` is also
+/// empty it inherits a non-empty side's bit; the all-empty case is
+/// unreachable here (we return `Clean(empty)` before reconstruction) and
+/// defaults to "yes".
+fn merge_trailing_newline_bit(base: &str, ours: &str, theirs: &str) -> bool {
+    fn ends_with_newline(s: &str) -> Option<bool> {
         if s.is_empty() {
-            continue;
-        }
-        total += 1;
-        if s.as_bytes().last() == Some(&b'\n') {
-            with += 1;
+            None
+        } else {
+            Some(s.as_bytes().last() == Some(&b'\n'))
         }
     }
-    // Default to "yes" when nothing has an opinion (all sides empty —
-    // unreachable in practice since we'd have returned Clean(empty)
-    // before reconstruction), and require strict majority otherwise.
-    total == 0 || with * 2 > total
+
+    let b = ends_with_newline(base);
+    let o = ends_with_newline(ours);
+    let t = ends_with_newline(theirs);
+
+    // An empty side inherits base; an empty base inherits a non-empty
+    // side. Resolve each to a concrete bit before the 3-way merge.
+    let base_bit = b.or(o).or(t);
+    let Some(base_bit) = base_bit else {
+        return true; // all sides empty — unreachable in practice.
+    };
+    let ours_bit = o.unwrap_or(base_bit);
+    let theirs_bit = t.unwrap_or(base_bit);
+
+    if ours_bit == base_bit {
+        // ours didn't touch the bit — theirs' edit (if any) wins.
+        theirs_bit
+    } else if theirs_bit == base_bit {
+        // theirs didn't touch the bit — ours' edit wins.
+        ours_bit
+    } else {
+        // Both sides moved the bit away from base. The text engine
+        // conflicts on this hunk (no canonical text answer); resolve to
+        // a trailing newline only if BOTH sides want one.
+        ours_bit && theirs_bit
+    }
 }
 
 /// Emit a `<<<<<<< / ======= / >>>>>>>` conflict block wrapping two

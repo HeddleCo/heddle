@@ -7,11 +7,13 @@ mod adopt;
 mod advice;
 mod agent;
 mod agent_cmd;
+mod auto_capture;
 mod blame;
 #[cfg(feature = "git-overlay")]
 mod bridge;
 mod checkpoint;
 mod cherry_pick;
+mod child_env;
 mod clean;
 mod clone;
 mod collapse;

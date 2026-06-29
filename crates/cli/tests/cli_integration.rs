@@ -318,8 +318,6 @@ mod output_mode_no_auto;
 mod perf_core_loop;
 #[path = "cli_integration/placeholder_identity.rs"]
 mod placeholder_identity;
-#[path = "cli_integration/quickstart.rs"]
-mod quickstart;
 #[path = "cli_integration/realworld_git.rs"]
 mod realworld_git;
 #[path = "cli_integration/redact_purge.rs"]

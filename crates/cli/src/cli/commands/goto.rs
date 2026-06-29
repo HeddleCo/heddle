@@ -45,7 +45,7 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
     if matches!(target.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
         ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &UserConfig::load_default()?,
             Some("Bootstrap git-overlay before switch HEAD".to_string()),
         )?;
     }

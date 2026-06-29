@@ -3,27 +3,34 @@
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use objects::{fs_atomic::write_file_atomic, object::ThreadName};
+use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::{FullName, RefPrecondition, Repository as SleyRepository};
+use sley::{
+    ConfigEdit, ConfigEditPlan, ConfigSectionEntry, FullName, RefPrecondition, RemoteConfigSet,
+    Repository as SleyRepository,
+};
+#[cfg(feature = "client")]
+use wire::ProtocolError;
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
+use crate::client::HostedGrpcClient;
+#[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
+#[cfg(feature = "client")]
+use crate::remote::Remote;
 use crate::{
     bridge::{
         GitBridge,
@@ -207,8 +214,16 @@ pub async fn cmd_push(
     }
 
     let user_config = UserConfig::load_default()?;
+    if state.is_none() {
+        auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Push)?;
+    }
 
-    if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
+    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
+
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && !repo.hosted_enabled()
+        && !push_uses_hosted_network
+    {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
         } else {
@@ -405,6 +420,7 @@ pub async fn cmd_push(
                 PushNetworkOptions {
                     addr,
                     repo_path: repo_path.as_deref(),
+                    remote_arg: remote.as_deref(),
                     session: network_session
                         .as_ref()
                         .context("network client config was not prevalidated")?,
@@ -639,6 +655,13 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
         return Ok(());
     }
     Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
+}
+
+pub(super) fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
+    matches!(
+        classify_remote_spec(repo, remote_arg),
+        Some(RemoteTransportKind::NetworkHeddle)
+    )
 }
 
 fn native_heddle_local_push_target(
@@ -946,147 +969,37 @@ fn git_remote_push_url(git: &SleyRepository, remote: &str) -> Result<Option<Stri
 }
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {
-    let config_path = git_overlay_config_path_for_write(root)
-        .context("Git-overlay tracking refresh requires a writable Git config")?;
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = remove_git_config_named_section(&contents, "branch", branch);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    contents.push_str(&format!(
-        "[branch \"{}\"]\n\tremote = {}\n\tmerge = refs/heads/{}\n",
-        escape_git_config_section(branch),
-        quote_git_config_value(remote),
-        escape_git_config_value(branch)
-    ));
-    write_file_atomic(&config_path, contents.as_bytes())?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "branch",
+            Some(branch.to_string()),
+            vec![
+                ConfigSectionEntry::new("remote", remote),
+                ConfigSectionEntry::new("merge", format!("refs/heads/{branch}")),
+            ],
+        ))
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
 fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
-    let config_path = git_overlay_config_path_for_write(root)
-        .context("Git-overlay remote tracking requires a writable Git config")?;
-    let contents = fs::read_to_string(&config_path).unwrap_or_default();
-    let mut contents = remove_git_config_named_section(&contents, "remote", name);
-    if !contents.ends_with('\n') && !contents.is_empty() {
-        contents.push('\n');
-    }
-    contents.push_str(&format!(
-        "[remote \"{}\"]\n\turl = {}\n\tfetch = +refs/heads/*:refs/remotes/{}/*\n",
-        escape_git_config_section(name),
-        quote_git_config_value(url),
-        escape_git_config_value(name)
-    ));
-    write_file_atomic(&config_path, contents.as_bytes())?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let remote = RemoteConfigSet::new(name)
+        .with_url(url)
+        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+    let plan = ConfigEditPlan::new(git.common_dir().join("config"))
+        .with_operation(ConfigEdit::replace_section(
+            "remote",
+            Some(remote.name),
+            remote.entries,
+        ))
+        .with_fsync(true);
+    git.apply_config_edit_plan(plan)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
-}
-
-fn git_overlay_config_path_for_write(root: &Path) -> Option<PathBuf> {
-    let dot_git = root.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git.join("config"));
-    }
-    let git_dir = pointed_git_dir(&dot_git)?;
-    Some(common_git_dir(&git_dir).unwrap_or(git_dir).join("config"))
-}
-
-fn pointed_git_dir(dot_git: &Path) -> Option<PathBuf> {
-    if dot_git.is_dir() {
-        return Some(dot_git.to_path_buf());
-    }
-    let contents = fs::read_to_string(dot_git).ok()?;
-    let target = contents.trim().strip_prefix("gitdir:")?.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dot_git.parent()?.join(path)
-    })
-}
-
-fn common_git_dir(git_dir: &Path) -> Option<PathBuf> {
-    let contents = fs::read_to_string(git_dir.join("commondir")).ok()?;
-    let target = contents.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        git_dir.join(path)
-    })
-}
-
-fn remove_git_config_named_section(contents: &str, section: &str, subsection_name: &str) -> String {
-    let mut rewritten = String::new();
-    let mut skipping_section = false;
-    for line in contents.lines() {
-        if let Some(section_name) = parse_git_config_subsection_name(line, section) {
-            skipping_section = section_name == subsection_name;
-            if skipping_section {
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_section = false;
-        }
-        if !skipping_section {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten
-}
-
-fn parse_git_config_subsection_name(line: &str, section: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let prefix = format!("[{section} \"");
-    let inner = trimmed.strip_prefix(&prefix)?.strip_suffix("\"]")?;
-    unescape_git_config_string(inner)
-}
-
-fn escape_git_config_section(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn escape_git_config_value(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\u{0008}' => out.push_str("\\b"),
-            ch => out.push(ch),
-        }
-    }
-    out
-}
-
-fn quote_git_config_value(value: &str) -> String {
-    format!("\"{}\"", escape_git_config_value(value))
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
-    }
-    Some(out)
 }
 
 fn remote_urls_match(left: &str, right: &str) -> bool {
@@ -1164,10 +1077,6 @@ async fn push_local(
 
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
-    let repo_path = options
-        .repo_path
-        .context("network remotes must include a hosted repository path")?;
-
     let mut client = options.session.connect(options.addr).await?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
@@ -1178,15 +1087,32 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         );
     }
 
-    let result = client
-        .push(
-            repo,
-            repo_path,
-            *options.state_id,
-            options.track_name,
-            options.force,
-        )
-        .await?;
+    let repo_path = match options.repo_path {
+        Some(repo_path) => repo_path.to_string(),
+        None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
+    };
+
+    let result = if repo.capability() == RepositoryCapability::GitOverlay {
+        client
+            .push_git_overlay_checkpoint(
+                repo,
+                &repo_path,
+                *options.state_id,
+                options.track_name,
+                options.force,
+            )
+            .await?
+    } else {
+        client
+            .push(
+                repo,
+                &repo_path,
+                *options.state_id,
+                options.track_name,
+                options.force,
+            )
+            .await?
+    };
 
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
@@ -1218,9 +1144,243 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 }
 
 #[cfg(feature = "client")]
+async fn auto_provision_hosted_repo(
+    repo: &Repository,
+    client: &mut HostedGrpcClient,
+    options: &PushNetworkOptions<'_>,
+) -> Result<String> {
+    let namespace = client.get_current_user_namespace().await?;
+    let slug = default_spool_slug_from_repo_root(repo.root())?;
+    let derived_full_path = format!("{}/{}", namespace.full_path, slug);
+    let provisioned_repo = match client.create_repository(&namespace.full_path, &slug).await {
+        Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
+        Err(err) if auto_provision_create_already_exists(&err) => {
+            AutoProvisionedHostedRepo::Existing(derived_full_path)
+        }
+        Err(err) => {
+            return Err(anyhow!(RecoveryAdvice::remote_push_failed(
+                options.track_name,
+                &auto_provision_create_error_message(&slug, &err),
+            )));
+        }
+    };
+
+    let configured_remote = persist_auto_provisioned_remote(
+        repo,
+        options.remote_arg,
+        options.addr,
+        provisioned_repo.full_path(),
+    )?;
+
+    if !should_output_json(options.cli, Some(repo.config())) {
+        let display_full_path =
+            hosted_spool_display_path(&namespace, &slug, provisioned_repo.full_path());
+        println!(
+            "{} {} hosted spool {}",
+            style::ok_marker(),
+            provisioned_repo.status_verb(),
+            style::bold(&display_full_path)
+        );
+        if let Some(remote_name) = configured_remote {
+            println!(
+                "{}",
+                style::field(
+                    "remote",
+                    &format!(
+                        "{} -> {}",
+                        style::bold(&remote_name),
+                        style::dim(&format!("heddle://{}/{}", options.addr, display_full_path))
+                    )
+                )
+            );
+        } else {
+            print_next(&format!(
+                "heddle remote add origin heddle://{}/{}",
+                options.addr, display_full_path
+            ));
+        }
+    }
+
+    Ok(provisioned_repo.into_full_path())
+}
+
+#[cfg(feature = "client")]
+enum AutoProvisionedHostedRepo {
+    Created(String),
+    Existing(String),
+}
+
+#[cfg(feature = "client")]
+impl AutoProvisionedHostedRepo {
+    fn full_path(&self) -> &str {
+        match self {
+            Self::Created(full_path) | Self::Existing(full_path) => full_path,
+        }
+    }
+
+    fn into_full_path(self) -> String {
+        match self {
+            Self::Created(full_path) | Self::Existing(full_path) => full_path,
+        }
+    }
+
+    fn status_verb(&self) -> &'static str {
+        match self {
+            Self::Created(_) => "created",
+            Self::Existing(_) => "using",
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_create_already_exists(err: &ProtocolError) -> bool {
+    match err {
+        ProtocolError::AlreadyExists(_) => true,
+        ProtocolError::Remote(message) => message_indicates_already_exists(message),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "client")]
+fn message_indicates_already_exists(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("already exists")
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> String {
+    let error = match err {
+        ProtocolError::Remote(_) | ProtocolError::LockError(_) => err.client_message(),
+        _ => redact_internal_hosted_paths(&err.to_string()),
+    };
+    format!(
+        "could not create hosted spool '{slug}': {error}. Pass a full hosted remote path or choose another local folder name"
+    )
+}
+
+#[cfg(feature = "client")]
+fn hosted_spool_display_path(
+    namespace: &wire::HostedNamespaceInfo,
+    slug: &str,
+    full_path: &str,
+) -> String {
+    if hosted_path_contains_internal_user_namespace(full_path) && !namespace.slug.is_empty() {
+        format!("{}/{}", namespace.slug, slug)
+    } else {
+        full_path.to_string()
+    }
+}
+
+#[cfg(feature = "client")]
+fn redact_internal_hosted_paths(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|part| {
+            if hosted_path_contains_internal_user_namespace(part) {
+                "[user namespace]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(feature = "client")]
+fn hosted_path_contains_internal_user_namespace(value: &str) -> bool {
+    value.contains("__users/")
+}
+
+#[cfg(feature = "client")]
+fn persist_auto_provisioned_remote(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+    addr: SocketAddr,
+    full_path: &str,
+) -> Result<Option<String>> {
+    let Some(remote_name) = auto_provision_remote_name(repo, remote_arg)? else {
+        return Ok(None);
+    };
+    let mut cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    cfg.add(
+        &remote_name,
+        Remote {
+            url: format!("heddle://{addr}/{full_path}"),
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(Some(remote_name))
+}
+
+#[cfg(feature = "client")]
+fn auto_provision_remote_name(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+) -> Result<Option<String>> {
+    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    match remote_arg {
+        Some(arg) if cfg.get(arg).is_ok() => Ok(Some(arg.to_string())),
+        Some(arg) => {
+            let is_direct_network_without_path = matches!(
+                RemoteTarget::parse(arg),
+                Ok(RemoteTarget::Network {
+                    repo_path: None,
+                    ..
+                })
+            );
+            if is_direct_network_without_path && cfg.default_name().is_none() {
+                Ok(Some("origin".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+        None => Ok(Some(
+            cfg.default_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| "origin".to_string()),
+        )),
+    }
+}
+
+#[cfg(feature = "client")]
+fn default_spool_slug_from_repo_root(root: &Path) -> Result<String> {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let slug = spool_slug_from_local_name(name);
+    if slug.is_empty() {
+        return Err(anyhow!(
+            "could not derive a hosted spool name from {}; rename the directory or pass a full hosted remote path",
+            root.display()
+        ));
+    }
+    Ok(slug)
+}
+
+#[cfg(any(feature = "client", test))]
+fn spool_slug_from_local_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            slug.push(ch);
+            last_was_separator = false;
+        } else if !slug.is_empty() && !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+#[cfg(feature = "client")]
 struct PushNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
+    remote_arg: Option<&'a str>,
     session: &'a HostedSession,
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
@@ -1230,27 +1390,120 @@ struct PushNetworkOptions<'a> {
 
 #[cfg(test)]
 mod git_overlay_config_atomic_tests {
-    //! Crash-mid-write semantics for the Git-overlay `.git/config`
-    //! writers. Both `write_git_overlay_remote` and
-    //! `write_git_overlay_branch_upstream` now route through
-    //! `objects::fs_atomic::write_file_atomic` — the same tmp-and-rename
-    //! primitive `remote add`/`remove` use. The atomicity contract:
-    //! after the helper returns, the file is the full new content; a
-    //! prior interrupted write that left the file partially-written
-    //! must not leak back into the result.
+    //! Crash-mid-write semantics for the Git-overlay `.git/config` writers.
+    //! Both helpers route through Sley's config editor, so section parsing,
+    //! quoting, locking, and atomic replacement stay Git-parity tested.
+    use std::fs;
+
     use tempfile::TempDir;
 
     use super::*;
 
-    fn init_dot_git(root: &Path) {
-        fs::create_dir_all(root.join(".git")).unwrap();
+    fn init_git_repo(root: &Path) {
+        SleyRepository::init(root).unwrap();
+    }
+
+    #[test]
+    fn spool_slug_from_local_name_normalizes_folder_names() {
+        assert_eq!(spool_slug_from_local_name("My Cool Repo"), "my-cool-repo");
+        assert_eq!(spool_slug_from_local_name("Heddle_CLI.v2"), "heddle-cli-v2");
+        assert_eq!(spool_slug_from_local_name("---"), "");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_remote_name_uses_existing_or_origin_remote() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        assert_eq!(
+            auto_provision_remote_name(&repo, None).unwrap().as_deref(),
+            Some("origin")
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            Some("origin")
+        );
+
+        let mut cfg = RemoteConfig::open(&repo).unwrap();
+        cfg.add(
+            "weft",
+            Remote {
+                url: "heddle://127.0.0.1:8421".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("weft"))
+                .unwrap()
+                .as_deref(),
+            Some("weft")
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            None
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_reuses_create_repository_already_exists() {
+        let typed_already_exists = ProtocolError::AlreadyExists("luke/demo-repo".to_string());
+        assert!(auto_provision_create_already_exists(&typed_already_exists));
+
+        let already_exists = ProtocolError::Remote("repository already exists".to_string());
+        assert!(auto_provision_create_already_exists(&already_exists));
+
+        let validation = ProtocolError::InvalidState("repository already exists".to_string());
+        assert!(!auto_provision_create_already_exists(&validation));
+
+        let permission = ProtocolError::AuthorizationFailed("missing grant".to_string());
+        assert!(!auto_provision_create_already_exists(&permission));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_hides_internal_user_namespace_paths_in_cli_text() {
+        let namespace = wire::HostedNamespaceInfo {
+            namespace_id: "user-1".to_string(),
+            kind: "user".to_string(),
+            slug: "alice".to_string(),
+            parent_id: None,
+            display_name: None,
+            full_path: "__users/user-1".to_string(),
+        };
+
+        assert_eq!(
+            hosted_spool_display_path(&namespace, "demo-repo", "__users/user-1/demo-repo"),
+            "alice/demo-repo"
+        );
+
+        let validation =
+            ProtocolError::InvalidState("namespace __users/user-1 rejected".to_string());
+        let validation_message = auto_provision_create_error_message("demo-repo", &validation);
+        assert!(
+            !validation_message.contains("__users/"),
+            "{validation_message}"
+        );
+        assert!(validation_message.contains("demo-repo"));
+
+        let remote =
+            ProtocolError::Remote("repository __users/user-1/demo-repo failed".to_string());
+        let remote_message = auto_provision_create_error_message("demo-repo", &remote);
+        assert!(!remote_message.contains("__users/"), "{remote_message}");
+        assert!(remote_message.contains("internal server error"));
     }
 
     #[test]
     fn write_git_overlay_remote_recovers_from_partial_prior_write() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        init_dot_git(root);
+        init_git_repo(root);
         let config = root.join(".git").join("config");
 
         // Establish a clean baseline so we know what "previous full
@@ -1294,7 +1547,7 @@ mod git_overlay_config_atomic_tests {
     fn write_git_overlay_branch_upstream_recovers_from_partial_prior_write() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        init_dot_git(root);
+        init_git_repo(root);
         let config = root.join(".git").join("config");
 
         // Baseline.

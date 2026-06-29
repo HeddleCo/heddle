@@ -257,6 +257,8 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let status_options = worktree_status_options(Some(repo.config()));
     let status = if let Some(status) = trust_visible_worktree_status(&repo, &trust)? {
         status
+    } else if trust.mapping_state == "git_backed" {
+        repo.git_overlay_worktree_status()?.unwrap_or_default()
     } else if let Some(state) = current_state.as_ref() {
         let tree = repo.require_tree(&state.tree)?;
         repo.compare_worktree_cached_with_options(&tree, &status_options)?
@@ -462,11 +464,7 @@ fn diagnose_health(
 ) -> DiagnoseHealthOutput {
     let Some(summary) = current_summary else {
         let recommended_action = if worktree_dirty {
-            if repo.capability() == repo::RepositoryCapability::GitOverlay {
-                "heddle commit -m \"...\""
-            } else {
-                "heddle capture"
-            }
+            "heddle commit -m \"...\""
         } else {
             ""
         };

@@ -166,17 +166,17 @@ else
   err "missing deterministic Heddle-<tag>-macos-universal.dmg artifact name"
 fi
 
-if grep -F 'cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount --target ${{ matrix.target }}' "$WF" >/dev/null; then
+if grep -F 'cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount' "$WF" >/dev/null; then
   ok "release CLI build explicitly enables mount backends"
 else
-  err "release CLI build must pass --features mount so macOS binaries include FSKit support"
+  err "release CLI build must include --features mount so macOS binaries include FSKit support"
 fi
 
 if grep -F "cargo build --release --locked -p heddle-mount --features fskit --target" scripts/build-macos-cask-artifact.sh >/dev/null \
-   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount --target" scripts/build-macos-cask-artifact.sh >/dev/null; then
+   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount" scripts/build-macos-cask-artifact.sh >/dev/null; then
   ok "macOS cask build explicitly enables FSKit/mount features"
 else
-  err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with --features mount"
+  err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with mount enabled"
 fi
 
 if ! grep -F "target: aarch64-apple-darwin" "$WF" >/dev/null \
@@ -226,6 +226,39 @@ if [[ -x scripts/render-homebrew-cask.sh ]] \
   ok "Homebrew cask manifest publication wired"
 else
   err "missing Homebrew cask manifest publication wiring"
+fi
+
+# Scoop (Windows) manifest publication — parallel channel on the same
+# substrate (#233). The renderer emits bucket/heddle.json from the Windows
+# zip line(s) in SHA256SUMS; the publish-manifests job opens a PR against
+# the scoop-heddle bucket with the same App token, gated stable-only by
+# the publish-manifests `if` condition asserted below.
+if [[ -x scripts/render-scoop-manifest.sh ]] \
+   && grep -F "bucket/heddle.json" "$WF" >/dev/null \
+   && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
+   && grep -F "HeddleCo/scoop-heddle" "$WF" >/dev/null; then
+  ok "Scoop manifest publication wired"
+else
+  err "missing Scoop manifest publication wiring"
+fi
+
+# apt (Debian/Ubuntu) pool publication — parallel channel on the same
+# substrate (#234). scripts/build-apt-pool.sh builds the amd64 + arm64 .deb
+# (and the heddle-archive-keyring .deb) from the linux-gnu tarballs in
+# SHA256SUMS, then generates + GPG-signs the pool/Packages/Release index in
+# an ephemeral GNUPGHOME (Ed25519 subkey, #328 Decision 2). The
+# publish-manifests job PRs the whole signed tree to apt-heddle via the same
+# composite action + App token, gated stable-only. The App token scope must
+# include apt-heddle alongside the homebrew/scoop taps.
+if [[ -x scripts/build-apt-pool.sh ]] \
+   && grep -F "scripts/build-apt-pool.sh" "$WF" >/dev/null \
+   && grep -F "HeddleCo/apt-heddle" "$WF" >/dev/null \
+   && grep -F "HEDDLE_APT_GPG_PRIVATE_KEY" "$WF" >/dev/null \
+   && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
+   && grep -E "repositories: .*apt-heddle" "$WF" >/dev/null; then
+  ok "apt pool publication wired"
+else
+  err "missing apt pool publication wiring"
 fi
 
 if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" "$WF" >/dev/null; then

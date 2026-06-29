@@ -22,10 +22,12 @@
 //! See HeddleCo/heddle#133 for the audit motivation.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
+use objects::object::ContentHash;
 use tree_sitter::Node;
 
 use super::language_rules::{Classified, MetadataBinding, USE_POISON_KEY, rules_for};
@@ -112,6 +114,20 @@ pub(crate) struct FileSegments {
     pub source_len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SegmentCacheKey {
+    content_hash: ContentHash,
+    language: Language,
+}
+
+#[derive(Default)]
+struct SegmentCacheInner {
+    entries: HashMap<SegmentCacheKey, Arc<FileSegments>>,
+    order: VecDeque<SegmentCacheKey>,
+}
+
+const SEGMENT_CACHE_MAX_ENTRIES: usize = 256;
+
 /// Inter-item slices for a list of sibling items occupying the byte region
 /// `[region_start, region_end)`. Length is `items.len() + 1`: the first slice
 /// is the preamble (region_start → first item), the last is the postamble
@@ -186,9 +202,53 @@ pub(crate) fn extract_items(parsed: &ParsedFile) -> Vec<Item> {
 /// Top-level entry: segment a parsed file into items + record the source
 /// length so reconstruction can recover inter-item content.
 pub(crate) fn segment_file(parsed: &ParsedFile) -> FileSegments {
-    FileSegments {
+    cached_file_segments(parsed).as_ref().clone()
+}
+
+fn cached_file_segments(parsed: &ParsedFile) -> Arc<FileSegments> {
+    let key = SegmentCacheKey {
+        content_hash: parsed.content_hash(),
+        language: parsed.language,
+    };
+
+    {
+        let mut cache = lock_segment_cache();
+        if let Some(segments) = cache.entries.get(&key).cloned() {
+            if let Some(position) = cache.order.iter().position(|existing| *existing == key) {
+                cache.order.remove(position);
+            }
+            cache.order.push_back(key);
+            return segments;
+        }
+    }
+
+    let segments = Arc::new(FileSegments {
         items: extract_items(parsed),
         source_len: parsed.source.len(),
+    });
+
+    let mut cache = lock_segment_cache();
+    if cache.entries.len() >= SEGMENT_CACHE_MAX_ENTRIES {
+        while cache.entries.len() >= SEGMENT_CACHE_MAX_ENTRIES {
+            let Some(evicted) = cache.order.pop_front() else {
+                break;
+            };
+            cache.entries.remove(&evicted);
+        }
+    }
+    cache.entries.insert(key, segments.clone());
+    cache.order.push_back(key);
+    segments
+}
+
+fn lock_segment_cache() -> std::sync::MutexGuard<'static, SegmentCacheInner> {
+    static CACHE: OnceLock<Mutex<SegmentCacheInner>> = OnceLock::new();
+    match CACHE
+        .get_or_init(|| Mutex::new(SegmentCacheInner::default()))
+        .lock()
+    {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 

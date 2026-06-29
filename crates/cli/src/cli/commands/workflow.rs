@@ -34,8 +34,8 @@ use super::{
     thread_landing::{land_local_command, switch_thread_command},
     worktree_safety::ensure_worktree_clean,
 };
-use crate::bridge::GitBridge;
 use crate::{
+    bridge::GitBridge,
     cli::{
         Cli,
         cli_args::{LandArgs, SyncArgs},
@@ -483,6 +483,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         "heddle land --thread <name>",
     )?;
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
+    let preview_warnings = land_warnings_for_preview(&preview);
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
@@ -592,7 +593,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 )
             },
             blockers: Vec::new(),
-            warnings: Vec::new(),
+            warnings: preview_warnings.clone(),
             next_action: post_land_action.clone(),
             recommended_action: post_land_action,
         };
@@ -658,7 +659,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                             merge_thread.id
                         ),
                         blockers: land_blockers_for_preview(&preview, &integration_blockers),
-                        warnings: Vec::new(),
+                        warnings: preview_warnings.clone(),
                         next_action: Some(recommended_action.clone()),
                         recommended_action: Some(recommended_action),
                     },
@@ -695,7 +696,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     action: OperatorAction::Land,
                     message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
                     blockers: land_blockers_for_preview(&preview, &integration_blockers),
-                    warnings: Vec::new(),
+                    warnings: preview_warnings.clone(),
                     next_action: Some(recommended_action.clone()),
                     recommended_action: Some(recommended_action),
                 },
@@ -827,7 +828,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             format!("Thread '{}' could not be landed cleanly", merge_thread.id)
         },
         blockers: merge_output.operator.blockers.clone(),
-        warnings: Vec::new(),
+        warnings: preview_warnings,
         next_action: if integrated {
             integrated_next_action.clone()
         } else {
@@ -1516,6 +1517,28 @@ fn land_blockers_for_preview(
     out
 }
 
+fn land_warnings_for_preview(preview: &super::merge::ThreadPreviewReport) -> Vec<String> {
+    let mut warnings = preview
+        .blockers
+        .iter()
+        .filter(|blocker| is_heavy_impact_advisory(blocker))
+        .cloned()
+        .collect::<Vec<_>>();
+    if warnings.is_empty() && !preview.heavy_impact_paths.is_empty() {
+        warnings.push(format!(
+            "Heavy-impact change: {} — review broader impact before merging",
+            preview.heavy_impact_paths.join(", ")
+        ));
+    }
+    warnings.sort();
+    warnings.dedup();
+    warnings
+}
+
+fn is_heavy_impact_advisory(blocker: &str) -> bool {
+    blocker.to_lowercase().contains("heavy-impact change")
+}
+
 fn manual_resolution_current(repo: &Repository, thread: &Thread) -> bool {
     let thread_tip = repo
         .refs()
@@ -1552,7 +1575,9 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
 pub(crate) fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
     blockers
         .iter()
-        .filter(|blocker| !blocker.contains(" is stale against "))
+        .filter(|blocker| {
+            !blocker.contains(" is stale against ") && !is_heavy_impact_advisory(blocker)
+        })
         .cloned()
         .collect()
 }
@@ -1687,6 +1712,9 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         for blocker in &output.operator.blockers {
             println!("  blocker: {}", style::warn(blocker));
         }
+        for warning in &output.operator.warnings {
+            println!("  warning: {}", style::warn(warning));
+        }
         println!(
             "Workspace: {}",
             if output.trust.verified {
@@ -1817,6 +1845,54 @@ mod tests {
     fn non_policy_blockers_yield_no_recovery_action() {
         let blockers = vec!["3 path conflict(s) need manual resolution".to_string()];
         assert!(integration_blocker_recommended_action(&blockers, None).is_none());
+    }
+
+    #[test]
+    fn heavy_impact_review_is_advisory_for_land() {
+        let blockers = vec![
+            "Thread 'agent-thread' is stale against 'main'".to_string(),
+            "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
+                .to_string(),
+            "confidence 0.40 is below the auto-land threshold of 0.75".to_string(),
+        ];
+
+        assert_eq!(
+            non_staleness_blockers(&blockers),
+            vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()]
+        );
+    }
+
+    #[test]
+    fn land_warnings_surface_heavy_impact_review() {
+        let preview = crate::cli::commands::merge::ThreadPreviewReport {
+            thread: "agent-thread".to_string(),
+            thread_mode: "solid".to_string(),
+            thread_state: "active".to_string(),
+            freshness: "current".to_string(),
+            task: None,
+            changed_paths: vec!["crates/wire/src/lib.rs".to_string()],
+            changed_path_count: 1,
+            impact_categories: vec![],
+            heavy_impact_paths: vec!["crates/wire/src/lib.rs".to_string()],
+            merge_relation: "would_merge".to_string(),
+            conflicts: vec![],
+            conflict_count: 0,
+            blockers: vec![
+                "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
+                    .to_string(),
+            ],
+            recommended_action: "heddle land --thread agent-thread --no-push".to_string(),
+            recommended_action_template: None,
+            thread_health: "review".to_string(),
+        };
+
+        assert_eq!(
+            land_warnings_for_preview(&preview),
+            vec![
+                "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
+                    .to_string()
+            ]
+        );
     }
 
     // `recovery_scope_checkout` is the gate that decides whether to scope: an

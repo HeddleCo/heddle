@@ -1,6 +1,6 @@
 {
   "name": "@heddleco/grpc",
-  "version": "0.7.1",
+  "version": "0.7.3",
   "description": "Generated TypeScript protobuf and Connect clients for Heddle gRPC.",
   "license": "Apache-2.0",
   "repository": {
@@ -39,11 +39,13 @@
   "engines": {
     "node": ">=18"
   },
-  "dependencies": {
+  "peerDependencies": {
     "@bufbuild/protobuf": "^2.12.0",
     "@connectrpc/connect": "^2.1.1"
   },
   "devDependencies": {
+    "@bufbuild/protobuf": "^2.12.0",
+    "@connectrpc/connect": "^2.1.1",
     "@bufbuild/protoc-gen-es": "^2.12.0",
     "typescript": "^5.4.0"
   }

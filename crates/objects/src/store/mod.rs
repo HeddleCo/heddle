@@ -52,6 +52,7 @@ impl From<CompressionError> for HeddleError {
 /// Sealed by construction: only the variants enumerated here are valid
 /// stores. Heddle is the sole implementer (heddle#259 / #283) — `AnyStore`
 /// is not a public extension point.
+#[derive(Clone)]
 pub enum AnyStore {
     Fs(FsStore),
 }
@@ -694,7 +695,11 @@ mod any_store_tests {
         let state = State::new(tree_hash, vec![], attribution.clone());
         let change_id = state.change_id;
         store.put_state(&state).unwrap();
-        assert!(ObjectStore::get_state(&store, &change_id).unwrap().is_some());
+        assert!(
+            ObjectStore::get_state(&store, &change_id)
+                .unwrap()
+                .is_some()
+        );
         assert!(store.has_state(&change_id).unwrap());
         assert!(store.list_states().unwrap().contains(&change_id));
         let state2 = State::new(tree2.hash(), vec![], attribution.clone());

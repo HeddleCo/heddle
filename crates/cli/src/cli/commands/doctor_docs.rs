@@ -268,11 +268,10 @@ const IGNORE_PATTERNS: &[&str] = &[
     ".cache/",
     ".idea/",
     ".vscode/",
-    // Spike/design docs deliberately reference planned-but-unbuilt
-    // verbs and flags ("heddle quickstart", "heddle init --quickstart")
-    // to argue for a shape. Drift-checking would force every author
-    // to either annotate each example or hold the spike to the
-    // current CLI surface. Exempt the directory wholesale.
+    // Spike/design docs deliberately reference planned-but-unbuilt or retired
+    // verbs and flags to argue for a shape. Drift-checking would force every
+    // author to either annotate each example or hold the spike to the current
+    // CLI surface. Exempt the directory wholesale.
     "docs/spikes/",
 ];
 

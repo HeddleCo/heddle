@@ -18,7 +18,9 @@ use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state, override_trust_recommended_action,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
+        override_trust_recommended_action,
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{
@@ -153,7 +155,16 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
 
     let repo = Repository::open(start)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
-    let initial_trust = build_repository_verification_state(&repo);
+    // Compute the git-overlay worktree status ONCE up front. It feeds the initial
+    // verification preflight here and the second preflight further down, which
+    // `ready` previously recomputed from scratch — a full worktree walk that
+    // re-reads + SHA-1s every tracked file. The second preflight can reuse this
+    // status ONLY when no bootstrap capture intervened (see below): a bootstrap
+    // capture advances the Heddle state and flips the git-overlay health
+    // classification, so after one the second preflight must take a FRESH walk.
+    let worktree_status = repo.git_overlay_worktree_status();
+    let initial_trust =
+        build_repository_verification_state_with_worktree_status(&repo, &worktree_status);
     if ready_verification_preflight_blocks(&initial_trust) {
         let output = trust_blocked_ready_output(args.thread.as_deref(), initial_trust);
         write_ready_output(cli, &repo, &output)?;
@@ -202,7 +213,16 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         })?,
     };
 
-    let preflight_trust = build_repository_verification_state(&repo);
+    // Reuse the status computed at the top only when no bootstrap capture ran
+    // (`had_current_state`): between the initial preflight and here, the only
+    // mutation is `ensure_current_state`'s bootstrap capture, which fires iff
+    // `!had_current_state`. After a bootstrap capture the git-overlay health
+    // classification flips, so that case must take a FRESH walk.
+    let preflight_trust = if had_current_state {
+        build_repository_verification_state_with_worktree_status(&repo, &worktree_status)
+    } else {
+        build_repository_verification_state(&repo)
+    };
     if ready_verification_preflight_blocks(&preflight_trust) {
         let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
         report.thread_state = "blocked".to_string();

@@ -129,10 +129,9 @@ mod linux {
         ContentAddressedMount, NfsSession, NfsShell,
         worker::{Supervisor, default_worker_binary},
     };
+    use objects::sync::LockExt;
     use repo::Repository;
     use tracing::warn;
-
-    use objects::sync::LockExt;
 
     use crate::util::OnceMap;
 
@@ -292,10 +291,9 @@ mod macos {
         ContentAddressedMount, NfsSession, NfsShell,
         fskit::readiness::{self, Readiness},
     };
+    use objects::sync::LockExt;
     use repo::Repository;
     use tracing::{debug, info, warn};
-
-    use objects::sync::LockExt;
 
     use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
 
@@ -791,10 +789,9 @@ mod windows {
 
     use anyhow::{Context, Result, anyhow};
     use mount::{ContentAddressedMount, NfsSession, NfsShell, ProjFsSession, ProjFsShell};
+    use objects::sync::LockExt;
     use repo::Repository;
     use tracing::warn;
-
-    use objects::sync::LockExt;
 
     use crate::util::OnceMap;
 

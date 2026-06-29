@@ -18,7 +18,7 @@ use sley::{
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        count_exported_commits, delete_reference_if_present,
+        copy_reachable_objects, count_exported_commits, delete_reference_if_present,
         git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
         read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
     },
@@ -70,7 +70,14 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
 /// OID (or fall through to the native mint) rather than mint a wrong-SHA
 /// reconstructed object.
-fn commit_is_byte_faithful(state: &State) -> bool {
+///
+/// `pub(crate)` so the checkout write-through path (#568 P1,
+/// `git_core::write_thread_state_checkout_from_existing_mirror`) reads the SAME
+/// single faithful-or-lossy discriminator the export path does — reconstruct
+/// faithful commits from state, mirror-backstop the lossy residual. Keeping ONE
+/// chokepoint for the decision means a new consumer cannot drift to a different
+/// (wrong-SHA) rule.
+pub(crate) fn commit_is_byte_faithful(state: &State) -> bool {
     has_git_fidelity(state)
         && !state.git_lossy
         && identity_is_byte_faithful(&state.attribution.principal)
@@ -79,6 +86,13 @@ fn commit_is_byte_faithful(state: &State) -> bool {
             .as_ref()
             .map(identity_is_byte_faithful)
             .unwrap_or(true)
+}
+
+pub(crate) struct ExportStateOptions<'a> {
+    pub(crate) identity: Option<&'a LocalGitIdentity>,
+    pub(crate) message_override: Option<&'a str>,
+    pub(crate) parent_override: Option<&'a [ObjectId]>,
+    pub(crate) audience: &'a AudienceTier,
 }
 
 /// Export a single state to Git for `audience`.
@@ -94,9 +108,7 @@ pub(crate) fn export_state(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
     state_id: &ChangeId,
-    identity: Option<&LocalGitIdentity>,
-    message_override: Option<&str>,
-    audience: &AudienceTier,
+    options: ExportStateOptions<'_>,
 ) -> GitResult<Option<ObjectId>> {
     let state = heddle_repo
         .store()
@@ -109,7 +121,7 @@ pub(crate) fn export_state(
     let tier = heddle_repo
         .effective_visibility_tier(state_id)
         .map_err(|e| GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}")))?;
-    if !visible(&tier, audience) {
+    if !visible(&tier, options.audience) {
         return Ok(None);
     }
 
@@ -157,7 +169,7 @@ pub(crate) fn export_state(
         .upstream_url
         .as_deref()
         .filter(|s| !s.is_empty());
-    let message = match message_override {
+    let message = match options.message_override {
         Some(message) => GitBridge::build_commit_message_with_footer_with_body(
             &state, message, hosted_url, /*omitted=*/ 0,
         ),
@@ -165,18 +177,22 @@ pub(crate) fn export_state(
             GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
         }
     };
-    let parent_oids: Vec<ObjectId> = state
-        .parents
-        .iter()
-        .map(|parent_id| {
-            mapping
-                .get_git(parent_id)
-                .ok_or(GitBridgeError::StateNotFound(*parent_id))
-        })
-        .collect::<GitResult<Vec<_>>>()?;
+    let parent_oids: Vec<ObjectId> = if let Some(parents) = options.parent_override {
+        parents.to_vec()
+    } else {
+        state
+            .parents
+            .iter()
+            .map(|parent_id| {
+                mapping
+                    .get_git(parent_id)
+                    .ok_or(GitBridgeError::StateNotFound(*parent_id))
+            })
+            .collect::<GitResult<Vec<_>>>()?
+    };
 
     let sig = if principal_is_default_unknown(&state.attribution.principal) {
-        let Some(identity) = identity else {
+        let Some(identity) = options.identity else {
             return Err(GitBridgeError::Git(
                 "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
@@ -441,6 +457,24 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 && has_git_fidelity(&state)
             {
                 let mapped = bridge.mapping.get_git(&state_id);
+                // Incremental-export fast path (perf, latent O(history) fix): the
+                // regenerate-from-state step below is purely a #567 idempotent
+                // re-write — it rebuilds the commit object from state and writes it
+                // so a correct export no longer DEPENDS on the mirror's verbatim
+                // bytes. But when the mapped commit object is ALREADY in the mirror,
+                // that re-write is a no-op (sley hashes-then-skips), preceded by
+                // `reconstruct_commit_bytes`'s FULL recursive tree re-walk + re-hash.
+                // On a deep imported history every already-mapped commit hits this
+                // branch on every export, so that re-walk is paid once per historical
+                // commit per export — O(total history). Skipping when the object is
+                // present makes it O(commits whose object is missing), with
+                // byte-identical output: the served object, its OID, and the mapping
+                // are all unchanged. The reconstruct still runs (and the safety net
+                // still guards the write) for any mapped commit whose object is NOT
+                // yet in the mirror — the case #567/#568 actually need it for.
+                if mapped.is_some_and(|oid| repo.read_object(&oid).is_ok()) {
+                    continue;
+                }
                 // mirror still required for non-byte-faithful commits (non-UTF8
                 // identities, --lossy); #568 mirror elimination must account for
                 // these, and full de-lossy needs byte-preserving identities (#564
@@ -499,14 +533,28 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             .commit_message_overrides
             .get(&state_id)
             .map(String::as_str);
+        let parent_override = bridge
+            .commit_parent_overrides
+            .get(&state_id)
+            .map(Vec::as_slice);
+        if let Some(parents) = parent_override
+            && !parents.is_empty()
+        {
+            let checkout_repo =
+                SleyRepository::discover(bridge.heddle_repo.root()).map_err(git_err)?;
+            copy_reachable_objects(&checkout_repo, &repo, parents.iter().copied())?;
+        }
         let Some(git_oid) = export_state(
             &mut bridge.mapping,
             bridge.heddle_repo,
             &repo,
             &state_id,
-            identity.as_ref(),
-            message_override,
-            &audience,
+            ExportStateOptions {
+                identity: identity.as_ref(),
+                message_override,
+                parent_override,
+                audience: &audience,
+            },
         )?
         else {
             // Embargoed for this audience — emit absence (no commit minted).

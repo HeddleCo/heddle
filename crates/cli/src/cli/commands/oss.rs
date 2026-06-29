@@ -17,7 +17,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
                 "summary": "Use Heddle as the daily loop with Git compatibility through the bridge: status, diff, commit, start --path, ready, land, push, undo, verify.",
                 "steps": [
                     "heddle status",
-                    "heddle adopt --ref <branch>",
+                    "heddle init",
                     "heddle diff",
                     "heddle commit -m <message>",
                     "heddle start <name> --path ../<name>",
@@ -32,15 +32,15 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", style::bold("Git-overlay quick start"));
+    println!("{}", style::bold("Git-overlay workflow"));
     println!("Use Heddle as the daily loop with Git interoperability kept explicit.");
     println!();
     println!("1. Orient");
     println!("   {}", style::bold("heddle status"));
-    println!("   {}", style::bold("heddle adopt --ref <branch>"));
+    println!("   {}", style::bold("heddle init"));
     println!(
         "   {}",
-        style::dim("use the exact adopt command printed by status")
+        style::dim("create the Heddle sidecar; Git commits stay in .git")
     );
     println!("   {}", style::bold("heddle workspace"));
     println!("2. Inspect changes");
@@ -75,10 +75,10 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     );
     println!(
         "  Captured in Heddle but not Git: {}",
-        style::bold("heddle commit -m '<message>'")
+        style::bold("heddle checkpoint -m '<message>'")
     );
     println!(
-        "  Git refs changed externally: {}",
+        "  Convert Git history to native Heddle storage: {}",
         style::bold("heddle adopt --ref <branch>")
     );
     println!();

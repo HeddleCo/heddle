@@ -72,8 +72,10 @@ chrono.workspace = true
 criterion = "0.8"
 # Used by the Linux mount integration tests to exercise the
 # `mmap(MAP_SHARED, ...)` path on mounted files. Required for the
-# `fuse_mount_serves_mmap_readers` regression test that locks in
-# `FUSE_DIRECT_IO_ALLOW_MMAP` opt-in (kernel 5.16+).
+# `fuse_mount_serves_mmap_readers` regression test, which locks in
+# that shared mmap works under cached mode (heddle#87) — no
+# `FOPEN_DIRECT_IO`, so the page cache backs the mapping on any
+# FUSE-capable kernel.
 memmap2.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

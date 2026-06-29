@@ -65,8 +65,7 @@ pub fn score_suggestions(inputs: SuggestionInputs, limit: usize) -> Vec<ContextS
         let stale_annotations = stale_map
             .iter()
             .filter(|(key, status)| {
-                key.starts_with(&format!("{path}:"))
-                    && !matches!(status, StalenessStatus::Fresh)
+                key.starts_with(&format!("{path}:")) && !matches!(status, StalenessStatus::Fresh)
             })
             .count() as u32;
 
@@ -144,10 +143,7 @@ mod tests {
             "high.rs".to_string(),
             signal(2, [], ["anthropic/claude", "openai/codex"], None),
         );
-        signals.insert(
-            "penalty.rs".to_string(),
-            signal(5, [], [], None),
-        );
+        signals.insert("penalty.rs".to_string(), signal(5, [], [], None));
         signals.insert("low.rs".to_string(), signal(1, ["s1"], [], None));
 
         let mut stale_map = HashMap::new();

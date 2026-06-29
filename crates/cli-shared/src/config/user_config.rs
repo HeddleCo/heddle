@@ -7,9 +7,9 @@ use std::{
 };
 
 use objects::fs_atomic::write_file_atomic_secret;
-use wire::AuthToken;
 use repo::{FsMonitorMode, FsMonitorSettings, OutputFormat, WorktreeStatusOptions};
 use serde::{Deserialize, Serialize};
+use wire::AuthToken;
 
 use crate::client_config::ClientConfig;
 
@@ -19,6 +19,8 @@ pub struct UserConfig {
     pub principal: Option<UserPrincipalConfig>,
     #[serde(default)]
     pub agent: UserAgentConfig,
+    #[serde(default)]
+    pub capture: UserCaptureConfig,
     #[serde(default)]
     pub output: UserOutputConfig,
     #[serde(default)]
@@ -51,6 +53,20 @@ pub struct UserAgentConfig {
     pub default_policy: Option<String>,
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserCaptureConfig {
+    #[serde(default)]
+    pub auto: UserAutoCaptureMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UserAutoCaptureMode {
+    #[default]
+    Off,
+    Command,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -364,6 +380,23 @@ impl UserConfig {
         }
     }
 
+    pub fn command_auto_capture_enabled(&self) -> anyhow::Result<bool> {
+        let mut mode = self.capture.auto;
+        match env::var("HEDDLE_AUTO_CAPTURE") {
+            Ok(value) if !value.trim().is_empty() => {
+                mode = parse_auto_capture_env("HEDDLE_AUTO_CAPTURE", &value)?;
+            }
+            Ok(_) | Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(config_value_error(
+                    "HEDDLE_AUTO_CAPTURE",
+                    format!("read environment value: {err}"),
+                ));
+            }
+        }
+        Ok(matches!(mode, UserAutoCaptureMode::Command))
+    }
+
     pub fn heddle_client_config(
         &self,
         token_override: Option<AuthToken>,
@@ -443,6 +476,19 @@ impl UserConfig {
     }
 }
 
+fn parse_auto_capture_env(setting: &str, value: &str) -> anyhow::Result<UserAutoCaptureMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "command" | "commands" => Ok(UserAutoCaptureMode::Command),
+        "0" | "false" | "no" | "off" => Ok(UserAutoCaptureMode::Off),
+        _ => Err(config_value_error(
+            setting,
+            format!(
+                "parse auto-capture value {value:?}; expected one of off, command, true, or false"
+            ),
+        )),
+    }
+}
+
 fn read_security_config_file(setting: &str, path: &Path) -> anyhow::Result<String> {
     fs::read_to_string(path).map_err(|err| {
         security_config_error(
@@ -475,6 +521,10 @@ fn env_bool(name: &str) -> anyhow::Result<bool> {
     }
 }
 
+fn config_value_error(setting: &str, reason: String) -> anyhow::Error {
+    anyhow::anyhow!("fatal configuration error for `{setting}`: {reason}")
+}
+
 fn security_config_error(setting: &str, reason: String) -> anyhow::Error {
     anyhow::anyhow!(
         "fatal TLS/auth configuration error for `{setting}`: {reason}; refusing to proceed with an ambiguous security posture"
@@ -499,7 +549,8 @@ mod tests {
     use repo::{FsMonitorMode, RepoConfig};
 
     use super::{
-        HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserRemoteConfig,
+        HarnessMode, HarnessTranscriptMode, HarnessTransport, UserAutoCaptureMode,
+        UserCaptureConfig, UserConfig, UserRemoteConfig,
     };
 
     static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -508,6 +559,7 @@ mod tests {
         "HEDDLE_REMOTE_TLS",
         "HEDDLE_REMOTE_TLS_DOMAIN",
         "HEDDLE_REMOTE_TLS_CA_CERT",
+        "HEDDLE_AUTO_CAPTURE",
     ];
 
     struct RemoteEnvGuard {
@@ -579,6 +631,62 @@ mod tests {
         assert_eq!(config.harness.transcript, HarnessTranscriptMode::Off);
         assert!(config.harness.auto_infer);
         assert!(config.harness.harnesses.is_empty());
+    }
+
+    #[test]
+    fn command_auto_capture_defaults_off() {
+        let _env = RemoteEnvGuard::clean();
+
+        let config = UserConfig::default();
+
+        assert!(!config.command_auto_capture_enabled().unwrap());
+    }
+
+    #[test]
+    fn command_auto_capture_reads_user_config() {
+        let _env = RemoteEnvGuard::clean();
+        let config = UserConfig {
+            capture: UserCaptureConfig {
+                auto: UserAutoCaptureMode::Command,
+            },
+            ..UserConfig::default()
+        };
+
+        assert!(config.command_auto_capture_enabled().unwrap());
+    }
+
+    #[test]
+    fn command_auto_capture_env_overrides_user_config() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_AUTO_CAPTURE", "off");
+        let config = UserConfig {
+            capture: UserCaptureConfig {
+                auto: UserAutoCaptureMode::Command,
+            },
+            ..UserConfig::default()
+        };
+
+        assert!(!config.command_auto_capture_enabled().unwrap());
+
+        env.set("HEDDLE_AUTO_CAPTURE", "command");
+        assert!(
+            UserConfig::default()
+                .command_auto_capture_enabled()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn user_config_toml_parses_capture_auto_command() {
+        let parsed: UserConfig = toml::from_str(
+            r#"
+                [capture]
+                auto = "command"
+            "#,
+        )
+        .expect("capture auto config should parse");
+
+        assert_eq!(parsed.capture.auto, UserAutoCaptureMode::Command);
     }
 
     #[test]
