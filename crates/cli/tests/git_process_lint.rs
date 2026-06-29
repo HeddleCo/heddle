@@ -119,7 +119,11 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
         .strip_prefix(workspace)
         .unwrap_or(path)
         .to_string_lossy();
-    if rel.ends_with("_tests.rs") {
+    // Test modules (whether a `*_tests.rs` sibling or a bare `tests.rs`
+    // submodule file) may shell out to Git for fixture setup; they are not
+    // runtime code, so they are exempt from the no-git-on-PATH lint. This
+    // mirrors the inline `#[cfg(test)] mod tests { .. }` skip below.
+    if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") {
         return;
     }
 
