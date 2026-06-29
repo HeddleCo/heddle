@@ -410,6 +410,7 @@ fn apply_commit(
                         &parent.hash,
                         &existing.hash,
                         &new.hash,
+                        &path,
                     )? && let Some(mode) = merge_file_mode(&parent, &existing, &new)
                     {
                         let mut merged = new;
@@ -490,6 +491,7 @@ fn try_auto_merge_textual_change(
     base: &ContentHash,
     current: &ContentHash,
     incoming: &ContentHash,
+    path: &str,
 ) -> Result<Option<ContentHash>> {
     let Some(base_blob) = repo.store().get_blob(base)? else {
         return Ok(None);
@@ -505,6 +507,7 @@ fn try_auto_merge_textual_change(
         base_blob.content(),
         current_blob.content(),
         incoming_blob.content(),
+        std::path::Path::new(path),
     )?
     else {
         return Ok(None);
@@ -519,14 +522,49 @@ fn try_auto_merge_textual_change(
 /// Returns `Some(bytes)` only when the merge resolves *cleanly* — any
 /// conflict (including binary, delete/modify, or overlapping hunks) returns
 /// `None`, leaving the rebase caller to either invoke `blob_contains_both`
-/// or stop with `ApplyResult::Conflict`. Routes through the native
-/// hunk-level merger added in heddle#79 — always available, no feature
-/// gate — so multi-hunk-per-side edits auto-resolve when disjoint even on
-/// `--no-default-features` builds, addressing the heddle#54 trip report's
-/// rebase failure mode.
-fn auto_merge_text_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Result<Option<Vec<u8>>> {
-    use merge::{MergeOutcome, text_hunk_merge};
-    match text_hunk_merge(base, current, incoming) {
+/// or stop with `ApplyResult::Conflict`.
+///
+/// Routes through the AST-aware function-level merge driver from heddle#68
+/// (`semantic::merge_driver::semantic_three_way_merge`) — the same driver the
+/// `heddle merge` path uses by default (see
+/// `merge::merge_algo::executor::text_hunk_merge_blobs`, `MergeStrategy::Semantic`).
+/// `path` selects the language; parseable source merges per-item by stable
+/// identity, so a structural reshape (function reorder / add / delete) that
+/// would shift every line past the change point — and so collide under the
+/// line-level `text_hunk_merge` — resolves cleanly. Unknown / unparseable
+/// files fall back to `text_hunk_merge` inside the driver itself.
+///
+/// When the `semantic` feature is compiled out (`--no-default-features`), the
+/// call collapses to the historical `text_hunk_merge` path from heddle#79 —
+/// no behavioural change for non-semantic builds.
+fn auto_merge_text_lines(
+    base: &[u8],
+    current: &[u8],
+    incoming: &[u8],
+    path: &std::path::Path,
+) -> Result<Option<Vec<u8>>> {
+    use merge::MergeOutcome;
+
+    // `current` is "ours" (the rebased-onto state) and `incoming` is "theirs"
+    // (the commit being replayed); the markers are only consumed on a conflict,
+    // which this caller maps to `None`, but keep the labelling consistent with
+    // the `heddle merge` path for any future surfacing.
+    let markers = merge::ConflictMarkers {
+        ours: "CURRENT",
+        theirs: "INCOMING",
+    };
+
+    #[cfg(feature = "semantic")]
+    let outcome = semantic::merge_driver::semantic_three_way_merge(
+        base, current, incoming, path, markers,
+    );
+    #[cfg(not(feature = "semantic"))]
+    let outcome = {
+        let _ = path;
+        merge::text_hunk_merge_with_markers(base, current, incoming, markers)
+    };
+
+    match outcome {
         MergeOutcome::Clean(bytes) => Ok(Some(bytes)),
         MergeOutcome::Conflicts { .. } | MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
             Ok(None)
