@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use merge::{ConflictMarkers, MergeOutcome};
+use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
 use super::{MergeStrategy, semantic_three_way_merge, three_way_merge};
 
@@ -6711,5 +6711,141 @@ fn conformance_484_r3_cross_side_cpp_namespace_prepend_no_collapse() {
     assert!(
         merged.find("void a()").unwrap() < merged.find("void b()").unwrap(),
         "prepended block must precede the base block:\n{merged}"
+    );
+}
+
+// =====================================================================
+// heddle#123: text-vs-semantic EOF-newline parity.
+//
+// The semantic path used to decide its output's trailing-newline state
+// by a context-free 3-side MAJORITY vote (`majority_ends_with_newline`).
+// The text engine (`text_hunk_merge`) instead carries whatever
+// trailing-newline state the side that AUTHORED the final line had —
+// equivalently, it 3-way-merges the trailing-newline as a one-bit field
+// (a side that changed the bit from base wins over a side that didn't).
+//
+// The majority vote diverges from the text engine precisely when the
+// side that edited the trailing line is in the newline-state MINORITY:
+// it strips a newline the editor added (1-of-3) or keeps one the editor
+// removed (2-of-3 still have it). Both are spurious one-byte EOF diffs
+// unique to the semantic engine — a regression the issue asks us to
+// close.
+//
+// `eof_parity_table` is the differential audit: for each fixture where
+// the TEXT engine resolves cleanly (so there is a canonical text answer
+// to match — the cases where text conflicts are legitimate
+// "semantic resolved what text could not" wins and are excluded), the
+// semantic output must end with the SAME trailing-newline state as the
+// text output. The four issue-named shapes are called out inline.
+// =====================================================================
+fn semantic_eof_byte(base: &str, ours: &str, theirs: &str) -> Option<u8> {
+    let outcome = merge_rust(base, ours, theirs);
+    let bytes = match outcome {
+        MergeOutcome::Clean(b) => b,
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => merged_bytes_with_markers,
+        other => panic!("unexpected semantic outcome: {other:?}"),
+    };
+    bytes.last().copied()
+}
+
+fn text_outcome(base: &str, ours: &str, theirs: &str) -> MergeOutcome {
+    text_hunk_merge_with_markers(
+        base.as_bytes(),
+        ours.as_bytes(),
+        theirs.as_bytes(),
+        MARKERS,
+    )
+}
+
+#[test]
+fn eof_parity_table() {
+    // (name, base, ours, theirs)
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // --- file ends WITH newline (all sides) ---
+        (
+            "ends-with-newline/disjoint-edits",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+        ),
+        // --- file ends WITHOUT newline (all sides) ---
+        (
+            "ends-without-newline/disjoint-edits",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+        ),
+        // --- both sides ADD a trailing newline (base had none) ---
+        (
+            "both-sides-add-trailing-newline",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+        ),
+        // --- one side STRIPS the trailing newline; that side edits the
+        //     final line, so the text engine drops the `\n`. The majority
+        //     vote (2-of-3 still have it) wrongly keeps it. ---
+        (
+            "one-side-strips-trailing-newline/theirs-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+        ),
+        // mirror: ours is the stripping editor.
+        (
+            "one-side-strips-trailing-newline/ours-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+        ),
+        // --- one side ADDS the trailing newline; that side edits the
+        //     final line (only 1-of-3 has it). The majority vote wrongly
+        //     strips it; the text engine keeps it. ---
+        (
+            "one-side-adds-trailing-newline/theirs-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+        ),
+        (
+            "one-side-adds-trailing-newline/ours-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, base, ours, theirs) in cases {
+        let text = text_outcome(base, ours, theirs);
+        let text_bytes = match &text {
+            MergeOutcome::Clean(b) => b.clone(),
+            // Text conflict => no canonical text answer; this is a
+            // legitimate "semantic resolved what text could not" case.
+            // Excluded from the parity assertion by construction.
+            MergeOutcome::Conflicts { .. } => {
+                panic!(
+                    "fixture `{name}` was meant to resolve cleanly in the text engine \
+                     but produced a conflict; fix the fixture or move it out of the \
+                     parity table"
+                );
+            }
+            other => panic!("unexpected text outcome for `{name}`: {other:?}"),
+        };
+        let text_eof = text_bytes.last().copied();
+        let sem_eof = semantic_eof_byte(base, ours, theirs);
+        if sem_eof != text_eof {
+            failures.push(format!(
+                "  [{name}] semantic EOF byte {sem_eof:?} != text EOF byte {text_eof:?}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "semantic path diverges from text engine on EOF-newline:\n{}",
+        failures.join("\n")
     );
 }
