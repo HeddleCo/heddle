@@ -34,6 +34,8 @@ struct GcOutput {
     preserved_redactions: usize,
     #[cfg(feature = "git-overlay")]
     pruned_git_mapping_entries: usize,
+    #[cfg(feature = "git-overlay")]
+    consolidated_mirror_loose: usize,
 }
 
 pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result<()> {
@@ -109,6 +111,22 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 summary.pruned_git_mapping_entries = removed;
                 if !json && removed > 0 {
                     println!("Pruned {removed} stale Git-overlay mapping entries");
+                }
+
+                // Consolidate the git-overlay mirror (`.heddle/git`): pack its
+                // loose objects and drop the redundant loose copies. The mirror
+                // is a separate object store (sley's git ODB) from heddle's
+                // native store packed above, and accumulates a loose object per
+                // minted/imported commit, tree, and blob — the dominant
+                // uninstrumented read cost. Lossless + OID-preserving (packs
+                // every object on disk, content-addressed); see
+                // `GitBridge::consolidate_mirror`.
+                let consolidated = bridge.consolidate_mirror()?;
+                summary.consolidated_mirror_loose = consolidated;
+                if !json && consolidated > 0 {
+                    println!(
+                        "Consolidated {consolidated} loose Git-overlay mirror objects into a pack"
+                    );
                 }
             }
         }

@@ -3096,10 +3096,11 @@ itself):
 
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
-report redacted blobs the collector refused to touch):
+report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
+counts loose Git-overlay mirror objects packed into the mirror's own pack):
 
 ```json
-{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0}
+{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
 ```
 
 `heddle redact purge apply|list --output json` emit (each carries `output_kind`
