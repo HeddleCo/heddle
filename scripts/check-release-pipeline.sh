@@ -228,6 +228,20 @@ else
   err "missing Homebrew cask manifest publication wiring"
 fi
 
+# Scoop (Windows) manifest publication — parallel channel on the same
+# substrate (#233). The renderer emits bucket/heddle.json from the Windows
+# zip line(s) in SHA256SUMS; the publish-manifests job opens a PR against
+# the scoop-heddle bucket with the same App token, gated stable-only by
+# the publish-manifests `if` condition asserted below.
+if [[ -x scripts/render-scoop-manifest.sh ]] \
+   && grep -F "bucket/heddle.json" "$WF" >/dev/null \
+   && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
+   && grep -F "HeddleCo/scoop-heddle" "$WF" >/dev/null; then
+  ok "Scoop manifest publication wired"
+else
+  err "missing Scoop manifest publication wiring"
+fi
+
 if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" "$WF" >/dev/null; then
   ok "manifest publication gated to stable releases"
 else

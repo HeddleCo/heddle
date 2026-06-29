@@ -684,6 +684,10 @@ jobs:
         shell: bash
         run: scripts/render-homebrew-cask.sh "${{ steps.ver.outputs.tag }}" dist/SHA256SUMS rendered/heddle.rb
 
+      - name: Render Scoop manifest
+        shell: bash
+        run: scripts/render-scoop-manifest.sh "${{ steps.ver.outputs.tag }}" dist/SHA256SUMS rendered/heddle.json
+
       - name: Generate release publisher token
         id: app-token
         uses: actions/create-github-app-token@v2
@@ -691,7 +695,7 @@ jobs:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}
           owner: HeddleCo
-          repositories: homebrew-heddle
+          repositories: homebrew-heddle,scoop-heddle
 
       - name: Publish Homebrew cask PR
         uses: ./.github/actions/publish-manifest
@@ -701,4 +705,14 @@ jobs:
           rendered-file: rendered/heddle.rb
           token: ${{ steps.app-token.outputs.token }}
           channel: homebrew
+          version: ${{ steps.ver.outputs.version }}
+
+      - name: Publish Scoop manifest PR
+        uses: ./.github/actions/publish-manifest
+        with:
+          target-repo: HeddleCo/scoop-heddle
+          manifest-path: bucket/heddle.json
+          rendered-file: rendered/heddle.json
+          token: ${{ steps.app-token.outputs.token }}
+          channel: scoop
           version: ${{ steps.ver.outputs.version }}
