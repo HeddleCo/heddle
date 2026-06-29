@@ -465,6 +465,195 @@ fn install_pack_accepts_valid_compressed_blob_pack() {
     );
 }
 
+fn count_packs(store: &FsStore) -> usize {
+    std::fs::read_dir(packs_dir(store.root()))
+        .map(|iter| {
+            iter.flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext == "pack")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn count_loose_objects(store: &FsStore) -> usize {
+    use super::fs_paths::{blobs_dir, trees_dir};
+    // Loose objects are sharded into 2-char prefix subdirectories
+    // (see `hash_path`), so count files recursively.
+    fn count_files_recursive(dir: &std::path::Path) -> usize {
+        let mut total = 0;
+        if let Ok(iter) = std::fs::read_dir(dir) {
+            for entry in iter.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    total += count_files_recursive(&path);
+                } else if path.is_file() {
+                    total += 1;
+                }
+            }
+        }
+        total
+    }
+    count_files_recursive(&blobs_dir(store.root()))
+        + count_files_recursive(&trees_dir(store.root()))
+}
+
+/// GC's contract is to *consolidate* the object store: pack the loose
+/// objects AND prune the now-redundant loose copies, so the ODB shrinks
+/// rather than gaining a duplicate pack alongside the still-loose
+/// originals. The pre-fix bug (heddle maintenance gc regression) left
+/// every packed object ALSO loose, so the object store had more sources
+/// to search and read commands ran ~2x slower. This test pins the
+/// invariant: after `pack_objects` + `prune_loose_objects` no object is
+/// simultaneously loose and packed.
+#[test]
+fn pack_objects_then_prune_leaves_no_loose_packed_duplicates() {
+    let (_temp, store) = create_test_store();
+
+    // Write a handful of loose blobs + trees.
+    let mut hashes = Vec::new();
+    for i in 0..16 {
+        let blob = Blob::from(format!("gc-consolidation-blob-{i}"));
+        hashes.push(store.put_blob(&blob).unwrap());
+    }
+    for (i, hash) in hashes.iter().take(4).enumerate() {
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file(format!("file-{i}.txt"), *hash, false).unwrap(),
+        ]);
+        store.put_tree(&tree).unwrap();
+    }
+
+    let loose_before = count_loose_objects(&store);
+    assert!(
+        loose_before >= 20,
+        "expected the test corpus to be written loose, got {loose_before}"
+    );
+
+    let (packed, _saved) = store.pack_objects(false).unwrap();
+    assert!(packed >= 20, "pack_objects should pack the loose corpus");
+    let (pruned, _freed) = store.prune_loose_objects().unwrap();
+    assert!(pruned >= 20, "prune should remove the now-packed loose copies");
+
+    // The consolidation invariant: nothing is left both loose and packed.
+    let loose_after = count_loose_objects(&store);
+    assert_eq!(
+        loose_after, 0,
+        "after gc (pack + prune) the object store must not retain loose copies \
+         of objects that now live in a pack (regression: pack-without-prune)"
+    );
+
+    // Every object is still readable (no data lost to the consolidation).
+    for hash in &hashes {
+        assert!(
+            store.get_blob(hash).unwrap().is_some(),
+            "blob {hash:?} must survive consolidation"
+        );
+    }
+}
+
+/// Running gc twice must not keep growing the pack count. The pre-fix
+/// `pack_objects` always wrote a *new* pack of the loose objects without
+/// consolidating the existing packs, so a repo that is gc'd repeatedly
+/// accumulated packs and got slower on every run. After the fix a
+/// second gc over an already-consolidated store is a no-op: it neither
+/// re-packs already-packed content into yet another pack nor leaves the
+/// pack count climbing.
+#[test]
+fn repeated_gc_does_not_grow_pack_count() {
+    let (_temp, store) = create_test_store();
+
+    for i in 0..16 {
+        let blob = Blob::from(format!("repeated-gc-blob-{i}"));
+        store.put_blob(&blob).unwrap();
+    }
+
+    store.pack_objects(false).unwrap();
+    store.prune_loose_objects().unwrap();
+    let packs_after_first = count_packs(&store);
+    assert_eq!(
+        packs_after_first, 1,
+        "a single gc should consolidate the corpus into exactly one pack"
+    );
+
+    // Second gc with nothing loose: must not mint another pack.
+    let (packed_second, _) = store.pack_objects(false).unwrap();
+    store.prune_loose_objects().unwrap();
+    let packs_after_second = count_packs(&store);
+    assert_eq!(
+        packed_second, 0,
+        "a second gc with no loose objects must not re-pack already-packed content"
+    );
+    assert_eq!(
+        packs_after_second, 1,
+        "repeated gc must not grow the pack count (regression: unbounded pack accumulation)"
+    );
+}
+
+/// The decisive regression: a store that ALREADY has a pack, then
+/// accumulates new loose objects, then is gc'd. The pre-fix
+/// `pack_objects` wrote the new loose objects into a *second* pack and
+/// left the first pack in place, so the pack count grew 1 -> 2. Read
+/// commands probe every pack linearly (`PackManager::get_object`), so on
+/// a real repo each extra pack roughly doubled status time even after
+/// the loose copies were pruned. GC must *consolidate*: fold every
+/// object (loose + already-packed) into a single pack so the pack count
+/// does not grow.
+#[test]
+fn gc_consolidates_into_single_pack_over_existing_pack() {
+    let (_temp, store) = create_test_store();
+
+    // Round 1: write objects and pack them -> one pack.
+    for i in 0..12 {
+        store.put_blob(&Blob::from(format!("round1-{i}"))).unwrap();
+    }
+    store.pack_objects(false).unwrap();
+    store.prune_loose_objects().unwrap();
+    assert_eq!(count_packs(&store), 1, "round 1 produces one pack");
+
+    // Round 2: more loose objects land (a later snapshot), then gc again.
+    let mut round2 = Vec::new();
+    for i in 0..12 {
+        round2.push(store.put_blob(&Blob::from(format!("round2-{i}"))).unwrap());
+    }
+    assert!(count_loose_objects(&store) >= 12);
+
+    store.pack_objects(false).unwrap();
+    store.prune_loose_objects().unwrap();
+
+    assert_eq!(
+        count_packs(&store),
+        1,
+        "gc must consolidate loose + existing pack into a SINGLE pack \
+         (regression: a second gc minted a new pack, growing pack count and \
+         slowing every object lookup)"
+    );
+    assert_eq!(
+        count_loose_objects(&store),
+        0,
+        "gc must prune the loose copies it just packed"
+    );
+
+    // No object lost across the consolidation.
+    for hash in &round2 {
+        assert!(store.get_blob(hash).unwrap().is_some());
+    }
+    // And the round-1 objects, which only ever lived in the first pack,
+    // must survive being folded into the consolidated pack.
+    assert!(
+        store
+            .get_blob(&Blob::from("round1-0").hash())
+            .unwrap()
+            .is_some(),
+        "objects from the pre-existing pack must survive consolidation"
+    );
+}
+
 #[test]
 fn test_blob_deduplication() {
     let (_temp, store) = create_test_store();

@@ -16,6 +16,14 @@ use crate::{
     },
 };
 
+fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(HeddleError::from(e)),
+    }
+}
+
 impl FsStore {
     /// Bulk-install many blobs as a single packfile. Two fsyncs total
     /// (one for `.pack`, one for `.idx`) regardless of blob count —
@@ -75,27 +83,120 @@ impl FsStore {
         Ok(())
     }
 
-    pub(super) fn pack_objects_impl(&self, _aggressive: bool) -> Result<(u64, u64)> {
-        let blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
-        let trees = list_hashes_from_dir(&trees_dir(&self.root))?;
+    /// Consolidate the object store into a single pack.
+    ///
+    /// GC must *shrink* the set of places a reader has to look, not grow
+    /// it. The naive "pack the loose objects into a fresh pack" strategy
+    /// regressed read performance badly: every `maintenance gc` minted a
+    /// brand-new pack *alongside* the existing pack(s) and (by default)
+    /// left the now-redundant loose copies in place. The result was an
+    /// object store with strictly MORE sources to search — loose objects
+    /// plus an ever-growing fleet of packs — and `PackManager::get_object`
+    /// probes every pack linearly, so each extra pack roughly doubled the
+    /// cost of the object lookups that `status`/`diff`/verification do.
+    ///
+    /// This implementation does a true repack: it folds every object
+    /// already living in a pack *together with* the loose blobs and trees
+    /// into one new consolidated pack, installs it, and then deletes the
+    /// superseded packs. Combined with the caller's
+    /// `prune_loose_objects`, the store ends a GC with exactly one pack
+    /// and no loose duplicates — strictly fewer read sources than it
+    /// started with. Running GC again over an already-consolidated store
+    /// is a no-op (nothing loose, one pack already covers everything).
+    ///
+    /// State objects are addressed by `ChangeId` and may have a stale
+    /// packed body shadowed by a fresher loose copy (#570). We re-pack
+    /// the packed state body verbatim; the loose copy (which `prune`
+    /// never touches) keeps shadowing it on read, so the shadow semantics
+    /// are preserved across the repack.
+    pub(super) fn pack_objects_impl(&self, aggressive: bool) -> Result<(u64, u64)> {
+        let loose_blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
+        let loose_trees = list_hashes_from_dir(&trees_dir(&self.root))?;
 
-        if blobs.is_empty() && trees.is_empty() {
+        // Snapshot what the existing packs already hold, plus the file
+        // paths we'll retire once the consolidated pack is installed.
+        let (existing_ids, old_pack_files) = {
+            let manager = self.pack_manager().read().map_err(|_| {
+                HeddleError::Config("Failed to acquire pack manager lock".to_string())
+            })?;
+            let ids = manager.list_all_ids()?;
+            let files: Vec<(std::path::PathBuf, std::path::PathBuf)> = manager
+                .pack_file_paths()
+                .into_iter()
+                .map(|(pack, index)| (pack.to_path_buf(), index.to_path_buf()))
+                .collect();
+            (ids, files)
+        };
+
+        // Nothing loose and at most one pack already — the store is
+        // already consolidated; don't churn a fresh identical pack.
+        if loose_blobs.is_empty() && loose_trees.is_empty() && old_pack_files.len() <= 1 {
             return Ok((0, 0));
         }
 
-        let mut builder = PackBuilder::new(self.compression);
+        // Consolidation packs every object that's already packed plus the
+        // loose ones. The default path SKIPS the sliding-window delta
+        // search: it runs across the full payloads of every object and on
+        // a large native store (tens of MB across thousands of objects)
+        // costs minutes for a near-zero size win, because the carried-
+        // forward objects are already zstd-compressed. `--aggressive`
+        // opts back into the full delta search for the rare "shrink the
+        // pack at all costs" case. This mirrors the snapshot hot path
+        // (`put_blobs_packed_impl`), which disables delta for the same
+        // reason.
+        let mut compression = self.compression;
+        if !aggressive {
+            compression.max_delta_size = 0;
+        }
+        let mut builder = PackBuilder::new(compression);
+        let mut seen: std::collections::HashSet<crate::store::pack::PackObjectId> =
+            std::collections::HashSet::new();
 
-        for hash in &blobs {
-            if let Some(blob) = ObjectStore::get_blob(self, hash)? {
-                builder.add(*hash, PackObjectType::Blob, blob.content().to_vec());
+        // 1. Carry forward everything already in a pack so the old packs
+        //    can be retired. `get_object` resolves the body + type for
+        //    any id (blob/tree/state/action), and `add_id` preserves
+        //    ChangeId-keyed state objects.
+        for id in existing_ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            let obj_type = {
+                let manager = self.pack_manager().read().map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?;
+                manager.get_object(&id)?
+            };
+            if let Some((obj_type, data)) = obj_type {
+                builder.add_id(id, obj_type, data);
             }
         }
 
-        for hash in &trees {
+        // 2. Fold in the loose blobs and trees. Skip any whose hash is
+        //    already covered by a carried-forward pack entry.
+        for hash in &loose_blobs {
+            let id = crate::store::pack::PackObjectId::Hash(*hash);
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(blob) = ObjectStore::get_blob(self, hash)? {
+                seen.insert(id);
+                builder.add(*hash, PackObjectType::Blob, blob.content().to_vec());
+            }
+        }
+        for hash in &loose_trees {
+            let id = crate::store::pack::PackObjectId::Hash(*hash);
+            if seen.contains(&id) {
+                continue;
+            }
             if let Some(tree) = ObjectStore::get_tree(self, hash)? {
                 let data = rmp_serde::to_vec(&tree)?;
+                seen.insert(id);
                 builder.add(*hash, PackObjectType::Tree, data);
             }
+        }
+
+        if seen.is_empty() {
+            return Ok((0, 0));
         }
 
         let (pack_data, index_data, stats) = builder.build()?;
@@ -107,6 +208,29 @@ impl FsStore {
         // path doesn't go through here — it calls
         // `install_pack_files` directly via `put_blobs_packed_impl`,
         // which keeps its caches warm.
+        self.clear_recent_object_caches();
+
+        // Retire the superseded packs now that the consolidated pack is
+        // durably installed and every object they held has been carried
+        // forward. The consolidated pack is content-addressed, so if it
+        // happened to hash-collide with an old pack (a store that was
+        // already a single consolidated pack) that file is excluded here.
+        let new_pack_name = blake3::hash(&pack_data).to_hex();
+        for (pack_path, index_path) in &old_pack_files {
+            let is_new_pack = pack_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem == new_pack_name.as_str())
+                .unwrap_or(false);
+            if is_new_pack {
+                continue;
+            }
+            remove_file_ignore_missing(pack_path)?;
+            remove_file_ignore_missing(index_path)?;
+        }
+        // Disk shrank (packs removed), so `reload_if_disk_grew` would
+        // not pick this up — force a full reload of the pack list.
+        self.reload_packs()?;
         self.clear_recent_object_caches();
 
         let saved = stats.total_uncompressed - stats.total_compressed;
