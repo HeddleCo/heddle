@@ -8,17 +8,81 @@
 //! /`release`, and folded into a real heddle state by
 //! [`ContentAddressedMount::capture`].
 //!
+//! ## Cache coherence — active invalidation (heddle#87)
+//!
+//! The mount lets the kernel cache page data, attrs, and dentries
+//! (no `FOPEN_DIRECT_IO`), and keeps that cache coherent the way
+//! FSKit does on macOS: by *actively pushing invalidations* to the
+//! kernel the instant heddle mutates the backing content. Every
+//! mutation flows through a FUSE callback in *this* shell, so the
+//! invalidation is self-referential — the same callback that mutates
+//! the overlay queues the matching `notify_inval_*` (dispatched off
+//! the worker thread; see below).
+//!
+//! The notifier handle ([`fuser::Notifier`]) only exists *after* the
+//! session is mounted (it wraps the `/dev/fuse` channel). [`FuseShell`]
+//! therefore holds an `Arc<NotifyGate>` that [`Self::mount`] /
+//! [`Self::mount_background`] *start* immediately after spawning the
+//! session. Before the gate is started (and after an unmount), every
+//! invalidate is a best-effort no-op; the un-started window only spans
+//! the mount handshake, during which nothing the kernel has cached can
+//! be stale.
+//!
+//! ### Off-thread dispatch (deadlock avoidance)
+//!
+//! Crucially, callbacks do **not** call the notifier inline. A
+//! whole-inode invalidation makes the kernel acquire `inode->i_rwsem`
+//! — a lock the in-flight `write`/`flush`/`setattr` callback is already
+//! holding — so a synchronous notify from inside the callback
+//! deadlocks the mount. Instead [`NotifyGate`] runs a dedicated
+//! invalidator thread: callbacks `enqueue` the invalidation and return
+//! (releasing the kernel lock), and the thread drains the queue and
+//! issues the actual `notify_inval_*`. This matches how libfuse's own
+//! `notify_inval_*` examples are structured (notify only off the
+//! request loop). Invalidation is therefore *asynchronous* — exactly
+//! like FSKit's `invalidateNode` — so a re-reader sees fresh content
+//! once the queued notify lands, which is effectively immediate but
+//! not synchronously ordered against the mutating syscall's return.
+//!
+//! ### Invalidation contract — which writes trigger which invals
+//!
+//! | callback              | mutation                         | invalidation |
+//! |-----------------------|----------------------------------|--------------|
+//! | `write`               | bytes into the hot tier          | `inval_inode(ino, 0, -1)` — drop cached pages + attrs for the file |
+//! | `setattr`             | chmod / truncate / mtime         | `inval_inode(ino, 0, -1)` — attrs (and, on truncate, data) changed |
+//! | `create` / `mknod`    | new file entry under `parent`    | `inval_entry(parent, name)` — refresh the now-stale negative/positive dentry |
+//! | `mkdir`               | new dir entry under `parent`     | `inval_entry(parent, name)` |
+//! | `symlink`             | new symlink entry under `parent` | `inval_entry(parent, name)` |
+//! | `unlink` / `rmdir`    | remove entry under `parent`      | `inval_entry(parent, name)` — drop the cached dentry so a re-lookup 404s |
+//! | `rename`              | move `src→dst`                   | `inval_entry(src_parent, src_name)` + `inval_entry(dst_parent, dst_name)` |
+//!
+//! `flush` / `release` deliberately do **not** invalidate: they promote
+//! the hot tier into CAS but don't change the bytes the shell serves
+//! (the content-changing `write` / `setattr` callbacks already
+//! invalidated), and `flush` fires on *every* `close(2)` including a
+//! reader's — invalidating there would throw away the cached-read win.
+//!
+//! `inval_inode(ino, 0, -1)` invalidates the *entire* data range plus
+//! the cached attrs; we use the whole-file form because the overlay
+//! re-materialises the blob wholesale on promotion rather than tracking
+//! dirty byte ranges. `inval_entry` is best-effort: the kernel returns
+//! `ENOENT` if it never cached the entry, which `fuser` swallows. All
+//! invalidations are *advisory for performance, mandatory for
+//! correctness* — a dropped notification (channel error) is logged but
+//! cannot corrupt state, only risk a stale read until the attr TTL
+//! lapses, so the callbacks never fail on an invalidation error.
+//!
 //! ## Implemented kernel callbacks
 //!
 //! Read path:
-//! * `init` — opts into `FUSE_DIRECT_IO_ALLOW_MMAP` so mmap works
-//!   alongside `FOPEN_DIRECT_IO`.
+//! * `init` — default page-cache mode; no `FUSE_DIRECT_IO_ALLOW_MMAP`
+//!   opt-in needed now that we don't return `FOPEN_DIRECT_IO`.
 //! * `lookup` / `getattr` / `open` / `read` / `readdir` / `flush` /
 //!   `release` / `opendir` / `releasedir` / `destroy`.
 //!
 //! Write path (heddle#180):
 //! * `create` — `open(O_CREAT[|O_EXCL|O_TRUNC])`. EEXIST on O_EXCL
-//!   clash. Returns `FOPEN_DIRECT_IO`.
+//!   clash. Fires `inval_entry(parent, name)`.
 //! * `mkdir` — empty directory in the overlay.
 //! * `mknod` — regular files only; non-`S_IFREG` returns EPERM.
 //! * `unlink` / `rmdir`.
@@ -132,16 +196,20 @@
 //! platform while sparing the other.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     panic::AssertUnwindSafe,
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Sender, channel},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use fuser::{
     BackgroundSession, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
+    FopenFlags, Generation, INodeNo, KernelConfig, LockOwner, MountOption, Notifier, OpenFlags,
     RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, ReplyWrite, Request, Session, TimeOrNow, WriteFlags,
 };
@@ -165,11 +233,150 @@ const TTL: Duration = Duration::from_secs(1);
 /// remounts, so a constant is fine.
 const GENERATION: Generation = Generation(0);
 
+/// A single kernel-invalidation request, enqueued by a FUSE callback
+/// and drained by the background invalidator thread.
+enum InvalMsg {
+    /// Drop cached pages + attrs for the whole inode.
+    Inode(u64),
+    /// Drop the cached dentry for `(parent, name)`.
+    Entry(u64, OsString),
+}
+
+/// Dispatcher that pushes active cache invalidations to the kernel for
+/// a live mount, **off the FUSE worker thread**.
+///
+/// ## Why a separate thread (the deadlock this avoids)
+///
+/// `fuse_lowlevel_notify_inval_inode` makes the kernel walk the inode's
+/// page cache and acquire `inode->i_rwsem`. An in-flight `write` /
+/// `flush` / `setattr` callback is *already holding* that lock when it
+/// runs — so calling the notifier **synchronously from inside the
+/// callback** is a classic AB-BA deadlock: the callback waits for the
+/// notify ack, the kernel waits for the callback's lock. (Empirically:
+/// the first cut of heddle#87 did exactly this and wedged the mount
+/// hard, leaving zombie worker threads.) libfuse's own
+/// `notify_inval_*` examples sidestep it by only ever notifying from a
+/// thread that is *not* the request loop. We do the same: callbacks
+/// `enqueue` a message and return immediately (releasing the kernel
+/// lock); a dedicated thread drains the queue and issues the notifier
+/// calls once the originating op has completed.
+///
+/// The [`Notifier`] only exists after the session mounts, so the gate
+/// starts empty (a [`OnceLock`] of the sender half) and
+/// [`NotifyGate::start`] fills it — spawning the thread — the moment
+/// the session is live. Before that, and after the session drops (the
+/// `Notifier`'s channel dies, the thread exits, the receiver is gone),
+/// every `enqueue` is a best-effort no-op.
+#[derive(Default)]
+struct NotifyGate {
+    /// Sender half of the invalidation queue, installed by [`Self::start`].
+    tx: OnceLock<Sender<InvalMsg>>,
+    /// Join handle for the invalidator thread, kept so the gate can be
+    /// dropped cleanly. Behind a `Mutex<Option<…>>` because `Drop`
+    /// needs `&mut`-style access through the shared `Arc`.
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl NotifyGate {
+    /// Install the live notifier and spawn the invalidator thread.
+    /// Called once, right after the session mounts. A second call (it
+    /// can't happen with the current flow) is ignored — the first
+    /// notifier wins and the second thread never starts.
+    fn start(&self, notifier: Notifier) {
+        let (tx, rx) = channel::<InvalMsg>();
+        if self.tx.set(tx).is_err() {
+            // Already started; drop the freshly-built channel.
+            return;
+        }
+        let handle = std::thread::Builder::new()
+            .name("heddle-fuse-inval".to_string())
+            .spawn(move || {
+                // Drains until every sender is dropped (i.e. the gate /
+                // mount is torn down), then exits.
+                for msg in rx {
+                    match msg {
+                        InvalMsg::Inode(ino) => {
+                            // offset 0, len -1 == the entire data range
+                            // plus the cached attrs.
+                            if let Err(err) = notifier.inval_inode(INodeNo(ino), 0, -1) {
+                                debug!(
+                                    ?err,
+                                    ino, "inval_inode failed; stale read possible until TTL"
+                                );
+                            }
+                        }
+                        InvalMsg::Entry(parent, name) => {
+                            if let Err(err) = notifier.inval_entry(INodeNo(parent), &name) {
+                                debug!(
+                                    ?err,
+                                    parent,
+                                    ?name,
+                                    "inval_entry failed; stale dentry possible until TTL"
+                                );
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("spawn heddle-fuse-inval thread");
+        *self.worker.lock().expect("notify worker mutex") = Some(handle);
+    }
+
+    /// Enqueue a whole-inode invalidation. Best-effort: a no-op before
+    /// the gate is started or after the worker has exited. Never blocks
+    /// the FUSE callback on the kernel — that's the whole point.
+    fn inval_inode(&self, ino: u64) {
+        if let Some(tx) = self.tx.get() {
+            let _ = tx.send(InvalMsg::Inode(ino));
+        }
+    }
+
+    /// Enqueue a dentry invalidation for `(parent, name)`. Best-effort,
+    /// same rationale as [`Self::inval_inode`].
+    fn inval_entry(&self, parent: u64, name: &OsStr) {
+        if let Some(tx) = self.tx.get() {
+            let _ = tx.send(InvalMsg::Entry(parent, name.to_os_string()));
+        }
+    }
+}
+
+impl Drop for NotifyGate {
+    fn drop(&mut self) {
+        // Field drop order would already close the channel (dropping
+        // the `Sender` in `tx`) and let the thread exit, but be explicit
+        // and deterministic: take the sender out first so the thread's
+        // `for msg in rx` loop ends, then join it. Joining keeps the
+        // invalidator from outliving the mount it serves.
+        //
+        // We can't move the `Sender` out of the `OnceLock` behind `&mut
+        // self` without `OnceLock::take` (stable), so use it to drop the
+        // sender, then join.
+        let _ = self.tx.take();
+        if let Some(handle) = self.worker.lock().ok().and_then(|mut g| g.take()) {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Adapter that exposes a [`ContentAddressedMount`] to the kernel
 /// via FUSE. Owns the mount in an `Arc` so the FUSE worker thread(s)
 /// share the same registry.
 pub struct FuseShell {
     inner: Arc<ContentAddressedMount>,
+    /// Kernel-notification handle, populated at mount time. Shared with
+    /// nothing else; the `Arc` is only so [`Self::mount`] can hand a
+    /// clone to the spawned session while keeping one for the shell
+    /// that's been moved into the session. See [`NotifyGate`].
+    notify: Arc<NotifyGate>,
+    /// Count of `read` callbacks served since mount. Lets a test prove
+    /// the kernel page cache is live (cached mode, heddle#87): in
+    /// cached mode a re-read of unchanged content is served from the
+    /// page cache and never reaches this callback, so the counter
+    /// stays flat across the second read; in the old `FOPEN_DIRECT_IO`
+    /// mode every userspace `read(2)` would bump it. Shared via `Arc`
+    /// so a caller can hold a handle ([`Self::read_calls_handle`])
+    /// after the shell is consumed by `mount_background`.
+    read_calls: Arc<AtomicU64>,
 }
 
 impl FuseShell {
@@ -177,7 +384,18 @@ impl FuseShell {
     pub fn new(mount: ContentAddressedMount) -> Self {
         Self {
             inner: Arc::new(mount),
+            notify: Arc::new(NotifyGate::default()),
+            read_calls: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Shared handle to the FUSE `read`-callback counter. Grab this
+    /// *before* mounting (the shell is consumed by `mount` /
+    /// `mount_background`) to observe how many reads actually reach
+    /// userspace — used by the cache-mode-active test to confirm the
+    /// kernel page cache is serving repeated reads (heddle#87).
+    pub fn read_calls_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.read_calls)
     }
 
     /// Best-effort mtime to attach to entry replies for newly
@@ -208,19 +426,51 @@ impl FuseShell {
 
     /// Mount synchronously. Blocks the calling thread for the lifetime
     /// of the mount (returns when unmounted or on error).
+    ///
+    /// We build the [`Session`] explicitly (rather than the
+    /// `fuser::mount2` convenience) so we can install the kernel
+    /// [`Notifier`] into the shell's [`NotifyGate`] *before* the event
+    /// loop starts serving callbacks — that's what lets the write-side
+    /// callbacks push active cache invalidations (heddle#87). The gate
+    /// is shared via `self.notify`, which gets moved into the session
+    /// along with `self`; we kept a clone of the `Arc` before the move.
+    ///
+    /// `Session::run` is crate-private in fuser, so to keep blocking
+    /// semantics we spawn the worker thread and `join()` it — the join
+    /// returns when the mount is torn down, exactly as the old
+    /// `mount2` call did.
     pub fn mount(self, mountpoint: impl AsRef<Path>) -> Result<()> {
         let config = default_config();
-        fuser::mount2(self, mountpoint.as_ref(), &config)
+        let gate = Arc::clone(&self.notify);
+        let session = Session::new(self, mountpoint.as_ref(), &config)
+            .map_err(|e| crate::error::MountError::Store(objects::error::HeddleError::Io(e)))?;
+        gate.start(session.notifier());
+        let bg = session
+            .spawn()
+            .map_err(|e| crate::error::MountError::Store(objects::error::HeddleError::Io(e)))?;
+        bg.join()
             .map_err(|e| crate::error::MountError::Store(objects::error::HeddleError::Io(e)))?;
         Ok(())
     }
 
     /// Mount in a background session. Caller holds the returned
     /// [`BackgroundSession`]; dropping it triggers an unmount.
+    ///
+    /// As with [`Self::mount`], the kernel [`Notifier`] is installed
+    /// into the shell's [`NotifyGate`] right after the session mounts
+    /// so the write-side callbacks can invalidate the kernel cache.
     pub fn mount_background(self, mountpoint: impl AsRef<Path>) -> Result<BackgroundSession> {
         let config = default_config();
+        let gate = Arc::clone(&self.notify);
         let session = Session::new(self, mountpoint.as_ref(), &config)
             .map_err(|e| crate::error::MountError::Store(objects::error::HeddleError::Io(e)))?;
+        // Install the notifier before spawning the worker thread: once
+        // the thread is live the kernel can issue callbacks, and we
+        // want the gate filled before the first mutation arrives. The
+        // `Session`'s notifier and the `BackgroundSession`'s notifier
+        // wrap clones of the same channel sender, so a notifier taken
+        // here stays valid for the whole session lifetime.
+        gate.start(session.notifier());
         session
             .spawn()
             .map_err(|e| crate::error::MountError::Store(objects::error::HeddleError::Io(e)))
@@ -396,29 +646,16 @@ fn guard_call<T>(label: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T
 }
 
 impl Filesystem for FuseShell {
-    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
-        // Opt into `FUSE_DIRECT_IO_ALLOW_MMAP`. We hand back
-        // `FOPEN_DIRECT_IO` from `open` (see the comment there), and
-        // under default kernel semantics that disables shared `mmap`
-        // on every fd — calls to `mmap(MAP_SHARED, ...)` return
-        // `ENODEV`. The kernel cap added in 5.16 keeps direct-IO
-        // bypass for `read(2)`/`write(2)` but re-enables shared mmap,
-        // which is the daily-use path for rust-analyzer, cargo, IDEs,
-        // and `grep --mmap` on heddle-mounted trees.
-        //
-        // `add_capabilities` errors when the kernel is < 5.16 (the
-        // bit wasn't defined). That's not fatal — older kernels just
-        // get the pre-cap behaviour (no shared mmap), which is the
-        // same shape r1 of this fix shipped with. Log it once at
-        // mount time so operators on old kernels can correlate
-        // `ENODEV` from a mapping syscall with the missing cap.
-        if let Err(unsupported) = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP) {
-            debug!(
-                ?unsupported,
-                "kernel does not support FUSE_DIRECT_IO_ALLOW_MMAP (requires 5.16+); \
-                 shared mmap on mounted files will fail with ENODEV"
-            );
-        }
+    fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
+        // Nothing to opt into. The mount runs in the kernel's default
+        // caching mode: `open` no longer returns `FOPEN_DIRECT_IO`, so
+        // the page cache is live and shared `mmap(MAP_SHARED, ...)`
+        // works out of the box without the `FUSE_DIRECT_IO_ALLOW_MMAP`
+        // capability (and therefore without the Linux 5.16+ floor that
+        // cap required). Coherence comes from active invalidation: see
+        // the module-level "Invalidation contract" — every write-side
+        // callback pushes the matching `notify_inval_*` so the kernel
+        // can never serve stale cached bytes, attrs, or dentries.
         Ok(())
     }
 
@@ -437,38 +674,35 @@ impl Filesystem for FuseShell {
                 "on_open bookkeeping failed; orphan cleanup may misfire"
             );
         }
-        // Open every file in `direct_io` mode so the kernel never
-        // serves bytes from its page cache. The content-addressed
-        // mount maintains its own blob cache ([`BlobCachePool`]),
-        // which already deduplicates repeated reads against the
-        // captured tree — so the kernel-side page cache wins us
-        // nothing, and *costs* correctness on the write-then-read
-        // path:
+        // Cached mode (heddle#87). Two flags, no `FOPEN_DIRECT_IO`:
         //
-        // Without `direct_io`, after a captured file is opened-for-
-        // write, mutated, closed (→ `flush` promotes the hot tier
-        // into the warm tier), and reopened, the kernel happily
-        // serves the *pre-write* bytes from its page cache. The
-        // dentry/inode caching at our 1-second TTL doesn't help —
-        // the page cache is keyed off the kernel-side inode, and
-        // the kernel has no way to know we replaced the blob behind
-        // it. `direct_io` short-circuits the page cache entirely;
-        // every kernel `read(2)` becomes a FUSE `read` callback,
-        // which we serve from the hot-tier-then-warm-tier-then-
-        // captured-blob priority chain.
+        // * (absence of `FOPEN_DIRECT_IO`) — reads flow through the
+        //   kernel page cache instead of bypassing it, so repeated
+        //   reads of unchanged content are served without a FUSE
+        //   round-trip (the throughput win), and shared `mmap` works
+        //   without the `FUSE_DIRECT_IO_ALLOW_MMAP` cap (no Linux 5.16+
+        //   floor).
+        // * `FOPEN_KEEP_CACHE` — tells the kernel *not* to drop the
+        //   page cache on `open`. FUSE's default is to invalidate the
+        //   data cache on every open, which would defeat cross-open
+        //   caching entirely (each fresh `open`+`read` would re-hit the
+        //   shell). With KEEP_CACHE the cache persists across opens and
+        //   we own coherence explicitly via active invalidation.
         //
-        // The kernel's default rule for direct-IO files is "no shared
-        // mmap" (the page cache is the mapping substrate; bypass it
-        // and `mmap(MAP_SHARED, ...)` returns `ENODEV`). We opt out
-        // of that rule by requesting `FUSE_DIRECT_IO_ALLOW_MMAP` in
-        // [`Self::init`] — on Linux 5.16+ the kernel keeps the
-        // direct-IO bypass for `read`/`write` but lets shared mmap
-        // through, which is the daily-use path for rust-analyzer,
-        // cargo, IDEs, and `grep --mmap` on heddle-mounted trees.
+        // Coherence is maintained actively: the content-changing
+        // callbacks (`write`, `setattr`) push a `notify_inval_*` after
+        // they mutate the overlay (see the module-level invalidation
+        // contract). The classic stale-read hazard — write a captured
+        // file, close, reopen, and have the kernel serve the *pre-write*
+        // bytes from its page cache — is closed because `write` /
+        // `setattr` enqueue `inval_inode(ino, 0, -1)`, dropping those
+        // cached pages so a re-reader misses cache and re-asks us. This
+        // is the same invalidate-on-change model FSKit uses on macOS,
+        // giving both platforms identical caching semantics.
         //
         // FH=0 mirrors the fuser default (we don't track per-handle
         // state — open files identify by inode in [`PlatformShell`]).
-        reply.opened(FileHandle(0), FopenFlags::FOPEN_DIRECT_IO);
+        reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
@@ -513,6 +747,13 @@ impl Filesystem for FuseShell {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        // Bump the read-callback counter. In cached mode (heddle#87)
+        // the kernel serves repeated reads of unchanged content from
+        // its page cache, so this fires far less often than userspace
+        // issues `read(2)` — the cache-mode-active test asserts on the
+        // gap. `Relaxed` is fine: the test reads the counter only after
+        // the relevant filesystem ops have completed and been observed.
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
         let result = guard_call("read", || {
             let mut buf = vec![0u8; size as usize];
             let n = self.inner.read(NodeId(ino.0), offset, &mut buf)?;
@@ -584,7 +825,14 @@ impl Filesystem for FuseShell {
         reply: ReplyWrite,
     ) {
         match guard_call("write", || self.inner.write(NodeId(ino.0), offset, data)) {
-            Ok(n) => reply.written(n as u32),
+            Ok(n) => {
+                // The hot tier now holds bytes the kernel's page cache
+                // doesn't know about. Drop the cached pages + attrs for
+                // this inode so any concurrent/subsequent reader re-asks
+                // us. (heddle#87 invalidation contract.)
+                self.notify.inval_inode(ino.0);
+                reply.written(n as u32);
+            }
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
@@ -599,6 +847,15 @@ impl Filesystem for FuseShell {
     ) {
         // Flush fires on `close(2)` from userspace. This is the
         // natural place to promote the hot buffer to CAS.
+        //
+        // We deliberately do *not* invalidate here. Promotion moves the
+        // bytes between tiers but doesn't change the *content* the shell
+        // serves — and the `write` (and `setattr`) callbacks already
+        // invalidated the kernel's cache for every byte they changed. A
+        // blanket invalidate on every `flush` would also drop the cache
+        // on a *read-only* close (flush fires on every `close(2)`, not
+        // just writers), defeating the cached-read win this whole change
+        // exists to deliver. (heddle#87 invalidation contract.)
         match guard_call("flush", || self.inner.flush(NodeId(ino.0))) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno_from_mount_error(err)),
@@ -618,6 +875,11 @@ impl Filesystem for FuseShell {
         // Belt-and-braces: a process that exits without an explicit
         // close still gets a release on the inode. Promote any
         // surviving buffer.
+        //
+        // As with `flush`: no invalidation here. The content-changing
+        // callbacks (`write` / `setattr`) already invalidated, and an
+        // unconditional release-time invalidate would drop the cache on
+        // every reader's close. (heddle#87 invalidation contract.)
         match guard_call("release", || self.inner.release(NodeId(ino.0))) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno_from_mount_error(err)),
@@ -654,10 +916,16 @@ impl Filesystem for FuseShell {
                         "on_open bookkeeping failed; orphan cleanup may misfire"
                     );
                 }
-                // Mirror the `open` callback: opt the new fd into
-                // FOPEN_DIRECT_IO so kernel page-cache reads don't
-                // shadow hot-tier writes (see `Self::open` for the
-                // full reasoning).
+                // A new entry now exists under `parent`. The kernel may
+                // have cached a *negative* dentry for this name (e.g.
+                // from an `O_CREAT` open that first `stat`ed and got
+                // ENOENT); invalidate it so the entry becomes visible.
+                // (heddle#87 invalidation contract.)
+                self.notify.inval_entry(parent.0, name);
+                // Mirror the `open` callback: cached mode with
+                // `FOPEN_KEEP_CACHE`, no `FOPEN_DIRECT_IO` (see
+                // `Self::open` for the full reasoning + the
+                // invalidation contract).
                 let attr = match guard_call("create", || self.inner.attrs(entry.node)) {
                     Ok(attrs) => file_attr_from(attrs),
                     Err(err) => {
@@ -670,7 +938,7 @@ impl Filesystem for FuseShell {
                     &attr,
                     GENERATION,
                     FileHandle(0),
-                    FopenFlags::FOPEN_DIRECT_IO,
+                    FopenFlags::FOPEN_KEEP_CACHE,
                 );
             }
             Err(err) => reply.error(errno_from_mount_error(err)),
@@ -689,6 +957,9 @@ impl Filesystem for FuseShell {
         let result = guard_call("mkdir", || self.inner.make_dir(NodeId(parent.0), name));
         match result {
             Ok(entry) => {
+                // New dir entry under `parent`; refresh any cached
+                // (likely negative) dentry. (heddle#87.)
+                self.notify.inval_entry(parent.0, name);
                 let attr = entry_attr_from(&entry, self.inner_mtime());
                 reply.entry(&TTL, &attr, GENERATION);
             }
@@ -725,6 +996,9 @@ impl Filesystem for FuseShell {
         });
         match result {
             Ok(entry) => {
+                // New file entry under `parent`; refresh the dentry.
+                // (heddle#87.)
+                self.notify.inval_entry(parent.0, name);
                 let attr = entry_attr_from(&entry, self.inner_mtime());
                 reply.entry(&TTL, &attr, GENERATION);
             }
@@ -734,14 +1008,25 @@ impl Filesystem for FuseShell {
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match guard_call("unlink", || self.inner.unlink_entry(NodeId(parent.0), name)) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                // Drop the now-removed entry's cached dentry so a
+                // re-lookup 404s instead of resurrecting it from cache.
+                // (heddle#87.)
+                self.notify.inval_entry(parent.0, name);
+                reply.ok();
+            }
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         match guard_call("rmdir", || self.inner.rmdir_entry(NodeId(parent.0), name)) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                // Same as `unlink`: drop the removed dir's dentry.
+                // (heddle#87.)
+                self.notify.inval_entry(parent.0, name);
+                reply.ok();
+            }
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
@@ -785,7 +1070,14 @@ impl Filesystem for FuseShell {
                 options,
             )
         }) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                // Both the source (now gone) and destination (now
+                // present, possibly replacing a cached entry) dentries
+                // are stale. Invalidate each. (heddle#87.)
+                self.notify.inval_entry(parent.0, name);
+                self.notify.inval_entry(newparent.0, newname);
+                reply.ok();
+            }
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
@@ -827,7 +1119,13 @@ impl Filesystem for FuseShell {
             mtime_sec,
         };
         match guard_call("setattr", || self.inner.set_attrs(NodeId(ino.0), update)) {
-            Ok(attrs) => reply.attr(&TTL, &file_attr_from(attrs)),
+            Ok(attrs) => {
+                // chmod / truncate / mtime all change cached attrs, and
+                // a truncate changes the cached data too. Whole-inode
+                // invalidate covers both. (heddle#87.)
+                self.notify.inval_inode(ino.0);
+                reply.attr(&TTL, &file_attr_from(attrs));
+            }
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
@@ -846,6 +1144,9 @@ impl Filesystem for FuseShell {
         });
         match result {
             Ok(entry) => {
+                // New symlink entry under `parent`; refresh the dentry.
+                // (heddle#87.)
+                self.notify.inval_entry(parent.0, link_name);
                 let attr = entry_attr_from(&entry, self.inner_mtime());
                 reply.entry(&TTL, &attr, GENERATION);
             }
