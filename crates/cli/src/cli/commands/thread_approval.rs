@@ -111,9 +111,16 @@ async fn open_heddle_client(
     };
 
     let user_config = UserConfig::load_default()?;
-    let client =
-        HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken)
-            .await?;
+    // Authenticated thread-workflow RPCs are proof-of-possession gated, so use
+    // CredentialFallback (resolves the credential store's proof key) rather
+    // than a token-only ConfigToken session.
+    let client = HostedGrpcClient::open_session(
+        addr,
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )
+    .await?;
     Ok((client, repo_path))
 }
 
