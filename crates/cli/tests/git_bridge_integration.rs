@@ -1357,6 +1357,199 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
     );
 }
 
+/// Count loose objects (`objects/<2-hex>/<38-hex>`) in a bare mirror's object
+/// store. The dominant uninstrumented read cost grows with this number.
+fn count_mirror_loose_objects(mirror_git_dir: &std::path::Path) -> usize {
+    let objects_dir = mirror_git_dir.join("objects");
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(&objects_dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Fanout dirs are exactly two hex chars; skip `pack`, `info`, etc.
+        if name.len() != 2 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        if let Ok(inner) = std::fs::read_dir(entry.path()) {
+            count += inner.flatten().count();
+        }
+    }
+    count
+}
+
+fn mirror_pack_file_count(mirror_git_dir: &std::path::Path) -> usize {
+    let pack_dir = mirror_git_dir.join("objects").join("pack");
+    let Ok(entries) = std::fs::read_dir(&pack_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x == "pack")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// `maintenance gc` must consolidate the git-overlay MIRROR (`.heddle/git`) —
+/// the bare sley repo that is heddle's canonical git object store — by packing
+/// its accumulated loose objects and dropping the redundant loose copies, so
+/// every read+write command stops paying the loose-object read tax.
+///
+/// The invariant proven here (state, not timing):
+/// 1. The loose-object count drops to zero (everything moves into a pack).
+/// 2. A pack file now exists.
+/// 3. Every managed ref still resolves AND its full reachable closure is
+///    intact, read back BYTE-FOR-BYTE — content-addressed repack means OIDs are
+///    unchanged, which is the only thing that preserves the lossy/non-UTF8
+///    commit whose verbatim bytes live ONLY in the mirror (it cannot be
+///    re-minted from heddle state).
+/// 4. Idempotent: a second consolidation finds nothing loose to pack.
+#[test]
+fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+
+    // Mint a multi-commit native heddle thread into the mirror. `export_all`
+    // writes each minted commit/tree/blob as a LOOSE object via
+    // `repo.write_object`/`write_blob`/`write_tree` — the real-world loose
+    // accumulation path that slows every read+write command.
+    let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
+    let put_state = |contents: &[u8], name: &str, parents: Vec<ChangeId>| -> State {
+        let store = test_support::heddle_repo(&bridge).store();
+        let blob_hash = store.put_blob(&Blob::from_slice(contents)).expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file(name.to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(tree_hash, parents, attribution());
+        store.put_state(&state).expect("put state");
+        state
+    };
+    let s1 = put_state(b"alpha\n", "a.txt", Vec::new());
+    let s2 = put_state(b"beta\n", "b.txt", vec![s1.change_id]);
+    let s3 = put_state(b"gamma\n", "c.txt", vec![s2.change_id]);
+    test_support::heddle_repo(&bridge)
+        .refs()
+        .set_thread(&ThreadName::new("main"), &s3.change_id)
+        .expect("set main thread");
+
+    let exported = export_all(&mut bridge).expect("export mints loose mirror objects");
+    assert!(
+        exported.commits_total >= 3,
+        "export must mint the three-commit history (got {})",
+        exported.commits_total
+    );
+
+    let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
+    let mirror_git_dir = mirror.git_dir().to_path_buf();
+
+    // Snapshot the managed-ref frontier and the full reachable closure of every
+    // managed ref, with each object's exact bytes, BEFORE consolidation.
+    let managed = read_mirror_managed_refs(&mirror).expect("managed refs");
+    assert!(
+        !managed.is_empty(),
+        "import must record managed refs in the mirror"
+    );
+    let mut closure_before: std::collections::HashMap<ObjectId, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut stack: Vec<ObjectId> = managed.values().copied().collect();
+    while let Some(oid) = stack.pop() {
+        if closure_before.contains_key(&oid) {
+            continue;
+        }
+        let object = mirror.read_object(&oid).expect("reachable object present");
+        closure_before.insert(oid, object.body.to_vec());
+        match object.object_type {
+            GitObjectType::Commit => {
+                let commit = CommitObject::parse(mirror.object_format(), &object.body)
+                    .expect("parse commit");
+                stack.push(commit.tree);
+                stack.extend(commit.parents);
+            }
+            GitObjectType::Tag => {
+                let tag =
+                    TagObject::parse(mirror.object_format(), &object.body).expect("parse tag");
+                stack.push(tag.object);
+            }
+            GitObjectType::Tree => {
+                let tree = mirror.read_tree(&oid).expect("read tree");
+                for entry in tree.entries {
+                    if entry.kind() != Some(EntryKind::Commit) {
+                        stack.push(entry.oid);
+                    }
+                }
+            }
+            GitObjectType::Blob => {}
+        }
+    }
+    assert!(
+        !closure_before.is_empty(),
+        "managed refs must have a reachable closure"
+    );
+
+    let loose_before = count_mirror_loose_objects(&mirror_git_dir);
+    assert!(
+        loose_before > 0,
+        "import must leave loose objects in the mirror (got {loose_before})"
+    );
+
+    // The consolidation under test.
+    let consolidated = test_support::consolidate_mirror(&bridge).expect("consolidate mirror");
+    assert!(
+        consolidated >= loose_before,
+        "consolidation must report packing at least every loose object \
+         (reported {consolidated}, had {loose_before} loose)"
+    );
+
+    // 1. Loose objects gone; 2. a pack now serves them.
+    let loose_after = count_mirror_loose_objects(&mirror_git_dir);
+    assert_eq!(
+        loose_after, 0,
+        "every loose object must be consolidated into a pack"
+    );
+    assert!(
+        mirror_pack_file_count(&mirror_git_dir) >= 1,
+        "a pack file must exist after consolidation"
+    );
+
+    // 3. Re-open the mirror and prove every managed ref + its closure still
+    //    resolves and reads back byte-for-byte (OID preservation).
+    let mirror_after = test_support::open_git_repo(&bridge).expect("reopen mirror");
+    let managed_after = read_mirror_managed_refs(&mirror_after).expect("managed refs after");
+    assert_eq!(
+        managed, managed_after,
+        "managed-ref frontier must be unchanged by consolidation"
+    );
+    for (oid, expected_bytes) in &closure_before {
+        let object = mirror_after
+            .read_object(oid)
+            .unwrap_or_else(|err| panic!("object {oid} lost after consolidation: {err}"));
+        assert_eq!(
+            &object.body.to_vec(),
+            expected_bytes,
+            "object {oid} bytes changed by consolidation — OID/content not preserved"
+        );
+    }
+
+    // 4. Idempotent: nothing new loose to pack on a second run.
+    let second = test_support::consolidate_mirror(&bridge).expect("idempotent consolidate");
+    assert_eq!(
+        second, 0,
+        "a second consolidation must find no loose objects to pack"
+    );
+    assert_eq!(count_mirror_loose_objects(&mirror_git_dir), 0);
+}
+
 /// Regression: `copy_local_repo_to_bare` (the engine behind `heddle clone
 /// /path/to/bare /work` for git-overlay paths) used to walk every tree
 /// entry without distinguishing gitlinks from regular blobs/subtrees,

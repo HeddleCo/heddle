@@ -242,6 +242,10 @@ pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<SleyRepository> {
     bridge.open_git_repo()
 }
 
+pub fn consolidate_mirror(bridge: &GitBridge<'_>) -> GitResult<usize> {
+    bridge.consolidate_mirror()
+}
+
 pub fn heddle_repo<'a>(bridge: &'a GitBridge<'a>) -> &'a HeddleRepository {
     bridge.heddle_repo
 }

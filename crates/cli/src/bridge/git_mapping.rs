@@ -218,6 +218,50 @@ impl<'a> GitBridge<'a> {
         }
         Ok(removed)
     }
+
+    /// Consolidate the git-overlay MIRROR (`.heddle/git`) — heddle's canonical
+    /// git object store, a bare sley repo — by packing every on-disk object into
+    /// a single pack and dropping the now-redundant loose copies.
+    ///
+    /// The mirror accumulates one loose object per minted/imported commit, tree,
+    /// and blob (thousands on a real clone). Loose-object reads dominate the
+    /// uninstrumented cost of `git_overlay_worktree_status`, which every read
+    /// command (status/diff/verify) and write command (capture/commit) pays.
+    /// `heddle maintenance gc` already consolidates heddle's NATIVE store; this
+    /// brings the mirror to parity.
+    ///
+    /// Correctness: this uses [`repack_all_objects`], which gathers EVERY object
+    /// on disk (every loose object and every pack), not the reachability closure
+    /// of any ref set. That matters because the mirror holds more than the
+    /// current checkout — every thread's `refs/heads/*`, markers, `refs/notes/heddle`,
+    /// and the served-frontier record — AND because some lossy/non-UTF8 imports'
+    /// verbatim bytes live ONLY in the mirror and cannot be re-minted from heddle
+    /// state (see `git_export.rs` `commit_is_byte_faithful`). Packing everything
+    /// on disk preserves all of them and is content-addressed, so OIDs are
+    /// byte-for-byte unchanged. The prune only drops loose objects whose canonical
+    /// copy is now in the new pack, so it is lossless and fsck stays clean.
+    /// Idempotent: a second run finds nothing new loose and is a no-op.
+    ///
+    /// Returns the number of loose objects consolidated into the pack (and thus
+    /// removed from disk). `Ok(0)` when the mirror has no objects to pack.
+    #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
+    pub(crate) fn consolidate_mirror(&self) -> GitResult<usize> {
+        use sley::plumbing::sley_odb::{install_repack_result, repack_all_objects};
+
+        let repo = self.open_git_repo()?;
+        let git_dir = repo.git_dir().to_path_buf();
+        let format = repo.object_format();
+
+        let Some(result) = repack_all_objects(&git_dir, format).map_err(git_err)? else {
+            return Ok(0);
+        };
+        let pruned_loose = result.packed_loose.len();
+        // prune = true: write the new pack, then drop the loose objects and
+        // superseded packs the new pack now serves (install-before-delete; the
+        // installer validates the new pack's checksum before removing anything).
+        install_repack_result(&git_dir, format, &result, true).map_err(git_err)?;
+        Ok(pruned_loose)
+    }
 }
 
 /// Walk all branch- and tag-tipped commit ancestry. Skips refs that peel
