@@ -707,9 +707,21 @@ impl HostedGrpcClient {
     ) -> Result<PullExchange, ProtocolError> {
         let exchange_start = Instant::now();
         let mut exclude_states = Vec::new();
-        if let Some(local_thread) = options.local_thread
-            && let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))?
+        if let Some(local_thread) = options.local_thread {
+            if let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))? {
+                exclude_states.push(head);
+            }
+        } else if let Some(head) =
+            locally_complete_pull_head(repo, remote_thread, options.target_state)?
         {
+            // Bare pull (no explicit `--local-thread`): advertise the head we
+            // already hold for the thread we're about to update so the server
+            // can prune to the delta (and fire the zero-delta short-circuit
+            // when we're already at the remote tip). `locally_complete_pull_head`
+            // only returns a head whose full object closure is provably present
+            // locally — advertising a head whose closure we lack would make the
+            // server omit those objects and silently leave us with an
+            // incomplete repo.
             exclude_states.push(head);
         }
         let allow_partial_fetch = options.materialization.allows_partial_fetch();
@@ -1325,6 +1337,59 @@ fn supports_compact_full_pull(
         return Ok(false);
     }
     repo_looks_fresh(repo)
+}
+
+/// For a bare `pull` (no explicit `--local-thread`), determine which locally
+/// held head — if any — is safe to advertise to the server as an
+/// `exclude_states` entry so the server prunes its closure to the delta.
+///
+/// Advertising state S asserts "I already hold S's FULL object closure
+/// locally." If we advertise a head whose closure we do NOT fully have, the
+/// server omits those objects and we silently end up with an incomplete repo.
+/// The server trusts this assertion blindly, so the entire correctness burden
+/// is here. We therefore advertise a head ONLY when:
+///
+/// 1. A target-state override is not in play (the override drives the want
+///    plan directly; advertising the thread head would be unrelated).
+/// 2. The local repo holds no recorded missing blobs (a partial/lazy clone
+///    can hold a state's metadata while its blobs were never fetched — never
+///    advertise such a head).
+/// 3. The thread we're about to update (`remote_thread`) resolves to a local
+///    head whose ENTIRE object closure is present locally — proven by walking
+///    it with `enumerate_state_closure`, which errors `ObjectNotFound` on the
+///    first absent state/tree/blob.
+///
+/// When any check fails we return `None` and the caller falls back to the
+/// (correct, just slower) empty-exclude full pull. Correctness > speed.
+fn locally_complete_pull_head(
+    repo: &Repository,
+    remote_thread: &str,
+    target_state: Option<ChangeId>,
+) -> Result<Option<ChangeId>, ProtocolError> {
+    // A target-state override pulls a specific state, not the thread tip;
+    // advertising the thread head here would not match what's being fetched.
+    if target_state.is_some() {
+        return Ok(None);
+    }
+    // A repo carrying known-missing blobs is partial/lazy: it may hold a
+    // state's metadata while lacking its blob content. Never advertise.
+    if !repo.missing_blobs()?.is_empty() {
+        return Ok(None);
+    }
+    let Some(head) = repo.refs().get_thread(&ThreadName::from(remote_thread))? else {
+        // Fresh local repo (no local head for this thread) — nothing to
+        // advertise; the server sends the full closure as before.
+        return Ok(None);
+    };
+    // Prove the head's closure is fully present locally. `enumerate_state_closure`
+    // loads every state, tree, and blob in the closure and errors `ObjectNotFound`
+    // on the first absent object. A clean `Ok` is the completeness guarantee that
+    // makes advertising this head safe.
+    match wire::enumerate_state_closure(repo.store(), head) {
+        Ok(_) => Ok(Some(head)),
+        Err(ProtocolError::ObjectNotFound(_)) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 fn should_request_full_closure(
@@ -2569,6 +2634,15 @@ mod tests {
     fn temp_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().expect("tempdir");
         let repo = Repository::init_default(dir.path()).expect("init repo");
+        (dir, repo)
+    }
+
+    /// An unseeded repo with no thread heads — the shape `heddle clone`
+    /// creates locally before its first pull (`Repository::init`, not
+    /// `init_default`).
+    fn temp_repo_unseeded() -> (TempDir, Repository) {
+        let dir = TempDir::new().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init repo");
         (dir, repo)
     }
 
@@ -3829,5 +3903,563 @@ mod tests {
         };
         assert_eq!(transfer.state_id, state.to_string_full());
         assert_eq!(transfer.state_visibility_blob, expected_bytes);
+    }
+
+    // ---- bare-pull head advertisement (delta sync) ----
+
+    fn sample_attribution() -> Attribution {
+        Attribution::human(Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        })
+    }
+
+    /// Put a state whose tree holds one blob into `repo`'s store. Returns the
+    /// state id. With `parents`, builds a child on top of an existing state.
+    fn put_state_with_blob(
+        repo: &Repository,
+        contents: &str,
+        parents: Vec<ChangeId>,
+    ) -> ChangeId {
+        let blob = Blob::from(contents);
+        let blob_hash = repo.store().put_blob(&blob).expect("put blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file(&format!("{contents}.txt"), blob_hash, false).expect("tree entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let state = State::new_snapshot(tree_hash, parents, sample_attribution());
+        let state_id = state.change_id;
+        repo.store().put_state(&state).expect("put state");
+        state_id
+    }
+
+    #[test]
+    fn locally_complete_pull_head_advertises_fully_present_thread_head() {
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised,
+            Some(head),
+            "a thread head whose full closure is present locally must be advertised"
+        );
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_unknown_thread() {
+        // Unseeded local repo: the bare-pull thread has no local head, so
+        // there is nothing to advertise and the pull falls back to a full
+        // closure.
+        let (_dir, repo) = temp_repo_unseeded();
+        let advertised =
+            locally_complete_pull_head(&repo, "nonexistent", None).expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_when_target_state_override_in_play() {
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        // A fetch_state-style override drives the want plan directly; the
+        // thread head is unrelated to what's being fetched.
+        let advertised = locally_complete_pull_head(&repo, "main", Some(head))
+            .expect("completeness check");
+        assert_eq!(advertised, None);
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_repo_with_missing_blobs() {
+        // A partial/lazy clone records known-missing blobs: it may hold a
+        // state's metadata while lacking blob content. Advertising such a
+        // head would make the server omit objects and silently leave us with
+        // an incomplete repo — so the completeness gate must refuse.
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "alpha", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+        repo.record_missing_blob(ContentHash::from_bytes([88u8; 32]))
+            .expect("record missing blob");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "a repo carrying missing blobs must never advertise a head"
+        );
+    }
+
+    #[test]
+    fn locally_complete_pull_head_skips_head_with_incomplete_closure() {
+        // The thread head's *state* is present, but a parent state in its
+        // closure is absent. Walking the closure surfaces `ObjectNotFound`,
+        // so the head must NOT be advertised. This is the dangerous case the
+        // cardinal correctness constraint guards against.
+        let (_dir, repo) = temp_repo();
+        let absent_parent = ChangeId::generate();
+        let blob = Blob::from("orphan");
+        let blob_hash = repo.store().put_blob(&blob).expect("put blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("orphan.txt", blob_hash, false).expect("tree entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        // Child references a parent state that is NOT in the store.
+        let child = State::new_snapshot(tree_hash, vec![absent_parent], sample_attribution());
+        let child_id = child.change_id;
+        repo.store().put_state(&child).expect("put child state");
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &child_id)
+            .expect("set thread");
+
+        let advertised =
+            locally_complete_pull_head(&repo, "main", None).expect("completeness check");
+        assert_eq!(
+            advertised, None,
+            "a head whose closure has an absent parent state must not be advertised"
+        );
+    }
+
+    /// Mock pull service that mimics the weft server's `exclude_states`
+    /// contract: it captures the inbound `exclude_states`, fires the
+    /// zero-delta short-circuit when the remote tip is advertised, and
+    /// otherwise sends only the objects NOT covered by an advertised
+    /// (parent) closure.
+    #[derive(Clone)]
+    struct DeltaAwarePullService {
+        remote_state: ChangeId,
+        /// Object descriptors keyed by the parent state that an advertised
+        /// `exclude_states` entry would cover. If `exclude_states` contains
+        /// `remote_state`, the delta is empty (short-circuit). If it contains
+        /// a known parent, only the child-specific objects are sent. If it
+        /// contains neither, the full closure is sent.
+        full_closure: Vec<ObjectInfo>,
+        delta_objects: Vec<ObjectInfo>,
+        known_parent: ChangeId,
+        full_pack: wire::NativePackBundle,
+        delta_pack: wire::NativePackBundle,
+        captured_exclude: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    }
+
+    #[tonic::async_trait]
+    impl RepoSyncService for DeltaAwarePullService {
+        async fn list_refs(
+            &self,
+            _request: tonic::Request<ListRefsRequest>,
+        ) -> Result<Response<ListRefsResponse>, Status> {
+            Ok(Response::new(ListRefsResponse::default()))
+        }
+
+        async fn update_ref(
+            &self,
+            _request: tonic::Request<UpdateRefRequest>,
+        ) -> Result<Response<UpdateRefResponse>, Status> {
+            Ok(Response::new(UpdateRefResponse::default()))
+        }
+
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+
+        async fn push(
+            &self,
+            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+        ) -> Result<Response<Self::PushStream>, Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
+        }
+
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+
+        async fn pull(
+            &self,
+            request: tonic::Request<tonic::Streaming<PullMessage>>,
+        ) -> Result<Response<Self::PullStream>, Status> {
+            let svc = self.clone();
+            let (tx, rx) = mpsc::channel(16);
+
+            tokio::spawn(async move {
+                let mut inbound = request.into_inner();
+                let exclude = match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Request(req)),
+                    })) => req.exclude_states,
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected pull request, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                *svc.captured_exclude.lock().unwrap() = Some(exclude.clone());
+
+                let remote_full = svc.remote_state.to_string_full();
+                let parent_full = svc.known_parent.to_string_full();
+
+                // Mirror the server contract: subtract advertised closures.
+                let (objects, pack, short_circuit) = if exclude.contains(&remote_full) {
+                    // weft#215 zero-delta short-circuit: client is at the tip.
+                    (Vec::new(), None, true)
+                } else if exclude.contains(&parent_full) {
+                    // Client is behind at `known_parent`; send only the delta.
+                    (svc.delta_objects.clone(), Some(svc.delta_pack.clone()), false)
+                } else {
+                    // No usable advertisement; send the full closure.
+                    (svc.full_closure.clone(), Some(svc.full_pack.clone()), false)
+                };
+
+                let descriptors: Vec<_> = objects
+                    .iter()
+                    .map(|info| {
+                        object_descriptor_with_status(
+                            info,
+                            ObjectAvailabilityStatus::Missing,
+                            "requested by client",
+                        )
+                    })
+                    .collect();
+
+                let ready = PullMessage {
+                    body: Some(pull_message::Body::Ready(PullReady {
+                        remote_state: remote_full.clone(),
+                        objects_to_fetch: descriptors,
+                        transfer: None,
+                        partial_fetch_status: PartialFetchStatus::Disabled as i32,
+                        missing_objects: Vec::new(),
+                        full_closure_available: false,
+                        object_count: objects.len() as u32,
+                        remote_revision_address: native_revision_address(svc.remote_state),
+                    })),
+                };
+                if tx.send(Ok(ready)).await.is_err() {
+                    return;
+                }
+
+                // Expect the client's Want.
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Want(_)),
+                    })) => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected want, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                if let Some(pack) = pack {
+                    if !short_circuit {
+                        for message in
+                            encode_pull_native_pack_messages(&pack, "delta-aware-test", 64)
+                        {
+                            if tx.send(Ok(message)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                let complete = PullMessage {
+                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                        success: true,
+                        new_state: remote_full,
+                        error: String::new(),
+                        transfer: Some(TransferCheckpoint {
+                            transfer_id: "delta-aware-test".to_string(),
+                            transport_mode: TransportMode::NativePack as i32,
+                            resume_offset: 0,
+                            chunk_index: 0,
+                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            is_complete: true,
+                        }),
+                        new_revision_address: native_revision_address(svc.remote_state),
+                    })),
+                };
+                let _ = tx.send(Ok(complete)).await;
+            });
+
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
+        }
+    }
+
+    async fn connect_delta_aware_service(
+        service: DeltaAwarePullService,
+    ) -> Option<(HostedGrpcClient, tokio::task::JoinHandle<()>)> {
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping hosted sync local gRPC test: TCP bind denied: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind test server: {err}"),
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _addr)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(RepoSyncServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve delta-aware test service");
+        });
+        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+            .await
+            .expect("connect client");
+        Some((client, handle))
+    }
+
+    #[tokio::test]
+    async fn warm_bare_pull_advertises_head_and_fires_zero_delta_short_circuit() {
+        // Client is exactly at the remote tip. A bare pull must advertise that
+        // tip as exclude_states; the server then returns an empty delta
+        // (weft#215 short-circuit) and the client transfers nothing.
+        let (_dir, repo) = temp_repo();
+        let head = put_state_with_blob(&repo, "tip", vec![]);
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &head)
+            .expect("set thread");
+
+        let full_closure =
+            wire::enumerate_state_closure(repo.store(), head).expect("enumerate closure");
+        let full_pack =
+            wire::build_native_pack(repo.store(), &full_closure).expect("build full pack");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: head,
+            full_closure,
+            delta_objects: Vec::new(),
+            known_parent: ChangeId::generate(),
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("warm bare pull must not hang")
+        .expect("warm bare pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            advertised,
+            vec![head.to_string_full()],
+            "a bare pull at the tip must advertise that tip in exclude_states"
+        );
+        assert!(exchange.result.success);
+        assert_eq!(
+            exchange.object_count, 0,
+            "the zero-delta short-circuit must transfer no objects, not the full closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn behind_client_bare_pull_receives_exactly_the_missing_delta() {
+        // The dangerous direction: client sits at the PARENT state, remote is
+        // at the CHILD. A bare pull advertises the parent (whose closure the
+        // client fully holds); the server sends only the child-specific
+        // objects, and the client must end up with a COMPLETE repo (no object
+        // it lacked is dropped).
+        // Build parent + child in the SOURCE repo (the server's view).
+        let (_src_dir, src_repo) = temp_repo_unseeded();
+        let parent = put_state_with_blob(&src_repo, "base", vec![]);
+        let child = put_state_with_blob(&src_repo, "feature", vec![parent]);
+        let child_closure =
+            wire::enumerate_state_closure(src_repo.store(), child).expect("child closure");
+
+        // The CLIENT holds exactly the parent closure (the dangerous "behind"
+        // setup): copy the parent's objects into a fresh client store and
+        // track `main` at the parent.
+        let (_dir, repo) = temp_repo_unseeded();
+        let parent_closure =
+            wire::enumerate_state_closure(src_repo.store(), parent).expect("parent closure");
+        let parent_pack =
+            wire::build_native_pack(src_repo.store(), &parent_closure).expect("parent pack");
+        wire::install_received_pack(repo.store(), &parent_pack.pack_data, &parent_pack.index_data)
+            .expect("install parent closure into client");
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &parent)
+            .expect("set thread to parent");
+        // Sanity: the client provably holds the parent's full closure...
+        wire::enumerate_state_closure(repo.store(), parent).expect("client holds parent closure");
+        // ...but NOT the child yet.
+        assert!(
+            repo.store().get_state(&child).expect("probe child").is_none(),
+            "client must start without the child state"
+        );
+        let parent_clone = parent;
+        let full_pack =
+            wire::build_native_pack(src_repo.store(), &child_closure).expect("full pack");
+        // Delta = child closure minus the parent closure (what the server
+        // would send when the parent is advertised).
+        let delta_objects = wire::enumerate_state_closure_with_options(
+            src_repo.store(),
+            child,
+            wire::StateClosureOptions {
+                depth: None,
+                exclude_states: vec![parent_clone],
+            },
+        )
+        .expect("delta closure");
+        assert!(
+            !delta_objects.is_empty() && delta_objects.len() < child_closure.len(),
+            "delta must be a strict, non-empty subset of the full closure"
+        );
+        let delta_pack =
+            wire::build_native_pack(src_repo.store(), &delta_objects).expect("delta pack");
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: child,
+            full_closure: child_closure.clone(),
+            delta_objects: delta_objects.clone(),
+            known_parent: parent_clone,
+            full_pack,
+            delta_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("behind-client pull must not hang")
+        .expect("behind-client pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(
+            advertised,
+            vec![parent.to_string_full()],
+            "a behind client must advertise the parent head it holds"
+        );
+        assert!(exchange.result.success);
+        // The client must now hold the COMPLETE child closure — every object
+        // in the remote's full closure must be present locally, proving the
+        // server-side parent-pruning dropped nothing the client lacked.
+        let reassembled = wire::enumerate_state_closure(repo.store(), child)
+            .expect("the client must hold the complete child closure after a delta pull");
+        assert_eq!(
+            reassembled.len(),
+            child_closure.len(),
+            "delta pull must leave the client with the full child closure, no gaps"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_bare_pull_advertises_nothing_and_gets_full_closure() {
+        // Unseeded local repo (the `heddle clone` shape): no local head for
+        // the thread, so nothing is advertised and the server sends the full
+        // closure (today's behavior).
+        let (_dir, repo) = temp_repo_unseeded();
+        let (_src_dir, src_repo) = temp_repo_unseeded();
+        let remote = put_state_with_blob(&src_repo, "seed", vec![]);
+        let full_closure =
+            wire::enumerate_state_closure(src_repo.store(), remote).expect("closure");
+        let full_pack =
+            wire::build_native_pack(src_repo.store(), &full_closure).expect("full pack");
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let Some((mut client, server)) = connect_delta_aware_service(DeltaAwarePullService {
+            remote_state: remote,
+            full_closure: full_closure.clone(),
+            delta_objects: Vec::new(),
+            known_parent: ChangeId::generate(),
+            full_pack: full_pack.clone(),
+            delta_pack: full_pack,
+            captured_exclude: captured.clone(),
+        })
+        .await
+        else {
+            return;
+        };
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("fresh bare pull must not hang")
+        .expect("fresh bare pull succeeds");
+        server.abort();
+
+        let advertised = captured.lock().unwrap().clone().expect("request captured");
+        assert!(
+            advertised.is_empty(),
+            "a fresh repo must advertise no exclude_states"
+        );
+        assert!(exchange.result.success);
+        assert_eq!(
+            exchange.object_count,
+            full_closure.len(),
+            "a fresh pull must receive the full closure, nothing wrongly excluded"
+        );
+        assert!(
+            wire::enumerate_state_closure(repo.store(), remote).is_ok(),
+            "fresh pull must install the complete closure"
+        );
     }
 }
