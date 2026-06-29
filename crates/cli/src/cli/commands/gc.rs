@@ -75,9 +75,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 trees.len()
             );
 
-            if prune {
-                println!("Would prune loose objects after packing");
-            }
+            let _ = prune;
+            println!("Would prune redundant loose objects after consolidating into a pack");
             if pinned_redactions > 0 {
                 println!(
                     "Pinned {pinned_redactions} redaction tombstone(s) — never collected by GC"
@@ -114,19 +113,28 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             }
         }
 
-        if prune {
-            let (removed, bytes_freed) = repo.store().prune_loose_objects()?;
-            summary.pruned_loose = removed;
-            summary.bytes_freed = bytes_freed;
-            if !json {
-                if removed > 0 {
-                    println!(
-                        "Pruned {} loose objects (freed {} bytes)",
-                        removed, bytes_freed
-                    );
-                } else {
-                    println!("No loose objects to prune");
-                }
+        // Consolidation prune: drop the loose copies of objects that now
+        // live in the pack we just wrote. This is intrinsic to what a GC
+        // *is* — a GC that packs without pruning leaves every object in
+        // BOTH places, so the object store has strictly more sources to
+        // search and read commands (status/diff/verification) get slower
+        // instead of faster. The prune only removes loose objects whose
+        // canonical copy is now in a pack, so it never loses data
+        // (fsck stays clean). It therefore runs unconditionally, not
+        // behind `--prune`. The `prune`/`aggressive` flags are retained
+        // for callers/scripts but no longer gate this safe step.
+        let _ = prune;
+        let (removed, bytes_freed) = repo.store().prune_loose_objects()?;
+        summary.pruned_loose = removed;
+        summary.bytes_freed = bytes_freed;
+        if !json {
+            if removed > 0 {
+                println!(
+                    "Pruned {} redundant loose objects (freed {} bytes)",
+                    removed, bytes_freed
+                );
+            } else {
+                println!("No loose objects to prune");
             }
         }
 

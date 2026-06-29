@@ -2,15 +2,24 @@
 use super::*;
 
 #[test]
-fn test_gc_creates_packfile() {
+fn test_gc_consolidates_into_single_pack() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "initial content");
 
     // Snapshot batches new blobs straight into a packfile (the
     // perf-hot path), so `packs/` already has at least one entry
-    // before gc runs. We only assert that gc *adds* one (it packs
-    // the loose trees that snapshot still writes loose).
+    // before gc runs, plus loose trees the snapshot writes loose.
+    //
+    // GC's contract is to *consolidate*, not to keep minting packs.
+    // The pre-fix bug added a new pack on every run while leaving the
+    // existing packs and loose copies in place, so the object store
+    // grew more sources to search and read commands slowed down. After
+    // the fix gc folds loose + existing packs into a SINGLE pack and
+    // prunes the redundant loose copies, so the pack count must not
+    // grow and no object is left both loose and packed.
     let packs_dir = temp.path().join(".heddle").join("packs");
+    let blobs_dir = temp.path().join(".heddle").join("objects").join("blobs");
+    let trees_dir = temp.path().join(".heddle").join("objects").join("trees");
     let pack_count_before = pack_count_in(&packs_dir);
 
     let result = heddle(&["maintenance", "gc", "--aggressive"], Some(temp.path()));
@@ -25,11 +34,22 @@ fn test_gc_creates_packfile() {
 
     assert!(packs_dir.exists(), "packs directory should exist after gc");
     let pack_count_after = pack_count_in(&packs_dir);
+    assert_eq!(
+        pack_count_after, 1,
+        "gc must consolidate into exactly one pack: before={}, after={}",
+        pack_count_before, pack_count_after
+    );
     assert!(
-        pack_count_after > pack_count_before,
-        "gc should add a pack: before={}, after={}",
+        pack_count_after <= pack_count_before.max(1),
+        "gc must not grow the pack count: before={}, after={}",
         pack_count_before,
         pack_count_after
+    );
+
+    let loose_after = count_files_recursive(&blobs_dir) + count_files_recursive(&trees_dir);
+    assert_eq!(
+        loose_after, 0,
+        "gc must prune the loose copies of objects it just packed"
     );
 }
 
