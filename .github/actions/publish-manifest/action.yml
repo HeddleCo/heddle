@@ -10,7 +10,11 @@ inputs:
     description: Path inside the target repository to update.
   rendered-file:
     required: true
-    description: Rendered manifest path in the caller workspace.
+    description: >-
+      Rendered manifest path in the caller workspace. A regular file is copied
+      to manifest-path. A directory is synced onto manifest-path as a whole
+      tree (used by the apt channel, whose pool + signed index is a tree, not a
+      single file); manifest-path '.' means the target repository root.
   token:
     required: true
     description: GitHub App installation token with contents and pull-request write access.
@@ -33,10 +37,25 @@ runs:
 
     - name: Copy rendered manifest
       shell: bash
+      env:
+        RENDERED_FILE: ${{ inputs.rendered-file }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
       run: |
         set -euo pipefail
-        mkdir -p "package-repo/$(dirname "${{ inputs.manifest-path }}")"
-        cp "${{ inputs.rendered-file }}" "package-repo/${{ inputs.manifest-path }}"
+        if [[ -d "$RENDERED_FILE" ]]; then
+          # Directory source (apt pool + signed index): sync the whole tree.
+          # manifest-path '.' targets the repository root.
+          if [[ "$MANIFEST_PATH" == "." ]]; then
+            dest="package-repo"
+          else
+            dest="package-repo/$MANIFEST_PATH"
+            mkdir -p "$dest"
+          fi
+          cp -a "$RENDERED_FILE/." "$dest/"
+        else
+          mkdir -p "package-repo/$(dirname "$MANIFEST_PATH")"
+          cp "$RENDERED_FILE" "package-repo/$MANIFEST_PATH"
+        fi
 
     - name: Open package update PR
       uses: peter-evans/create-pull-request@v7
