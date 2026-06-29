@@ -522,9 +522,9 @@ fn pack_objects_then_prune_leaves_no_loose_packed_duplicates() {
         let blob = Blob::from(format!("gc-consolidation-blob-{i}"));
         hashes.push(store.put_blob(&blob).unwrap());
     }
-    for i in 0..4 {
+    for (i, hash) in hashes.iter().take(4).enumerate() {
         let tree = Tree::from_entries(vec![
-            TreeEntry::file(format!("file-{i}.txt"), hashes[i], false).unwrap(),
+            TreeEntry::file(format!("file-{i}.txt"), *hash, false).unwrap(),
         ]);
         store.put_tree(&tree).unwrap();
     }
