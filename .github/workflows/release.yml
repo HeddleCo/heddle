@@ -688,6 +688,26 @@ jobs:
         shell: bash
         run: scripts/render-scoop-manifest.sh "${{ steps.ver.outputs.tag }}" dist/SHA256SUMS rendered/heddle.json
 
+      - name: Build apt pool + signed index
+        shell: bash
+        env:
+          # Ed25519 signing subkey exported offline from the primary (#328
+          # Decision 2). Imported into an ephemeral GNUPGHOME that lives only
+          # for this step; apt-heddle never sees a secret.
+          HEDDLE_APT_GPG_PRIVATE_KEY: ${{ secrets.HEDDLE_APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$HEDDLE_APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          # Sign with the first secret subkey/key id imported above.
+          key_id="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')"
+          HEDDLE_APT_GPG_KEY_ID="$key_id" \
+            scripts/build-apt-pool.sh "${{ steps.ver.outputs.tag }}" \
+              dist/SHA256SUMS dist rendered/apt
+          rm -rf "$GNUPGHOME"
+
       - name: Generate release publisher token
         id: app-token
         uses: actions/create-github-app-token@v2
@@ -695,7 +715,7 @@ jobs:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}
           owner: HeddleCo
-          repositories: homebrew-heddle,scoop-heddle
+          repositories: homebrew-heddle,scoop-heddle,apt-heddle
 
       - name: Publish Homebrew cask PR
         uses: ./.github/actions/publish-manifest
@@ -715,4 +735,16 @@ jobs:
           rendered-file: rendered/heddle.json
           token: ${{ steps.app-token.outputs.token }}
           channel: scoop
+          version: ${{ steps.ver.outputs.version }}
+
+      - name: Publish apt pool PR
+        uses: ./.github/actions/publish-manifest
+        with:
+          target-repo: HeddleCo/apt-heddle
+          # Whole pool + signed index tree, not a single file. manifest-path
+          # '.' syncs onto the apt-heddle repository root (Pages serves it).
+          manifest-path: .
+          rendered-file: rendered/apt
+          token: ${{ steps.app-token.outputs.token }}
+          channel: apt
           version: ${{ steps.ver.outputs.version }}

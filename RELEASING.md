@@ -204,8 +204,9 @@ Set these GitHub Actions variables as well:
 | `HEDDLE_DEVELOPER_ID_APPLICATION` | Codesigning identity, e.g. `Developer ID Application: HeddleCo, LLC (33V6242M8S)` |
 
 The release-publisher GitHub App should be installed only on
-`homebrew-heddle` and `scoop-heddle` and granted only `Contents: write`
-and `Pull requests: write`.
+`homebrew-heddle`, `scoop-heddle`, and `apt-heddle` and granted only
+`Contents: write` and `Pull requests: write`. The token minted in the
+`publish-manifests` job lists all three in its `repositories:` scope.
 
 ## Scoop manifest publication
 
@@ -243,6 +244,94 @@ or refresh a PR against `scoop-heddle`, which a maintainer merges after
 bucket CI passes. The wiring (renderer present, `bucket/heddle.json`
 path, App token, `HeddleCo/scoop-heddle` target) is asserted by
 `scripts/check-release-pipeline.sh`.
+
+## apt repository publication
+
+The Debian/Ubuntu install path pins Heddle's signing key to its own
+keyring and scopes trust to Heddle's source with `signed-by=` (never
+`apt-key add`, which is removed on modern apt):
+
+```bash
+# 1. Install Heddle's signing key into its own keyring.
+curl -fsSL https://apt.heddle.sh/heddle-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/heddle-archive-keyring.gpg > /dev/null
+
+# 2. Register the source, pinned to that keyring + this machine's arch.
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/heddle-archive-keyring.gpg] https://apt.heddle.sh stable main" \
+  | sudo tee /etc/apt/sources.list.d/heddle.list > /dev/null
+
+# 3. Install. The heddle-archive-keyring package keeps the key current
+#    across future `apt upgrade`s.
+sudo apt update && sudo apt install heddle
+```
+
+The modern deb822 form (`/etc/apt/sources.list.d/heddle.sources`) is
+equivalent:
+
+```
+Types: deb
+URIs: https://apt.heddle.sh
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Signed-By: /usr/share/keyrings/heddle-archive-keyring.gpg
+```
+
+The repository is `HeddleCo/apt-heddle` (git-backed pool + signed index,
+served as static files via GitHub Pages at `apt.heddle.sh`). Stable
+releases run `scripts/build-apt-pool.sh`, which:
+
+- verifies the two `*-unknown-linux-gnu.tar.gz` archives against the
+  release `SHA256SUMS`, then builds `heddle_<version>_amd64.deb` and
+  `heddle_<version>_arm64.deb` into `pool/main/h/heddle/`
+- builds the `heddle-archive-keyring_<n>_all.deb` self-updating trust
+  anchor (it ships the dearmored public key into
+  `/usr/share/keyrings/`), and writes the same key to
+  `heddle-archive-keyring.gpg` at the repo root for manual installers
+- generates the `dists/stable/main/binary-<arch>/Packages{,.gz}` indices
+  and the suite `dists/stable/Release` (single rolling `stable main`
+  suite carrying both arches — the binaries are glibc-dynamic, not
+  codename-specific)
+- GPG-signs `Release` (detached `Release.gpg` + inline `InRelease`) with
+  the Ed25519 signing subkey imported into an ephemeral `GNUPGHOME`. The
+  subkey comes from the `HEDDLE_APT_GPG_PRIVATE_KEY` secret; `apt-heddle`
+  holds no secrets.
+
+Like the Homebrew cask and Scoop manifest, the signed tree is not pushed
+directly: the `publish-manifests` job uses the same release-publisher App
+token (scoped to include `apt-heddle`) and the shared
+`./.github/actions/publish-manifest` composite action to open a PR
+against `apt-heddle` carrying the whole pool + signed index
+(`manifest-path: .`). A maintainer merges it; GitHub Pages then serves
+the merged tree. The wiring (`scripts/build-apt-pool.sh` present, the
+GPG secret imported into an ephemeral `GNUPGHOME`, the `apt-heddle`
+target, and the widened App-token scope) is asserted by
+`scripts/check-release-pipeline.sh`.
+
+The design rationale — hosting platform, GPG key strategy, key rotation,
+and install UX — lives in
+`docs/design/apt-hosting-gpg-spike.md`.
+
+### Required GitHub Actions secrets (apt)
+
+- `HEDDLE_APT_GPG_PRIVATE_KEY` — the armored Ed25519 **signing subkey**
+  exported offline from the primary. The primary stays offline; only the
+  subkey reaches CI, so a leak is revocable without re-minting subscriber
+  trust. Rotate by updating this one secret (no workflow change).
+
+### apt human-infra prerequisites (org-admin)
+
+These are one-time setup steps tracked in
+`docs/design/apt-hosting-gpg-spike.md`. Until they land, the apt leg
+opens its PR but the published repo is not yet reachable at the branded
+URL:
+
+1. Create `HeddleCo/apt-heddle`; install the "Heddle Release Publisher"
+   GitHub App on it (`Contents: write` + `Pull requests: write`).
+2. `apt.heddle.sh` DNS (CNAME → `heddleco.github.io`) + Pages
+   custom-domain + TLS.
+3. Offline-generate the Ed25519 primary + signing subkey; export the
+   subkey to the `HEDDLE_APT_GPG_PRIVATE_KEY` secret.
 
 ### Linux glibc floor
 
