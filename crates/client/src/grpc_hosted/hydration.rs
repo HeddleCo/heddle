@@ -526,6 +526,7 @@ mod tests {
         auth_service_client::AuthServiceClient, content_service_client::ContentServiceClient,
         hosted_user_service_client::HostedUserServiceClient,
         repo_sync_service_client::RepoSyncServiceClient,
+        tree_edit_service_client::TreeEditServiceClient,
     };
     use objects::object::{Blob, ChangeId, ThreadName};
     use repo::Repository;
@@ -549,7 +550,8 @@ mod tests {
             inner: RepoSyncServiceClient::new(channel.clone()),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            content: ContentServiceClient::new(channel.clone()),
+            tree_edit: TreeEditServiceClient::new(channel),
             token_header: None,
             transport,
             auth_proof_key_pem: None,
