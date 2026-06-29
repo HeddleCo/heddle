@@ -1,0 +1,9 @@
+{
+  "_comment": "Post-gix-removal transitive-dependency baseline for the heddle-cli crate (default features). Tracked by scripts/check-cli-dep-count.sh, wired into .github/workflows/audit.yml. See docs/CLI_DEP_AUDIT_2026-05-12.md for the audit method and the dep-reduction plan (IMPROVEMENT_PLAN section 8, P4: gix removal cut a ~277-dep subtree). The gate FAILS if the live count exceeds baseline + slack; raise the baseline (with justification) only when a dep addition is deliberate.",
+  "package": "heddle-cli",
+  "features": "default",
+  "baseline": 350,
+  "slack": 10,
+  "measured_at": "2026-06-29",
+  "measured_against": "main post-#598 (sley-substrate) merge; pre-gix-removal count was 485 (docs/CLI_DEP_AUDIT_2026-05-12.md)"
+}
