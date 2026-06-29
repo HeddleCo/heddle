@@ -13,6 +13,7 @@ service HostedUserService {
   rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
   rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
+  rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
   rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
   rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
@@ -22,6 +23,13 @@ service HostedUserService {
   rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
   rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant);
   rpc DeleteGrant(DeleteGrantRequest) returns (DeleteResponse);
+
+  // Resolve opaque subjects (from grants/annotations) to human display
+  // info. Today only WhoAmI exists (current session); this is the batch
+  // subject-resolution surface the grant/member UIs need so they can render
+  // a name + handle instead of the raw subject. Backend impl lives in weft
+  // (a follow-up); this is the contract only.
+  rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse);
 
   // ── Thread merge approvals ───────────────────────────────────────
   rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval);
@@ -175,6 +183,13 @@ message UpdateNamespaceRequest {
   string client_operation_id = 15;
 }
 
+message SetNamespaceVisibilityRequest {
+  string full_path = 1;
+  SpoolVisibility visibility = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
 message DeleteNamespaceRequest {
   string full_path = 1;
   // Idempotency (audit-idempotency enforces tag 15).
@@ -244,6 +259,10 @@ message HostedNamespace {
   string parent_id = 5;
   string display_name = 6;
   SpoolSettings settings = 7;
+  // Current effective visibility of the namespace's spool. Mirrors
+  // `settings.visibility` for top-level reads; populated on every response
+  // builder so SetNamespaceVisibility callers see the applied value.
+  SpoolVisibility visibility = 8;
 }
 
 message HostedRepository {
@@ -412,4 +431,29 @@ message ListRepositoriesResponse {
 
 message ListGrantsResponse {
   repeated HostedGrant grants = 1;
+}
+
+// ── Subject resolution ──────────────────────────────────────────────────────
+// Batch subject→display-name resolution. The grant/member UIs hold opaque
+// subjects (from HostedGrant.subject / MemberEntry.Grant.subject) and today
+// render them raw; this lets a consumer enrich a whole grant/member list in a
+// single round trip. Backend impl is a weft follow-up.
+message ResolveSubjectsRequest {
+  // Opaque subjects, e.g. "user:<uuid>" / "ops-alice".
+  repeated string subjects = 1;
+}
+
+message ResolveSubjectsResponse {
+  repeated ResolvedPrincipal principals = 1;
+}
+
+message ResolvedPrincipal {
+  // Echo of the requested subject (the join key for the caller).
+  string subject = 1;
+  // Human display name; empty when unresolved.
+  string display_name = 2;
+  // Username / handle; empty when unresolved.
+  string handle = 3;
+  // False when the subject couldn't be resolved (display_name + handle empty).
+  bool resolved = 4;
 }
