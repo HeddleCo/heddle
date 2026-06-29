@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use merge::{ConflictMarkers, MergeOutcome};
+use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
 use super::{MergeStrategy, semantic_three_way_merge, three_way_merge};
 
@@ -3130,34 +3130,44 @@ class C {
 
 // =====================================================================
 // Codex r5 P1 #4: `reconcile_trailing_newline` pops a single byte when
-// majority votes "no trailing newline". If the output ends with CRLF
-// (one side carries Windows line endings into the postamble), popping
+// the rule votes "no trailing newline". If the output ends with CRLF
+// (a side carries Windows line endings into the postamble), popping
 // the `\n` alone leaves a dangling `\r` — line-ending corruption.
 // CRLF must be popped AS A UNIT.
+//
+// heddle#123: rewritten to the 3-way-bit rule. `ours` is the side that
+// EDITS the trailing line and STRIPS its newline (changing the bit away
+// from base); `base`/`theirs` keep the CRLF terminator. Single-side
+// change → ours' "no trailing newline" wins, so reconcile strips the
+// CRLF the unchanged `theirs` postamble carried in — which must pop as
+// a unit. This now matches the text engine byte-for-byte (it too drops
+// the newline the editing side removed).
 // =====================================================================
 #[test]
-fn crlf_trailing_pair_popped_as_unit_when_majority_has_no_trailing_newline() {
-    // base and ours both lack a trailing newline. theirs is the only
-    // side that ends with CRLF. Majority (base + ours, 2 of 3) votes
-    // "no trailing newline" so reconcile_trailing_newline strips it.
-    // Pre-fix it pops a single byte (the `\n`), leaving a trailing
-    // `\r`. Post-fix it pops both bytes of the CRLF together.
-    //
-    // The body change on ours (and no change on theirs) is what funnels
-    // theirs's CRLF postamble into the output via the postamble merge.
-    let base = "fn foo() {}";
-    let ours = "fn foo() { 1 }";
-    let theirs = "fn foo() {}\r\n";
+fn crlf_trailing_pair_popped_as_unit_when_rule_has_no_trailing_newline() {
+    let base = "fn foo() {}\r\nfn bar() {}\r\n";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }"; // edits + strips the trailing CRLF
+    let theirs = "fn foo() { 9 }\r\nfn bar() {}\r\n"; // disjoint edit, keeps CRLF
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         !merged.ends_with('\r'),
         "merged output must not end with a dangling \\r (CRLF must pop as a unit): {merged:?}"
     );
-    // Stronger: the output should end with `}` (matching the
-    // no-trailing-newline majority).
+    // The output should end at the closing brace (the editing side
+    // stripped the trailing newline).
     assert!(
         merged.ends_with('}'),
-        "merged output should end at the closing brace (majority wants no trailing newline): {merged:?}"
+        "merged output should end at the closing brace (editing side stripped the newline): {merged:?}"
+    );
+    // Text-parity: the text engine drops the same newline.
+    let text = match text_outcome(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("text engine did not resolve cleanly: {other:?}"),
+    };
+    assert_eq!(
+        merged.as_bytes().last(),
+        text.as_bytes().last(),
+        "semantic EOF byte must match text engine: sem={merged:?} text={text:?}"
     );
 }
 
@@ -3412,24 +3422,25 @@ fn mixed_eol_add_add_marker_follows_item_bytes_not_whole_file() {
 // =====================================================================
 // Self-audit prediction P1 (heddle#114 r7): r6's reconcile_trailing_newline
 // fix made the POP case CRLF-aware (popping `\r\n` as a unit). The
-// inverse path — when majority votes "yes trailing newline" and output
+// inverse path — when the rule votes "yes trailing newline" and output
 // lacks one — still hardcodes `b'\n'`, so a CRLF-style file whose
 // reconstructed bytes happen to end without a newline gets a bare LF
 // appended. Same hazard class as the r6 P2 #1 markers finding: any
 // place that emits a newline must respect the file's existing EOL.
+//
+// heddle#123: rewritten to the 3-way-bit rule. `base`/`theirs` end with
+// NO trailing newline; `ours` is the side that EDITS the trailing line
+// and ADDS a CRLF newline (changing the bit away from base). Single-side
+// change → ours' "yes trailing newline" wins, so reconcile pushes a
+// newline back — and it must push `\r\n`, not a bare LF, to match the
+// file's CRLF style. Matches the text engine, which keeps the newline
+// the editing side added.
 // =====================================================================
 #[test]
 fn reconcile_trailing_newline_add_case_uses_crlf_when_file_is_crlf() {
-    // base and theirs both end with CRLF (both vote "yes trailing
-    // newline", so majority = yes). ours's modification appends a new
-    // function without a final newline, and the reconstruction
-    // pipeline ends the output at ours's last item — no trailing
-    // newline. reconcile_trailing_newline pushes one back; pre-fix
-    // it pushes `\n`, post-fix it pushes `\r\n` to match the file's
-    // existing CRLF style.
-    let base = "fn foo() {}\r\n";
-    let ours = "fn foo() {}\r\nfn bar() {}";
-    let theirs = "fn foo() { 1 }\r\n";
+    let base = "fn foo() {}\r\nfn bar() {}";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }\r\n"; // edits + adds the trailing CRLF
+    let theirs = "fn foo() { 9 }\r\nfn bar() {}"; // disjoint edit, keeps no-newline
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         merged.ends_with("\r\n"),
@@ -3445,6 +3456,15 @@ fn reconcile_trailing_newline_add_case_uses_crlf_when_file_is_crlf() {
             );
         }
     }
+    // Text-parity: the text engine keeps the same CRLF the editing side added.
+    let text = match text_outcome(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("text engine did not resolve cleanly: {other:?}"),
+    };
+    assert!(
+        text.ends_with("\r\n"),
+        "text engine should also end with CRLF: {text:?}"
+    );
 }
 
 // =====================================================================
@@ -3893,16 +3913,19 @@ abstract class Foo {
 // majority style of the file. Should be majority-of-occurrences with
 // base style as the tie-break.
 // =====================================================================
+//
+// heddle#123: the 3-way-bit rule decides WHETHER to push a newline; this
+// test pins WHICH EOL the push uses. `ours` is the side that EDITS the
+// trailing line and ADDS a newline (so its "yes newline" bit wins the
+// 3-way merge and the ADD branch fires); `base`/`theirs` end without a
+// newline. `ours`'s body is CRLF-internal, but the whole-file EOL policy
+// is majority-LF (2 LF samples vs 1 CRLF), so the pushed terminator must
+// be a bare LF, not `\r\n`.
 #[test]
 fn detect_eol_uses_majority_when_two_of_three_inputs_are_lf() {
-    // base and theirs are LF (one bare `\n` each); ours uses CRLF
-    // internally but doesn't end with a newline, forcing the ADD
-    // branch of reconcile_trailing_newline. With the any-CRLF rule
-    // detect_eol picks CRLF and the merged file ends `\r\n`; with
-    // the majority rule it picks LF (2 LF samples vs 1 CRLF sample).
-    let base = "fn foo() {}\n";
-    let ours = "fn foo() {}\r\nfn bar() {}";
-    let theirs = "fn foo() { 1 }\n";
+    let base = "fn foo() {}\nfn bar() {}";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }\n"; // CRLF-internal; edits + adds trailing newline
+    let theirs = "fn foo() { 9 }\nfn bar() {}"; // disjoint LF edit, no trailing newline
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         merged.ends_with('\n') && !merged.ends_with("\r\n"),
@@ -6711,5 +6734,141 @@ fn conformance_484_r3_cross_side_cpp_namespace_prepend_no_collapse() {
     assert!(
         merged.find("void a()").unwrap() < merged.find("void b()").unwrap(),
         "prepended block must precede the base block:\n{merged}"
+    );
+}
+
+// =====================================================================
+// heddle#123: text-vs-semantic EOF-newline parity.
+//
+// The semantic path used to decide its output's trailing-newline state
+// by a context-free 3-side MAJORITY vote (`majority_ends_with_newline`).
+// The text engine (`text_hunk_merge`) instead carries whatever
+// trailing-newline state the side that AUTHORED the final line had —
+// equivalently, it 3-way-merges the trailing-newline as a one-bit field
+// (a side that changed the bit from base wins over a side that didn't).
+//
+// The majority vote diverges from the text engine precisely when the
+// side that edited the trailing line is in the newline-state MINORITY:
+// it strips a newline the editor added (1-of-3) or keeps one the editor
+// removed (2-of-3 still have it). Both are spurious one-byte EOF diffs
+// unique to the semantic engine — a regression the issue asks us to
+// close.
+//
+// `eof_parity_table` is the differential audit: for each fixture where
+// the TEXT engine resolves cleanly (so there is a canonical text answer
+// to match — the cases where text conflicts are legitimate
+// "semantic resolved what text could not" wins and are excluded), the
+// semantic output must end with the SAME trailing-newline state as the
+// text output. The four issue-named shapes are called out inline.
+// =====================================================================
+fn semantic_eof_byte(base: &str, ours: &str, theirs: &str) -> Option<u8> {
+    let outcome = merge_rust(base, ours, theirs);
+    let bytes = match outcome {
+        MergeOutcome::Clean(b) => b,
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => merged_bytes_with_markers,
+        other => panic!("unexpected semantic outcome: {other:?}"),
+    };
+    bytes.last().copied()
+}
+
+fn text_outcome(base: &str, ours: &str, theirs: &str) -> MergeOutcome {
+    text_hunk_merge_with_markers(
+        base.as_bytes(),
+        ours.as_bytes(),
+        theirs.as_bytes(),
+        MARKERS,
+    )
+}
+
+#[test]
+fn eof_parity_table() {
+    // (name, base, ours, theirs)
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // --- file ends WITH newline (all sides) ---
+        (
+            "ends-with-newline/disjoint-edits",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+        ),
+        // --- file ends WITHOUT newline (all sides) ---
+        (
+            "ends-without-newline/disjoint-edits",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+        ),
+        // --- both sides ADD a trailing newline (base had none) ---
+        (
+            "both-sides-add-trailing-newline",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+        ),
+        // --- one side STRIPS the trailing newline; that side edits the
+        //     final line, so the text engine drops the `\n`. The majority
+        //     vote (2-of-3 still have it) wrongly keeps it. ---
+        (
+            "one-side-strips-trailing-newline/theirs-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+        ),
+        // mirror: ours is the stripping editor.
+        (
+            "one-side-strips-trailing-newline/ours-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }\n",
+            "fn foo() { 1 }\nfn bar() { 2 }",
+            "fn foo() { 2 }\nfn bar() { 1 }\n",
+        ),
+        // --- one side ADDS the trailing newline; that side edits the
+        //     final line (only 1-of-3 has it). The majority vote wrongly
+        //     strips it; the text engine keeps it. ---
+        (
+            "one-side-adds-trailing-newline/theirs-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+        ),
+        (
+            "one-side-adds-trailing-newline/ours-edits-last",
+            "fn foo() { 1 }\nfn bar() { 1 }",
+            "fn foo() { 1 }\nfn bar() { 2 }\n",
+            "fn foo() { 2 }\nfn bar() { 1 }",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (name, base, ours, theirs) in cases {
+        let text = text_outcome(base, ours, theirs);
+        let text_bytes = match &text {
+            MergeOutcome::Clean(b) => b.clone(),
+            // Text conflict => no canonical text answer; this is a
+            // legitimate "semantic resolved what text could not" case.
+            // Excluded from the parity assertion by construction.
+            MergeOutcome::Conflicts { .. } => {
+                panic!(
+                    "fixture `{name}` was meant to resolve cleanly in the text engine \
+                     but produced a conflict; fix the fixture or move it out of the \
+                     parity table"
+                );
+            }
+            other => panic!("unexpected text outcome for `{name}`: {other:?}"),
+        };
+        let text_eof = text_bytes.last().copied();
+        let sem_eof = semantic_eof_byte(base, ours, theirs);
+        if sem_eof != text_eof {
+            failures.push(format!(
+                "  [{name}] semantic EOF byte {sem_eof:?} != text EOF byte {text_eof:?}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "semantic path diverges from text engine on EOF-newline:\n{}",
+        failures.join("\n")
     );
 }

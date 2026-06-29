@@ -1123,17 +1123,33 @@ fn count_eols(s: &[u8]) -> (usize, usize) {
     (crlf, lf)
 }
 
-/// Match the trailing-newline state of `output` to the majority of the
-/// three input sides. `text_hunk_merge` preserves whatever its line
-/// splitter sees on the last line; the semantic path used to force a
-/// trailing `\n` unconditionally, which dirtied files that ended
-/// without one on every side (Codex r3 P2 #2).
+/// Match the trailing-newline state of `output` to what the textual
+/// engine (`text_hunk_merge`) would emit. `text_hunk_merge` carries the
+/// trailing-newline state of the side that AUTHORED the final line; the
+/// semantic path used to force a trailing `\n` unconditionally
+/// (Codex r3 P2 #2), and then a context-free 3-side MAJORITY vote
+/// (heddle#114) — both of which silently dirty the EOF byte relative to
+/// the text engine.
 ///
-/// Rule: count how many of `base`, `ours`, `theirs` end with `\n`. If
-/// the majority do, ensure output ends with `\n`; otherwise strip any
-/// `\n` we may have inherited from a single side's content. Empty
-/// inputs are not counted (they have no opinion on trailing-newline
-/// state).
+/// Rule (heddle#123): 3-way merge the trailing-newline as a one-bit
+/// field — exactly what the text engine does line-locally. Counting
+/// votes ignores WHICH side touched the trailing line; a 3-way bit merge
+/// honours it. Let `b`/`o`/`t` be whether `base`/`ours`/`theirs` end
+/// with `\n` (an empty side has no opinion and inherits `base`'s bit):
+///
+/// - `o == b` → the trailing line is unchanged on ours, so `theirs`'
+///   bit wins (whether theirs kept or changed it).
+/// - `t == b` → symmetric; `ours`' bit wins.
+/// - both changed the bit away from base → a genuine two-sided
+///   trailing-newline edit; the text engine surfaces that hunk as a
+///   CONFLICT (no clean text answer to mirror), so the semantic path is
+///   free to resolve it — we AND the two (newline only if both want one)
+///   to bias toward the no-trailing-newline that git's `\ No newline`
+///   convention treats as the meaningful state.
+///
+/// This collapses to the old "majority" answer on every shape where the
+/// editor is NOT in the minority, and corrects the four minority-editor
+/// shapes the differential audit (`eof_parity_table`) pins.
 ///
 /// CRLF is treated as a single unit on BOTH the pop and push paths:
 /// when popping a trailing `\n`, an immediately-preceding `\r` is
@@ -1146,7 +1162,7 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, sides: SideSources<'_>) {
     if out.is_empty() {
         return;
     }
-    let want_newline = majority_ends_with_newline(sides.base, sides.ours, sides.theirs);
+    let want_newline = merge_trailing_newline_bit(sides.base, sides.ours, sides.theirs);
     let has_newline = *out.last().unwrap() == b'\n';
     match (want_newline, has_newline) {
         (true, false) => {
@@ -1162,22 +1178,47 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, sides: SideSources<'_>) {
     }
 }
 
-fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
-    let mut with = 0u8;
-    let mut total = 0u8;
-    for s in [base, ours, theirs] {
+/// 3-way merge of the trailing-newline bit. Mirrors the text engine's
+/// final-line-author behaviour (heddle#123). See
+/// [`reconcile_trailing_newline`] for the rule. An empty side has no
+/// trailing-newline opinion and inherits `base`'s bit; if `base` is also
+/// empty it inherits a non-empty side's bit; the all-empty case is
+/// unreachable here (we return `Clean(empty)` before reconstruction) and
+/// defaults to "yes".
+fn merge_trailing_newline_bit(base: &str, ours: &str, theirs: &str) -> bool {
+    fn ends_with_newline(s: &str) -> Option<bool> {
         if s.is_empty() {
-            continue;
-        }
-        total += 1;
-        if s.as_bytes().last() == Some(&b'\n') {
-            with += 1;
+            None
+        } else {
+            Some(s.as_bytes().last() == Some(&b'\n'))
         }
     }
-    // Default to "yes" when nothing has an opinion (all sides empty —
-    // unreachable in practice since we'd have returned Clean(empty)
-    // before reconstruction), and require strict majority otherwise.
-    total == 0 || with * 2 > total
+
+    let b = ends_with_newline(base);
+    let o = ends_with_newline(ours);
+    let t = ends_with_newline(theirs);
+
+    // An empty side inherits base; an empty base inherits a non-empty
+    // side. Resolve each to a concrete bit before the 3-way merge.
+    let base_bit = b.or(o).or(t);
+    let Some(base_bit) = base_bit else {
+        return true; // all sides empty — unreachable in practice.
+    };
+    let ours_bit = o.unwrap_or(base_bit);
+    let theirs_bit = t.unwrap_or(base_bit);
+
+    if ours_bit == base_bit {
+        // ours didn't touch the bit — theirs' edit (if any) wins.
+        theirs_bit
+    } else if theirs_bit == base_bit {
+        // theirs didn't touch the bit — ours' edit wins.
+        ours_bit
+    } else {
+        // Both sides moved the bit away from base. The text engine
+        // conflicts on this hunk (no canonical text answer); resolve to
+        // a trailing newline only if BOTH sides want one.
+        ours_bit && theirs_bit
+    }
 }
 
 /// Emit a `<<<<<<< / ======= / >>>>>>>` conflict block wrapping two
