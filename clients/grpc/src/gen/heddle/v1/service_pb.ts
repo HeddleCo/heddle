@@ -22,10 +22,11 @@ import { file_heddle_v1_timeline } from "./timeline_pb.js";
 import { file_heddle_v1_transactions } from "./transactions_pb.js";
 import { file_heddle_v1_hooks } from "./hooks_pb.js";
 import { file_heddle_v1_support } from "./support_pb.js";
+import { file_heddle_v1_tree_edit } from "./tree_edit_pb.js";
 
 /**
  * Describes the file heddle/v1/service.proto.
  */
 export const file_heddle_v1_service: GenFile = /*@__PURE__*/
-  fileDesc("ChdoZWRkbGUvdjEvc2VydmljZS5wcm90bxIJaGVkZGxlLnYxUABQAVACUANQBFAFUAZQB1AIUAlQClALUAxQDVAOUA9QEFARYgZwcm90bzM", [file_heddle_v1_common, file_heddle_v1_sync, file_heddle_v1_hosted, file_heddle_v1_auth, file_heddle_v1_content, file_heddle_v1_repo_events, file_heddle_v1_threads, file_heddle_v1_review, file_heddle_v1_feed, file_heddle_v1_policies, file_heddle_v1_state_review, file_heddle_v1_discussion, file_heddle_v1_signals, file_heddle_v1_operations, file_heddle_v1_timeline, file_heddle_v1_transactions, file_heddle_v1_hooks, file_heddle_v1_support]);
+  fileDesc("ChdoZWRkbGUvdjEvc2VydmljZS5wcm90bxIJaGVkZGxlLnYxUABQAVACUANQBFAFUAZQB1AIUAlQClALUAxQDVAOUA9QEFARUBJiBnByb3RvMw", [file_heddle_v1_common, file_heddle_v1_sync, file_heddle_v1_hosted, file_heddle_v1_auth, file_heddle_v1_content, file_heddle_v1_repo_events, file_heddle_v1_threads, file_heddle_v1_review, file_heddle_v1_feed, file_heddle_v1_policies, file_heddle_v1_state_review, file_heddle_v1_discussion, file_heddle_v1_signals, file_heddle_v1_operations, file_heddle_v1_timeline, file_heddle_v1_transactions, file_heddle_v1_hooks, file_heddle_v1_support, file_heddle_v1_tree_edit]);
 

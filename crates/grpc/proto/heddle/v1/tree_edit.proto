@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "heddle/v1/content.proto";
+
+// Read-side tree-edit RPCs for hosted threads (heddle#409, from spike #267).
+//
+// These methods let a filesystem-less client inspect a hosted thread's tree
+// state — status, diff, and log — without ever materializing a local
+// `.heddle/` or worktree. The contract is explicit:
+//
+//   * **Committed tree by default.** With no compare input, `StatusForThread`
+//     reports the committed hosted thread state and its relation to the base;
+//     it makes NO claim about a client filesystem.
+//   * **Caller-supplied overlay only.** Dirty-overlay fields are populated only
+//     when the request names a `compare_tree` (a committed ref, a staged
+//     capture, or an inline tree). There is no implicit filesystem status.
+//   * **Reuse, not reimplement.** Diff/log payloads reuse the existing
+//     `ContentService` shapes (`FileDiff`, `CompareSummary`, `StateSummary`).
+//     The server resolves them with the same object-store primitives the local
+//     CLI uses (`Repository::diff_trees`, `Repository::query_history`), which
+//     already take only `store: &S` and never touch a worktree.
+service TreeEditService {
+  // Committed-thread status by default; dirty overlay only when `compare_tree`
+  // is supplied. Never reports an implicit client filesystem.
+  rpc StatusForThread(StatusForThreadRequest) returns (StatusForThreadResponse);
+  // Diff between two named treeish points (committed ref / staged capture /
+  // inline tree). Reuses the `FileDiff` / `CompareSummary` content shapes.
+  rpc DiffForThread(DiffForThreadRequest) returns (DiffForThreadResponse);
+  // First-parent history for a thread, reusing the `StateSummary` shape.
+  rpc LogForThread(LogForThreadRequest) returns (LogForThreadResponse);
+}
+
+// A point in the object graph that can be diffed or compared against. The
+// server resolves each variant to a root tree hash before diffing.
+message Treeish {
+  oneof value {
+    // Thread name, marker, or state spec.
+    string ref = 1;
+    // Full `hd-*` state id string.
+    string state_id = 2;
+    // A capture id from the (write-side) staging surface.
+    string capture_id = 3;
+    // Raw `ContentHash` bytes of a tree.
+    bytes tree_hash = 4;
+  }
+}
+
+// Added / modified / deleted path buckets for the committed-thread delta or a
+// supplied-tree overlay comparison.
+message ThreadPathSet {
+  repeated string modified = 1;
+  repeated string added = 2;
+  repeated string deleted = 3;
+}
+
+message StatusForThreadRequest {
+  // Hosted namespace/repo path.
+  string repo_path = 1;
+  // Thread name to inspect.
+  string thread = 2;
+  // Absent = committed-thread status only. Present = compare the committed
+  // thread tree against this supplied treeish (the FS-less overlay).
+  optional Treeish compare_tree = 3;
+}
+
+message StatusForThreadResponse {
+  string thread = 1;
+  // Committed head state of the thread (`hd-*`).
+  string head_state = 2;
+  // Base state the thread is measured against (`hd-*`).
+  string base_state = 3;
+  // The integration target thread, when known.
+  string target_thread = 4;
+  // Hosted coordination status string (e.g. ahead/behind/diverged), when known.
+  string coordination_status = 5;
+  // Path delta. Empty unless `compare_tree` was supplied or the thread differs
+  // from its base.
+  ThreadPathSet changes = 6;
+  // True when `changes` reflects a comparison against the supplied
+  // `compare_tree` rather than the committed base.
+  bool compared_to_supplied_tree = 7;
+}
+
+message DiffForThreadRequest {
+  string repo_path = 1;
+  string thread = 2;
+  // Left side of the diff. Required.
+  Treeish from = 3;
+  // Right side of the diff. Required. A diff never implies an invisible
+  // worktree — the caller must name both sides.
+  Treeish to = 4;
+  // Surface semantic classification on each `FileDiff` when available.
+  bool include_semantic = 5;
+}
+
+message DiffForThreadResponse {
+  // Resolved `hd-*` state ids for each side (empty when the side resolved
+  // directly to a tree hash or capture rather than a state).
+  string from_state = 1;
+  string to_state = 2;
+  // Per-file diffs, reusing the `ContentService` `FileDiff` shape.
+  repeated FileDiff files = 3;
+  // Aggregate counts, reusing the `ContentService` `CompareSummary` shape.
+  CompareSummary summary = 4;
+}
+
+message LogForThreadRequest {
+  string repo_path = 1;
+  string thread = 2;
+  // Max states to return. 0 = server default.
+  uint32 limit = 3;
+  // Exclusive lower bound (`hd-*`); stop the first-parent walk here.
+  optional string since_state = 4;
+  // Restrict to states that changed any of these paths (relative to first
+  // parent). Empty = no path filter.
+  repeated string paths = 5;
+  // Restrict to states whose agent model contains this substring.
+  optional string agent_model_substring = 6;
+}
+
+message LogForThreadResponse {
+  // History states, reusing the `ContentService` `StateSummary` shape.
+  repeated StateSummary states = 1;
+}
