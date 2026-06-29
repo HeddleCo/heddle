@@ -349,19 +349,21 @@ export const LogForThreadResponseSchema: GenMessage<LogForThreadResponse> = /*@_
  *
  * These methods let a filesystem-less client inspect a hosted thread's tree
  * state — status, diff, and log — without ever materializing a local
- * `.heddle/` or worktree. The contract is explicit:
+ * `.heddle/` or worktree. The contract is explicit.
  *
- *   * **Committed tree by default.** With no compare input, `StatusForThread`
- *     reports the committed hosted thread state and its relation to the base;
- *     it makes NO claim about a client filesystem.
- *   * **Caller-supplied overlay only.** Dirty-overlay fields are populated only
- *     when the request names a `compare_tree` (a committed ref, a staged
- *     capture, or an inline tree). There is no implicit filesystem status.
- *   * **Reuse, not reimplement.** Diff/log payloads reuse the existing
- *     `ContentService` shapes (`FileDiff`, `CompareSummary`, `StateSummary`).
- *     The server resolves them with the same object-store primitives the local
- *     CLI uses (`Repository::diff_trees`, `Repository::query_history`), which
- *     already take only `store: &S` and never touch a worktree.
+ * Committed tree by default: with no compare input, `StatusForThread` reports
+ * the committed hosted thread state and its relation to the base, and makes no
+ * claim about a client filesystem.
+ *
+ * Caller-supplied overlay only: dirty-overlay fields are populated solely when
+ * the request names a `compare_tree` (a committed ref, a staged capture, or an
+ * inline tree). There is no implicit filesystem status.
+ *
+ * Reuse, not reimplement: diff and log payloads reuse the existing
+ * `ContentService` shapes (`FileDiff`, `CompareSummary`, `StateSummary`). The
+ * server resolves them with the same object-store primitives the local CLI uses
+ * (`Repository::diff_trees`, `Repository::query_history`), which already take
+ * only `store: &S` and never touch a worktree.
  *
  * @generated from service heddle.v1.TreeEditService
  */
