@@ -17,7 +17,7 @@ use objects::{
     object::{OperationId, Principal},
 };
 use runtime_bridge::RuntimeBridge;
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use uuid::Uuid;
 
 use super::{
@@ -189,7 +189,7 @@ impl PgOpLogBackend {
              FROM oplog WHERE repo_id = $1 AND batch_id = ANY($2)
              ORDER BY batch_id {order}, batch_index ASC"
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(repo_id)
             .bind(batch_ids)
             .fetch_all(pool)
@@ -235,7 +235,7 @@ impl PgOpLogBackend {
                  WHERE repo_id = $1 {extra_where} AND scope = $2
                  ORDER BY batch_id {order} LIMIT $3"
             );
-            sqlx::query_scalar::<_, i64>(&sql)
+            sqlx::query_scalar::<_, i64>(AssertSqlSafe(sql))
                 .bind(repo_id)
                 .bind(scope)
                 .bind(count as i64)
@@ -248,7 +248,7 @@ impl PgOpLogBackend {
                  WHERE repo_id = $1 {extra_where}
                  ORDER BY batch_id {order} LIMIT $2"
             );
-            sqlx::query_scalar::<_, i64>(&sql)
+            sqlx::query_scalar::<_, i64>(AssertSqlSafe(sql))
                 .bind(repo_id)
                 .bind(count as i64)
                 .fetch_all(pool)
@@ -589,7 +589,7 @@ mod current_thread_runtime_tests {
             .connect(database_url)
             .await
             .expect("connect to postgres for pg oplog fixture");
-        sqlx::query(&format!("CREATE SCHEMA {quoted_schema}"))
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {quoted_schema}")))
             .execute(&admin)
             .await
             .expect("create pg oplog fixture schema");
@@ -600,7 +600,7 @@ mod current_thread_runtime_tests {
             .after_connect(move |conn, _meta| {
                 let search_path_sql = search_path_sql.clone();
                 Box::pin(async move {
-                    conn.execute(search_path_sql.as_str()).await?;
+                    conn.execute(AssertSqlSafe(search_path_sql)).await?;
                     Ok(())
                 })
             })
@@ -648,10 +648,12 @@ mod current_thread_runtime_tests {
             .connect(database_url)
             .await
             .expect("connect to postgres for pg oplog fixture cleanup");
-        sqlx::query(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .expect("drop pg oplog fixture schema");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP SCHEMA {quoted_schema} CASCADE"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop pg oplog fixture schema");
     }
 
     /// Issue #62: `PgOpLogBackend`'s sync methods must not panic when the

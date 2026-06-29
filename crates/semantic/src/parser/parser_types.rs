@@ -19,7 +19,7 @@ pub struct Import {
 }
 
 /// Type of import.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImportKind {
     Use,
     ExternCrate,

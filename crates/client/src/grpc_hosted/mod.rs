@@ -5,6 +5,7 @@ mod helpers;
 mod hydration;
 mod session;
 mod sync;
+mod tree_edit;
 mod user;
 
 use cli_shared::ClientConfig;
@@ -14,6 +15,7 @@ use grpc::heddle::v1::{
     content_service_client::ContentServiceClient,
     hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
     repo_sync_service_client::RepoSyncServiceClient,
+    tree_edit_service_client::TreeEditServiceClient,
 };
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
@@ -31,6 +33,7 @@ pub struct HostedGrpcClient {
     pub(super) user: HostedUserServiceClient<Channel>,
     pub(super) auth: AuthServiceClient<Channel>,
     pub(super) content: ContentServiceClient<Channel>,
+    pub(super) tree_edit: TreeEditServiceClient<Channel>,
     pub(super) token_header: Option<MetadataValue<tonic::metadata::Ascii>>,
     transport: helpers::HostedTransportPolicy,
     pub(super) auth_proof_key_pem: Option<String>,
@@ -82,7 +85,8 @@ impl HostedGrpcClient {
                 .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
-            content: ContentServiceClient::new(channel),
+            content: ContentServiceClient::new(channel.clone()),
+            tree_edit: TreeEditServiceClient::new(channel),
             token_header,
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),

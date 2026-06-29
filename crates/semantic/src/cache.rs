@@ -69,7 +69,9 @@ impl SemanticParseCache {
             return parsed;
         }
 
-        let parsed = ParsedFile::parse(source, language).map(Arc::new);
+        let parsed =
+            ParsedFile::parse_with_hash(Arc::<str>::from(source), language, key.content_hash)
+                .map(Arc::new);
         self.store(key, parsed.clone());
         parsed
     }

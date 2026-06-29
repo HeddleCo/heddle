@@ -18,7 +18,8 @@ use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state, build_repository_verification_state_with_worktree_status,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
         override_trust_recommended_action,
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},

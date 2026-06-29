@@ -32,12 +32,19 @@
 //!   parallelism (a build of any non-trivial project will issue tens
 //!   of these per second).
 //! * [`fuse_mount_serves_mmap_readers`] — `mmap(MAP_SHARED, ...)` on a
-//!   mounted file. Locks in the [`InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP`]
-//!   opt-in: without it, every `open` reply carrying
-//!   `FOPEN_DIRECT_IO` forces `mmap(MAP_SHARED, ...)` to fail with
-//!   `ENODEV`, which breaks rust-analyzer, cargo, IDEs, and
-//!   `grep --mmap` on heddle-mounted trees. Requires Linux 5.16+;
-//!   skips itself on older kernels (the cap is silently dropped).
+//!   mounted file. Locks in cached mode (heddle#87): with no
+//!   `FOPEN_DIRECT_IO`, the page cache is the mapping substrate and
+//!   shared mmap works on any FUSE-capable kernel — the path
+//!   rust-analyzer, cargo, IDEs, and `grep --mmap` rely on. (No longer
+//!   needs the `FUSE_DIRECT_IO_ALLOW_MMAP` cap or Linux 5.16+.)
+//! * [`fuse_mount_cache_stays_coherent_after_write`] — heddle#87
+//!   coherence red-commit. Write→close→reopen serves *fresh* content
+//!   under cached mode, proving active inode invalidation closes the
+//!   stale-read hazard that `FOPEN_DIRECT_IO` used to paper over.
+//! * [`fuse_mount_serves_repeat_reads_from_cache`] — heddle#87
+//!   cache-mode-active red-commit. A repeat read of unchanged content
+//!   is served from the kernel page cache (the FUSE `read`-callback
+//!   counter stays flat), proving the mount isn't bypassing the cache.
 //! * [`fuse_mount_unmounts_cleanly_on_session_drop`] — drop semantics.
 //!   After the session is dropped the mountpoint must no longer
 //!   serve the captured file; reading should fail with `NotFound` and
@@ -93,6 +100,29 @@ fn mount_fixture(repo: Repository) -> (BackgroundSession, TempDir) {
     let target = mountpoint.path().join("hello.txt");
     wait_for(&target, true, Duration::from_secs(5));
     (session, mountpoint)
+}
+
+/// Like [`mount_fixture`], but also hands back the FUSE `read`-callback
+/// counter so a test can observe whether the kernel page cache is
+/// serving repeated reads (cached mode, heddle#87).
+fn mount_fixture_with_read_counter(
+    repo: Repository,
+) -> (
+    BackgroundSession,
+    TempDir,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let mount = ContentAddressedMount::new(repo, "main").expect("open mount");
+    let mountpoint = TempDir::new().expect("tempdir for mountpoint");
+    let shell = FuseShell::new(mount);
+    let read_calls = shell.read_calls_handle();
+    let session = shell
+        .mount_background(mountpoint.path())
+        .expect("mount session");
+
+    let target = mountpoint.path().join("hello.txt");
+    wait_for(&target, true, Duration::from_secs(5));
+    (session, mountpoint, read_calls)
 }
 
 /// Poll up to `deadline` for `target` to exist (`expect_present=true`)
@@ -155,6 +185,134 @@ fn fuse_mount_round_trips_writes_to_existing_file() {
     drop(session);
 }
 
+/// **heddle#87 red-commit (coherence).** The write→close→reopen
+/// stale-read hazard that heddle#74 r1 originally papered over with
+/// `FOPEN_DIRECT_IO` must stay closed *under cached mode* — i.e. with
+/// the page cache live and coherence maintained by active inode
+/// invalidation instead.
+///
+/// The scenario is deliberately the worst case for a page cache:
+///   1. Read the file through a fresh fd → kernel caches the bytes.
+///   2. Truncate-and-rewrite with *different-length* content through a
+///      *separate* fd, then close (→ `flush`/`release` promote the hot
+///      tier and fire `inval_inode`).
+///   3. Open a brand-new fd and read again.
+///
+/// Without invalidation, step 3 would hand back the bytes cached in
+/// step 1 (the page cache is keyed off the kernel-side inode, which is
+/// unchanged). With the heddle#87 invalidation contract, step 2's
+/// `inval_inode(ino, 0, -1)` drops those pages, so step 3 re-asks the
+/// shell and observes the fresh content. A regression that drops the
+/// invalidation (or re-introduces a caching mode the inval can't reach)
+/// fails here with the stale bytes.
+#[test]
+#[ignore = "requires FUSE on host; opt-in via --ignored"]
+fn fuse_mount_cache_stays_coherent_after_write() {
+    let (_repo_dir, repo) = build_fixture();
+    let (session, mountpoint) = mount_fixture(repo);
+
+    let target = mountpoint.path().join("hello.txt");
+
+    // 1. Prime the kernel page cache with the captured content.
+    assert_eq!(
+        fs::read_to_string(&target).expect("prime read"),
+        "world",
+        "captured content visible before write"
+    );
+
+    // 2. Rewrite with longer, different content through a separate fd.
+    //    `truncate(true)` exercises the `setattr(size=0)` → invalidation
+    //    path as well as the `write` + `flush`/`release` path.
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&target)
+            .expect("open for truncate+write");
+        f.write_all(b"FRESH-AND-LONGER-CONTENT")
+            .expect("write new content");
+        // drop → close → flush + release → promote + inval_inode.
+    }
+
+    // 3. Fresh open + read. Must observe the new bytes, not the cached
+    //    "world" from step 1.
+    //
+    //    Invalidation is dispatched off the FUSE worker thread (it has
+    //    to be — a synchronous notify from inside the mutating callback
+    //    deadlocks on the kernel inode lock), so it lands a beat after
+    //    `close(2)` returns rather than synchronously with it. Poll a
+    //    bounded window — deliberately *shorter than the 1 s attr TTL*
+    //    (`fuse::TTL`) — for the fresh content. The short window is what
+    //    makes this a real test of *active* invalidation rather than
+    //    passive TTL expiry: a coherent mount drops the page cache and
+    //    converges within single-digit ms, but a broken mount (no
+    //    invalidation) can only self-heal once the kernel re-validates
+    //    attrs at the TTL boundary — which is outside this window, so it
+    //    would still be serving the stale "world" when we assert.
+    let deadline = Instant::now() + Duration::from_millis(700);
+    let mut after = fs::read_to_string(&target).expect("read after rewrite");
+    while after != "FRESH-AND-LONGER-CONTENT" && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        after = fs::read_to_string(&target).expect("re-read after rewrite");
+    }
+    assert_eq!(
+        after, "FRESH-AND-LONGER-CONTENT",
+        "active invalidation must drop the stale page cache so the \
+         reopened fd sees fresh content (heddle#87 coherence)"
+    );
+
+    drop(session);
+}
+
+/// **heddle#87 red-commit (cache-mode-active).** Proves the kernel
+/// page cache is actually serving repeated reads — i.e. the mount runs
+/// in cached mode, not the old `FOPEN_DIRECT_IO` bypass.
+///
+/// We read the same unchanged file twice through fresh fds and watch
+/// the FUSE `read`-callback counter. In cached mode the *second* whole
+/// read is served entirely from the kernel page cache, so the counter
+/// must not advance for it. In the old direct-IO mode every userspace
+/// `read(2)` becomes a FUSE `read` callback, so the counter would climb
+/// on the second read too — which is exactly the throughput cost
+/// heddle#87 removes. A regression that re-introduces `FOPEN_DIRECT_IO`
+/// fails here: the counter advances on the second read.
+#[test]
+#[ignore = "requires FUSE on host; opt-in via --ignored"]
+fn fuse_mount_serves_repeat_reads_from_cache() {
+    use std::sync::atomic::Ordering;
+
+    let (_repo_dir, repo) = build_fixture();
+    let (session, mountpoint, read_calls) = mount_fixture_with_read_counter(repo);
+
+    let target = mountpoint.path().join("hello.txt");
+
+    // First read: populates the page cache. This *does* go through the
+    // FUSE `read` callback (cold cache).
+    assert_eq!(fs::read_to_string(&target).expect("first read"), "world");
+    let after_first = read_calls.load(Ordering::Relaxed);
+    assert!(
+        after_first >= 1,
+        "the cold first read must reach the FUSE read callback at least once \
+         (got {after_first})"
+    );
+
+    // Second read of the same unchanged file through a fresh fd. In
+    // cached mode the kernel serves it from the page cache and never
+    // calls us; the counter stays flat.
+    assert_eq!(fs::read_to_string(&target).expect("second read"), "world");
+    let after_second = read_calls.load(Ordering::Relaxed);
+
+    assert_eq!(
+        after_second, after_first,
+        "cached mode must serve the second read from the kernel page cache \
+         without a FUSE round-trip — counter went {after_first} → {after_second}; \
+         a nonzero delta means the mount is still bypassing the cache \
+         (FOPEN_DIRECT_IO regression, heddle#87)"
+    );
+
+    drop(session);
+}
+
 #[test]
 #[ignore = "requires FUSE on host; opt-in via --ignored"]
 fn fuse_mount_serves_concurrent_readers() {
@@ -192,34 +350,20 @@ fn fuse_mount_serves_concurrent_readers() {
 /// `mmap(MAP_SHARED, ...)` against a mounted file must succeed and
 /// must return the captured bytes when the mapping is read.
 ///
-/// This locks in `FUSE_DIRECT_IO_ALLOW_MMAP`: the shell unconditionally
-/// returns `FOPEN_DIRECT_IO` from `open` so kernel page-cache reads
-/// don't shadow hot-tier writes, and under default kernel semantics
-/// that disables shared `mmap` on every fd (the page cache is the
-/// mapping substrate; bypass it and the kernel refuses to map the
-/// file, returning `ENODEV` from the `mmap` syscall). The shell opts
-/// out of that restriction via `InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP`
-/// in its `init` callback — without that opt-in, this test fails
-/// with `Errno::NODEV` at the `Mmap::map(&file)` call, which is the
-/// exact failure mode rust-analyzer, cargo, and IDEs hit on
-/// heddle-mounted repos.
+/// Post-heddle#87 the shell runs in the kernel's default *cached*
+/// mode — `open` no longer returns `FOPEN_DIRECT_IO` — so shared
+/// `mmap` works out of the box: the page cache is the mapping
+/// substrate, and we keep it live. This is what makes rust-analyzer,
+/// cargo, IDEs, and `grep --mmap` work on heddle-mounted repos.
 ///
-/// The cap requires Linux 5.16+ (when the kernel-side flag was
-/// added). Older kernels silently drop the request — fuser logs it at
-/// debug — and this test will fail there. We probe the kernel version
-/// up front and skip rather than fail on older kernels so the
-/// `fuse-smoke` CI matrix stays portable.
+/// (Before heddle#87 this test had to opt the kernel into
+/// `FUSE_DIRECT_IO_ALLOW_MMAP` to map a `FOPEN_DIRECT_IO` fd, which
+/// required Linux 5.16+. Active invalidation removed both the
+/// direct-IO flag and that kernel-version floor, so the test no
+/// longer probes the kernel version.)
 #[test]
-#[ignore = "requires FUSE on host (Linux 5.16+); opt-in via --ignored"]
+#[ignore = "requires FUSE on host; opt-in via --ignored"]
 fn fuse_mount_serves_mmap_readers() {
-    if !kernel_at_least(5, 16) {
-        eprintln!(
-            "skipping fuse_mount_serves_mmap_readers: \
-             FUSE_DIRECT_IO_ALLOW_MMAP requires Linux 5.16+"
-        );
-        return;
-    }
-
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -229,11 +373,10 @@ fn fuse_mount_serves_mmap_readers() {
     // SAFETY: `Mmap::map` is unsafe because the kernel may revoke the
     // mapping out from under us if another process truncates the
     // backing file. In this test we hold the only handle to the
-    // mounted file for the lifetime of `mapping`, and the FUSE shell
-    // doesn't expose `setattr(size)` (so truncation is impossible
-    // through the mount). Soundness is on us; we accept the contract.
+    // mounted file for the lifetime of `mapping`, and we don't mutate
+    // it through the mount. Soundness is on us; we accept the contract.
     let mapping = unsafe { memmap2::Mmap::map(&file) }
-        .expect("mmap(MAP_SHARED) on mounted file (FUSE_DIRECT_IO_ALLOW_MMAP must be enabled)");
+        .expect("mmap(MAP_SHARED) on mounted file (cached mode must be in effect)");
 
     assert_eq!(
         &mapping[..],
@@ -244,22 +387,6 @@ fn fuse_mount_serves_mmap_readers() {
     drop(mapping);
     drop(file);
     drop(session);
-}
-
-/// Parse `/proc/sys/kernel/osrelease` to skip the mmap test on
-/// kernels older than `(major, minor)`. The cap was added in 5.16; a
-/// `mount.fuse.kernel-old.smoke` CI runner on an older kernel should
-/// skip rather than fail.
-fn kernel_at_least(major: u32, minor: u32) -> bool {
-    let raw = match fs::read_to_string("/proc/sys/kernel/osrelease") {
-        Ok(s) => s,
-        Err(_) => return true, // not Linux-shaped — let the test attempt and report
-    };
-    let version_str = raw.trim().split('-').next().unwrap_or("");
-    let mut parts = version_str.split('.').filter_map(|s| s.parse::<u32>().ok());
-    let host_major = parts.next().unwrap_or(0);
-    let host_minor = parts.next().unwrap_or(0);
-    (host_major, host_minor) >= (major, minor)
 }
 
 /// End-to-end verification of the write-side overlay ops added in

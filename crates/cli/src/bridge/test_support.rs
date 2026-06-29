@@ -253,3 +253,27 @@ pub fn heddle_repo<'a>(bridge: &'a GitBridge<'a>) -> &'a HeddleRepository {
 pub fn open_repo(path: &Path) -> GitResult<SleyRepository> {
     git_core::open_repo(path)
 }
+
+/// Drive the #568 P1 checkout-materialization closure walk directly: reconstruct
+/// faithful commits from heddle state into `object_repo`, mirror-backstop the
+/// lossy residual. Used by the bridge integration tests to prove a faithful
+/// commit materializes WITHOUT the mirror holding its objects (and that the OID
+/// safety gate fires on a divergence).
+pub fn materialize_checkout_closure_from_state(
+    bridge: &GitBridge<'_>,
+    mirror_repo: &SleyRepository,
+    object_repo: &SleyRepository,
+    tip_state_id: &ChangeId,
+    tip_oid: ObjectId,
+    excluded: &HashSet<ObjectId>,
+) -> GitResult<()> {
+    git_core::materialize_checkout_closure_from_state(
+        bridge.heddle_repo,
+        &bridge.mapping,
+        mirror_repo,
+        object_repo,
+        tip_state_id,
+        tip_oid,
+        excluded,
+    )
+}

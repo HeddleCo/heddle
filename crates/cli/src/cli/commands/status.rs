@@ -2804,10 +2804,10 @@ mod tests {
 
     use super::{
         ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, ShortStatusRow,
-        append_fast_status_row, assess_materialized_threads, build_status_output,
-        combined_verdict_axes, coordination_axis_clean, coordination_label,
-        render_status_materialized, resolve_coordination_with_trust,
+        PlainGitStatusOutput, RepositoryVerificationState, ShortStatusRow, append_fast_status_row,
+        assess_materialized_threads, build_status_output, combined_verdict_axes,
+        coordination_axis_clean, coordination_label, render_status_materialized,
+        resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -3395,7 +3395,12 @@ mod tests {
         }
     }
 
-    fn status_row<'a>(index: u8, worktree: u8, path: &'a [u8], in_head: bool) -> ShortStatusRow<'a> {
+    fn status_row<'a>(
+        index: u8,
+        worktree: u8,
+        path: &'a [u8],
+        in_head: bool,
+    ) -> ShortStatusRow<'a> {
         ShortStatusRow {
             index,
             worktree,

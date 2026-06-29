@@ -70,7 +70,14 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
 /// OID (or fall through to the native mint) rather than mint a wrong-SHA
 /// reconstructed object.
-fn commit_is_byte_faithful(state: &State) -> bool {
+///
+/// `pub(crate)` so the checkout write-through path (#568 P1,
+/// `git_core::write_thread_state_checkout_from_existing_mirror`) reads the SAME
+/// single faithful-or-lossy discriminator the export path does — reconstruct
+/// faithful commits from state, mirror-backstop the lossy residual. Keeping ONE
+/// chokepoint for the decision means a new consumer cannot drift to a different
+/// (wrong-SHA) rule.
+pub(crate) fn commit_is_byte_faithful(state: &State) -> bool {
     has_git_fidelity(state)
         && !state.git_lossy
         && identity_is_byte_faithful(&state.attribution.principal)
