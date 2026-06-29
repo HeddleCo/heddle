@@ -1116,4 +1116,89 @@ mod tests {
             "two distinct transaction ids must produce two batches"
         );
     }
+
+    /// Regression for heddle#116: a rebase replay's content auto-merge must
+    /// route through the function-level semantic driver (heddle#68), not the
+    /// text-only `text_hunk_merge` path.
+    ///
+    /// This is the load-bearing structural-reshape shape from the heddle#54
+    /// trip report (mirrored from `semantic::merge_driver::tests`): ours
+    /// reorders every function while theirs edits one and appends another.
+    /// Line-level `text_hunk_merge` can't anchor past the reorder and emits a
+    /// wide conflict block — so before the fix `auto_merge_text_lines` returns
+    /// `None` (no clean merge). The semantic driver matches functions by
+    /// identity and resolves cleanly. The `.rs` path is what selects the
+    /// language; an unparseable / unknown-extension file still falls back to
+    /// the text path inside the driver.
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn auto_merge_routes_structural_reshape_through_semantic_driver() {
+        let base = "\
+fn a() { 1 }
+
+fn b() { 2 }
+
+fn c() { 3 }
+
+fn d() { 4 }
+
+fn e() { 5 }
+";
+        // ours reorders to [e, a, c, b, d] — every line moves.
+        let ours = "\
+fn e() { 5 }
+
+fn a() { 1 }
+
+fn c() { 3 }
+
+fn b() { 2 }
+
+fn d() { 4 }
+";
+        // theirs edits c() and appends f().
+        let theirs = "\
+fn a() { 1 }
+
+fn b() { 2 }
+
+fn c() { 333 }
+
+fn d() { 4 }
+
+fn e() { 5 }
+
+fn f() { 6 }
+";
+
+        // Sanity: the plain text path genuinely conflicts on this shape, so a
+        // clean result below can only come from the semantic driver.
+        assert!(
+            matches!(
+                merge::text_hunk_merge(base.as_bytes(), ours.as_bytes(), theirs.as_bytes()),
+                merge::MergeOutcome::Conflicts { .. }
+            ),
+            "fixture must conflict under the text-only path for this test to be meaningful"
+        );
+
+        let merged = auto_merge_text_lines(
+            base.as_bytes(),
+            ours.as_bytes(),
+            theirs.as_bytes(),
+            std::path::Path::new("src/reshape.rs"),
+        )
+        .unwrap()
+        .expect("semantic driver should resolve the structural reshape cleanly");
+        let merged = String::from_utf8(merged).unwrap();
+
+        assert!(
+            !merged.contains("<<<<<<<"),
+            "no conflict markers expected: {merged}"
+        );
+        assert!(merged.contains("fn c() { 333 }"), "theirs c-edit lost: {merged}");
+        assert!(merged.contains("fn f() { 6 }"), "theirs add lost: {merged}");
+        for name in ["fn a", "fn b", "fn c", "fn d", "fn e"] {
+            assert!(merged.contains(name), "missing {name}: {merged}");
+        }
+    }
 }
