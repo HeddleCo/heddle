@@ -3130,34 +3130,44 @@ class C {
 
 // =====================================================================
 // Codex r5 P1 #4: `reconcile_trailing_newline` pops a single byte when
-// majority votes "no trailing newline". If the output ends with CRLF
-// (one side carries Windows line endings into the postamble), popping
+// the rule votes "no trailing newline". If the output ends with CRLF
+// (a side carries Windows line endings into the postamble), popping
 // the `\n` alone leaves a dangling `\r` — line-ending corruption.
 // CRLF must be popped AS A UNIT.
+//
+// heddle#123: rewritten to the 3-way-bit rule. `ours` is the side that
+// EDITS the trailing line and STRIPS its newline (changing the bit away
+// from base); `base`/`theirs` keep the CRLF terminator. Single-side
+// change → ours' "no trailing newline" wins, so reconcile strips the
+// CRLF the unchanged `theirs` postamble carried in — which must pop as
+// a unit. This now matches the text engine byte-for-byte (it too drops
+// the newline the editing side removed).
 // =====================================================================
 #[test]
-fn crlf_trailing_pair_popped_as_unit_when_majority_has_no_trailing_newline() {
-    // base and ours both lack a trailing newline. theirs is the only
-    // side that ends with CRLF. Majority (base + ours, 2 of 3) votes
-    // "no trailing newline" so reconcile_trailing_newline strips it.
-    // Pre-fix it pops a single byte (the `\n`), leaving a trailing
-    // `\r`. Post-fix it pops both bytes of the CRLF together.
-    //
-    // The body change on ours (and no change on theirs) is what funnels
-    // theirs's CRLF postamble into the output via the postamble merge.
-    let base = "fn foo() {}";
-    let ours = "fn foo() { 1 }";
-    let theirs = "fn foo() {}\r\n";
+fn crlf_trailing_pair_popped_as_unit_when_rule_has_no_trailing_newline() {
+    let base = "fn foo() {}\r\nfn bar() {}\r\n";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }"; // edits + strips the trailing CRLF
+    let theirs = "fn foo() { 9 }\r\nfn bar() {}\r\n"; // disjoint edit, keeps CRLF
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         !merged.ends_with('\r'),
         "merged output must not end with a dangling \\r (CRLF must pop as a unit): {merged:?}"
     );
-    // Stronger: the output should end with `}` (matching the
-    // no-trailing-newline majority).
+    // The output should end at the closing brace (the editing side
+    // stripped the trailing newline).
     assert!(
         merged.ends_with('}'),
-        "merged output should end at the closing brace (majority wants no trailing newline): {merged:?}"
+        "merged output should end at the closing brace (editing side stripped the newline): {merged:?}"
+    );
+    // Text-parity: the text engine drops the same newline.
+    let text = match text_outcome(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("text engine did not resolve cleanly: {other:?}"),
+    };
+    assert_eq!(
+        merged.as_bytes().last(),
+        text.as_bytes().last(),
+        "semantic EOF byte must match text engine: sem={merged:?} text={text:?}"
     );
 }
 
@@ -3412,24 +3422,25 @@ fn mixed_eol_add_add_marker_follows_item_bytes_not_whole_file() {
 // =====================================================================
 // Self-audit prediction P1 (heddle#114 r7): r6's reconcile_trailing_newline
 // fix made the POP case CRLF-aware (popping `\r\n` as a unit). The
-// inverse path — when majority votes "yes trailing newline" and output
+// inverse path — when the rule votes "yes trailing newline" and output
 // lacks one — still hardcodes `b'\n'`, so a CRLF-style file whose
 // reconstructed bytes happen to end without a newline gets a bare LF
 // appended. Same hazard class as the r6 P2 #1 markers finding: any
 // place that emits a newline must respect the file's existing EOL.
+//
+// heddle#123: rewritten to the 3-way-bit rule. `base`/`theirs` end with
+// NO trailing newline; `ours` is the side that EDITS the trailing line
+// and ADDS a CRLF newline (changing the bit away from base). Single-side
+// change → ours' "yes trailing newline" wins, so reconcile pushes a
+// newline back — and it must push `\r\n`, not a bare LF, to match the
+// file's CRLF style. Matches the text engine, which keeps the newline
+// the editing side added.
 // =====================================================================
 #[test]
 fn reconcile_trailing_newline_add_case_uses_crlf_when_file_is_crlf() {
-    // base and theirs both end with CRLF (both vote "yes trailing
-    // newline", so majority = yes). ours's modification appends a new
-    // function without a final newline, and the reconstruction
-    // pipeline ends the output at ours's last item — no trailing
-    // newline. reconcile_trailing_newline pushes one back; pre-fix
-    // it pushes `\n`, post-fix it pushes `\r\n` to match the file's
-    // existing CRLF style.
-    let base = "fn foo() {}\r\n";
-    let ours = "fn foo() {}\r\nfn bar() {}";
-    let theirs = "fn foo() { 1 }\r\n";
+    let base = "fn foo() {}\r\nfn bar() {}";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }\r\n"; // edits + adds the trailing CRLF
+    let theirs = "fn foo() { 9 }\r\nfn bar() {}"; // disjoint edit, keeps no-newline
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         merged.ends_with("\r\n"),
@@ -3445,6 +3456,15 @@ fn reconcile_trailing_newline_add_case_uses_crlf_when_file_is_crlf() {
             );
         }
     }
+    // Text-parity: the text engine keeps the same CRLF the editing side added.
+    let text = match text_outcome(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("text engine did not resolve cleanly: {other:?}"),
+    };
+    assert!(
+        text.ends_with("\r\n"),
+        "text engine should also end with CRLF: {text:?}"
+    );
 }
 
 // =====================================================================
@@ -3893,16 +3913,19 @@ abstract class Foo {
 // majority style of the file. Should be majority-of-occurrences with
 // base style as the tie-break.
 // =====================================================================
+//
+// heddle#123: the 3-way-bit rule decides WHETHER to push a newline; this
+// test pins WHICH EOL the push uses. `ours` is the side that EDITS the
+// trailing line and ADDS a newline (so its "yes newline" bit wins the
+// 3-way merge and the ADD branch fires); `base`/`theirs` end without a
+// newline. `ours`'s body is CRLF-internal, but the whole-file EOL policy
+// is majority-LF (2 LF samples vs 1 CRLF), so the pushed terminator must
+// be a bare LF, not `\r\n`.
 #[test]
 fn detect_eol_uses_majority_when_two_of_three_inputs_are_lf() {
-    // base and theirs are LF (one bare `\n` each); ours uses CRLF
-    // internally but doesn't end with a newline, forcing the ADD
-    // branch of reconcile_trailing_newline. With the any-CRLF rule
-    // detect_eol picks CRLF and the merged file ends `\r\n`; with
-    // the majority rule it picks LF (2 LF samples vs 1 CRLF sample).
-    let base = "fn foo() {}\n";
-    let ours = "fn foo() {}\r\nfn bar() {}";
-    let theirs = "fn foo() { 1 }\n";
+    let base = "fn foo() {}\nfn bar() {}";
+    let ours = "fn foo() {}\r\nfn bar() { 1 }\n"; // CRLF-internal; edits + adds trailing newline
+    let theirs = "fn foo() { 9 }\nfn bar() {}"; // disjoint LF edit, no trailing newline
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(
         merged.ends_with('\n') && !merged.ends_with("\r\n"),
