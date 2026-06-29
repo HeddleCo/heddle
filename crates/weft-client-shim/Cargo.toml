@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-repo = { path = "../repo", package = "heddle-repo", version = "0.5", default-features = false, features = ["git-overlay", "native"] }
+repo = { path = "../repo", package = "heddle-repo", version = "0.6", default-features = false, features = ["git-overlay", "native"] }
 
 [lib]
 path = "src/lib.rs"

@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.5" }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.5" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.6" }
 serde.workspace = true
 
 [lib]
