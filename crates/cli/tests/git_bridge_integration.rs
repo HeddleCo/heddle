@@ -1200,6 +1200,233 @@ fn both_engines_fail_hard_on_default_rerun_after_lossy() {
     }
 }
 
+/// #568 P1: the checkout-materialization closure walk reconstructs a
+/// byte-faithful commit's objects DIRECTLY from heddle state into the worktree
+/// `.git`, instead of copying the verbatim objects out of the eager `.heddle/git`
+/// mirror. Proven by handing the walk an EMPTY mirror: if it still leaned on the
+/// mirror copy the commit could not materialize, but reconstruction-from-state
+/// lands the byte-identical OID with nothing in the mirror to copy.
+#[test]
+fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
+    use cli::bridge::git_reconstruct::commit_object_id;
+    use objects::object::{Attribution, Principal, State};
+    use std::collections::HashSet;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+
+    // A faithful root state: git-fidelity (`raw_message`), valid UTF-8 identity,
+    // not lossy → `commit_is_byte_faithful` is true, so it routes to reconstruct.
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::from_slice(b"hello\n"))
+        .expect("put blob");
+    let tree_hash = repo
+        .store()
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
+        .expect("put tree");
+    let state = State::new(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Alice", "alice@example.com")),
+    )
+    .with_raw_message("an imported commit\n");
+    repo.store().put_state(&state).expect("put state");
+    let state_id = state.change_id;
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // Learn the expected git OID the SAME way export does — reconstruct the
+    // commit's bytes from state and hash them — and seed the bridge mapping so
+    // the walk's OID-equality gate has an expected target.
+    let scratch_temp = TempDir::new().expect("scratch temp");
+    let scratch = SleyRepository::init_bare(scratch_temp.path()).expect("scratch repo");
+    let expected_oid = bridge
+        .reconstruct_and_write_commit(&scratch, &state)
+        .expect("reconstruct expected oid");
+    test_support::mapping_mut(&mut bridge).insert(state_id, expected_oid);
+
+    // The mirror is EMPTY — a copy-from-mirror path could not materialize the
+    // commit. The checkout object db is empty too (fresh worktree).
+    let mirror_temp = TempDir::new().expect("mirror temp");
+    let mirror_repo = SleyRepository::init_bare(mirror_temp.path()).expect("empty mirror");
+    let checkout_temp = TempDir::new().expect("checkout temp");
+    let object_repo = SleyRepository::init_bare(checkout_temp.path()).expect("checkout odb");
+
+    assert!(
+        mirror_repo.read_object(&expected_oid).is_err(),
+        "test invariant: the mirror must NOT hold the commit — reconstruction is the only way it can appear"
+    );
+    assert!(
+        object_repo.read_object(&expected_oid).is_err(),
+        "test invariant: the checkout starts without the commit"
+    );
+
+    test_support::materialize_checkout_closure_from_state(
+        &bridge,
+        &mirror_repo,
+        &object_repo,
+        &state_id,
+        expected_oid,
+        &HashSet::new(),
+    )
+    .expect("materialize faithful commit from state");
+
+    // The checkout now carries the byte-identical commit object AND its tree/blob
+    // closure — all reconstructed from state, none copied from the empty mirror.
+    let commit = object_repo
+        .read_commit(&expected_oid)
+        .expect("checkout must hold the reconstructed commit");
+    assert_eq!(
+        commit_object_id(
+            &bridge
+                .reconstruct_commit_bytes(&object_repo, &state)
+                .expect("re-reconstruct")
+        ),
+        expected_oid,
+        "reconstructed OID is byte-identical to the mapped expected OID",
+    );
+    assert!(
+        object_repo.read_object(&commit.tree).is_ok(),
+        "the commit's tree must be materialized into the checkout too",
+    );
+}
+
+/// #568 P1 safety gate: when a commit is classified faithful but reconstructs to
+/// a DIFFERENT OID than the mapping expects (an unmodeled fidelity gap), the walk
+/// MUST hard-error rather than silently materialize a wrong-OID checkout.
+#[test]
+fn checkout_materialization_hard_errors_on_oid_mismatch() {
+    use objects::object::{Attribution, Principal, State};
+    use std::collections::HashSet;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::from_slice(b"hello\n"))
+        .expect("put blob");
+    let tree_hash = repo
+        .store()
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
+        .expect("put tree");
+    let state = State::new(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Alice", "alice@example.com")),
+    )
+    .with_raw_message("an imported commit\n");
+    repo.store().put_state(&state).expect("put state");
+    let state_id = state.change_id;
+
+    let mut bridge = GitBridge::new(&repo);
+    // Deliberately map the state to a WRONG OID — reconstruction will produce a
+    // different id, which must trip the gate.
+    let wrong_oid: ObjectId = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        .parse()
+        .expect("oid");
+    test_support::mapping_mut(&mut bridge).insert(state_id, wrong_oid);
+
+    let mirror_temp = TempDir::new().expect("mirror temp");
+    let mirror_repo = SleyRepository::init_bare(mirror_temp.path()).expect("mirror");
+    let checkout_temp = TempDir::new().expect("checkout temp");
+    let object_repo = SleyRepository::init_bare(checkout_temp.path()).expect("checkout odb");
+
+    let err = test_support::materialize_checkout_closure_from_state(
+        &bridge,
+        &mirror_repo,
+        &object_repo,
+        &state_id,
+        wrong_oid,
+        &HashSet::new(),
+    )
+    .expect_err("OID mismatch must hard-error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("OID mismatch") && msg.contains("refusing to materialize"),
+        "error must name the OID-mismatch safety gate; got: {msg}"
+    );
+    assert!(
+        object_repo.read_object(&wrong_oid).is_err(),
+        "no wrong-OID object may be written to the checkout on the failure path",
+    );
+}
+
+/// #568 P1: a LOSSY commit (verbatim bytes live ONLY in the mirror — `--lossy`
+/// import or non-UTF8 identity) is NOT reconstructed; the walk backstops to the
+/// mirror copy. Proven by reconstructing-then-stashing the object only in the
+/// mirror (not the checkout) and confirming the lossy state still materializes.
+#[test]
+fn checkout_materialization_backstops_lossy_commit_from_mirror() {
+    use objects::object::{Attribution, Principal, State};
+    use std::collections::HashSet;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::from_slice(b"hello\n"))
+        .expect("put blob");
+    let tree_hash = repo
+        .store()
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
+        .expect("put tree");
+    // `git_lossy` → NOT byte-faithful → mirror backstop, even though raw_message
+    // is present.
+    let state = State::new(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Alice", "alice@example.com")),
+    )
+    .with_raw_message("a lossy imported commit\n")
+    .with_git_lossy(true);
+    repo.store().put_state(&state).expect("put state");
+    let state_id = state.change_id;
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // The mirror is the ONLY home of the lossy commit's bytes. Stage the object
+    // there (the verbatim bytes); use the reconstructed bytes as a stand-in for
+    // the verbatim ones (the tree/identity here happen to round-trip; the point is
+    // the walk must NOT reconstruct-into-checkout and must copy from the mirror).
+    let mirror_temp = TempDir::new().expect("mirror temp");
+    let mirror_repo = SleyRepository::init_bare(mirror_temp.path()).expect("mirror");
+    let lossy_oid = bridge
+        .reconstruct_and_write_commit(&mirror_repo, &state)
+        .expect("stage lossy bytes in the mirror");
+    test_support::mapping_mut(&mut bridge).insert(state_id, lossy_oid);
+
+    let checkout_temp = TempDir::new().expect("checkout temp");
+    let object_repo = SleyRepository::init_bare(checkout_temp.path()).expect("checkout odb");
+    assert!(
+        object_repo.read_object(&lossy_oid).is_err(),
+        "test invariant: the checkout starts without the lossy commit",
+    );
+
+    test_support::materialize_checkout_closure_from_state(
+        &bridge,
+        &mirror_repo,
+        &object_repo,
+        &state_id,
+        lossy_oid,
+        &HashSet::new(),
+    )
+    .expect("lossy commit materializes via the mirror backstop");
+
+    assert!(
+        object_repo.read_object(&lossy_oid).is_ok(),
+        "the lossy commit must be copied from the mirror into the checkout",
+    );
+}
+
 #[test]
 fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     let heddle_temp = TempDir::new().expect("heddle temp");

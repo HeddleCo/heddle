@@ -27,8 +27,9 @@ use sley::{
 };
 
 use super::{
-    git_export::{export_all, export_current_thread},
+    git_export::{commit_is_byte_faithful, export_all, export_current_thread},
     git_ingest::import_git_history,
+    git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_util::ImportStats,
 };
 
@@ -594,6 +595,14 @@ impl SyncMapping {
     /// Iterate over mappings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
+    }
+
+    /// Whether the in-memory mapping holds no `ChangeId → git OID` entries. The
+    /// checkout-materialization path (#568 P1) uses this to decide whether it must
+    /// hydrate the mapping from disk (a standalone `bridge git checkout`) or trust
+    /// the mapping export just built in memory (a checkpoint/push).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.heddle_to_git.is_empty()
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
@@ -1665,6 +1674,18 @@ impl<'a> GitBridge<'a> {
         state_id: &ChangeId,
     ) -> GitResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
+        // Reconstructing a faithful commit from state (#568 P1) resolves each
+        // parent's git OID through the bridge mapping. A checkpoint/push runs
+        // export first, which leaves the in-memory mapping populated for the
+        // served set — trust it, and do NOT re-read from disk (notes vs sidecar
+        // can legitimately disagree mid-operation, e.g. a `--git-commit` merge
+        // checkpoint that has not yet flushed; clobbering the freshly-built
+        // mapping with a disk read trips the conflict guard). Only a STANDALONE
+        // checkout (`bridge git checkout`, no preceding export) starts with an
+        // empty mapping; hydrate it from disk in that case alone.
+        if self.mapping.is_empty() {
+            self.build_existing_mapping(None)?;
+        }
         let git_oid = if let Some(git_oid) = self.mapping.get_git(state_id) {
             git_oid
         } else if let Some(git_commit) = self
@@ -1707,22 +1728,23 @@ impl<'a> GitBridge<'a> {
             .flatten()
             .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
 
+        let heddle_repo = self.heddle_repo;
+        let mapping = &self.mapping;
         let write_result = (|| -> GitResult<()> {
-            // Incremental object copy (perf): copying the new commit's full
-            // reachable closure from the mirror into the checkout re-walks +
-            // delta-compresses the ENTIRE tree every checkpoint — ~115s of the
-            // ~140s on the ~6k-object ghostty tree, scaling with total history
-            // rather than the change. But the checkout already holds the prior
-            // HEAD (`previous_branch`) and its whole closure. So exclude that
-            // closure from the copy: only objects genuinely new since the parent
-            // are walked + packed. Excluding the parent COMMIT alone is not enough
-            // — the new commit's tree re-reaches the parent's unchanged
-            // trees/blobs, so they would not be pruned. Compute the parent's FULL
-            // closure from the DESTINATION (cheap: those objects are local and
-            // already packed) and exclude all of it. Byte-identical result — every
-            // pruned object was already present in the checkout; only the transfer
-            // is smaller (O(changed) not O(history)). First checkpoint on a thread
-            // has no previous branch, so the exclude set is empty (full copy).
+            // Incremental object materialization (perf): bringing the new commit's
+            // full reachable closure into the checkout re-walks the ENTIRE tree
+            // every checkpoint — ~115s of the ~140s on the ~6k-object ghostty tree,
+            // scaling with total history rather than the change. But the checkout
+            // already holds the prior HEAD (`previous_branch`) and its whole
+            // closure. So exclude that closure: only objects genuinely new since
+            // the parent are reconstructed/copied. Excluding the parent COMMIT
+            // alone is not enough — the new commit's tree re-reaches the parent's
+            // unchanged trees/blobs, so they would not be pruned. Compute the
+            // parent's FULL closure from the DESTINATION (cheap: those objects are
+            // local and already packed) and exclude all of it. Byte-identical
+            // result — every pruned object was already present in the checkout.
+            // First checkpoint on a thread has no previous branch, so the exclude
+            // set is empty (full materialization).
             let excluded: HashSet<ObjectId> = match previous_branch {
                 Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
                     object_repo.objects().as_ref(),
@@ -1732,7 +1754,22 @@ impl<'a> GitBridge<'a> {
                 .map_err(|error| GitBridgeError::Git(error.to_string()))?,
                 None => HashSet::new(),
             };
-            copy_reachable_objects_excluding(&mirror_repo, &object_repo, [git_oid], &excluded)?;
+            // #568 P1: materialize the checkout from heddle state, NOT by copying
+            // the eager `.heddle/git` mirror's verbatim objects. Each byte-faithful
+            // commit's object closure is reconstructed directly into the checkout
+            // `object_repo`; the mirror is consulted only for the lossy residual
+            // (commits whose original bytes can't be re-derived). This is the
+            // strategic flip — heddle-native store feeds the worktree, git is a
+            // derived projection — with a per-commit fallback so nothing is lost.
+            materialize_checkout_closure_from_state(
+                heddle_repo,
+                mapping,
+                &mirror_repo,
+                &object_repo,
+                state_id,
+                git_oid,
+                &excluded,
+            )?;
             // Atomic temp+rename so a torn write can't leave HEAD in a
             // self-inconsistent state mid-write-through (the rollback
             // path below restores previous_head on any later failure).
@@ -3795,6 +3832,138 @@ fn clone_url_to_bare_via_sley(
     Ok(outcome
         .head_symref
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
+}
+
+/// Materialize the checkout `.git` object closure for the commit mapped to
+/// `tip_state_id` (`tip_oid`) — reconstructing every byte-faithful commit from
+/// heddle state, and copying only the lossy residual from the eager `.heddle/git`
+/// mirror (#568 P1).
+///
+/// Walks the heddle state DAG from `tip_state_id`. For each visited state:
+///   * its mapped git OID is already in `excluded` (the prior checkout HEAD's full
+///     closure, already on disk) ⇒ skip it AND its ancestors — that subgraph is
+///     present;
+///   * [`commit_is_byte_faithful`] ⇒ reconstruct the commit object (and, via
+///     [`reconstruct_commit_bytes`]'s [`export_tree`], its whole tree/blob closure)
+///     directly into `object_repo`, then recurse into its parents;
+///   * otherwise (lossy: `--lossy` import or non-UTF8 identity — the residual the
+///     mirror exclusively holds) ⇒ copy that commit's full reachable closure from
+///     `mirror_repo` and DO NOT recurse (the copy already brought its ancestry).
+///
+/// CRITICAL safety gate: every reconstructed commit's git OID MUST equal the
+/// mapped `git_oid`. A mismatch means reconstruction diverged from the imported
+/// bytes (an unmodeled fidelity gap), which would silently materialize a
+/// wrong-OID checkout — so this HARD-ERRORS instead. This assertion is what lets
+/// the reconstruction path be trusted as a mirror replacement.
+///
+/// Output is byte-identical to the prior `copy_reachable_objects_excluding(mirror
+/// → checkout)`: git objects are content-addressed, so a faithful reconstruction
+/// lands the exact same OID the mirror copy would have, and the lossy path copies
+/// verbatim. The exclude set keeps it O(objects new since the parent).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_checkout_closure_from_state(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    mirror_repo: &SleyRepository,
+    object_repo: &SleyRepository,
+    tip_state_id: &ChangeId,
+    tip_oid: ObjectId,
+    excluded: &HashSet<ObjectId>,
+) -> GitResult<()> {
+    // Lossy commits whose closure is copied verbatim from the mirror. Their roots
+    // are batched and copied once at the end (a single excluding pack install,
+    // matching the prior single-copy perf shape) rather than per-commit.
+    let mut lossy_roots: Vec<ObjectId> = Vec::new();
+    let mut stack: Vec<ChangeId> = vec![*tip_state_id];
+    let mut seen: HashSet<ChangeId> = HashSet::new();
+
+    while let Some(state_id) = stack.pop() {
+        if !seen.insert(state_id) {
+            continue;
+        }
+        let Some(git_oid) = resolve_mapped_git_oid(heddle_repo, mapping, &state_id, object_repo)?
+        else {
+            // No mapping for this state: it was never exported (e.g. an embargoed
+            // ancestor withheld from the served frontier). The tip itself always
+            // resolves (`tip_oid`), and a withheld ancestor's git object is, by
+            // construction, absent from both store-reconstruction and the served
+            // mirror — so there is nothing to materialize. Skip without recursing.
+            continue;
+        };
+
+        // Already on disk (this state's object is in the parent's excluded closure,
+        // or a sibling branch already materialized it): the whole subgraph beneath
+        // it is present too, so prune here.
+        if excluded.contains(&git_oid) || object_repo.read_object(&git_oid).is_ok() {
+            continue;
+        }
+
+        let state = heddle_repo
+            .store()
+            .get_state(&state_id)?
+            .ok_or(GitBridgeError::StateNotFound(state_id))?;
+
+        if commit_is_byte_faithful(&state) {
+            let content = reconstruct_commit_bytes(heddle_repo, object_repo, mapping, &state)?;
+            // The byte-exact gate (#568 P1): a faithful reconstruction MUST hash to
+            // the mapped OID. If it does not, refuse — never write a wrong-SHA
+            // object into the worktree.
+            let reconstructed = commit_object_id(&content);
+            if reconstructed != git_oid {
+                return Err(GitBridgeError::Git(format!(
+                    "checkout reconstruction OID mismatch for state {state_id}: reconstructed {reconstructed}, expected mapped {git_oid}; \
+                     refusing to materialize a wrong-OID checkout (unmodeled fidelity gap)"
+                )));
+            }
+            let written = write_commit_object(object_repo, &content)?;
+            debug_assert_eq!(written, git_oid);
+            stack.extend(state.parents.iter().copied());
+        } else {
+            // Lossy residual: the verbatim bytes live only in the mirror. Copy this
+            // commit's full closure from there and stop — the copy carries its
+            // ancestry, so we don't reconstruct (or re-copy) beneath it.
+            lossy_roots.push(git_oid);
+        }
+    }
+
+    // Ensure the requested tip is materialized even in the degenerate case where
+    // the walk skipped it (e.g. an unmapped store state that nonetheless has a
+    // mirror object): fall back to the mirror copy for it. The faithful path above
+    // already wrote it when reconstructable, and a redundant root here is pruned
+    // by the exclude set / idempotent install.
+    if object_repo.read_object(&tip_oid).is_err() && !lossy_roots.contains(&tip_oid) {
+        lossy_roots.push(tip_oid);
+    }
+
+    if !lossy_roots.is_empty() {
+        copy_reachable_objects_excluding(mirror_repo, object_repo, lossy_roots, excluded)?;
+    }
+
+    Ok(())
+}
+
+/// Resolve the git OID a heddle state maps to, preferring the in-memory bridge
+/// mapping and falling back to the git-overlay checkpoint mapping (the same
+/// resolution the checkout tip uses). Returns `None` when the state has no mapped
+/// git object at all.
+fn resolve_mapped_git_oid(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    state_id: &ChangeId,
+    object_repo: &SleyRepository,
+) -> GitResult<Option<ObjectId>> {
+    if let Some(git_oid) = mapping.get_git(state_id) {
+        return Ok(Some(git_oid));
+    }
+    if let Some(git_commit) = heddle_repo
+        .git_overlay_mapped_git_commit_for_change(state_id)
+        .map_err(|error| GitBridgeError::Git(error.to_string()))?
+    {
+        let oid = ObjectId::from_hex(object_repo.object_format(), &git_commit)
+            .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?;
+        return Ok(Some(oid));
+    }
+    Ok(None)
 }
 
 pub(crate) fn copy_reachable_objects(
