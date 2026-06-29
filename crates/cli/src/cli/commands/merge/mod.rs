@@ -411,7 +411,13 @@ pub(crate) fn merge_thread_into_current(
     no_semantic: bool,
     git_commit: bool,
 ) -> Result<MergeOutput> {
-    let use_semantic = semantic_merge_enabled(no_semantic);
+    // Strategy + diff-semantics decided ONCE per merge attempt
+    // (HeddleCo/heddle#503). Preview, refresh, apply, and diff all read
+    // their strategy back off this single plan instead of re-deriving it
+    // — so the preview can't pick a different content-merge strategy than
+    // the apply path, which is the documented Codex r13 divergence class.
+    let attempt = MergeAttemptPlan::decide(no_semantic);
+    let use_semantic = attempt.use_semantic();
     let registry = AgentRegistry::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = thread_manager.find_by_thread(track_name)?;
@@ -467,8 +473,8 @@ pub(crate) fn merge_thread_into_current(
     // match the strategy the actual merge plan (below) will use, so
     // the `preview_summary` lines don't contradict the real outcome
     // (e.g. reporting `conflicts: 1 path conflict(s)` on a structural
-    // reshape that semantic resolves cleanly).
-    let preview_strategy = merge_strategy_for(use_semantic);
+    // reshape that semantic resolves cleanly). Both now read the SAME
+    // decision off `attempt` (#503), so they cannot diverge.
     let current_thread = repo
         .current_lane()?
         .unwrap_or_else(|| "detached".to_string());
@@ -485,7 +491,7 @@ pub(crate) fn merge_thread_into_current(
             &mut graph,
             thread,
             preview,
-            preview_strategy,
+            attempt.strategy(),
             Some(PreviewTarget {
                 label: &current_thread,
                 change_id: current_state.change_id,
@@ -516,7 +522,7 @@ pub(crate) fn merge_thread_into_current(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
-            strategy: merge_strategy_for(use_semantic),
+            strategy: attempt.strategy(),
         },
     )?;
 
