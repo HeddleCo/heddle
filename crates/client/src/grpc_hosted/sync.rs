@@ -3924,7 +3924,7 @@ mod tests {
         let blob = Blob::from(contents);
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
-            TreeEntry::file(&format!("{contents}.txt"), blob_hash, false).expect("tree entry"),
+            TreeEntry::file(format!("{contents}.txt"), blob_hash, false).expect("tree entry"),
         ]);
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
         let state = State::new_snapshot(tree_hash, parents, sample_attribution());
@@ -4160,14 +4160,12 @@ mod tests {
                     }
                 }
 
-                if let Some(pack) = pack {
-                    if !short_circuit {
-                        for message in
-                            encode_pull_native_pack_messages(&pack, "delta-aware-test", 64)
-                        {
-                            if tx.send(Ok(message)).await.is_err() {
-                                return;
-                            }
+                if let Some(pack) = pack
+                    && !short_circuit
+                {
+                    for message in encode_pull_native_pack_messages(&pack, "delta-aware-test", 64) {
+                        if tx.send(Ok(message)).await.is_err() {
+                            return;
                         }
                     }
                 }
