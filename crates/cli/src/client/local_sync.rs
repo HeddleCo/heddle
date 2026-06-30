@@ -3,14 +3,21 @@
 //!
 //! Direct access to local repositories without network protocol overhead.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::Path,
+};
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{ChangeId, ContentHash},
+    object::{ActionId, ChangeId, ContentHash},
     store::ObjectStore,
 };
 use repo::Repository;
+use wire::{
+    GitLaneTransferIntent, ObjectId, ObjectType, PlannedObject, RepositoryTransferPlan,
+    StateClosureOptions,
+};
 
 /// Synchronize objects from a local source repository to a target repository.
 pub struct LocalSync {
@@ -53,10 +60,8 @@ impl LocalSync {
 
     /// Fetch a state and all its dependencies from source to target.
     pub fn fetch_state(&self, target: &Repository, state_id: &ChangeId) -> Result<usize> {
-        let mut copied = 0;
-        let mut visited = HashSet::new();
-        self.copy_state_recursive(target, state_id, &mut visited, &mut copied, None)?;
-        Ok(copied)
+        let transfer_plan = self.plan_state_transfer(*state_id, None)?;
+        self.copy_transfer_plan(target, &transfer_plan)
     }
 
     /// Fetch a state with limited depth (shallow clone).
@@ -69,223 +74,146 @@ impl LocalSync {
         state_id: &ChangeId,
         depth: u32,
     ) -> Result<usize> {
-        let mut copied = 0;
-        let mut visited = HashSet::new();
-        self.copy_state_recursive(target, state_id, &mut visited, &mut copied, Some(depth))?;
+        let transfer_plan = self.plan_state_transfer(*state_id, Some(depth))?;
+        let copied = self.copy_transfer_plan(target, &transfer_plan)?;
+        self.mark_shallow_boundaries(target, *state_id, depth)?;
         Ok(copied)
     }
 
-    fn copy_state_recursive(
+    fn plan_state_transfer(
         &self,
-        target: &Repository,
-        state_id: &ChangeId,
-        visited: &mut HashSet<ChangeId>,
-        copied: &mut usize,
-        max_depth: Option<u32>,
-    ) -> Result<()> {
-        if visited.contains(state_id) {
-            return Ok(());
-        }
-        visited.insert(*state_id);
-
-        // Whether the target already has this state. We do NOT
-        // early-return on this — even when the object graph is fully
-        // present, an operator may have declared a redaction on the
-        // source *after* the target previously fetched the content.
-        // Subsequent syncs must still propagate the sidecar. We
-        // therefore always walk the tree(s) to surface redactions,
-        // and condition just the object-copy step on the
-        // `state_already_present` flag.
-        let target_state = target.store().get_state(state_id)?;
-        let state_already_present = target_state.is_some();
-
-        // Source-side state read drives both the object copy (when
-        // needed) and sidecar propagation (always).
-        // If the source no longer has the state but the target does,
-        // we can't enumerate sidecars for propagation — skip with
-        // no error in that case.
-        let state = match self.source.store().get_state(state_id)? {
-            Some(state) => state,
-            None if state_already_present => return Ok(()),
-            None => return Err(anyhow!("State {} not found in source", state_id)),
-        };
-
-        // Always propagate per-state visibility and per-blob redactions,
-        // regardless of whether the objects themselves need copying.
-        self.propagate_state_visibility_for_state(target, state_id)?;
-        let mut propagated_trees: HashSet<ContentHash> = HashSet::new();
-        self.propagate_redactions_in_tree(target, &state.tree, &mut propagated_trees)?;
-        if let Some(provenance_root) = state.provenance {
-            self.propagate_redactions_in_tree(target, &provenance_root, &mut propagated_trees)?;
-        }
-        if let Some(context_root) = state.context {
-            self.propagate_redactions_in_tree(target, &context_root, &mut propagated_trees)?;
-        }
-
-        if !state_already_present {
-            // Copy tree recursively
-            self.copy_tree_recursive(target, &state.tree, copied)?;
-            if let Some(provenance_root) = state.provenance {
-                self.copy_tree_recursive(target, &provenance_root, copied)?;
-            }
-            if let Some(context_root) = state.context {
-                self.copy_tree_recursive(target, &context_root, copied)?;
-            }
-        }
-        self.copy_state_blob_dependencies(target, &state, copied)?;
-
-        // Copy parent states recursively (if depth allows). We recurse
-        // on parents even when the current state was already present —
-        // a redaction declared on an ancestor blob still needs to
-        // reach the target's redactions store.
-        if let Some(depth) = max_depth {
-            if depth > 0 {
-                for parent in &state.parents {
-                    self.copy_state_recursive(target, parent, visited, copied, Some(depth - 1))?;
-                }
-            } else {
-                // Shallow state - mark parents as grafted
-                if !state_already_present {
-                    target.set_shallow(state_id, &state.parents)?;
-                }
-            }
-        } else {
-            for parent in &state.parents {
-                self.copy_state_recursive(target, parent, visited, copied, None)?;
-            }
-        }
-
-        if !state_already_present || state_metadata_roots_changed(target_state.as_ref(), &state) {
-            target.store().put_state(&state)?;
-            if !state_already_present {
-                *copied += 1;
-            }
-        }
-
-        Ok(())
+        state_id: ChangeId,
+        depth: Option<u32>,
+    ) -> Result<RepositoryTransferPlan> {
+        // Local sync still executes through the existing dependency-preserving
+        // recursive copy path. The shared plan gives local and hosted Heddle
+        // object sync the same partition/stats contract without introducing a
+        // second local storage executor.
+        Ok(RepositoryTransferPlan::from_state_closure_plan(
+            self.source.store(),
+            state_id,
+            StateClosureOptions {
+                depth,
+                exclude_states: Vec::new(),
+            },
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        )?)
     }
 
-    fn copy_state_blob_dependencies(
+    fn copy_transfer_plan(
         &self,
         target: &Repository,
-        state: &objects::object::State,
-        copied: &mut usize,
-    ) -> Result<()> {
-        for hash in [
-            state.risk_signals,
-            state.review_signatures,
-            state.discussions,
-            state.structured_conflicts,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            self.copy_blob_dependency(target, &hash, copied)?;
+        transfer_plan: &RepositoryTransferPlan,
+    ) -> Result<usize> {
+        let mut copied = 0;
+        for object in &transfer_plan.partitions.packable_objects {
+            if self.copy_planned_object(target, object)? {
+                copied += 1;
+            }
         }
-        Ok(())
+        for object in &transfer_plan.partitions.sidecar_objects {
+            self.copy_planned_sidecar(target, object)?;
+        }
+        Ok(copied)
     }
 
-    fn copy_blob_dependency(
-        &self,
-        target: &Repository,
-        hash: &ContentHash,
-        copied: &mut usize,
-    ) -> Result<()> {
-        if target.store().has_blob(hash)? {
-            return Ok(());
+    fn copy_planned_object(&self, target: &Repository, object: &PlannedObject) -> Result<bool> {
+        match (&object.id, object.obj_type) {
+            (ObjectId::Hash(hash), ObjectType::Blob) => self.copy_blob(target, hash),
+            (ObjectId::Hash(hash), ObjectType::Tree) => self.copy_tree(target, hash),
+            (ObjectId::Hash(hash), ObjectType::Action) => self.copy_action(target, hash),
+            (ObjectId::ChangeId(state_id), ObjectType::State) => self.copy_state(target, state_id),
+            (_, ObjectType::Redaction | ObjectType::StateVisibility) => Ok(false),
+            (id, obj_type) => Err(anyhow!(
+                "transfer plan object {id:?} has incompatible type {obj_type:?}"
+            )),
         }
-        let blob = self.source.require_blob(hash)?;
-        target.store().put_blob(&blob)?;
-        *copied += 1;
-        Ok(())
     }
 
-    fn copy_tree_recursive(
-        &self,
-        target: &Repository,
-        tree_hash: &ContentHash,
-        copied: &mut usize,
-    ) -> Result<()> {
-        // Check if target already has this tree
+    fn copy_tree(&self, target: &Repository, tree_hash: &ContentHash) -> Result<bool> {
         if target.store().has_tree(tree_hash)? {
-            return Ok(());
+            return Ok(false);
         }
-
-        // Get the tree from source
         let tree = self
             .source
             .store()
             .get_tree(tree_hash)?
             .ok_or_else(|| anyhow!("Tree {} not found in source", tree_hash))?;
-
-        // Copy all blobs and sub-trees. Redaction propagation lives
-        // in `propagate_redactions_in_tree`, called by
-        // `copy_state_recursive` regardless of whether the tree was
-        // already present — so it's intentionally absent here.
-        for entry in tree.entries() {
-            match entry.entry_type {
-                objects::object::EntryType::Blob => {
-                    if !target.store().has_blob(&entry.hash)? {
-                        let blob = self.source.require_blob(&entry.hash)?;
-                        target.store().put_blob(&blob)?;
-                        *copied += 1;
-                    }
-                }
-                objects::object::EntryType::Tree => {
-                    self.copy_tree_recursive(target, &entry.hash, copied)?;
-                }
-                objects::object::EntryType::Symlink => {
-                    if !target.store().has_blob(&entry.hash)? {
-                        let blob = self.source.require_blob(&entry.hash)?;
-                        target.store().put_blob(&blob)?;
-                        *copied += 1;
-                    }
-                }
-            }
-        }
-
-        // Store the tree in target
         target.store().put_tree(&tree)?;
-        *copied += 1;
-
-        Ok(())
+        Ok(true)
     }
 
-    /// Walk a source-side tree and propagate any redaction sidecars
-    /// found for the blobs it references. Runs regardless of whether
-    /// the tree (or its parent state) is already present on the
-    /// target — the whole point is to recover from the "redact-after-
-    /// peer-fetched" flow where the object graph is unchanged but a
-    /// new sidecar exists upstream.
-    ///
-    /// `propagated_trees` dedups within a single sync so we don't
-    /// re-walk the same subtree across `state.tree`, `provenance`,
-    /// and `context` roots that happen to share content.
-    fn propagate_redactions_in_tree(
+    fn copy_action(&self, target: &Repository, hash: &ContentHash) -> Result<bool> {
+        let action_id = ActionId::from_hash(*hash);
+        if target.store().get_action(&action_id)?.is_some() {
+            return Ok(false);
+        }
+        let mut action = self
+            .source
+            .store()
+            .get_action(&action_id)?
+            .ok_or_else(|| anyhow!("Action {} not found in source", hash))?;
+        target.store().put_action(&mut action)?;
+        Ok(true)
+    }
+
+    fn copy_state(&self, target: &Repository, state_id: &ChangeId) -> Result<bool> {
+        let target_state = target.store().get_state(state_id)?;
+        let state_already_present = target_state.is_some();
+        let state = self
+            .source
+            .store()
+            .get_state(state_id)?
+            .ok_or_else(|| anyhow!("State {} not found in source", state_id))?;
+
+        if !state_already_present || state_metadata_roots_changed(target_state.as_ref(), &state) {
+            target.store().put_state(&state)?;
+        }
+        Ok(!state_already_present)
+    }
+
+    fn copy_planned_sidecar(&self, target: &Repository, object: &PlannedObject) -> Result<()> {
+        match (&object.id, object.obj_type) {
+            (ObjectId::Hash(hash), ObjectType::Redaction) => {
+                self.propagate_redactions_for_blob(target, hash)
+            }
+            (ObjectId::ChangeId(state_id), ObjectType::StateVisibility) => {
+                self.propagate_state_visibility_for_state(target, state_id)
+            }
+            (_, ObjectType::Blob | ObjectType::Tree | ObjectType::State | ObjectType::Action) => {
+                Ok(())
+            }
+            (id, obj_type) => Err(anyhow!(
+                "transfer plan sidecar {id:?} has incompatible type {obj_type:?}"
+            )),
+        }
+    }
+
+    fn mark_shallow_boundaries(
         &self,
         target: &Repository,
-        tree_hash: &ContentHash,
-        propagated_trees: &mut HashSet<ContentHash>,
+        state_id: ChangeId,
+        max_depth: u32,
     ) -> Result<()> {
-        if !propagated_trees.insert(*tree_hash) {
-            return Ok(());
-        }
-
-        // Tree must come from the source — if it's missing there, we
-        // can't enumerate blob hashes for sidecar lookup. Treat as a
-        // gap in propagation (best-effort), not a hard failure.
-        let Some(tree) = self.source.store().get_tree(tree_hash)? else {
-            return Ok(());
-        };
-
-        for entry in tree.entries() {
-            match entry.entry_type {
-                objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                    self.propagate_redactions_for_blob(target, &entry.hash)?;
+        let mut seen: HashSet<ChangeId> = HashSet::new();
+        let mut queue = VecDeque::from([(state_id, 0u32)]);
+        while let Some((id, depth)) = queue.pop_front() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let state = self
+                .source
+                .store()
+                .get_state(&id)?
+                .ok_or_else(|| anyhow!("State {} not found in source", id))?;
+            if depth == max_depth {
+                if !state.parents.is_empty() {
+                    target.set_shallow(&id, &state.parents)?;
                 }
-                objects::object::EntryType::Tree => {
-                    self.propagate_redactions_in_tree(target, &entry.hash, propagated_trees)?;
-                }
+                continue;
+            }
+            for parent in &state.parents {
+                queue.push_back((*parent, depth + 1));
             }
         }
         Ok(())

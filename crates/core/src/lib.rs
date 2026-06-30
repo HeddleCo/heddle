@@ -5,6 +5,7 @@ pub mod context;
 pub mod contract;
 pub mod fsck;
 pub mod query;
+pub mod verify;
 
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -16,3 +17,9 @@ pub use objects::{
     TaskId, Warning, WarningSink,
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
+pub use verify::{
+    ActionTemplate, MachineContractCoverage, PlainGitVerifyProbe, RepositoryContextInfo,
+    RepositoryPresentation, RepositoryVerificationState, VerificationCheck, VerifyOptions,
+    VerifyProfile, VerifyReport, dirty_path_count, repository_mode_label, repository_presentation,
+    verify,
+};

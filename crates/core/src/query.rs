@@ -42,10 +42,10 @@ impl QueryReport {
     pub const CONTRACT: ReportContract = ReportContract {
         schema_name: "query",
         machine_output_kind: MachineOutputKind::Json,
-        output_discriminator: OutputDiscriminator {
+        output_discriminator: Some(OutputDiscriminator {
             field: "output_kind",
             value: "query",
-        },
+        }),
         schema: schema_for_report::<QueryReport>,
     };
 }

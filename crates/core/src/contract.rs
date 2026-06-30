@@ -12,8 +12,10 @@ pub struct ReportContract {
     pub schema_name: &'static str,
     /// Machine-readable stream/container kind emitted for this report.
     pub machine_output_kind: MachineOutputKind,
-    /// Stable output discriminator emitted in the report payload.
-    pub output_discriminator: OutputDiscriminator,
+    /// Stable output discriminator emitted in the report payload, when the
+    /// report shape has one. Legacy discriminator-less reports keep this absent
+    /// so the contract does not force a JSON shape change.
+    pub output_discriminator: Option<OutputDiscriminator>,
     /// Generate the JSON Schema for this report shape.
     pub schema: fn() -> Value,
 }

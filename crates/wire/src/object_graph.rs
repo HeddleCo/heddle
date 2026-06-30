@@ -2,7 +2,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ChangeId, ContentHash, EntryType},
+    object::{ChangeId, ContentHash, EntryType, State},
     store::ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -128,10 +128,10 @@ pub fn enumerate_state_closure_with_options(
                 &mut out,
             )?;
         }
-        if let Some(discussions_blob) = state.discussions {
+        for metadata_blob in state_blob_dependencies(&state) {
             enumerate_blob_filtered(
                 store,
-                discussions_blob,
+                metadata_blob,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut out,
@@ -211,10 +211,10 @@ pub fn enumerate_state_closure_plan_with_options(
                 &mut out,
             )?;
         }
-        if let Some(discussions_blob) = state.discussions {
+        for metadata_blob in state_blob_dependencies(&state) {
             enumerate_blob_plan_filtered(
                 store,
-                discussions_blob,
+                metadata_blob,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut out,
@@ -496,12 +496,23 @@ fn collect_excluded(
         if let Some(context_root) = state.context {
             collect_tree_hashes(store, context_root, &mut excluded_hashes)?;
         }
-        if let Some(discussions_blob) = state.discussions {
-            excluded_hashes.insert(discussions_blob);
+        for metadata_blob in state_blob_dependencies(&state) {
+            excluded_hashes.insert(metadata_blob);
         }
     }
 
     Ok((excluded_states, excluded_hashes))
+}
+
+fn state_blob_dependencies(state: &State) -> impl Iterator<Item = ContentHash> + '_ {
+    [
+        state.risk_signals,
+        state.review_signatures,
+        state.discussions,
+        state.structured_conflicts,
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn collect_tree_hashes(
@@ -887,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn enumerate_state_closure_emits_discussions_blob() {
+    fn enumerate_state_closure_emits_state_metadata_blobs() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
@@ -917,33 +928,52 @@ mod tests {
             .store()
             .put_blob(&Blob::new(discussion_bytes))
             .expect("put discussions blob");
-        let state_with_discussions = state.with_discussions(discussion_hash);
+        let risk_hash = repo
+            .store()
+            .put_blob(&Blob::from_slice(b"risk signals"))
+            .expect("put risk blob");
+        let review_hash = repo
+            .store()
+            .put_blob(&Blob::from_slice(b"review signatures"))
+            .expect("put review blob");
+        let conflicts_hash = repo
+            .store()
+            .put_blob(&Blob::from_slice(b"structured conflicts"))
+            .expect("put conflicts blob");
+        let state_with_metadata = state
+            .with_risk_signals(risk_hash)
+            .with_review_signatures(review_hash)
+            .with_discussions(discussion_hash)
+            .with_structured_conflicts(conflicts_hash);
         repo.store()
-            .put_state(&state_with_discussions)
-            .expect("put state with discussions");
+            .put_state(&state_with_metadata)
+            .expect("put state with metadata");
 
         let full = enumerate_state_closure_with_options(
             repo.store(),
-            state_with_discussions.change_id,
+            state_with_metadata.change_id,
             StateClosureOptions::default(),
         )
         .unwrap();
         let plan = enumerate_state_closure_plan_with_options(
             repo.store(),
-            state_with_discussions.change_id,
+            state_with_metadata.change_id,
             StateClosureOptions::default(),
         )
         .unwrap();
 
-        assert!(
-            full.iter().any(|info| info.obj_type == ObjectType::Blob
-                && info.id == ObjectId::Hash(discussion_hash)),
-            "full closure must include the discussions blob referenced by the state"
-        );
-        assert!(
-            plan.iter()
-                .any(|p| p.obj_type == ObjectType::Blob && p.id == ObjectId::Hash(discussion_hash)),
-            "plan closure must include the discussions blob referenced by the state"
-        );
+        for metadata_hash in [risk_hash, review_hash, discussion_hash, conflicts_hash] {
+            assert!(
+                full.iter().any(|info| info.obj_type == ObjectType::Blob
+                    && info.id == ObjectId::Hash(metadata_hash)),
+                "full closure must include state metadata blob {metadata_hash}"
+            );
+            assert!(
+                plan.iter().any(
+                    |p| p.obj_type == ObjectType::Blob && p.id == ObjectId::Hash(metadata_hash)
+                ),
+                "plan closure must include state metadata blob {metadata_hash}"
+            );
+        }
     }
 }

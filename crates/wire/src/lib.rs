@@ -18,6 +18,7 @@ mod object_availability;
 mod object_graph;
 mod object_transfer;
 mod scope_match;
+mod transfer_plan;
 
 pub use auth_context::AuthContext;
 pub use auth_token::{AuthToken, TokenScope};
@@ -59,6 +60,9 @@ pub use object_transfer::{
     chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
 pub use scope_match::scope_contains;
+pub use transfer_plan::{
+    GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,
+};
 
 /// Default port for Heddle protocol.
 pub const DEFAULT_PORT: u16 = 8421;

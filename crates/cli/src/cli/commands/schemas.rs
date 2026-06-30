@@ -17,7 +17,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
-use heddle_core::QueryReport;
+use heddle_core::{FsckReport, QueryReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -58,13 +58,16 @@ macro_rules! schema_registry {
 
 #[cfg(test)]
 fn report_contract_schema_verbs() -> &'static [&'static str] {
-    &[QueryReport::CONTRACT.schema_name]
+    &[
+        QueryReport::CONTRACT.schema_name,
+        FsckReport::CONTRACT.schema_name,
+        VerifyReport::CONTRACT.schema_name,
+    ]
 }
 
 schema_registry! {
     (&["init"], InitSchema),
     (&["status"], StatusSchema),
-    (&["verify"], VerifySchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
@@ -108,6 +111,8 @@ schema_registry! {
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["log --timeline"], TimelineLogSchema),
+    (&["timeline status"], TimelineStatusSchema),
+    (&["timeline record-start", "timeline record-finish"], TimelineRecordingSchema),
     (&["timeline fork", "timeline reset", "timeline recover"], TimelineActionSchema),
     (&["show"], ShowSchema),
     (&["thread list"], ThreadListSchema),
@@ -161,7 +166,6 @@ schema_registry! {
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
-    (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
     (&["maintenance index"], IndexSchema),
     (&["error"], ErrorEnvelopeSchema),
@@ -214,6 +218,10 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
 fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
     match verb {
         verb if verb == QueryReport::CONTRACT.schema_name => Some((QueryReport::CONTRACT.schema)()),
+        verb if verb == FsckReport::CONTRACT.schema_name => Some((FsckReport::CONTRACT.schema)()),
+        verb if verb == VerifyReport::CONTRACT.schema_name => {
+            Some((VerifyReport::CONTRACT.schema)())
+        }
         _ => None,
     }
 }
@@ -853,22 +861,6 @@ pub struct BlameContextSnippetSchema {
     pub kind: String,
     pub content: String,
     pub revision_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FsckSchema {
-    pub valid: bool,
-    pub errors: Vec<FsckErrorSchema>,
-    pub warnings: Vec<String>,
-    pub objects_checked: usize,
-    pub bridge_checked: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FsckErrorSchema {
-    pub kind: String,
-    pub message: String,
-    pub object: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2192,16 +2184,6 @@ pub struct StatusSchema {
 // ---- verify ---------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct VerifySchema {
-    pub output_kind: String,
-    pub clean: bool,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    #[serde(flatten)]
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct RepositoryVerificationStateSchema {
     #[serde(rename = "verified")]
     pub verified: bool,
@@ -2219,8 +2201,7 @@ pub struct RepositoryVerificationStateSchema {
     pub default_remote: Option<String>,
     pub clone_verification: String,
     pub machine_contract: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_contract_coverage: Option<MachineContractCoverageSchema>,
+    pub machine_contract_coverage: MachineContractCoverageSchema,
     pub workflow_status: String,
     pub workflow_summary: String,
     pub summary: String,
@@ -2481,6 +2462,76 @@ pub struct TimelineRecoverySchema {
     pub reason: String,
     pub moved_at_ms: i64,
     pub checkout_state: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub thread: String,
+    pub cursor_branch_id: Option<String>,
+    pub cursor_step_id: Option<String>,
+    pub cursor_state: Option<String>,
+    pub current_step: Option<TimelineStatusStepSchema>,
+    pub active_branch_path: Vec<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub branch_count: usize,
+    pub step_count: usize,
+    pub recovery: Option<TimelineStatusRecoverySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusStepSchema {
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
+    pub changed: Option<bool>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub labels: Vec<String>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub can_seek: bool,
+    pub can_fork: bool,
+    pub can_reset: bool,
+    pub can_materialize: bool,
+    pub has_boundary_warning: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusRecoverySchema {
+    pub status: String,
+    pub branch_id: String,
+    pub from_step_id: Option<String>,
+    pub to_step_id: Option<String>,
+    pub from_state: String,
+    pub to_state: String,
+    pub reason: String,
+    pub moved_at_ms: i64,
+    pub checkout_state: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineRecordingSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub action: String,
+    pub thread: String,
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub operation_id: String,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub changed: Option<bool>,
+    pub tool_status: Option<String>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub branch_count: usize,
+    pub step_count: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3342,7 +3393,8 @@ mod tests {
             if discriminator.field != "output_kind" {
                 continue;
             }
-            let bare = schema_for_registered_verb(verb)
+            let bare = schema_for_report_contract_verb(verb)
+                .or_else(|| schema_for_registered_verb(verb))
                 .unwrap_or_else(|| panic!("documented verb `{verb}` has no registered schema"));
             let declares = schema_declares_property(&bare, &bare, "output_kind");
             if !declares {
@@ -3496,7 +3548,10 @@ mod tests {
         let action_template = schema
             .get("$defs")
             .or_else(|| schema.get("definitions"))
-            .and_then(|defs| defs.get("ActionTemplateSchema"))
+            .and_then(|defs| {
+                defs.get("ActionTemplate")
+                    .or_else(|| defs.get("ActionTemplateSchema"))
+            })
             .expect("verify schema includes ActionTemplateSchema definition");
         let description = property_schema(action_template, "agent_may_fill")
             .get("description")

@@ -342,6 +342,8 @@ mod stdout_stderr_split;
 mod thread_cleanup;
 #[path = "cli_integration/thread_default_current.rs"]
 mod thread_default_current;
+#[path = "cli_integration/timeline.rs"]
+mod timeline;
 #[path = "cli_integration/try_cmd.rs"]
 mod try_cmd;
 #[path = "cli_integration/unrelated_histories_recovery.rs"]

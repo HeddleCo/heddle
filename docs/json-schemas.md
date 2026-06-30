@@ -2229,6 +2229,94 @@ tool-call navigation state:
 }
 ```
 
+`heddle timeline status --output json` emits a scrubbed status envelope for
+the selected timeline thread. It reports cursor and summary metadata only; it
+does not include raw tool payloads, transcripts, stdout, stderr, environment
+values, argv, or filename lists.
+
+```json
+{
+  "output_kind": "timeline_status",
+  "status": "ok",
+  "thread": "main",
+  "cursor_branch_id": "tlb-main",
+  "cursor_step_id": "tls-1",
+  "cursor_state": "hd-0123456789abcdefghijklmnop",
+  "current_step": {
+    "step_id": "tls-1",
+    "branch_id": "tlb-main",
+    "parent_step_id": null,
+    "tool_name": "read",
+    "tool_status": "succeeded",
+    "changed": false,
+    "payload_summary": "Read project metadata",
+    "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "labels": ["external-side-effects-unknown"],
+    "started_at_ms": 1710000000000,
+    "finished_at_ms": 1710000001000,
+    "can_seek": true,
+    "can_fork": true,
+    "can_reset": true,
+    "can_materialize": true,
+    "has_boundary_warning": false
+  },
+  "active_branch_path": ["tlb-main"],
+  "can_undo": false,
+  "can_redo": false,
+  "branch_count": 1,
+  "step_count": 1,
+  "recovery": null
+}
+```
+
+`heddle timeline record-start --output json` emits the scrubbed append
+result after appending a versioned tool-call-start operation body:
+
+```json
+{
+  "output_kind": "timeline_record_start",
+  "status": "ok",
+  "action": "record-start",
+  "thread": "main",
+  "step_id": "tls-1",
+  "branch_id": "tlb-main",
+  "parent_step_id": null,
+  "operation_id": "tl-0123456789abcdefghijklmnopqrstuv",
+  "before_state": "hd-0123456789abcdefghijklmnop",
+  "after_state": null,
+  "changed": null,
+  "tool_status": null,
+  "payload_summary": "Read project metadata",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "branch_count": 1,
+  "step_count": 1
+}
+```
+
+`heddle timeline record-finish --output json` emits the scrubbed append
+result after appending a versioned tool-call-finish operation body:
+
+```json
+{
+  "output_kind": "timeline_record_finish",
+  "status": "ok",
+  "action": "record-finish",
+  "thread": "main",
+  "step_id": "tls-1",
+  "branch_id": "tlb-main",
+  "parent_step_id": null,
+  "operation_id": "tl-1123456789abcdefghijklmnopqrstuv",
+  "before_state": "hd-0123456789abcdefghijklmnop",
+  "after_state": "hd-1123456789abcdefghijklmnop",
+  "changed": true,
+  "tool_status": "succeeded",
+  "payload_summary": "Read project metadata",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "branch_count": 1,
+  "step_count": 1
+}
+```
+
 `heddle timeline fork|reset|recover --output json` emit timeline
 action results:
 

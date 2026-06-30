@@ -18,6 +18,7 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
     },
+    git_overlay_txn,
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
@@ -326,7 +327,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         None
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
-    if let Some(advice) = land_checkpoint_preflight_advice(&repo, &thread.id) {
+    if let Some(advice) = git_overlay_txn::land_checkpoint_preflight_advice(&repo, &thread.id) {
         return Err(anyhow!(advice));
     }
 
@@ -569,7 +570,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             .integration_policy_result
             .conflicts_resolved_manually;
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
-        let trust = build_repository_verification_state(&repo);
+        let trust = git_overlay_txn::post_verify(&repo);
         let post_land_action = integrated_land_next_action(true, pushed, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
@@ -817,7 +818,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
     }
 
-    let trust = build_repository_verification_state(&repo);
+    let trust = git_overlay_txn::post_verify(&repo);
     let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
@@ -903,7 +904,7 @@ fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Resu
     let mut bridge = GitBridge::new(repo);
     bridge.pull(&remote_name)?;
 
-    let trust = build_repository_verification_state(repo);
+    let trust = git_overlay_txn::post_verify(repo);
     if !trust.verified {
         let primary_command = if trust.recommended_action.trim().is_empty() {
             "heddle status".to_string()
@@ -1110,66 +1111,6 @@ fn integrated_land_next_action(
     } else {
         Some("heddle thread cleanup --merged --dry-run".to_string())
     }
-}
-
-fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
-    if repo.capability() != repo::RepositoryCapability::GitOverlay {
-        return None;
-    }
-    let trust = build_repository_verification_state(repo);
-    if trust.remote_drift == "remote_diverged" {
-        let remote_decision = repo
-            .git_remote_tracking_status()
-            .ok()
-            .flatten()
-            .map(|remote| super::git_overlay_health::remote_drift_decision(repo, &remote));
-        let primary_command = remote_decision
-            .as_ref()
-            .and_then(|decision| decision.primary_action.clone())
-            .unwrap_or_else(|| {
-                if trust.recommended_action.trim().is_empty() {
-                    "heddle pull".to_string()
-                } else {
-                    trust.recommended_action.clone()
-                }
-            });
-        let recovery_commands = if trust.recovery_commands.is_empty() {
-            let mut commands = remote_decision
-                .map(|decision| decision.recovery_commands)
-                .unwrap_or_else(|| vec![primary_command.clone()]);
-            commands.push(format!("heddle sync {}", thread_flag(thread_id)));
-            commands.push(land_local_command(thread_id));
-            commands
-        } else {
-            trust.recovery_commands.clone()
-        };
-        return Some(RecoveryAdvice::safety_refusal(
-            "land_requires_current_upstream",
-            format!("Refusing to land '{thread_id}': upstream work must be integrated first"),
-            format!("Run `{primary_command}`, then retry the land."),
-            format!(
-                "repository verification reports {}: {}",
-                trust.remote_drift, trust.summary
-            ),
-            "land would first integrate Heddle state locally, then fail while writing the Git checkpoint because the checkout branch is behind its upstream",
-            "thread refs, Heddle refs, Git refs, index, and worktree files were left unchanged",
-            primary_command,
-            recovery_commands,
-        ));
-    }
-    if repo.root().join(".git/index.lock").exists() {
-        return Some(RecoveryAdvice::safety_refusal(
-            "land_checkpoint_preflight_blocked",
-            format!("Refusing to land '{thread_id}': Git index is locked"),
-            "Remove the stale Git index lock or wait for the active Git operation to finish, then retry the land.",
-            ".git/index.lock exists in the parent checkout",
-            "land would first integrate Heddle state locally, then fail while writing the Git checkpoint because the Git index is locked",
-            "thread refs, Heddle refs, Git refs, index, and worktree files were left unchanged",
-            "heddle status",
-            vec!["heddle status".to_string()],
-        ));
-    }
-    None
 }
 
 fn land_checkpoint_message(

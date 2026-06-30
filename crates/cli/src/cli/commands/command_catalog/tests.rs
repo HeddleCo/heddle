@@ -422,6 +422,15 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["thread", "marker", "show"],
         &["thread", "marker", "show", "checkpoint"],
     ),
+    sample(&["timeline", "status"], &["timeline", "status"]),
+    sample(
+        &["timeline", "record-start"],
+        &["timeline", "record-start", "--tool-call", "call-1"],
+    ),
+    sample(
+        &["timeline", "record-finish"],
+        &["timeline", "record-finish", "--tool-call", "call-1"],
+    ),
     sample(
         &["timeline", "fork"],
         &["timeline", "fork", "--step", "tls-abc"],
@@ -1438,6 +1447,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "thread marker create",
             "thread marker delete",
             "thread marker show",
+            "timeline status",
+            "timeline record-start",
+            "timeline record-finish",
             "timeline fork",
             "timeline reset",
             "timeline recover",

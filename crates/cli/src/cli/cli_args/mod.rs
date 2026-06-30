@@ -46,8 +46,9 @@ pub use commands_args::{
     ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
     ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
     ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
+    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
+    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};

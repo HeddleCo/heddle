@@ -4,7 +4,9 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
-use heddle_core::{MachineOutputKind, QueryReport, ReportContract as CoreReportContract};
+use heddle_core::{
+    FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract, VerifyReport,
+};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -939,11 +941,14 @@ const fn report_json_discriminator(
     schema_verb: Option<&'static str>,
     report_contract: CoreReportContract,
 ) -> CommandJsonDiscriminatorSpec {
-    CommandJsonDiscriminatorSpec {
-        schema_verb,
-        field: report_contract.output_discriminator.field,
-        value: report_contract.output_discriminator.value,
-        no_schema_reason: None,
+    match report_contract.output_discriminator {
+        Some(discriminator) => CommandJsonDiscriminatorSpec {
+            schema_verb,
+            field: discriminator.field,
+            value: discriminator.value,
+            no_schema_reason: None,
+        },
+        None => panic!("report contract has no payload discriminator"),
     }
 }
 
@@ -1027,6 +1032,12 @@ const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[
         "query_attribution",
     ),
 ];
+const FSCK_COMMAND_SCHEMA_VERBS: &[&str] = &[FsckReport::CONTRACT.schema_name];
+const VERIFY_COMMAND_SCHEMA_VERBS: &[&str] = &[VerifyReport::CONTRACT.schema_name];
+const VERIFY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
+    Some(VerifyReport::CONTRACT.schema_name),
+    VerifyReport::CONTRACT,
+)];
 
 const fn exits(
     contract: CommandContract,
@@ -1944,7 +1955,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fsck"],
-        category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
+        category(
+            documented_report_schema(MUTATING, FsckReport::CONTRACT, FSCK_COMMAND_SCHEMA_VERBS),
+            "recovery",
+        ),
     ),
     entry(&["oplog"], category(GROUP, "recovery")),
     entry(
@@ -2943,6 +2957,48 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["timeline"], surface(GROUP, "automation")),
     entry(
+        &["timeline", "status"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["timeline status"]),
+                &[json_discriminator(
+                    Some("timeline status"),
+                    "output_kind",
+                    "timeline_status",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "record-start"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline record-start"]),
+                &[json_discriminator(
+                    Some("timeline record-start"),
+                    "output_kind",
+                    "timeline_record_start",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "record-finish"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline record-finish"]),
+                &[json_discriminator(
+                    Some("timeline record-finish"),
+                    "output_kind",
+                    "timeline_record_finish",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
         &["timeline", "fork"],
         surface(
             json_discriminators(
@@ -3006,8 +3062,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(READ_JSON, &["verify"]),
-                    &[json_discriminator(Some("verify"), "output_kind", "verify")],
+                    documented_report_schema(
+                        READ_JSON,
+                        VerifyReport::CONTRACT,
+                        VERIFY_COMMAND_SCHEMA_VERBS,
+                    ),
+                    VERIFY_JSON_DISCRIMINATORS,
                 ),
                 110,
             ),
@@ -4747,6 +4807,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
         },
         Commands::Timeline(args) => match &args.command {
+            TimelineCommands::Status(_) => vec!["timeline", "status"],
+            TimelineCommands::RecordStart(_) => vec!["timeline", "record-start"],
+            TimelineCommands::RecordFinish(_) => vec!["timeline", "record-finish"],
             TimelineCommands::Fork(_) => vec!["timeline", "fork"],
             TimelineCommands::Reset(_) => vec!["timeline", "reset"],
             TimelineCommands::Recover(_) => vec!["timeline", "recover"],

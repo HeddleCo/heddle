@@ -361,6 +361,17 @@ pub struct TimelineArgs {
 /// Timeline navigation action commands.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum TimelineCommands {
+    /// Show the current timeline cursor, counts, and recovery status.
+    Status(TimelineStatusArgs),
+
+    /// Record the start of a native tool timeline step.
+    #[command(name = "record-start")]
+    RecordStart(TimelineRecordStartArgs),
+
+    /// Record the finish of a native tool timeline step.
+    #[command(name = "record-finish")]
+    RecordFinish(TimelineRecordFinishArgs),
+
     /// Fork a timeline branch from a step or native harness tool call.
     #[command(after_help = "\
 Examples:
@@ -461,6 +472,76 @@ pub struct TimelineRecoverArgs {
     /// Timeline thread to recover.
     #[arg(long, default_value = "main")]
     pub thread: String,
+}
+
+/// Arguments for `heddle timeline status`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineStatusArgs {
+    /// Timeline thread to inspect.
+    #[arg(long, default_value = "main")]
+    pub thread: String,
+}
+
+/// Shared scrubbed native tool-call identity for timeline recording commands.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineRecordToolArgs {
+    /// Timeline thread to record into.
+    #[arg(long, default_value = "main")]
+    pub thread: String,
+
+    /// Native harness name.
+    #[arg(long, default_value = "opencode")]
+    pub harness: String,
+
+    /// Native harness session id.
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Native harness message id.
+    #[arg(long)]
+    pub message: Option<String>,
+
+    /// Native harness tool-call id.
+    #[arg(long = "tool-call")]
+    pub tool_call: String,
+
+    /// Explicit timeline step id. When omitted, Heddle derives one from the native identity.
+    #[arg(long = "step-id")]
+    pub step_id: Option<String>,
+
+    /// Explicit timeline branch id. Defaults to the current timeline branch or `tlb-main`.
+    #[arg(long = "branch")]
+    pub branch: Option<String>,
+
+    /// Scrubbed human summary for the native payload.
+    #[arg(long = "summary")]
+    pub summary: Option<String>,
+
+    /// Hash of the native payload, never the raw payload bytes.
+    #[arg(long = "payload-hash")]
+    pub payload_hash: Option<String>,
+}
+
+/// Arguments for `heddle timeline record-start`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineRecordStartArgs {
+    #[command(flatten)]
+    pub tool: TimelineRecordToolArgs,
+
+    /// Stable tool name such as `bash`, `edit`, or `read`.
+    #[arg(long = "tool-name", default_value = "tool")]
+    pub tool_name: String,
+}
+
+/// Arguments for `heddle timeline record-finish`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineRecordFinishArgs {
+    #[command(flatten)]
+    pub tool: TimelineRecordToolArgs,
+
+    /// Tool result status: succeeded, failed, or cancelled.
+    #[arg(long, default_value = "succeeded")]
+    pub status: String,
 }
 
 /// Arguments for the `retro` command.

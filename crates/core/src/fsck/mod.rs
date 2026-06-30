@@ -10,9 +10,10 @@ mod state;
 mod tests;
 
 use ::objects::{HeddleError, error::Result};
+use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::ExecutionContext;
+use crate::{ExecutionContext, HeddleReport, MachineOutputKind, ReportContract, schema_for_report};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FsckOptions {
@@ -22,7 +23,7 @@ pub struct FsckOptions {
     pub bridge: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct FsckReport {
     pub valid: bool,
     pub errors: Vec<FsckError>,
@@ -31,7 +32,20 @@ pub struct FsckReport {
     pub bridge_checked: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+impl FsckReport {
+    pub const CONTRACT: ReportContract = ReportContract {
+        schema_name: "fsck",
+        machine_output_kind: MachineOutputKind::Json,
+        output_discriminator: None,
+        schema: schema_for_report::<FsckReport>,
+    };
+}
+
+impl HeddleReport for FsckReport {
+    const CONTRACT: ReportContract = FsckReport::CONTRACT;
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct FsckError {
     pub kind: String,
     pub message: String,

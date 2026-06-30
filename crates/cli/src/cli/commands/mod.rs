@@ -35,6 +35,7 @@ mod fsck;
 mod gc;
 mod git_compat;
 mod git_overlay_health;
+mod git_overlay_txn;
 mod goto;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
