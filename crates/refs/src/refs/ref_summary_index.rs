@@ -388,8 +388,8 @@ impl RefManager {
     /// directory growing to `N` refs).
     ///
     /// When a current, valid index exists we apply each delta (`O(deltas)` edits
-    /// + one packed-refs load) and rewrite. When the index is absent or corrupt
-    /// — or `deltas` is empty (a HEAD-only publish) — we fall back to a full
+    /// plus one packed-refs load) and rewrite. When the index is absent or corrupt
+    /// (or `deltas` is empty, a HEAD-only publish) we fall back to a full
     /// from-storage rebuild so the sidecar is never left half-built. The result
     /// is byte-identical to a full rebuild after the same sequence of writes.
     pub(super) fn update_ref_summary_index_with_deltas(

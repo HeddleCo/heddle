@@ -489,7 +489,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
     for n in [101usize, 401, 801, 1548] {
         let (_t, refs) = create_ref_manager();
         for i in 0..n {
-            refs.set_thread(&ThreadName::new(&format!("branch-{i:05}")), &ChangeId::generate())
+            refs.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
                 .unwrap();
         }
 
@@ -521,7 +521,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         let (_t1, inc) = create_ref_manager();
         let start = Instant::now();
         for i in 0..n {
-            inc.set_thread(&ThreadName::new(&format!("branch-{i:05}")), &ChangeId::generate())
+            inc.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
                 .unwrap();
         }
         let inc_elapsed = start.elapsed();
@@ -529,7 +529,7 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         let (_t2, full) = create_ref_manager();
         let start = Instant::now();
         for i in 0..n {
-            full.set_thread(&ThreadName::new(&format!("branch-{i:05}")), &ChangeId::generate())
+            full.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
                 .unwrap();
             full.rebuild_ref_summary_index().unwrap();
         }
