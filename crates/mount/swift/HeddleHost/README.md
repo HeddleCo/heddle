@@ -287,7 +287,7 @@ The eventual `brew install --cask heddleco/heddle/heddle` should:
 A Homebrew **cask** is the right shape because it ships a `.app`:
 
 ```ruby
-# Pseudo-cask in heddleco/homebrew-heddle:
+# Pseudo-cask in heddleco/homebrew-tap:
 cask "heddle" do
   version "0.3.0"
   sha256 "..."

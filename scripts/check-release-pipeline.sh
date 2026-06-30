@@ -222,7 +222,7 @@ fi
 if [[ -x scripts/render-homebrew-cask.sh ]] \
    && grep -F "Casks/heddle.rb" "$WF" >/dev/null \
    && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
-   && grep -F "HeddleCo/homebrew-heddle" "$WF" >/dev/null; then
+   && grep -F "HeddleCo/homebrew-tap" "$WF" >/dev/null; then
   ok "Homebrew cask manifest publication wired"
 else
   err "missing Homebrew cask manifest publication wiring"
