@@ -11,13 +11,15 @@ use std::{
 use objects::{
     object::{Blob, ChangeId, ContentHash},
     store::{
-        CompressionConfig, ObjectStore, PackBuilder, PackObjectId,
-        pack::ObjectType as PackObjectType,
+        pack::ObjectType as PackObjectType, CompressionConfig, ObjectStore, PackBuilder,
+        PackObjectId,
     },
 };
 use repo::Repository;
 use tempfile::TempDir;
 use wire::{ObjectData, ObjectId, ObjectType};
+
+mod perf_fixtures;
 
 #[derive(Debug)]
 struct SnapshotProfile {
@@ -482,6 +484,64 @@ fn test_incremental_snapshot_performance() {
         elapsed.as_secs() < 5,
         "Incremental snapshot should be fast, took {:?}",
         elapsed
+    );
+}
+
+#[test]
+fn test_performance_fixture_suite_smoke_scaffold() {
+    for shape in perf_fixtures::required_shapes() {
+        assert!(
+            perf_fixtures::fixture_catalog()
+                .iter()
+                .any(|definition| definition.shape == *shape),
+            "fixture catalog should define {shape:?}"
+        );
+    }
+
+    let fixture = perf_fixtures::build_default_smoke_fixture();
+    let metrics = fixture.metrics();
+    println!(
+        "perf fixture smoke: root={} build={:?} peak_rss={:?} objects={} packs={} logical_read={}B logical_written={}B cold_status={:?} warm_status={:?} thread_refs={}",
+        fixture.root().display(),
+        metrics.build_wall_time,
+        metrics.peak_rss_bytes,
+        metrics.object_count,
+        metrics.pack_count,
+        metrics.logical_bytes_read,
+        metrics.logical_bytes_written,
+        metrics.cold_status_wall_time,
+        metrics.warm_status_wall_time,
+        metrics.thread_ref_count,
+    );
+
+    for shape in [
+        perf_fixtures::FixtureShape::ManySmallFiles,
+        perf_fixtures::FixtureShape::MultiMbBlobs,
+        perf_fixtures::FixtureShape::DeepHistory,
+        perf_fixtures::FixtureShape::ManyRefs,
+        perf_fixtures::FixtureShape::RenameMove,
+    ] {
+        assert!(
+            fixture.covers(shape),
+            "smoke fixture should cover {shape:?}"
+        );
+    }
+    assert!(
+        metrics.object_count > 0,
+        "smoke fixture should write objects"
+    );
+    assert!(metrics.pack_count > 0, "smoke fixture should create a pack");
+    assert!(
+        metrics.logical_bytes_written >= 2 * 1024 * 1024,
+        "smoke fixture should include a multi-MB payload"
+    );
+    assert!(
+        metrics.logical_bytes_read >= 2 * 1024 * 1024,
+        "smoke fixture should read back the multi-MB payload"
+    );
+    assert!(
+        metrics.thread_ref_count >= 8,
+        "smoke fixture should include additional refs"
     );
 }
 
