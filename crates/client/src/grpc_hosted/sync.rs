@@ -400,7 +400,7 @@ impl HostedGrpcClient {
             send_native_pack_streaming_messages(
                 &tx,
                 repo,
-                &wanted_packable,
+                wanted_packable,
                 &transfer_id,
                 self.transport.chunk_size.max(1),
                 &self.transport,
@@ -2434,12 +2434,13 @@ fn git_oid_from_bytes(
 async fn send_native_pack_streaming_messages(
     tx: &mpsc::Sender<PushMessage>,
     repo: &Repository,
-    objects: &[ObjectInfo],
+    objects: Vec<ObjectInfo>,
     transfer_id: &str,
     chunk_size: usize,
     transport: &super::helpers::HostedTransportPolicy,
     transport_mode: TransportMode,
 ) -> Result<(), ProtocolError> {
+    let object_len = objects.len();
     let object_count = u64::try_from(objects.len()).map_err(|_| {
         ProtocolError::InvalidState("native pack object count exceeds u64".to_string())
     })?;
@@ -2450,14 +2451,13 @@ async fn send_native_pack_streaming_messages(
         Result<wire::ObjectData, ProtocolError>,
     )>(NATIVE_PACK_OBJECT_PREFETCH_LIMIT);
     let store = repo.store().clone();
-    let object_plan = objects.to_vec();
     let loader = tokio::task::spawn_blocking(move || {
-        load_native_pack_objects_parallel(store, object_plan, loaded_tx);
+        load_native_pack_objects_parallel(store, objects, loaded_tx);
     });
 
     let mut next_index = 0usize;
     let mut pending = BTreeMap::new();
-    while next_index < objects.len() {
+    while next_index < object_len {
         let (index, object) = loaded_rx.recv().await.ok_or_else(|| {
             ProtocolError::InvalidState(
                 "native pack object loader stopped before sending all objects".to_string(),
@@ -3960,11 +3960,7 @@ mod tests {
 
     /// Put a state whose tree holds one blob into `repo`'s store. Returns the
     /// state id. With `parents`, builds a child on top of an existing state.
-    fn put_state_with_blob(
-        repo: &Repository,
-        contents: &str,
-        parents: Vec<ChangeId>,
-    ) -> ChangeId {
+    fn put_state_with_blob(repo: &Repository, contents: &str, parents: Vec<ChangeId>) -> ChangeId {
         let blob = Blob::from(contents);
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
@@ -4015,8 +4011,8 @@ mod tests {
 
         // A fetch_state-style override drives the want plan directly; the
         // thread head is unrelated to what's being fetched.
-        let advertised = locally_complete_pull_head(&repo, "main", Some(head))
-            .expect("completeness check");
+        let advertised =
+            locally_complete_pull_head(&repo, "main", Some(head)).expect("completeness check");
         assert_eq!(advertised, None);
     }
 
@@ -4082,8 +4078,8 @@ mod tests {
             .set_thread(&ThreadName::from("feature"), &head)
             .expect("set thread");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised,
             Some(head),
@@ -4128,8 +4124,8 @@ mod tests {
         repo.record_missing_blob(ContentHash::from_bytes([88u8; 32]))
             .expect("record missing blob");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised, None,
             "a repo carrying missing blobs must never advertise an explicit local-thread head"
@@ -4157,8 +4153,8 @@ mod tests {
             .set_thread(&ThreadName::from("feature"), &child_id)
             .expect("set thread");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised, None,
             "an explicit local-thread head whose closure has an absent parent must not be advertised"
@@ -4249,7 +4245,11 @@ mod tests {
                     (Vec::new(), None, true)
                 } else if exclude.contains(&parent_full) {
                     // Client is behind at `known_parent`; send only the delta.
-                    (svc.delta_objects.clone(), Some(svc.delta_pack.clone()), false)
+                    (
+                        svc.delta_objects.clone(),
+                        Some(svc.delta_pack.clone()),
+                        false,
+                    )
                 } else {
                     // No usable advertisement; send the full closure.
                     (svc.full_closure.clone(), Some(svc.full_pack.clone()), false)
@@ -4448,8 +4448,12 @@ mod tests {
             wire::enumerate_state_closure(src_repo.store(), parent).expect("parent closure");
         let parent_pack =
             wire::build_native_pack(src_repo.store(), &parent_closure).expect("parent pack");
-        wire::install_received_pack(repo.store(), &parent_pack.pack_data, &parent_pack.index_data)
-            .expect("install parent closure into client");
+        wire::install_received_pack(
+            repo.store(),
+            &parent_pack.pack_data,
+            &parent_pack.index_data,
+        )
+        .expect("install parent closure into client");
         repo.refs()
             .set_thread(&ThreadName::from("main"), &parent)
             .expect("set thread to parent");
@@ -4457,7 +4461,10 @@ mod tests {
         wire::enumerate_state_closure(repo.store(), parent).expect("client holds parent closure");
         // ...but NOT the child yet.
         assert!(
-            repo.store().get_state(&child).expect("probe child").is_none(),
+            repo.store()
+                .get_state(&child)
+                .expect("probe child")
+                .is_none(),
             "client must start without the child state"
         );
         let parent_clone = parent;

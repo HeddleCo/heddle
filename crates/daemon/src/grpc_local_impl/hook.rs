@@ -4,7 +4,11 @@
 //! payloads. Live event delivery (subscribe + respond) lands when the
 //! capture/merge code paths emit events.
 
-use std::{path::PathBuf, pin::Pin};
+use std::{
+    path::PathBuf,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::Stream;
 use grpc::heddle::v1::{
@@ -16,7 +20,7 @@ use grpc::heddle::v1::{
 use objects::{error::HeddleError, fs_atomic::write_file_atomic};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use super::{GrpcLocalService, HookResponse, to_status, with_idempotency};
@@ -157,11 +161,43 @@ fn event_catalog() -> Vec<HookEventSchema> {
     ]
 }
 
-/// Stream type for `SubscribeHookEvents`. Boxed so tonic can hand it
-/// back through the trait associated type without surfacing the
-/// concrete `mpsc::Receiver` shape.
-pub type SubscribeHookEventsStream =
-    Pin<Box<dyn Stream<Item = Result<ProtoHookEvent, Status>> + Send>>;
+/// Concrete stream type for `SubscribeHookEvents`.
+pub struct SubscribeHookEventsStream {
+    receiver: ReceiverStream<ProtoHookEvent>,
+    filter: std::collections::HashSet<String>,
+}
+
+impl SubscribeHookEventsStream {
+    fn new(
+        receiver: tokio::sync::mpsc::Receiver<ProtoHookEvent>,
+        filter: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            receiver: ReceiverStream::new(receiver),
+            filter,
+        }
+    }
+}
+
+impl Stream for SubscribeHookEventsStream {
+    type Item = Result<ProtoHookEvent, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match Pin::new(&mut this.receiver).poll_next(cx) {
+                Poll::Ready(Some(event))
+                    if this.filter.is_empty() || this.filter.contains(&event.event_name) =>
+                {
+                    return Poll::Ready(Some(Ok(event)));
+                }
+                Poll::Ready(Some(_)) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
 
 #[tonic::async_trait]
 impl HookService for LocalHookService {
@@ -295,14 +331,9 @@ impl HookService for LocalHookService {
         // `tonic::Stream<Result<ProtoHookEvent, Status>>`. Apply the
         // event-name filter on the read side so subscribers don't pay
         // for events they don't care about.
-        let stream = ReceiverStream::new(receiver).filter_map(move |event| {
-            if filter.is_empty() || filter.contains(&event.event_name) {
-                Some(Ok(event))
-            } else {
-                None
-            }
-        });
-        Ok(Response::new(Box::pin(stream)))
+        Ok(Response::new(SubscribeHookEventsStream::new(
+            receiver, filter,
+        )))
     }
 
     async fn respond_to_hook(
@@ -486,7 +517,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        let mut stream = Box::pin(stream);
+        tokio::pin!(stream);
         // Yield so the subscriber's forwarding task is wired up
         // before the broker emit fires.
         tokio::task::yield_now().await;
@@ -495,6 +526,35 @@ mod tests {
             .await
             .expect("event")
             .expect("ok");
+        assert_eq!(event.hook_event_id, id);
+        assert_eq!(event.event_name, "post_capture");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn subscribe_filters_non_matching_events() {
+        let (_t, svc) = fresh_service();
+        let stream = svc
+            .subscribe_hook_events(Request::new(SubscribeHookEventsRequest {
+                repo_path: String::new(),
+                events: vec!["post_capture".into()],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        tokio::pin!(stream);
+        tokio::task::yield_now().await;
+        svc.inner.hook_events.emit("pre_capture", "{}");
+        let id = svc.inner.hook_events.emit("post_capture", "{}");
+
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            futures::StreamExt::next(&mut stream),
+        )
+        .await
+        .expect("filtered event")
+        .expect("event")
+        .expect("ok");
         assert_eq!(event.hook_event_id, id);
         assert_eq!(event.event_name, "post_capture");
     }
