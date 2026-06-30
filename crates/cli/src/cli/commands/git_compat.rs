@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git-muscle-memory compatibility shims.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -26,8 +26,8 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{
-        create_git_checkpoint, create_git_checkpoint_from_index_snapshot,
-        create_git_checkpoint_with_worktree_status, preflight_git_checkpoint_ref_update,
+        create_git_checkpoint_from_index_snapshot, create_git_checkpoint_with_worktree_status,
+        preflight_git_checkpoint_ref_update,
     },
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
@@ -41,8 +41,9 @@ use super::{
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
-        is_placeholder_principal, placeholder_principal_warning,
-        preflight_large_capture_for_compat_commit, resolve_principal,
+        create_snapshot_profiled_with_worktree_status, is_placeholder_principal,
+        placeholder_principal_warning,
+        preflight_large_capture_for_compat_commit_with_worktree_status, resolve_principal,
     },
     thread_cmd::cmd_thread,
 };
@@ -53,6 +54,7 @@ use crate::{
         worktree_status_options,
     },
     config::UserConfig,
+    perf::{ProfileField, emit_profile, profile_enabled},
 };
 
 const GIT_MODE_FILE: u32 = 0o100644;
@@ -148,7 +150,9 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // exact `Result` from a full worktree walk that re-reads + SHA-1s every
     // tracked file — before this, the clean fast-path paid that walk 3× before
     // the ref ever moved.
+    let preflight_worktree_status_start = Instant::now();
     let worktree_status = repo.git_overlay_worktree_status();
+    let preflight_worktree_status_ms = preflight_worktree_status_start.elapsed().as_millis();
     if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
         &repo,
         "commit",
@@ -160,12 +164,23 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     let user_config = UserConfig::load_default().unwrap_or_default();
     let placeholder_principal_warning =
         placeholder_principal_first_commit_warning(&repo, &user_config)?;
+    // Heddle-side clean-check: walks the worktree against the current Heddle tree
+    // (load index + read + SHA-1 every tracked file + save index). This is a
+    // SEPARATE walk from the git-overlay `worktree_status` above (different
+    // representation/semantics), so it cannot be threaded from it. It is only
+    // needed to distinguish "nothing to commit" / index-only-intent from a real
+    // change; the dirty path discards the result. Profiled below so the cost is
+    // attributed. Cutting it (cheap is-dirty probe for the dirty path) is a
+    // noted L-effort follow-up.
+    let mut clean_check_status_ms = 0u128;
     if let Some(state) = repo.current_state()? {
         let tree = repo.require_tree(&state.tree)?;
+        let clean_check_start = Instant::now();
         let status = repo.compare_worktree_cached_with_options(
             &tree,
             &worktree_status_options(Some(repo.config())),
         )?;
+        clean_check_status_ms = clean_check_start.elapsed().as_millis();
         // A clean worktree (matches Heddle's current tree) can still
         // hide real index-only intent on a Git-overlay checkout — e.g.
         // `git rm --cached path` stages a deletion without touching
@@ -323,8 +338,23 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     }
     let git_index = GitIndexPlan::from_intent(&index_intent, args.all);
 
-    preflight_large_capture_for_compat_commit(&repo, args.force)?;
-    let snapshot = create_snapshot(
+    // Reuse the pre-mutation git-overlay worktree status computed at the top of
+    // this command (`worktree_status`) for the dirty-commit path's three
+    // PRE-mutation consumers: the large-capture safety preflight, the capture
+    // mutation preflight inside the snapshot, and the checkpoint's two
+    // preflights. None of these moves a Git ref, so they all observe the same
+    // pre-mutation git state and reuse is byte-identical to a fresh walk. Before
+    // this, the dirty path re-walked the worktree (re-reading + SHA-1ing every
+    // tracked file) four-plus times here — the large-capture preflight, the
+    // snapshot preflight, and both checkpoint preflights each ran their own
+    // walk. The post-checkpoint verification (`build_repository_verification_state`
+    // below) is left FRESH: the checkpoint advances the Git ref, which flips the
+    // git-overlay health classification.
+    let large_capture_start = Instant::now();
+    preflight_large_capture_for_compat_commit_with_worktree_status(args.force, &worktree_status)?;
+    let large_capture_preflight_ms = large_capture_start.elapsed().as_millis();
+    let snapshot_start = Instant::now();
+    let (snapshot, _snapshot_profile) = create_snapshot_profiled_with_worktree_status(
         &repo,
         &user_config,
         Some(message.clone()),
@@ -338,15 +368,19 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             no_policy: false,
             no_agent: false,
         },
+        &worktree_status,
     )?;
+    let snapshot_ms = snapshot_start.elapsed().as_millis();
     let captured_state = repo
         .current_state()?
         .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
     let snapshot_batch = find_recent_snapshot_batch(&repo, &captured_state.change_id)?;
-    let record = create_git_checkpoint(
+    let checkpoint_start = Instant::now();
+    let record = create_git_checkpoint_with_worktree_status(
         &repo,
         Some(message.as_str()),
         worktree_status_options(Some(repo.config())),
+        &worktree_status,
     )
     .map_err(|err| {
         anyhow!(commit_checkpoint_failed_advice(
@@ -356,6 +390,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             false,
         ))
     })?;
+    let checkpoint_ms = checkpoint_start.elapsed().as_millis();
     let checkpoint_batch = find_recent_git_checkpoint_batch(&repo, &record.git_commit)?;
     repo.oplog()
         .coalesce_batches(snapshot_batch.id, checkpoint_batch.id)
@@ -363,7 +398,22 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             "commit completed but failed to record capture and Git checkpoint as one undo batch",
         )?;
 
+    let verify_start = Instant::now();
     let trust = commit_safe_trust(build_repository_verification_state(&repo));
+    let verify_ms = verify_start.elapsed().as_millis();
+    if profile_enabled() {
+        emit_profile(
+            "commit phases",
+            &[
+                ProfileField::millis("preflight_worktree_status_ms", preflight_worktree_status_ms),
+                ProfileField::millis("clean_check_status_ms", clean_check_status_ms),
+                ProfileField::millis("large_capture_preflight_ms", large_capture_preflight_ms),
+                ProfileField::millis("snapshot_ms", snapshot_ms),
+                ProfileField::millis("checkpoint_ms", checkpoint_ms),
+                ProfileField::millis("verify_ms", verify_ms),
+            ],
+        );
+    }
     let output = CommitCompatOutput {
         output_kind: "commit",
         status: "committed",
