@@ -387,6 +387,163 @@ fn test_ref_summary_index_rebuild_reports_repo_ref_shape() {
     );
 }
 
+/// The incremental per-publish summary-index update (perf/adopt: avoids the
+/// O(refs²) full-dir rescan) must produce a sidecar that is byte-identical to a
+/// full from-storage rebuild after the same sequence of mixed set/delete/pack
+/// operations — including the loose-over-packed `source` distinction. A drift
+/// here would corrupt ref resolution.
+#[test]
+fn test_incremental_ref_summary_index_matches_full_rebuild() {
+    let (_temp, refs) = create_ref_manager();
+
+    // A mixed sequence exercising: many sets (the adopt-style growth), an
+    // overwrite, deletes (loose + packed purge), packed entries, and a loose
+    // override of a packed ref (the LooseAndPacked source case).
+    let ids: Vec<ChangeId> = (0..12).map(|_| ChangeId::generate()).collect();
+
+    refs.set_thread(&ThreadName::new("main"), &ids[0]).unwrap();
+    refs.set_thread(&ThreadName::new("feature/api"), &ids[1])
+        .unwrap();
+    refs.set_thread(&ThreadName::new("feature/ui"), &ids[2])
+        .unwrap();
+    refs.create_marker(&MarkerName::new("v1.0.0"), &ids[3])
+        .unwrap();
+    refs.create_marker(&MarkerName::new("v1.1.0"), &ids[4])
+        .unwrap();
+
+    // Pack everything, then add loose refs on top — including a loose override
+    // of a packed thread (must record source = loose+packed incrementally).
+    refs.pack_refs().unwrap();
+    refs.set_thread(&ThreadName::new("main"), &ids[5]).unwrap();
+    refs.set_thread(&ThreadName::new("hotfix"), &ids[6])
+        .unwrap();
+    refs.create_marker(&MarkerName::new("v2.0.0"), &ids[7])
+        .unwrap();
+
+    // Overwrite + delete a mix of loose and packed-backed refs.
+    refs.set_thread(&ThreadName::new("feature/ui"), &ids[8])
+        .unwrap();
+    refs.delete_thread(&ThreadName::new("feature/api")).unwrap();
+    refs.delete_marker(&MarkerName::new("v1.0.0")).unwrap();
+
+    // Remote threads (untouched by the incremental publish path) must survive.
+    refs.set_remote_thread("origin", &ThreadName::new("main"), &ids[9])
+        .unwrap();
+    refs.set_remote_thread("origin", &ThreadName::new("dev"), &ids[10])
+        .unwrap();
+
+    refs.set_thread(&ThreadName::new("release"), &ids[11])
+        .unwrap();
+
+    // Snapshot the incrementally-maintained on-disk sidecar...
+    let incremental = std::fs::read_to_string(refs.ref_summary_index_path()).unwrap();
+
+    // ...then force a full from-storage rebuild and compare byte-for-byte.
+    refs.rebuild_ref_summary_index().unwrap();
+    let from_storage = std::fs::read_to_string(refs.ref_summary_index_path()).unwrap();
+
+    assert_eq!(
+        incremental, from_storage,
+        "incremental summary index diverged from a full from-storage rebuild"
+    );
+
+    // And the resolved values must still be correct through the public API.
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("main")).unwrap(),
+        Some(ids[5])
+    );
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("feature/ui")).unwrap(),
+        Some(ids[8])
+    );
+    assert_eq!(refs.get_thread(&ThreadName::new("feature/api")).unwrap(), None);
+    assert_eq!(refs.get_marker(&MarkerName::new("v1.0.0")).unwrap(), None);
+    assert_eq!(
+        refs.list_threads().unwrap(),
+        vec![
+            ThreadName::new("feature/ui"),
+            ThreadName::new("hotfix"),
+            ThreadName::new("main"),
+            ThreadName::new("release"),
+        ]
+    );
+}
+
+/// Scaling proof for perf/adopt (run with `--ignored --nocapture`). Two views:
+///
+/// 1. **Marginal per-publish index cost** at a refs dir already holding N refs:
+///    one incremental delta-fold (the new path, O(changed)) vs one full
+///    from-storage rebuild (the old per-publish behavior, O(refs)). This is the
+///    cost that ran once *per publish* and made `adopt` quadratic.
+/// 2. **End-to-end** cost of growing the dir to N refs the new way vs forcing a
+///    full rebuild after every publish — the gap is the eliminated O(refs²)
+///    rescan term.
+#[test]
+#[ignore = "timing harness; run explicitly with --ignored --nocapture"]
+fn bench_incremental_vs_full_rebuild_scaling() {
+    use std::time::Instant;
+
+    const ITERS: u32 = 50;
+
+    println!("\n-- marginal cost of ONE index update at a dir already holding N refs --");
+    for n in [101usize, 401, 801, 1548] {
+        let (_t, refs) = create_ref_manager();
+        for i in 0..n {
+            refs.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
+                .unwrap();
+        }
+
+        // One incremental delta-fold (set an existing thread -> single delta).
+        let incr = Instant::now();
+        for _ in 0..ITERS {
+            refs.set_thread(&ThreadName::new("branch-00000"), &ChangeId::generate())
+                .unwrap();
+        }
+        let incr_per = incr.elapsed() / ITERS;
+
+        // One full from-storage rebuild (the old per-publish cost).
+        let full = Instant::now();
+        for _ in 0..ITERS {
+            refs.rebuild_ref_summary_index().unwrap();
+        }
+        let full_per = full.elapsed() / ITERS;
+
+        println!(
+            "n={n:5}  incremental-fold={:>10.1?}  full-rebuild={:>10.1?}  speedup={:.1}x",
+            incr_per,
+            full_per,
+            full_per.as_secs_f64() / incr_per.as_secs_f64()
+        );
+    }
+
+    println!("\n-- end-to-end: grow dir to N refs (gap = eliminated O(refs²) rescan) --");
+    for n in [101usize, 401, 801, 1548] {
+        let (_t1, inc) = create_ref_manager();
+        let start = Instant::now();
+        for i in 0..n {
+            inc.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
+                .unwrap();
+        }
+        let inc_elapsed = start.elapsed();
+
+        let (_t2, full) = create_ref_manager();
+        let start = Instant::now();
+        for i in 0..n {
+            full.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
+                .unwrap();
+            full.rebuild_ref_summary_index().unwrap();
+        }
+        let full_elapsed = start.elapsed();
+
+        println!(
+            "n={n:5}  incremental={:>9.1?}  full-rebuild-per-publish={:>9.1?}  delta={:>9.1?}",
+            inc_elapsed,
+            full_elapsed,
+            full_elapsed.saturating_sub(inc_elapsed)
+        );
+    }
+}
+
 #[test]
 fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
     let (_temp, refs) = create_ref_manager();

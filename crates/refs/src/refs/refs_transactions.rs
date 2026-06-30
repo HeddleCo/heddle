@@ -12,6 +12,7 @@ use super::{
     RefManager, RefUpdate, format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
+    ref_summary_index::SummaryDelta,
     reconcile::{LoadRequest, Loaded},
     refs_storage::RefsLock,
     refs_types::{
@@ -26,6 +27,34 @@ enum PackedRemove {
     Marker(String),
 }
 
+/// Map a planned thread write to its summary-index delta: a set when `new` is
+/// `Some`, a delete (loose + packed are both purged) when `None`.
+fn thread_summary_delta(name: &str, new: Option<&ChangeId>) -> SummaryDelta {
+    match new {
+        Some(change_id) => SummaryDelta::SetThread {
+            name: name.to_string(),
+            change_id: *change_id,
+        },
+        None => SummaryDelta::DeleteThread {
+            name: name.to_string(),
+        },
+    }
+}
+
+/// Map a planned marker write to its summary-index delta (see
+/// [`thread_summary_delta`]).
+fn marker_summary_delta(name: &str, new: Option<&ChangeId>) -> SummaryDelta {
+    match new {
+        Some(change_id) => SummaryDelta::SetMarker {
+            name: name.to_string(),
+            change_id: *change_id,
+        },
+        None => SummaryDelta::DeleteMarker {
+            name: name.to_string(),
+        },
+    }
+}
+
 pub(super) struct RefUpdatePlan {
     path: PathBuf,
     new_content: Option<String>,
@@ -33,6 +62,10 @@ pub(super) struct RefUpdatePlan {
     description: String,
     temp_path: Option<PathBuf>,
     packed_remove: Option<PackedRemove>,
+    /// How this plan changes the summary index, so the post-publish index update
+    /// is an `O(1)` edit instead of a full-dir rescan. `None` for HEAD plans
+    /// (HEAD is not part of the summary index).
+    summary_delta: Option<SummaryDelta>,
 }
 
 impl RefManager {
@@ -200,6 +233,7 @@ impl RefManager {
                     } else {
                         None
                     };
+                    let summary_delta = Some(thread_summary_delta(name.as_str(), new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
                         new_content,
@@ -207,6 +241,7 @@ impl RefManager {
                         description: format!("thread {}", name),
                         temp_path: None,
                         packed_remove,
+                        summary_delta,
                     });
                 }
                 RefUpdate::Marker {
@@ -244,6 +279,7 @@ impl RefManager {
                     } else {
                         None
                     };
+                    let summary_delta = Some(marker_summary_delta(name, new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
                         new_content,
@@ -251,6 +287,7 @@ impl RefManager {
                         description: format!("marker {}", name),
                         temp_path: None,
                         packed_remove,
+                        summary_delta,
                     });
                 }
                 RefUpdate::Head { expected, new } => {
@@ -293,6 +330,7 @@ impl RefManager {
                         description: "HEAD".to_string(),
                         temp_path: None,
                         packed_remove: None,
+                        summary_delta: None,
                     });
                 }
             }
@@ -328,6 +366,7 @@ impl RefManager {
                     } else {
                         None
                     };
+                    let summary_delta = Some(thread_summary_delta(name.as_str(), new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
                         new_content: new.as_ref().map(format_change_id_text),
@@ -335,6 +374,7 @@ impl RefManager {
                         description: format!("thread {}", name),
                         temp_path: None,
                         packed_remove,
+                        summary_delta,
                     });
                 }
                 RefUpdate::Marker { name, new, .. } => {
@@ -349,6 +389,7 @@ impl RefManager {
                     } else {
                         None
                     };
+                    let summary_delta = Some(marker_summary_delta(name, new.as_ref()));
                     plans.push(RefUpdatePlan {
                         path,
                         new_content: new.as_ref().map(format_change_id_text),
@@ -356,6 +397,7 @@ impl RefManager {
                         description: format!("marker {}", name),
                         temp_path: None,
                         packed_remove,
+                        summary_delta,
                     });
                 }
                 RefUpdate::Head { new, .. } => {
@@ -370,6 +412,7 @@ impl RefManager {
                         description: "HEAD".to_string(),
                         temp_path: None,
                         packed_remove: None,
+                        summary_delta: None,
                     });
                 }
             }
@@ -437,7 +480,20 @@ impl RefManager {
             return Err(err);
         }
 
-        if self.rebuild_ref_summary_index_with_lock(_lock).is_err() {
+        // Fold only the just-published loose-ref deltas into the summary index
+        // (heddle perf/adopt: the old per-publish `rebuild_ref_summary_index`
+        // rescanned the entire refs dir, making any many-ref operation
+        // O(refs²)). The plans already carry each changed ref's new value, so
+        // this is O(deltas) edits + one packed-refs load. On any failure we drop
+        // the sidecar so the next read rebuilds it from storage.
+        let deltas: Vec<SummaryDelta> = plans
+            .iter()
+            .filter_map(|plan| plan.summary_delta.clone())
+            .collect();
+        if self
+            .update_ref_summary_index_with_deltas(_lock, &deltas)
+            .is_err()
+        {
             self.invalidate_ref_summary_index();
         }
 
@@ -541,6 +597,9 @@ mod tests {
             description: "thread packed-only".to_string(),
             temp_path: None,
             packed_remove: Some(PackedRemove::Thread("packed-only".to_string())),
+            summary_delta: Some(SummaryDelta::DeleteThread {
+                name: "packed-only".to_string(),
+            }),
         }];
 
         refs.rollback_updates(&plans, &[], Some(packed_snapshot.clone()))

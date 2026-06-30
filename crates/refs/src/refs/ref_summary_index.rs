@@ -79,6 +79,27 @@ struct RefSummaryEntry {
     source: RefSummarySource,
 }
 
+/// A single loose-ref delta carried by a publish plan, used to update the
+/// summary index incrementally instead of rescanning the whole refs dir.
+///
+/// The plan already knows exactly which thread/marker changed and its new
+/// change-id, so a publish that touches `k` refs costs `O(k)` index edits +
+/// one packed-refs load — not an `O(refs)` full-dir rescan. HEAD is not part of
+/// the summary index, so HEAD plans carry no target; remote threads are never
+/// produced by `publish_ref_plans`, so they stay untouched in the index.
+#[derive(Debug, Clone)]
+pub(super) enum SummaryDelta {
+    /// Loose thread set to a new change-id (the loose file now exists on disk).
+    SetThread { name: String, change_id: ChangeId },
+    /// Loose marker set to a new change-id.
+    SetMarker { name: String, change_id: ChangeId },
+    /// Thread removed from both loose and packed storage (delete plans always
+    /// carry a packed removal), so the entry leaves the index entirely.
+    DeleteThread { name: String },
+    /// Marker removed from both loose and packed storage.
+    DeleteMarker { name: String },
+}
+
 #[derive(Debug, Clone)]
 struct RemoteThreadSummaryEntry {
     name: String,
@@ -233,6 +254,39 @@ impl RefSummaryIndex {
         }
     }
 
+    /// Apply one loose-ref delta in place, recomputing the entry's `source`
+    /// from the supplied packed-refs view so a loose set over a packed ref is
+    /// recorded as `LooseAndPacked` (matching the from-storage rebuild).
+    ///
+    /// Entries stay sorted by name: set inserts at the sorted position (or
+    /// updates in place), delete removes. Remotes are never touched here.
+    fn apply_delta(&mut self, delta: &SummaryDelta, packed: &PackedRefs) {
+        match delta {
+            SummaryDelta::SetThread { name, change_id } => {
+                let source = if packed.get_thread(name).is_some() {
+                    RefSummarySource::LooseAndPacked
+                } else {
+                    RefSummarySource::Loose
+                };
+                upsert_entry(&mut self.threads, name, *change_id, source);
+            }
+            SummaryDelta::SetMarker { name, change_id } => {
+                let source = if packed.get_marker(name).is_some() {
+                    RefSummarySource::LooseAndPacked
+                } else {
+                    RefSummarySource::Loose
+                };
+                upsert_entry(&mut self.markers, name, *change_id, source);
+            }
+            SummaryDelta::DeleteThread { name } => {
+                self.threads.retain(|entry| entry.name != *name);
+            }
+            SummaryDelta::DeleteMarker { name } => {
+                self.markers.retain(|entry| entry.name != *name);
+            }
+        }
+    }
+
     pub(super) fn thread_names(&self) -> Vec<ThreadName> {
         self.threads
             .iter()
@@ -325,6 +379,45 @@ impl RefManager {
 
     pub(super) fn invalidate_ref_summary_index(&self) {
         let _ = std::fs::remove_file(self.ref_summary_index_path());
+    }
+
+    /// Incrementally fold a publish's loose-ref deltas into the on-disk summary
+    /// index instead of rescanning the whole refs dir (the `O(refs²)` cost that
+    /// made `heddle adopt` quadratic — the index was rebuilt from a full
+    /// `read_dir` + per-ref `read_change_id_at` on *every* publish over a
+    /// directory growing to `N` refs).
+    ///
+    /// When a current, valid index exists we apply each delta (`O(deltas)` edits
+    /// plus one packed-refs load) and rewrite. When the index is absent or corrupt
+    /// (or `deltas` is empty, a HEAD-only publish) we fall back to a full
+    /// from-storage rebuild so the sidecar is never left half-built. The result
+    /// is byte-identical to a full rebuild after the same sequence of writes.
+    pub(super) fn update_ref_summary_index_with_deltas(
+        &self,
+        _lock: &RefsLock,
+        deltas: &[SummaryDelta],
+    ) -> Result<()> {
+        let mut summary = match self.read_ref_summary_index() {
+            Ok(Some(summary)) => summary,
+            // Absent or unreadable/corrupt: fall back to a clean full rebuild.
+            Ok(None) | Err(_) => {
+                return self
+                    .rebuild_ref_summary_index_with_lock(_lock)
+                    .map(|_| ());
+            }
+        };
+
+        if deltas.is_empty() {
+            return Ok(());
+        }
+
+        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        for delta in deltas {
+            summary.apply_delta(delta, &packed);
+        }
+
+        let path = self.ref_summary_index_path();
+        self.write_string(&path, &summary.to_text())
     }
 
     pub(super) fn list_threads_from_storage(&self) -> Result<Vec<ThreadName>> {
@@ -512,6 +605,30 @@ impl RefManager {
             }
         }
         Ok(threads)
+    }
+}
+
+/// Insert `name` into the sorted `entries`, or update it in place if present.
+/// Keeps `entries` sorted by name (the from-storage rebuild sorts the same way).
+fn upsert_entry(
+    entries: &mut Vec<RefSummaryEntry>,
+    name: &str,
+    change_id: ChangeId,
+    source: RefSummarySource,
+) {
+    match entries.binary_search_by(|entry| entry.name.as_str().cmp(name)) {
+        Ok(idx) => {
+            entries[idx].change_id = change_id;
+            entries[idx].source = source;
+        }
+        Err(idx) => entries.insert(
+            idx,
+            RefSummaryEntry {
+                name: name.to_string(),
+                change_id,
+                source,
+            },
+        ),
     }
 }
 
