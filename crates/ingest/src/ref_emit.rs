@@ -31,7 +31,7 @@ use objects::{
     object::{ChangeId, MarkerName, ThreadName, Tree},
     store::ObjectStore,
 };
-use refs::refs::{RefBackend, RefExpectation};
+use refs::refs::{RefBackend, RefExpectation, RefUpdate};
 use tracing::warn;
 
 use crate::{
@@ -105,6 +105,9 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                         ))
                     })?;
                     let thread_name = ThreadName::from(head.short_name.as_str());
+                    // The divergence check MUST run before the batch publish:
+                    // a thread import that would move a thread across divergent
+                    // history fails closed here, before any ref is written.
                     if let Some(existing) = self
                         .refs
                         .get_thread(&thread_name)
@@ -122,36 +125,62 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                     threads.push((thread_name, cid));
                 }
                 RefNamespace::Tag => {
-                    markers.push((MarkerName::from(head.short_name.as_str()), cid));
+                    let marker_name = MarkerName::from(head.short_name.as_str());
+                    // `create_marker` rejects existing names (markers are
+                    // write-once by design), so an idempotent importer has to
+                    // use `RefExpectation::Any`. We still short-circuit when
+                    // the marker already points at the same cid — keeps the
+                    // batch free of no-op churn and matches the prior
+                    // per-marker behavior.
+                    let existing = self
+                        .refs
+                        .get_marker(&marker_name)
+                        .await
+                        .map_err(IngestError::from)?;
+                    markers.push((marker_name, cid, existing));
                 }
             }
         }
 
+        // Batch every thread + marker write into ONE `update_refs` call so the
+        // whole import publishes under a single lock with a single ref-summary
+        // rebuild. The previous one-ref-at-a-time loop made N publishes, each
+        // rescanning the entire refs dir — Σ ≈ N²/2 file reads (101 refs=2s,
+        // 401=15s, 801=52s). `update_refs` validates the whole batch atomically
+        // and rejects duplicate paths, so the batch must carry at most one
+        // update per distinct path. Git ref names live in disjoint namespaces
+        // (`refs/heads`/`refs/remotes` → threads, `refs/tags` → markers) and a
+        // ref list never repeats a full name, so each (kind, short_name) pair
+        // is already unique across the batch.
+        let mut updates: Vec<RefUpdate> = Vec::with_capacity(threads.len() + markers.len());
+
         for (thread_name, cid) in threads {
-            self.refs
-                .set_thread(&thread_name, &cid)
-                .map_err(IngestError::from)?;
+            updates.push(RefUpdate::Thread {
+                name: thread_name,
+                // The divergence check above already validated the move; there
+                // is no concurrent writer during import, so `Any` mirrors the
+                // single-ref `set_thread` it replaces.
+                expected: RefExpectation::Any,
+                new: Some(cid),
+            });
             stats.threads_written += 1;
         }
 
-        for (marker_name, cid) in markers {
-            // `create_marker` rejects existing names (markers are
-            // write-once by design), so an idempotent importer has to
-            // use `set_marker_cas(Any, …)`. We still short-circuit when
-            // the marker already points at the same cid — saves a lock
-            // cycle.
-            let existing = self
-                .refs
-                .get_marker(&marker_name)
-                .await
-                .map_err(IngestError::from)?;
+        for (marker_name, cid, existing) in markers {
             if existing != Some(cid) {
-                self.refs
-                    .set_marker_cas(&marker_name, RefExpectation::Any, &cid)
-                    .map_err(IngestError::from)?;
+                updates.push(RefUpdate::Marker {
+                    name: marker_name,
+                    expected: RefExpectation::Any,
+                    new: Some(cid),
+                });
             }
+            // `markers_written` counts every tag we adopted (including no-op
+            // re-points), preserving the prior stat semantics.
             stats.markers_written += 1;
         }
+
+        self.refs.update_refs(&updates).map_err(IngestError::from)?;
+
         Ok(stats)
     }
 
@@ -368,6 +397,109 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(mgr.get_thread(&ThreadName::new("main")).unwrap(), Some(cid));
+    }
+
+    #[test]
+    fn batched_emit_writes_every_thread_and_marker_exactly_once() {
+        // Regression guard for the O(refs²) → single-batch rewrite: a many-ref
+        // import must land EVERY branch + tag at its exact change-id, with
+        // nothing dropped, duplicated, or mis-targeted. A batched
+        // `update_refs` that loses or mis-routes a ref is the cardinal bug.
+        let (_tmp, mgr) = fresh_ref_manager();
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+
+        const N_BRANCHES: usize = 30;
+        const N_REMOTES: usize = 10;
+        const N_TAGS: usize = 20;
+
+        let mut heads = Vec::new();
+        // Each ref gets its OWN distinct commit/change-id so a mis-target
+        // (ref A ending up pointing at ref B's cid) is detectable.
+        let mut expected_threads = Vec::new();
+        let mut expected_markers = Vec::new();
+
+        let mut next_sha = 0u64;
+        let fresh = |store: &InMemoryStore, map: &mut ShaMap, n: &mut u64| {
+            let cid = test_state(store, vec![]);
+            let sha = format!("{:040x}", *n);
+            *n += 1;
+            map.insert_commit(&sha, cid).unwrap();
+            (sha, cid)
+        };
+
+        for i in 0..N_BRANCHES {
+            let (sha, cid) = fresh(&store, &mut map, &mut next_sha);
+            // Mix flat and slashed names to exercise nested path writes.
+            let name = if i % 3 == 0 {
+                format!("feature/branch-{i}")
+            } else {
+                format!("branch-{i}")
+            };
+            heads.push(sample_head(&name, RefNamespace::Branch, &sha));
+            expected_threads.push((name, cid));
+        }
+        for i in 0..N_REMOTES {
+            let (sha, cid) = fresh(&store, &mut map, &mut next_sha);
+            let name = format!("origin/remote-{i}");
+            heads.push(sample_head(&name, RefNamespace::RemoteBranch, &sha));
+            expected_threads.push((name, cid));
+        }
+        for i in 0..N_TAGS {
+            let (sha, cid) = fresh(&store, &mut map, &mut next_sha);
+            let name = format!("v{i}.0");
+            heads.push(sample_head(&name, RefNamespace::Tag, &sha));
+            expected_markers.push((name, cid));
+        }
+
+        let stats =
+            pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
+
+        assert_eq!(stats.threads_written, N_BRANCHES + N_REMOTES);
+        assert_eq!(stats.markers_written, N_TAGS);
+        assert_eq!(stats.skipped_unmapped, 0);
+
+        // Every thread present at its EXACT change-id.
+        for (name, cid) in &expected_threads {
+            assert_eq!(
+                mgr.get_thread(&ThreadName::new(name)).unwrap(),
+                Some(*cid),
+                "thread {name} missing or mis-targeted after batched emit",
+            );
+        }
+        // Exactly the threads we asked for — none extra, none dropped.
+        let listed_threads = mgr.list_threads().unwrap();
+        assert_eq!(
+            listed_threads.len(),
+            expected_threads.len(),
+            "thread count drift: {listed_threads:?}",
+        );
+
+        // Every marker present at its EXACT change-id.
+        for (name, cid) in &expected_markers {
+            assert_eq!(
+                mgr.get_marker(&MarkerName::new(name)).unwrap(),
+                Some(*cid),
+                "marker {name} missing or mis-targeted after batched emit",
+            );
+        }
+        let listed_markers = mgr.list_markers().unwrap();
+        assert_eq!(
+            listed_markers.len(),
+            expected_markers.len(),
+            "marker count drift: {listed_markers:?}",
+        );
+
+        // Idempotent: a second identical emit is a no-op for final state.
+        let again =
+            pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
+        assert_eq!(again.threads_written, N_BRANCHES + N_REMOTES);
+        for (name, cid) in &expected_threads {
+            assert_eq!(mgr.get_thread(&ThreadName::new(name)).unwrap(), Some(*cid));
+        }
+        for (name, cid) in &expected_markers {
+            assert_eq!(mgr.get_marker(&MarkerName::new(name)).unwrap(), Some(*cid));
+        }
     }
 
     #[test]

@@ -203,6 +203,12 @@ enum RefResolution {
 /// handle internally; clone-cheap via `&` reference only.
 pub struct GitSource {
     repo: SleyRepository,
+    /// Whether the source repo carries `refs/notes/heddle`, resolved once and
+    /// cached. Most imported repos (e.g. a plain ripgrep clone) have no such
+    /// ref, so `read_heddle_note_bytes` can short-circuit to `None` instead of
+    /// attempting a notes-tree walk per commit (a 4,410-commit import otherwise
+    /// pays 4,410 wasted notes lookups).
+    heddle_notes_present: std::sync::OnceLock<bool>,
 }
 
 impl std::fmt::Debug for GitSource {
@@ -228,7 +234,22 @@ impl GitSource {
             Err(_) => SleyRepository::open(path)
                 .map_err(|e| IngestError::Git(format!("open {}: {e}", path.display())))?,
         };
-        Ok(Self { repo })
+        Ok(Self {
+            repo,
+            heddle_notes_present: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Whether `refs/notes/heddle` exists in the source repo, resolved once and
+    /// memoized. Absence is the common case (most imports have no heddle notes),
+    /// and lets [`Self::read_heddle_note_bytes`] skip the per-commit notes walk.
+    fn heddle_notes_present(&self) -> bool {
+        *self.heddle_notes_present.get_or_init(|| {
+            matches!(
+                self.repo.find_reference("refs/notes/heddle"),
+                Ok(Some(_))
+            )
+        })
     }
 
     fn resolve_ref_commit(&self, name: &str, target: &SleyRefTarget) -> RefResolution {
@@ -433,6 +454,13 @@ impl GitSource {
     /// Read Heddle's metadata note for `sha`, if the source repository
     /// carries `refs/notes/heddle`.
     pub fn read_heddle_note_bytes(&self, sha: &str) -> crate::Result<Option<Vec<u8>>> {
+        // Short-circuit before touching the object format / notes tree when the
+        // source repo has no `refs/notes/heddle` — the overwhelmingly common
+        // case. This collapses the per-commit notes lookup to a single cached
+        // ref-existence check for the whole import.
+        if !self.heddle_notes_present() {
+            return Ok(None);
+        }
         let oid = parse_oid(self.repo.object_format(), sha)?;
         let notes_ref = sley::notes::NotesRef::expand("refs/notes/heddle");
         self.repo
@@ -975,6 +1003,85 @@ mod tests {
         assert_eq!(commit.author.name, "Test");
         assert_eq!(commit.author.email, "test@example.com");
         assert!(String::from_utf8_lossy(&commit.message).contains("second commit"));
+    }
+
+    #[test]
+    fn heddle_note_absent_repo_short_circuits_to_none() {
+        // The common case (e.g. a plain ripgrep clone): no `refs/notes/heddle`.
+        // `read_heddle_note_bytes` must return `None` without walking a notes
+        // tree, and the presence flag must read `false`.
+        let tmp = TempDir::new().unwrap();
+        let head = seed_repo(tmp.path());
+
+        let src = GitSource::open(tmp.path()).unwrap();
+        assert!(
+            !src.heddle_notes_present(),
+            "repo without refs/notes/heddle must report notes absent"
+        );
+        assert_eq!(
+            src.read_heddle_note_bytes(&head).unwrap(),
+            None,
+            "absent-notes repo must short-circuit to None"
+        );
+        // The walked commit carries no note either.
+        let commit = src.read_commit(&head).unwrap();
+        assert_eq!(commit.heddle_note, None);
+    }
+
+    #[test]
+    fn heddle_note_present_repo_reads_payload() {
+        // The present path must be preserved: a repo WITH refs/notes/heddle
+        // still surfaces the note payload byte-for-byte.
+        let tmp = TempDir::new().unwrap();
+        let head = seed_repo(tmp.path());
+        let path = tmp.path();
+
+        let note_body = "heddle-metadata-payload";
+        let status = Command::new("git")
+            .args(["notes", "--ref=heddle", "add", "-m", note_body, &head])
+            .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git notes add");
+        assert!(status.success(), "git notes add failed");
+
+        let src = GitSource::open(path).unwrap();
+        assert!(
+            src.heddle_notes_present(),
+            "repo with refs/notes/heddle must report notes present"
+        );
+        let bytes = src
+            .read_heddle_note_bytes(&head)
+            .unwrap()
+            .expect("note should be present");
+        // git notes stores the message with a trailing newline.
+        assert_eq!(String::from_utf8_lossy(&bytes).trim_end(), note_body);
+
+        // A commit WITHOUT a note in a notes-present repo still yields None.
+        let first = src
+            .read_commit(&head)
+            .unwrap()
+            .parents
+            .first()
+            .cloned()
+            .expect("head has a parent");
+        assert_eq!(
+            src.read_heddle_note_bytes(&first).unwrap(),
+            None,
+            "un-annotated commit must yield None even when notes ref exists"
+        );
+
+        // And the head commit's walked entry carries the note bytes.
+        let commit = src.read_commit(&head).unwrap();
+        assert_eq!(
+            commit.heddle_note.map(|b| String::from_utf8_lossy(&b).trim_end().to_string()),
+            Some(note_body.to_string()),
+        );
     }
 
     /// Close-the-class conformance (ingest path): a commit whose extension
