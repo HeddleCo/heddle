@@ -26,8 +26,8 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{
-        create_git_checkpoint, create_git_checkpoint_from_index_snapshot,
-        create_git_checkpoint_with_worktree_status, preflight_git_checkpoint_ref_update,
+        create_git_checkpoint_from_index_snapshot, create_git_checkpoint_with_worktree_status,
+        preflight_git_checkpoint_ref_update,
     },
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
