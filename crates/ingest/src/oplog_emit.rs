@@ -764,6 +764,41 @@ mod tests {
         assert_eq!(ids, vec![ids[0], ids[0] + 1, ids[0] + 2]);
     }
 
+    /// Scaling proof (run with `cargo test -p heddle-ingest --release
+    /// -- --ignored --nocapture oplog_emit_scaling`). Times
+    /// `OplogEmitter::emit` — the phase the profiling spike pinned as the
+    /// O(N²) term — at N=100/200/400/800. Pre-fix it grows ~4× per doubling
+    /// (one full-log rewrite per reflog entry); post-fix it is ~linear (one
+    /// rewrite for the whole import).
+    #[test]
+    #[ignore = "timing benchmark; run explicitly with --ignored --nocapture in release"]
+    fn oplog_emit_scaling_curve() {
+        use std::time::Instant;
+        for &n in &[100usize, 200, 400, 800] {
+            let (_tmp, log) = fresh_oplog();
+            let mut map = ShaMap::new();
+            let mut entries = Vec::with_capacity(n);
+            for i in 0..n {
+                let sha = format!("{:040x}", i + 1);
+                map.insert_commit(&sha, ChangeId::generate()).unwrap();
+                entries.push(mk_entry(
+                    &format!("refs/heads/b{i}"),
+                    None,
+                    Some(&sha),
+                    "branch: Created",
+                ));
+            }
+            let start = Instant::now();
+            let stats = OplogEmitter::new(&log, &map)
+                .with_scope("ingest")
+                .emit(&entries)
+                .unwrap();
+            let dt = start.elapsed();
+            assert_eq!(stats.thread_creates, n);
+            println!("oplog_emit N={n:<5} emit={:.3}s", dt.as_secs_f64());
+        }
+    }
+
     /// An emit that classifies everything away appends nothing — no
     /// empty-batch corruption.
     #[test]
