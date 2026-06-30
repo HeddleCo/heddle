@@ -11,7 +11,6 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    fs_ops::remove_path_recursively,
     object::{ChangeId, MarkerName, ThreadName},
 };
 
@@ -653,41 +652,6 @@ impl RefManager {
         std::fs::create_dir_all(self.threads_dir())?;
         std::fs::create_dir_all(self.markers_dir())?;
         std::fs::create_dir_all(self.remotes_dir())?;
-        Ok(())
-    }
-
-    pub fn migrate_legacy_tracks(&self) -> Result<()> {
-        let legacy_dir = self.legacy_tracks_dir();
-        if !legacy_dir.exists() {
-            return Ok(());
-        }
-
-        let threads_dir = self.threads_dir();
-        if !threads_dir.exists() {
-            std::fs::create_dir_all(self.refs_dir())?;
-            std::fs::rename(&legacy_dir, &threads_dir)?;
-            return Ok(());
-        }
-
-        let legacy_threads = self.list_refs_recursive(&legacy_dir, "")?;
-        for name in legacy_threads {
-            let legacy_path = self.legacy_track_path(&name)?;
-            let thread_path = self.thread_path(&name)?;
-            if thread_path.exists() {
-                continue;
-            }
-
-            let parent = thread_path
-                .parent()
-                .ok_or_else(|| HeddleError::Config(format!("invalid thread path for {}", name)))?;
-            std::fs::create_dir_all(parent)?;
-            std::fs::rename(&legacy_path, &thread_path)?;
-        }
-
-        if legacy_dir.exists() {
-            remove_path_recursively(&legacy_dir)?;
-        }
-
         Ok(())
     }
 

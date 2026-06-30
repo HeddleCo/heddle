@@ -772,21 +772,12 @@ pub fn import_git_into_with_options(
     heddle_path: impl AsRef<Path>,
     options: ImportOptions,
 ) -> crate::Result<(ImportStats, ShaMap)> {
-    import_git_into_with_options_and_progress(git_path, heddle_path, options, None)
-}
-
-pub fn import_git_into_with_options_and_progress(
-    git_path: impl AsRef<Path>,
-    heddle_path: impl AsRef<Path>,
-    options: ImportOptions,
-    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
-) -> crate::Result<(ImportStats, ShaMap)> {
     import_git_into_scoped_with_options_and_progress(
         git_path,
         heddle_path,
         options,
         ImportScope::all(),
-        progress,
+        None,
     )
 }
 
