@@ -308,9 +308,10 @@ impl ThreadManager {
             .max_by_key(|thread_entry| thread_entry.updated_at))
     }
 
-    pub(crate) fn update_current_state_for_thread(
+    pub(crate) fn update_current_state_for_thread_from_expected(
         &self,
         thread_name: &str,
+        expected_current_state: Option<&ChangeId>,
         state: &ChangeId,
         freshness: ThreadFreshness,
     ) -> Result<bool> {
@@ -326,6 +327,12 @@ impl ThreadManager {
             return Ok(false);
         };
         let mut thread = self.hydrate_thread_from_record(record)?;
+        let expected_short = expected_current_state.map(ChangeId::short);
+        let target_short = state.short();
+        let current = thread.current_state.as_deref();
+        if current != Some(target_short.as_str()) && current != expected_short.as_deref() {
+            return Ok(false);
+        }
         thread.current_state = Some(state.short());
         thread.updated_at = Utc::now();
         thread.freshness = freshness;
@@ -587,6 +594,53 @@ mod tests {
         assert!(
             hydrated.auto,
             "auto flag must round-trip back into the hydrated Thread"
+        );
+    }
+
+    #[test]
+    fn update_current_state_from_expected_does_not_clobber_newer_metadata() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let old = ChangeId::generate();
+        let newer = ChangeId::generate();
+        let stale = ChangeId::generate();
+
+        let mut thread = sample_thread();
+        thread.id = "thread-expected".to_string();
+        thread.thread = "feature/expected".to_string();
+        thread.current_state = Some(old.short());
+        manager.save(&thread).unwrap();
+
+        assert!(
+            manager
+                .update_current_state_for_thread_from_expected(
+                    "feature/expected",
+                    Some(&old),
+                    &newer,
+                    ThreadFreshness::Current,
+                )
+                .unwrap(),
+            "matching expected-old metadata should converge"
+        );
+        assert!(
+            !manager
+                .update_current_state_for_thread_from_expected(
+                    "feature/expected",
+                    Some(&old),
+                    &stale,
+                    ThreadFreshness::Current,
+                )
+                .unwrap(),
+            "a stale metadata writer must not overwrite the newer state"
+        );
+
+        let stored = manager
+            .find_by_thread("feature/expected")
+            .unwrap()
+            .expect("thread record exists");
+        assert_eq!(
+            stored.current_state.as_deref(),
+            Some(newer.short().as_str())
         );
     }
 

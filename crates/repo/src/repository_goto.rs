@@ -3,8 +3,12 @@
 
 use std::time::Instant;
 
-use objects::{lock::RepositoryLockExt, object::ChangeId, store::ObjectStore};
-use oplog::OpLogRecorder;
+use objects::{
+    lock::RepositoryLockExt,
+    object::{ChangeId, ThreadName},
+    store::ObjectStore,
+};
+use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use tracing::debug;
 
@@ -27,6 +31,147 @@ enum WorktreeBaseline {
 enum HeadPublishMode {
     Detach,
     PreserveAttached,
+}
+
+#[derive(Debug)]
+struct GotoRefTransaction {
+    target: ChangeId,
+    previous_head_ref: Head,
+    previous_head: Option<ChangeId>,
+    head_publish_mode: HeadPublishMode,
+    record: bool,
+}
+
+impl GotoRefTransaction {
+    fn new(
+        target: &ChangeId,
+        previous_head_ref: &Head,
+        previous_head: Option<ChangeId>,
+        head_publish_mode: HeadPublishMode,
+        record: bool,
+    ) -> Self {
+        Self {
+            target: *target,
+            previous_head_ref: previous_head_ref.clone(),
+            previous_head,
+            head_publish_mode,
+            record,
+        }
+    }
+
+    fn ref_updates(&self, expected_head: RefExpectation<Head>) -> Vec<RefUpdate> {
+        match (self.head_publish_mode, &self.previous_head_ref) {
+            (HeadPublishMode::PreserveAttached, Head::Attached { thread }) => {
+                let expected_thread = match self.previous_head {
+                    Some(change_id) => RefExpectation::Value(change_id),
+                    None => RefExpectation::Missing,
+                };
+                vec![
+                    RefUpdate::Thread {
+                        name: thread.clone(),
+                        expected: expected_thread,
+                        new: Some(self.target),
+                    },
+                    RefUpdate::Head {
+                        expected: expected_head,
+                        new: Head::Attached {
+                            thread: thread.clone(),
+                        },
+                    },
+                ]
+            }
+            _ => vec![RefUpdate::Head {
+                expected: expected_head,
+                new: Head::Detached { state: self.target },
+            }],
+        }
+    }
+
+    fn validation_updates(&self) -> Vec<RefUpdate> {
+        self.ref_updates(RefExpectation::Value(self.previous_head_ref.clone()))
+    }
+
+    fn publish_updates_after_materialize(&self) -> Option<Vec<RefUpdate>> {
+        match (self.head_publish_mode, &self.previous_head_ref) {
+            (HeadPublishMode::PreserveAttached, Head::Attached { .. }) => {
+                Some(self.ref_updates(RefExpectation::Value(Head::Detached { state: self.target })))
+            }
+            _ => None,
+        }
+    }
+
+    fn metadata_update(&self) -> Option<(&ThreadName, Option<ChangeId>)> {
+        match (self.head_publish_mode, &self.previous_head_ref) {
+            (HeadPublishMode::PreserveAttached, Head::Attached { thread }) => {
+                Some((thread, self.previous_head))
+            }
+            _ => None,
+        }
+    }
+
+    fn encoded_records(&self) -> Result<Vec<Vec<u8>>> {
+        if !self.record {
+            return Ok(Vec::new());
+        }
+        let record = OpRecord::Goto {
+            target: self.target,
+            prev_head: self.previous_head,
+            head: self.target,
+        };
+        Ok(vec![
+            rmp_serde::to_vec(&record).map_err(|e| HeddleError::Serialization(e.to_string()))?,
+        ])
+    }
+
+    fn commit(self, repo: &Repository) -> Result<()> {
+        let metadata_update = self
+            .metadata_update()
+            .map(|(thread, expected)| (thread.clone(), expected));
+        let updates = self.validation_updates();
+        if self.record {
+            let encoded_records = self.encoded_records()?;
+            let scope = repo.op_scope();
+            if let Some(publish_updates) = self.publish_updates_after_materialize() {
+                repo.refs.commit_materialize_and_publish_after_commit(
+                    &encoded_records,
+                    &updates,
+                    &publish_updates,
+                    Some(&scope),
+                    || {
+                        objects::fault_inject::maybe_panic_at(
+                            "goto_after_oplog_commit_before_ref_publish",
+                        );
+                        Ok(())
+                    },
+                )?;
+            } else {
+                repo.refs.commit_and_publish_after_commit(
+                    &encoded_records,
+                    &updates,
+                    Some(&scope),
+                    || {
+                        objects::fault_inject::maybe_panic_at(
+                            "goto_after_oplog_commit_before_ref_publish",
+                        );
+                        Ok(())
+                    },
+                )?;
+            }
+            let _ = repo.oplog.refresh_cache();
+        } else {
+            repo.refs.update_refs(&updates)?;
+        }
+
+        if let Some((thread, expected_state)) = metadata_update {
+            ThreadManager::new(repo.heddle_dir()).update_current_state_for_thread_from_expected(
+                thread.as_str(),
+                expected_state.as_ref(),
+                &self.target,
+                ThreadFreshness::Current,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl Repository {
@@ -300,11 +445,6 @@ impl Repository {
             )
         };
 
-        if record {
-            self.oplog
-                .record_goto(target, prev_head.as_ref(), Some(&self.op_scope()))?;
-            objects::fault_inject::maybe_panic_at("goto_after_oplog_commit_before_ref_publish");
-        }
         self.publish_goto_refs(target, &prev_head_ref, prev_head, head_publish_mode, record)?;
 
         debug!(
@@ -345,45 +485,8 @@ impl Repository {
         head_publish_mode: HeadPublishMode,
         record: bool,
     ) -> Result<()> {
-        let recorded_head = Head::Detached { state: *target };
-        let expected_head = if record {
-            RefExpectation::Value(recorded_head)
-        } else {
-            RefExpectation::Value(prev_head_ref.clone())
-        };
-        match (head_publish_mode, prev_head_ref) {
-            (HeadPublishMode::PreserveAttached, Head::Attached { thread }) => {
-                let expected_thread = match prev_head {
-                    Some(change_id) => RefExpectation::Value(change_id),
-                    None => RefExpectation::Missing,
-                };
-                // Thread ref and attached HEAD publish as one expected-old batch;
-                // metadata convergence runs only after that authoritative move.
-                self.refs.update_refs(&[
-                    RefUpdate::Thread {
-                        name: thread.clone(),
-                        expected: expected_thread,
-                        new: Some(*target),
-                    },
-                    RefUpdate::Head {
-                        expected: expected_head,
-                        new: Head::Attached {
-                            thread: thread.clone(),
-                        },
-                    },
-                ])?;
-                ThreadManager::new(self.heddle_dir()).update_current_state_for_thread(
-                    thread.as_str(),
-                    target,
-                    ThreadFreshness::Current,
-                )?;
-            }
-            _ => {
-                self.refs
-                    .write_head_cas(expected_head, &Head::Detached { state: *target })?;
-            }
-        }
-        Ok(())
+        GotoRefTransaction::new(target, prev_head_ref, prev_head, head_publish_mode, record)
+            .commit(self)
     }
 }
 
@@ -393,6 +496,7 @@ mod tests {
 
     use chrono::Utc;
     use objects::object::ThreadName;
+    use oplog::OpLogBackend;
     use refs::Head;
     use tempfile::TempDir;
 
@@ -656,5 +760,70 @@ mod tests {
             "metadata must not advance when the authoritative ref publish conflicts"
         );
         assert!(matches!(metadata.freshness, ThreadFreshness::Stale));
+    }
+
+    #[test]
+    fn attached_goto_head_conflict_appends_no_goto_record_or_metadata() {
+        let (temp, repo) = create_repo();
+        let base = write_snapshot(&repo, temp.path(), "base.txt", "base\n");
+        fs::write(temp.path().join("target.txt"), "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+        fs::write(temp.path().join("detached.txt"), "detached\n").unwrap();
+        let detached = repo
+            .snapshot(Some("detached".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &base).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+        save_thread_metadata(&repo, temp.path(), thread.as_str(), &base);
+
+        repo.refs()
+            .write_head(&Head::Detached { state: detached })
+            .unwrap();
+        let result = repo.publish_goto_refs(
+            &target,
+            &Head::Attached {
+                thread: thread.clone(),
+            },
+            Some(base),
+            HeadPublishMode::PreserveAttached,
+            true,
+        );
+
+        assert!(
+            result.is_err(),
+            "attached goto must fail when HEAD moved after it was read"
+        );
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(base));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == detached
+        ));
+        let recent = repo.oplog().recent(64).unwrap();
+        assert!(
+            !recent.iter().any(|entry| matches!(
+                entry.operation,
+                OpRecord::Goto { target: recorded, .. } if recorded == target
+            )),
+            "validation must run before appending the goto record"
+        );
+        let metadata = ThreadManager::new(repo.heddle_dir())
+            .find_by_thread(thread.as_str())
+            .unwrap()
+            .expect("thread metadata should exist");
+        assert_eq!(
+            metadata.current_state.as_deref(),
+            Some(base.short().as_str()),
+            "metadata must not advance when the authoritative ref transaction conflicts"
+        );
     }
 }

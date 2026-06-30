@@ -506,7 +506,10 @@ fn test_incremental_ref_summary_index_matches_full_rebuild() {
         refs.get_thread(&ThreadName::new("feature/ui")).unwrap(),
         Some(ids[8])
     );
-    assert_eq!(refs.get_thread(&ThreadName::new("feature/api")).unwrap(), None);
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("feature/api")).unwrap(),
+        None
+    );
     assert_eq!(refs.get_marker(&MarkerName::new("v1.0.0")).unwrap(), None);
     assert_eq!(
         refs.list_threads().unwrap(),
@@ -539,8 +542,11 @@ fn bench_incremental_vs_full_rebuild_scaling() {
     for n in [101usize, 401, 801, 1548] {
         let (_t, refs) = create_ref_manager();
         for i in 0..n {
-            refs.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
-                .unwrap();
+            refs.set_thread(
+                &ThreadName::new(format!("branch-{i:05}")),
+                &ChangeId::generate(),
+            )
+            .unwrap();
         }
 
         // One incremental delta-fold (set an existing thread -> single delta).
@@ -571,16 +577,22 @@ fn bench_incremental_vs_full_rebuild_scaling() {
         let (_t1, inc) = create_ref_manager();
         let start = Instant::now();
         for i in 0..n {
-            inc.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
-                .unwrap();
+            inc.set_thread(
+                &ThreadName::new(format!("branch-{i:05}")),
+                &ChangeId::generate(),
+            )
+            .unwrap();
         }
         let inc_elapsed = start.elapsed();
 
         let (_t2, full) = create_ref_manager();
         let start = Instant::now();
         for i in 0..n {
-            full.set_thread(&ThreadName::new(format!("branch-{i:05}")), &ChangeId::generate())
-                .unwrap();
+            full.set_thread(
+                &ThreadName::new(format!("branch-{i:05}")),
+                &ChangeId::generate(),
+            )
+            .unwrap();
             full.rebuild_ref_summary_index().unwrap();
         }
         let full_elapsed = start.elapsed();
@@ -1516,6 +1528,7 @@ mod write_read_conformance {
         assert_only(
             &callers_of(&srcs, "publish_ref_plans"),
             &[
+                "commit_materialize_and_publish_after_commit",
                 "materialize",
                 "update_refs_with_lock",
                 "validate_commit_publish",
@@ -1560,6 +1573,7 @@ mod write_read_conformance {
         for writer in [
             "update_refs",
             "commit_and_publish",
+            "commit_materialize_and_publish_after_commit",
             "set_undo_recovery_raw",
             "set_remote_thread_raw",
             "delete_remote_thread_raw",

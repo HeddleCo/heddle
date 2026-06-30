@@ -163,28 +163,107 @@ impl RefManager {
         scope: Option<&str>,
     ) -> Result<()> {
         self.write_chokepoint(|lock| {
-            self.validate_commit_publish(ref_updates, lock, || {
-                // Phase 4 — the commit point: append the ref-carrying records
-                // only after phase-3 validation has passed, under the held lock.
-                let committed_for_reconcile =
-                    self.committer.is_some() && !encoded_records.is_empty();
-                if let Some(committer) = self.committer.as_ref() {
-                    committer.commit_records(encoded_records, scope)?;
-                } else if !encoded_records.is_empty() {
-                    // Fail closed (heddle#354 r9, cid 3330304656): no committer
-                    // is wired but records were handed in. Publishing the refs
-                    // here would silently drop them — committed data must never
-                    // be lost. The bootstrap/no-committer path only legitimately
-                    // runs with an empty record batch.
-                    return Err(HeddleError::Config(format!(
-                        "commit_and_publish was handed {} record(s) but this RefManager has no \
-                         committer; refusing to publish and silently drop committed data",
-                        encoded_records.len()
-                    )));
-                }
-                Ok(committed_for_reconcile)
-            })
+            self.commit_and_publish_with_lock(encoded_records, ref_updates, scope, lock, || Ok(()))
         })
+    }
+
+    /// Like [`commit_and_publish`](Self::commit_and_publish), with a narrow
+    /// phase-4 hook for fault tests that must stop after the record is durable
+    /// and before refs publish.
+    pub fn commit_and_publish_after_commit(
+        &self,
+        encoded_records: &[Vec<u8>],
+        ref_updates: &[RefUpdate],
+        scope: Option<&str>,
+        after_commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.write_chokepoint(|lock| {
+            self.commit_and_publish_with_lock(
+                encoded_records,
+                ref_updates,
+                scope,
+                lock,
+                after_commit,
+            )
+        })
+    }
+
+    /// Commit records, materialize their replayed refs under the held refs lock,
+    /// then publish a final expected-old ref batch. Use when the replayed record
+    /// is an intermediate recovery state and the visible ref must intentionally
+    /// differ after the transaction completes.
+    pub fn commit_materialize_and_publish_after_commit(
+        &self,
+        encoded_records: &[Vec<u8>],
+        validation_updates: &[RefUpdate],
+        publish_updates: &[RefUpdate],
+        scope: Option<&str>,
+        after_commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.write_chokepoint(|lock| {
+            let _ = self.plan_ref_updates(validation_updates)?;
+            let committed_for_reconcile =
+                self.commit_records_for_publish(encoded_records, scope)?;
+            after_commit()?;
+            let publish_result = (|| {
+                self.materialize_committed_tail(lock)?;
+                let plans = self.plan_ref_updates(publish_updates)?;
+                self.publish_ref_plans(plans, lock)
+            })();
+            match publish_result {
+                Ok(()) => Ok(()),
+                Err(err) if committed_for_reconcile => {
+                    tracing::warn!(
+                        error = %err,
+                        "ref publish failed after the record committed; the operation \
+                         linearized and reconciliation will materialize it on the next read"
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        })
+    }
+
+    fn commit_and_publish_with_lock(
+        &self,
+        encoded_records: &[Vec<u8>],
+        ref_updates: &[RefUpdate],
+        scope: Option<&str>,
+        lock: &RefsLock,
+        after_commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.validate_commit_publish(ref_updates, lock, || {
+            // Phase 4 — the commit point: append the ref-carrying records
+            // only after phase-3 validation has passed, under the held lock.
+            let committed_for_reconcile =
+                self.commit_records_for_publish(encoded_records, scope)?;
+            after_commit()?;
+            Ok(committed_for_reconcile)
+        })
+    }
+
+    fn commit_records_for_publish(
+        &self,
+        encoded_records: &[Vec<u8>],
+        scope: Option<&str>,
+    ) -> Result<bool> {
+        let committed_for_reconcile = self.committer.is_some() && !encoded_records.is_empty();
+        if let Some(committer) = self.committer.as_ref() {
+            committer.commit_records(encoded_records, scope)?;
+        } else if !encoded_records.is_empty() {
+            // Fail closed (heddle#354 r9, cid 3330304656): no committer
+            // is wired but records were handed in. Publishing the refs
+            // here would silently drop them — committed data must never
+            // be lost. The bootstrap/no-committer path only legitimately
+            // runs with an empty record batch.
+            return Err(HeddleError::Config(format!(
+                "commit_and_publish was handed {} record(s) but this RefManager has no \
+                 committer; refusing to publish and silently drop committed data",
+                encoded_records.len()
+            )));
+        }
+        Ok(committed_for_reconcile)
     }
 
     /// THE write chokepoint (heddle#354 r7): the SOLE path by which any ref

@@ -12,8 +12,8 @@ use super::{
     RefManager, RefUpdate, format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
-    ref_summary_index::SummaryDelta,
     reconcile::{LoadRequest, Loaded},
+    ref_summary_index::SummaryDelta,
     refs_storage::RefsLock,
     refs_types::{
         describe_change_id, describe_expectation_change_id, describe_expectation_head,
@@ -191,7 +191,7 @@ impl RefManager {
     /// [`reconciled_value_under_lock`](RefManager::reconciled_value_under_lock)
     /// folds the committed tail without re-locking; the fold→validate→publish
     /// sequence is therefore one atomic unit under the single held lock.
-    fn plan_ref_updates(&self, updates: &[RefUpdate]) -> Result<Vec<RefUpdatePlan>> {
+    pub(super) fn plan_ref_updates(&self, updates: &[RefUpdate]) -> Result<Vec<RefUpdatePlan>> {
         let mut seen = HashSet::new();
         let mut plans = Vec::new();
 
