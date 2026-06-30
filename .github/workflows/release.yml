@@ -516,7 +516,7 @@ jobs:
           mkdir -p dist
           find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.sig' -o -name '*.pem' -o -name '*.sha256' \) \
             -exec cp -t dist {} +
-          ( cd dist && cat *.sha256 | sort > SHA256SUMS )
+          ( cd dist && cat *.sha256 | tr -d '\r' | sort > SHA256SUMS )
           echo "--- artifacts ---"
           ls -la dist
 
@@ -668,7 +668,7 @@ jobs:
           mkdir -p dist rendered
           find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.sha256' \) \
             -exec cp -t dist {} +
-          ( cd dist && cat *.sha256 | sort > SHA256SUMS )
+          ( cd dist && cat *.sha256 | tr -d '\r' | sort > SHA256SUMS )
 
       - name: Compute manifest inputs
         id: ver
