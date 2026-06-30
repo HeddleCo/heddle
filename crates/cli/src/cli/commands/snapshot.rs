@@ -490,18 +490,14 @@ pub(crate) fn preflight_large_capture_for_compat_commit(
     repo: &Repository,
     force: bool,
 ) -> Result<()> {
-    preflight_large_capture(repo, force)
-}
-
-fn preflight_large_capture(repo: &Repository, force: bool) -> Result<()> {
     if force {
         return Ok(());
     }
     preflight_large_capture_with_status(force, &repo.git_overlay_worktree_status())
 }
 
-/// Variant of [`preflight_large_capture`] that reuses an already-computed
-/// git-overlay worktree status instead of re-walking the worktree. The
+/// Large-capture preflight that reuses an already-computed git-overlay
+/// worktree status instead of re-walking the worktree. The
 /// large-capture classification is byte-identical because it reads the same
 /// `WorktreeStatus`; only the redundant walk is removed.
 fn preflight_large_capture_with_status(
@@ -736,8 +732,7 @@ fn create_snapshot_profiled_inner(
         repo.snapshot_with_attribution_profiled(intent.clone(), confidence, attribution)?;
 
     let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
+    let thread_refresh = refresh_active_thread_metadata(repo, &execution.state, &execution.tree)?;
     let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
 
     let trust = build_repository_verification_state(repo);
@@ -763,8 +758,8 @@ fn create_snapshot_profiled_inner(
             .agent
             .as_ref()
             .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
+        promotion_suggested: thread_refresh.promotion_suggested,
+        heavy_impact_paths: thread_refresh.heavy_impact_paths,
         signed: execution.state.signature.is_some(),
         message: format!(
             "Captured state {} ({})",
@@ -856,8 +851,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         attribution,
     )?;
     let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
+    let thread_refresh = refresh_active_thread_metadata(repo, &execution.state, &execution.tree)?;
     let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
 
     let trust = build_repository_verification_state(repo);
@@ -883,8 +877,8 @@ pub(crate) fn create_snapshot_from_tree_profiled(
             .agent
             .as_ref()
             .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
+        promotion_suggested: thread_refresh.promotion_suggested,
+        heavy_impact_paths: thread_refresh.heavy_impact_paths,
         signed: execution.state.signature.is_some(),
         message: format!(
             "Captured state {} ({})",
@@ -916,15 +910,6 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         output,
         snapshot_command_profile(execution.profile, thread_metadata_ms),
     ))
-}
-
-fn update_active_thread_metadata(
-    repo: &Repository,
-    state: &objects::object::State,
-    tree: &Tree,
-) -> Result<(bool, Vec<String>)> {
-    let refresh = refresh_active_thread_metadata(repo, state, tree)?;
-    Ok((refresh.promotion_suggested, refresh.heavy_impact_paths))
 }
 
 fn default_bootstrap_intent(repo: &Repository) -> String {
