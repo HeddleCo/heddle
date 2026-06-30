@@ -42,6 +42,7 @@ use crate::{
     bridge::GitBridge,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
+    perf::{ProfileField, emit_profile, profile_enabled},
 };
 
 #[derive(Serialize)]
@@ -216,17 +217,22 @@ pub async fn cmd_snapshot(
     // classification, so it is NOT threaded). Both pre-mutation consumers
     // observe the same pre-capture git state, so reuse is sound and the
     // classification stays byte-identical.
+    let worktree_status_start = Instant::now();
     let worktree_status = repo.git_overlay_worktree_status();
+    let worktree_status_ms = worktree_status_start.elapsed().as_millis();
     preflight_large_capture_with_status(force, &worktree_status)?;
-    let mut output = match create_snapshot_with_worktree_status(
+    let snapshot_start = Instant::now();
+    let snapshot_result = create_snapshot_profiled_with_worktree_status(
         &repo,
         &user_config,
         Some(intent),
         confidence,
         agent,
         &worktree_status,
-    ) {
-        Ok(output) => output,
+    );
+    let snapshot_ms = snapshot_start.elapsed().as_millis();
+    let (mut output, snapshot_profile) = match snapshot_result {
+        Ok((output, profile)) => (output, profile),
         Err(err) => {
             // ENOSPC is the only mid-capture failure where the user's
             // working tree is guaranteed safe (we never touched it) and
@@ -356,6 +362,33 @@ pub async fn cmd_snapshot(
         );
     }
 
+    if profile_enabled() {
+        emit_profile(
+            "capture phases",
+            &[
+                // Pre-mutation git-overlay worktree status walk (threaded into
+                // both the large-capture preflight and the snapshot mutation
+                // preflight — a single walk for both).
+                ProfileField::millis("worktree_status_ms", worktree_status_ms),
+                // The snapshot itself (preflight + tree build + blob/tree write
+                // + state/ref/oplog), broken down below.
+                ProfileField::millis("snapshot_ms", snapshot_ms),
+                ProfileField::millis("snapshot_tree_walk_ms", snapshot_profile.tree_walk_ms),
+                ProfileField::millis("snapshot_blob_prep_ms", snapshot_profile.blob_prep_ms),
+                ProfileField::millis("snapshot_blob_write_ms", snapshot_profile.blob_write_ms),
+                ProfileField::millis("snapshot_tree_write_ms", snapshot_profile.tree_write_ms),
+                ProfileField::millis(
+                    "snapshot_state_ref_oplog_ms",
+                    snapshot_profile.state_ref_oplog_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_thread_metadata_ms",
+                    snapshot_profile.thread_metadata_ms,
+                ),
+            ],
+        );
+    }
+
     Ok(())
 }
 
@@ -436,24 +469,23 @@ fn current_thread_name(repo: &Repository) -> String {
     }
 }
 
-pub(crate) fn preflight_large_capture_for_compat_commit(
-    repo: &Repository,
+/// Large-capture safety preflight for `commit`'s dirty path, reusing an
+/// already-computed git-overlay worktree status instead of re-walking the
+/// worktree. `commit` has already computed the same pre-mutation status for its
+/// own preflights and the (unchanged) clean classification, so threading it here
+/// removes a redundant full walk. The large-capture gating decision is
+/// byte-identical because it reads the same `WorktreeStatus`.
+pub(crate) fn preflight_large_capture_for_compat_commit_with_worktree_status(
     force: bool,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> Result<()> {
-    preflight_large_capture(repo, force)
+    preflight_large_capture_with_status(force, worktree_status)
 }
 
-fn preflight_large_capture(repo: &Repository, force: bool) -> Result<()> {
-    if force {
-        return Ok(());
-    }
-    preflight_large_capture_with_status(force, &repo.git_overlay_worktree_status())
-}
-
-/// Variant of [`preflight_large_capture`] that reuses an already-computed
-/// git-overlay worktree status instead of re-walking the worktree. The
-/// large-capture classification is byte-identical because it reads the same
-/// `WorktreeStatus`; only the redundant walk is removed.
+/// Large-capture safety preflight built from an already-computed git-overlay
+/// worktree status instead of re-walking the worktree. The large-capture
+/// classification is byte-identical because it reads the same `WorktreeStatus`;
+/// only the redundant walk is removed.
 fn preflight_large_capture_with_status(
     force: bool,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
@@ -539,31 +571,6 @@ pub(crate) fn create_snapshot(
     create_snapshot_profiled(repo, user_config, intent, confidence, agent).map(|(output, _)| output)
 }
 
-/// Variant of [`create_snapshot`] that reuses an already-computed git-overlay
-/// worktree status for the PRE-mutation capture preflight instead of re-walking
-/// the worktree. The snapshot result is byte-identical; only the redundant
-/// pre-mutation status walk is removed. The post-mutation verification state
-/// built after the capture is still computed FRESH (the capture advances the
-/// Heddle state, which flips the git-overlay health classification).
-pub(crate) fn create_snapshot_with_worktree_status(
-    repo: &Repository,
-    user_config: &UserConfig,
-    intent: Option<String>,
-    confidence: Option<f32>,
-    agent: SnapshotAgentOverrides,
-    worktree_status: &repo::Result<Option<WorktreeStatus>>,
-) -> Result<SnapshotOutput> {
-    create_snapshot_profiled_inner(
-        repo,
-        user_config,
-        intent,
-        confidence,
-        agent,
-        Some(worktree_status),
-    )
-    .map(|(output, _)| output)
-}
-
 pub(crate) fn create_snapshot_from_tree(
     repo: &Repository,
     user_config: &UserConfig,
@@ -613,6 +620,28 @@ pub(crate) fn create_snapshot_profiled(
     agent: SnapshotAgentOverrides,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     create_snapshot_profiled_inner(repo, user_config, intent, confidence, agent, None)
+}
+
+/// Profiled variant of [`create_snapshot_with_worktree_status`]. Reuses an
+/// already-computed pre-mutation git-overlay worktree status for capture's
+/// mutation preflight (no extra worktree walk) and returns the inner snapshot
+/// profile so the caller can attribute sub-phase timings.
+pub(crate) fn create_snapshot_profiled_with_worktree_status(
+    repo: &Repository,
+    user_config: &UserConfig,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: SnapshotAgentOverrides,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    create_snapshot_profiled_inner(
+        repo,
+        user_config,
+        intent,
+        confidence,
+        agent,
+        Some(worktree_status),
+    )
 }
 
 fn create_snapshot_profiled_inner(
