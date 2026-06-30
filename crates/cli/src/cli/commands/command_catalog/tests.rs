@@ -78,6 +78,30 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["agent", "task", "update"],
         &["agent", "task", "update", "task-1", "--status", "complete"],
     ),
+    sample(
+        &["agent", "fanout", "plan"],
+        &[
+            "agent",
+            "fanout",
+            "plan",
+            "--title",
+            "Coordinate lanes",
+            "--lane",
+            "feature/a=../a:Implement A",
+        ],
+    ),
+    sample(
+        &["agent", "fanout", "start"],
+        &[
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Coordinate lanes",
+            "--lane",
+            "feature/a=../a:Implement A",
+        ],
+    ),
     #[cfg(feature = "client")]
     sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
     #[cfg(feature = "client")]
@@ -1344,6 +1368,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent task list",
             "agent task show",
             "agent task update",
+            "agent fanout plan",
+            "agent fanout start",
             "auth logout",
             "auth status",
             "auth create-service-token",

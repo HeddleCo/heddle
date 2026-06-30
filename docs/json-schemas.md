@@ -1736,6 +1736,160 @@ the same ready envelope.
 
 ---
 
+## `heddle agent fanout plan --output json`
+
+```json
+{
+  "output_kind": "agent_fanout_plan",
+  "title": "Coordinate Wave 4 lanes",
+  "parent_thread": "main",
+  "base_state": "hd-base123",
+  "base_root": "tr-root123",
+  "coordination_discussion_id": "discussion-123",
+  "parent_task": null,
+  "lanes": [
+    {
+      "thread": "feature/lane-d4",
+      "path": "../lane-d4",
+      "title": "Implement native fan-out UX",
+      "task": null,
+      "session_id": null,
+      "status": "planned"
+    }
+  ],
+  "commands": [
+    {
+      "lane_thread": "feature/lane-d4",
+      "command": "heddle start feature/lane-d4 --path ../lane-d4 --task 'Implement native fan-out UX'",
+      "argv": [
+        "heddle",
+        "start",
+        "feature/lane-d4",
+        "--path",
+        "../lane-d4",
+        "--task",
+        "Implement native fan-out UX"
+      ]
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent fanout start --output json`
+
+```json
+{
+  "output_kind": "agent_fanout_start",
+  "title": "Coordinate Wave 4 lanes",
+  "parent_thread": "main",
+  "base_state": "hd-base123",
+  "base_root": "tr-root123",
+  "coordination_discussion_id": "discussion-123",
+  "parent_task": {
+    "schema_version": 1,
+    "task_id": "task-parent",
+    "title": "Coordinate Wave 4 lanes",
+    "body": "- feature/lane-d4 -> ../lane-d4: Implement native fan-out UX",
+    "status": "in_progress",
+    "target_thread": "main",
+    "base_state": "hd-base123",
+    "base_root": "tr-root123",
+    "parent_task_id": null,
+    "coordination_discussion_id": "discussion-123",
+    "allow_offline": true,
+    "delegated_by": "heddle agent fanout start",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "lanes": [
+    {
+      "thread": "feature/lane-d4",
+      "path": "../lane-d4",
+      "title": "Implement native fan-out UX",
+      "task": {
+        "schema_version": 1,
+        "task_id": "task-child",
+        "title": "Implement native fan-out UX",
+        "body": "Fan-out child lane for parent task task-parent",
+        "status": "in_progress",
+        "target_thread": "feature/lane-d4",
+        "base_state": "hd-base123",
+        "base_root": "tr-root123",
+        "parent_task_id": "task-parent",
+        "coordination_discussion_id": "discussion-123",
+        "allow_offline": true,
+        "delegated_by": "task-parent",
+        "created_at": "2026-06-30T12:00:00Z",
+        "updated_at": "2026-06-30T12:00:00Z",
+        "completed_at": null
+      },
+      "session_id": "agent-123",
+      "status": "started"
+    }
+  ],
+  "commands": [
+    {
+      "lane_thread": "feature/lane-d4",
+      "command": "heddle start feature/lane-d4 --path ../lane-d4 --task 'Implement native fan-out UX'",
+      "argv": [
+        "heddle",
+        "start",
+        "feature/lane-d4",
+        "--path",
+        "../lane-d4",
+        "--task",
+        "Implement native fan-out UX"
+      ]
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
 ## `heddle auth logout --output json`
 
 ```json

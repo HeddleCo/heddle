@@ -18,7 +18,10 @@ use crate::cli::{
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
     StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
-    cli_args::{AgentTaskCommands, DiscussCommands, ReviewCommands, TransactionCommands},
+    cli_args::{
+        AgentFanoutCommands, AgentTaskCommands, DiscussCommands, ReviewCommands,
+        TransactionCommands,
+    },
     render::shell_quote,
 };
 #[cfg(feature = "client")]
@@ -1355,6 +1358,35 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     Some("agent task update"),
                     "output_kind",
                     "agent_task_update",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(&["agent", "fanout"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "fanout", "plan"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent fanout plan"]),
+                &[json_discriminator(
+                    Some("agent fanout plan"),
+                    "output_kind",
+                    "agent_fanout_plan",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "fanout", "start"],
+        surface(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["agent fanout start"]),
+                &[json_discriminator(
+                    Some("agent fanout start"),
+                    "output_kind",
+                    "agent_fanout_start",
                 )],
             ),
             "automation",
@@ -4935,6 +4967,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentTaskCommands::List(_) => vec!["agent", "task", "list"],
                 AgentTaskCommands::Show(_) => vec!["agent", "task", "show"],
                 AgentTaskCommands::Update(_) => vec!["agent", "task", "update"],
+            },
+            AgentCommands::Fanout(command) => match command {
+                AgentFanoutCommands::Plan(_) => vec!["agent", "fanout", "plan"],
+                AgentFanoutCommands::Start(_) => vec!["agent", "fanout", "start"],
             },
         },
         Commands::Maintenance { command } => match command {

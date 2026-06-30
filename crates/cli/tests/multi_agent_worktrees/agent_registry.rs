@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+fn temp_leaf(temp: &RepoFixture) -> String {
+    temp.path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo")
+        .to_string()
+}
+
 #[test]
 fn start_registers_thread_with_agent_metadata() {
     let main = setup_repo("base.txt", "base");
@@ -344,6 +352,256 @@ fn agent_task_create_list_show_update_round_trip() {
         shown["task"]["body"].as_str(),
         Some("Persist task provenance locally.")
     );
+}
+
+#[test]
+fn agent_fanout_plan_is_read_only_and_returns_start_commands() {
+    let main = setup_repo("base.txt", "base");
+    let lane_path = main
+        .path()
+        .with_file_name(format!("{}-fanout-plan-lane", temp_leaf(&main)));
+    let lane_spec = format!(
+        "feature/fanout-plan={}:Implement fanout plan lane",
+        lane_path.display()
+    );
+
+    let planned: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "plan",
+                "--title",
+                "Coordinate fanout",
+                "--coordination-discussion-id",
+                "discussion-123",
+                "--lane",
+                &lane_spec,
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(planned["output_kind"].as_str(), Some("agent_fanout_plan"));
+    assert_eq!(planned["parent_task"], Value::Null);
+    assert_eq!(
+        planned["coordination_discussion_id"].as_str(),
+        Some("discussion-123")
+    );
+    assert_eq!(planned["lanes"][0]["status"].as_str(), Some("planned"));
+    assert_eq!(
+        planned["commands"][0]["argv"].as_array().unwrap()[1].as_str(),
+        Some("agent")
+    );
+    assert_eq!(
+        planned["commands"][0]["argv"].as_array().unwrap()[2].as_str(),
+        Some("fanout")
+    );
+    assert_eq!(
+        planned["commands"][0]["argv"].as_array().unwrap()[3].as_str(),
+        Some("start")
+    );
+    assert!(
+        !main.path().join(".heddle").join("agent-tasks").exists(),
+        "plan must not create task records"
+    );
+    assert!(
+        !lane_path.exists(),
+        "plan must not materialize the lane checkout"
+    );
+}
+
+#[test]
+fn agent_fanout_start_preflights_all_lanes_before_creating_tasks() {
+    let main = setup_repo("base.txt", "base");
+    let first_lane_path = main
+        .path()
+        .with_file_name(format!("{}-fanout-preflight-first", temp_leaf(&main)));
+    let blocked_lane_path = main
+        .path()
+        .with_file_name(format!("{}-fanout-preflight-blocked", temp_leaf(&main)));
+    std::fs::create_dir_all(&blocked_lane_path).unwrap();
+    std::fs::write(blocked_lane_path.join("already-here.txt"), "occupied").unwrap();
+
+    let first_lane = format!(
+        "feature/fanout-preflight-a={}:First lane",
+        first_lane_path.display()
+    );
+    let blocked_lane = format!(
+        "feature/fanout-preflight-b={}:Blocked lane",
+        blocked_lane_path.display()
+    );
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Coordinate failing fanout",
+            "--lane",
+            &first_lane,
+            "--lane",
+            &blocked_lane,
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "fanout start should fail before creating any lane; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !main.path().join(".heddle").join("agent-tasks").exists(),
+        "failed fanout preflight must not create task records"
+    );
+    assert!(
+        !first_lane_path.exists(),
+        "failed fanout preflight must not materialize earlier lanes"
+    );
+}
+
+#[test]
+fn agent_fanout_start_rejects_duplicate_lane_threads_before_creating_tasks() {
+    let main = setup_repo("base.txt", "base");
+    let lane_path_a = main
+        .path()
+        .with_file_name(format!("{}-fanout-dup-a", temp_leaf(&main)));
+    let lane_path_b = main
+        .path()
+        .with_file_name(format!("{}-fanout-dup-b", temp_leaf(&main)));
+    let lane_a = format!(
+        "feature/fanout-duplicate={}:First duplicate lane",
+        lane_path_a.display()
+    );
+    let lane_b = format!(
+        "feature/fanout-duplicate={}:Second duplicate lane",
+        lane_path_b.display()
+    );
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Coordinate duplicate fanout",
+            "--lane",
+            &lane_a,
+            "--lane",
+            &lane_b,
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        !main.path().join(".heddle").join("agent-tasks").exists(),
+        "duplicate lane preflight must not create task records"
+    );
+    assert!(!lane_path_a.exists());
+    assert!(!lane_path_b.exists());
+}
+
+#[test]
+fn agent_fanout_start_creates_tasks_lanes_and_reservation_links() {
+    let main = setup_repo("base.txt", "base");
+    let lane_path = main
+        .path()
+        .with_file_name(format!("{}-fanout-start-lane", temp_leaf(&main)));
+    let lane_spec = format!(
+        "feature/fanout-start={}:Implement fanout start lane",
+        lane_path.display()
+    );
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "start",
+                "--title",
+                "Coordinate fanout start",
+                "--coordination-discussion-id",
+                "discussion-start",
+                "--lane",
+                &lane_spec,
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(started["output_kind"].as_str(), Some("agent_fanout_start"));
+    let parent_task_id = started["parent_task"]["task_id"]
+        .as_str()
+        .expect("parent task id");
+    let child_task_id = started["lanes"][0]["task"]["task_id"]
+        .as_str()
+        .expect("child task id");
+    assert_ne!(parent_task_id, child_task_id);
+    assert_eq!(
+        started["lanes"][0]["task"]["parent_task_id"].as_str(),
+        Some(parent_task_id)
+    );
+    assert_eq!(
+        started["lanes"][0]["task"]["coordination_discussion_id"].as_str(),
+        Some("discussion-start")
+    );
+    let parent_body = started["parent_task"]["body"].as_str().unwrap_or("");
+    assert!(parent_body.contains("feature/fanout-start"));
+    assert!(parent_body.contains("Implement fanout start lane"));
+    assert!(
+        !parent_body.contains(&lane_path.display().to_string()),
+        "parent task body should not persist checkout paths"
+    );
+    assert!(
+        lane_path.join(".heddle").exists(),
+        "fanout start should materialize a real lane checkout"
+    );
+
+    let listed: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "list",
+                "--thread",
+                "feature/fanout-start",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        listed["reservations"][0]["task_assignment_id"].as_str(),
+        Some(child_task_id)
+    );
+
+    let shown: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "show", "feature/fanout-start"],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shown["parent_thread"].as_str(), Some("main"));
 }
 
 #[test]

@@ -358,6 +358,10 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
+        // TODO: Gate hosted Git-lane transfer planning on the Sley reachable-pack
+        // facade. Keep this as ExistingImplementation until Sley can return the
+        // exact pack identity and stream from one boundary; do not add a
+        // Heddle-local reachable-pack planner or wire variant here.
         let git_lane_intent = if git_lane.is_some() {
             GitLaneTransferIntent::ExistingImplementation
         } else {
@@ -2041,6 +2045,10 @@ fn build_git_lane_multi_root_pack_plan(
     }
     let objects = git_repo.objects();
     let mut sink = io::sink();
+    // TODO: Replace this metadata-only reachable-pack walk and the later
+    // streaming walk with the Sley reachable-pack facade gate once it can expose
+    // stable size/checksum plus streaming. Do not grow a second planner in
+    // Heddle.
     let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
         git_repo.object_format(),
@@ -2106,6 +2114,9 @@ fn stream_git_pack_messages_blocking(
         pack.pack_size,
         chunk_size,
     );
+    // TODO: This is the second walk of the same reachable Git closure planned
+    // in build_git_lane_pack_plan. Collapse both walks behind Sley's
+    // reachable-pack facade when available, without changing the protobuf lane.
     let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
         pack.git_repo.object_format(),

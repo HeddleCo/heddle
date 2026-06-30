@@ -3971,6 +3971,9 @@ pub(crate) fn copy_reachable_objects(
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<()> {
+    // TODO: Keep local Git-lane reachable transfer behind Sley primitives. If
+    // this needs pack identity/stream planning, route it through the Sley
+    // reachable-pack facade gate instead of adding a Heddle-local planner.
     let roots = roots.into_iter().collect::<Vec<_>>();
     target.copy_reachable_from(source, &roots).map_err(git_err)
 }
@@ -4003,6 +4006,9 @@ pub(crate) fn copy_reachable_objects_excluding(
         // its existing format-mismatch error surfaces unchanged.
         return copy_reachable_objects(source, target, roots);
     }
+    // TODO: This local incremental transfer already delegates pack installation
+    // to Sley. Keep future reachable-pack planning Sley-gated here too; Heddle
+    // should not grow its own exclusion-aware pack planner.
     sley::plumbing::sley_odb::install_reachable_pack_excluding(
         source.objects().as_ref(),
         target.objects().as_ref(),

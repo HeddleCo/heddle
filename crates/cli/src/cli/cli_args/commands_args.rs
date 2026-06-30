@@ -1708,6 +1708,38 @@ pub struct AgentTaskUpdateArgs {
     pub delegated_by: Option<String>,
 }
 
+/// Arguments shared by `agent fanout plan` and `agent fanout start`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentFanoutPlanArgs {
+    /// Parent coordination task title.
+    #[arg(long)]
+    pub title: String,
+
+    /// Lane spec: `<thread>=<path>:<title>`. Repeat once per child lane.
+    #[arg(long, value_name = "THREAD=PATH:TITLE")]
+    pub lane: Vec<String>,
+
+    /// Optional collaboration discussion id to store on task assignments.
+    #[arg(long)]
+    pub coordination_discussion_id: Option<String>,
+}
+
+/// Arguments for `agent fanout start`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentFanoutStartArgs {
+    /// Parent coordination task title.
+    #[arg(long)]
+    pub title: String,
+
+    /// Lane spec: `<thread>=<path>:<title>`. Repeat once per child lane.
+    #[arg(long, value_name = "THREAD=PATH:TITLE")]
+    pub lane: Vec<String>,
+
+    /// Optional collaboration discussion id to store on task assignments.
+    #[arg(long)]
+    pub coordination_discussion_id: Option<String>,
+}
+
 /// Arguments for `agent capture`. Mirrors `heddle capture` with an
 /// extra `--session` guard so an orchestrator can prove it owns the
 /// thread before writing.

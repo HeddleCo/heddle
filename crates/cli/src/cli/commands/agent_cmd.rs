@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
+use std::{collections::BTreeSet, path::PathBuf};
+
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::{
@@ -21,16 +23,23 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    git_overlay_health::{
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+    },
     thread::thread_name_invalid_advice,
+    worktree_cmd::helpers::plan_worktree_target,
+    worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{
     Cli,
     cli_args::{
-        AgentApiListArgs, AgentHeartbeatArgs, AgentReleaseArgs, AgentReleaseStatusArg,
-        AgentReserveArgs, AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs,
-        AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs,
+        AgentApiListArgs, AgentFanoutCommands, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+        AgentHeartbeatArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
+        AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
+        AgentTaskStatusArg, AgentTaskUpdateArgs, ThreadStartArgs, WorkspaceModeArg,
     },
+    render::shell_quote,
     should_output_json,
 };
 
@@ -110,6 +119,38 @@ pub(crate) struct AgentTaskOutput {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentFanoutOutput {
+    pub output_kind: &'static str,
+    pub title: String,
+    pub parent_thread: String,
+    pub base_state: String,
+    pub base_root: String,
+    pub coordination_discussion_id: Option<String>,
+    pub parent_task: Option<AgentTaskOutput>,
+    pub lanes: Vec<AgentFanoutLaneOutput>,
+    pub commands: Vec<AgentFanoutCommandOutput>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentFanoutLaneOutput {
+    pub thread: String,
+    pub path: String,
+    pub title: String,
+    pub task: Option<AgentTaskOutput>,
+    pub session_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentFanoutCommandOutput {
+    pub lane_thread: String,
+    pub command: String,
+    pub argv: Vec<String>,
 }
 
 impl From<&AgentEntry> for AgentReservationOutput {
@@ -658,6 +699,161 @@ pub fn cmd_agent_task(cli: &Cli, command: AgentTaskCommands) -> Result<()> {
     }
 }
 
+pub fn cmd_agent_fanout(cli: &Cli, command: AgentFanoutCommands) -> Result<()> {
+    match command {
+        AgentFanoutCommands::Plan(args) => cmd_agent_fanout_plan(cli, args),
+        AgentFanoutCommands::Start(args) => cmd_agent_fanout_start(cli, args),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FanoutLaneSpec {
+    thread: String,
+    path: PathBuf,
+    title: String,
+}
+
+fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    let lanes = parse_fanout_lanes(&args.lane)?;
+    let (base_state, base_root) = fanout_base(&repo)?;
+    let parent_thread = fanout_parent_thread(&repo)?;
+    let output = build_fanout_output(
+        &repo,
+        "agent_fanout_plan",
+        args.title,
+        parent_thread,
+        base_state,
+        base_root,
+        args.coordination_discussion_id,
+        None,
+        lanes
+            .into_iter()
+            .map(|lane| AgentFanoutLaneOutput {
+                thread: lane.thread,
+                path: lane.path.display().to_string(),
+                title: lane.title,
+                task: None,
+                session_id: None,
+                status: "planned".to_string(),
+            })
+            .collect(),
+    );
+    render_agent_fanout_output(output, should_output_json(cli, Some(repo.config())))
+}
+
+fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        &repo,
+        "agent fanout start",
+        GitOverlayMutationPreflight::capture_like(),
+    )? {
+        return Err(anyhow!(advice));
+    }
+    ensure_worktree_clean(&repo, "agent fanout start")?;
+
+    let lanes = parse_fanout_lanes(&args.lane)?;
+    let (base_state, base_root) = fanout_base(&repo)?;
+    let parent_thread = fanout_parent_thread(&repo)?;
+    preflight_fanout_start(&repo, &lanes)?;
+    let store = AgentTaskStore::new(repo.heddle_dir());
+
+    let mut parent = AgentTaskRecord::new(String::new(), args.title.clone(), parent_thread.clone());
+    parent.body = fanout_parent_body(&lanes);
+    parent.base_state = Some(base_state.clone());
+    parent.base_root = Some(base_root.clone());
+    parent.coordination_discussion_id = args.coordination_discussion_id.clone();
+    parent.allow_offline = true;
+    parent.delegated_by = Some("heddle agent fanout start".to_string());
+    parent.status = AgentTaskStatus::InProgress;
+    let parent = store.create(parent)?;
+
+    let mut created_task_ids = vec![parent.task_id.clone()];
+    let start_result = (|| -> Result<Vec<AgentFanoutLaneOutput>> {
+        let mut outputs = Vec::new();
+        for lane in lanes {
+            let mut child =
+                AgentTaskRecord::new(String::new(), lane.title.clone(), lane.thread.clone());
+            child.body = format!("Fan-out child lane for parent task {}", parent.task_id);
+            child.base_state = Some(base_state.clone());
+            child.base_root = Some(base_root.clone());
+            child.parent_task_id = Some(parent.task_id.clone());
+            child.coordination_discussion_id = args.coordination_discussion_id.clone();
+            child.allow_offline = true;
+            child.delegated_by = Some(parent.task_id.clone());
+            child.status = AgentTaskStatus::InProgress;
+            let child = store.create(child)?;
+            created_task_ids.push(child.task_id.clone());
+
+            let started = super::thread::start_thread(
+                &repo,
+                ThreadStartArgs {
+                    name: lane.thread.clone(),
+                    from: Some(base_state.clone()),
+                    path: Some(lane.path.clone()),
+                    workspace: WorkspaceModeArg::Auto,
+                    agent_provider: None,
+                    agent_model: None,
+                    task: Some(lane.title.clone()),
+                    parent_thread: Some(parent_thread.clone()),
+                    automated: true,
+                    print_cd_path: false,
+                    daemon: true,
+                    no_daemon: false,
+                    shared_target: false,
+                    hydrate: false,
+                },
+            )?;
+            let session_id = started
+                .thread
+                .as_ref()
+                .and_then(|thread| thread.session_id.clone());
+            if let Some(session_id) = session_id.as_deref() {
+                let registry = AgentRegistry::new(repo.heddle_dir());
+                let _ = registry.update_entry(session_id, |entry| {
+                    entry.task_assignment_id = Some(child.task_id.clone());
+                    entry.attach_reason = Some(lane.title.clone());
+                    entry
+                        .attach_precedence
+                        .push("agent-fanout-start".to_string());
+                    entry.winning_attach_rule = Some("agent-fanout-start".to_string());
+                })?;
+            }
+            outputs.push(AgentFanoutLaneOutput {
+                thread: lane.thread,
+                path: lane.path.display().to_string(),
+                title: lane.title,
+                task: Some(AgentTaskOutput::from(&child)),
+                session_id,
+                status: "started".to_string(),
+            });
+        }
+        Ok(outputs)
+    })();
+
+    let outputs = match start_result {
+        Ok(outputs) => outputs,
+        Err(err) => {
+            abandon_fanout_tasks(&store, &created_task_ids);
+            return Err(err);
+        }
+    };
+
+    let output = build_fanout_output(
+        &repo,
+        "agent_fanout_start",
+        args.title,
+        parent_thread,
+        base_state,
+        base_root,
+        args.coordination_discussion_id,
+        Some(AgentTaskOutput::from(&parent)),
+        outputs,
+    );
+    render_agent_fanout_output(output, should_output_json(cli, Some(repo.config())))
+}
+
 fn cmd_agent_task_create(cli: &Cli, args: AgentTaskCreateArgs) -> Result<()> {
     ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     if let Some(task_id) = args.task_id.as_deref() {
@@ -792,6 +988,265 @@ fn agent_task_status_from_arg(status: &AgentTaskStatusArg) -> AgentTaskStatus {
         AgentTaskStatusArg::Complete => AgentTaskStatus::Complete,
         AgentTaskStatusArg::Abandoned => AgentTaskStatus::Abandoned,
     }
+}
+
+fn parse_fanout_lanes(raw_lanes: &[String]) -> Result<Vec<FanoutLaneSpec>> {
+    if raw_lanes.is_empty() {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_lane_required",
+            "agent fanout requires at least one --lane <thread>=<path>:<title>",
+            "Pass --lane once for each child checkout to create.",
+            "heddle agent fanout plan --title <title> --lane <thread>=<path>:<title>",
+        )));
+    }
+    raw_lanes.iter().map(|raw| parse_fanout_lane(raw)).collect()
+}
+
+fn parse_fanout_lane(raw: &str) -> Result<FanoutLaneSpec> {
+    let (thread, rest) = raw.split_once('=').ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_lane_invalid",
+            format!("invalid fanout lane '{raw}'"),
+            "Use <thread>=<path>:<title>.",
+            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
+        ))
+    })?;
+    let (path, title) = rest.split_once(':').ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_lane_invalid",
+            format!("invalid fanout lane '{raw}'"),
+            "Use <thread>=<path>:<title>.",
+            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
+        ))
+    })?;
+    let thread = thread.trim();
+    let path = path.trim();
+    let title = title.trim();
+    if path.is_empty() || title.is_empty() {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_lane_invalid",
+            format!("invalid fanout lane '{raw}'"),
+            "Thread, path, and title must all be non-empty.",
+            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
+        )));
+    }
+    ThreadId::new(thread).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    Ok(FanoutLaneSpec {
+        thread: thread.to_string(),
+        path: PathBuf::from(path),
+        title: title.to_string(),
+    })
+}
+
+fn fanout_base(repo: &Repository) -> Result<(String, String)> {
+    let head = repo
+        .head()?
+        .ok_or_else(|| anyhow!("repository has no HEAD state for agent fanout"))?;
+    let state = repo
+        .store()
+        .get_state(&head)?
+        .ok_or_else(|| anyhow!("HEAD state '{}' not found", head.short()))?;
+    Ok((head.to_string_full(), state.tree.short()))
+}
+
+fn fanout_parent_thread(repo: &Repository) -> Result<String> {
+    Ok(match repo.head_ref()? {
+        Head::Attached { thread } => thread.to_string(),
+        Head::Detached { .. } => "detached".to_string(),
+    })
+}
+
+fn fanout_parent_body(lanes: &[FanoutLaneSpec]) -> String {
+    lanes
+        .iter()
+        .map(|lane| format!("- {}: {}", lane.thread, lane.title))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
+    for task_id in task_ids {
+        let _ = store.update(task_id, |task| {
+            task.status = AgentTaskStatus::Abandoned;
+        });
+    }
+}
+
+fn preflight_fanout_start(repo: &Repository, lanes: &[FanoutLaneSpec]) -> Result<()> {
+    let mut seen_threads = BTreeSet::new();
+    let mut seen_paths = BTreeSet::new();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    for lane in lanes {
+        if !seen_threads.insert(lane.thread.clone()) {
+            return Err(anyhow!(fanout_lane_unavailable_advice(
+                "agent_fanout_duplicate_thread",
+                lane,
+                format!("fanout lane '{}' is listed more than once", lane.thread),
+                "Use each child thread name once per fanout.",
+            )));
+        }
+        if super::thread::find_active_thread_entry(repo, &lane.thread)?.is_some() {
+            return Err(anyhow!(fanout_lane_unavailable_advice(
+                "agent_fanout_live_owner",
+                lane,
+                format!(
+                    "fanout lane '{}' already has an active agent reservation",
+                    lane.thread
+                ),
+                "Release the active reservation or choose a fresh child thread.",
+            )));
+        }
+        if repo
+            .refs()
+            .get_thread(&ThreadName::new(&lane.thread))?
+            .is_some()
+        {
+            return Err(anyhow!(fanout_lane_unavailable_advice(
+                "agent_fanout_thread_exists",
+                lane,
+                format!("fanout lane '{}' already exists", lane.thread),
+                "Choose a fresh child thread or inspect the existing thread before retrying.",
+            )));
+        }
+        if let Some(existing) = manager.find_by_thread(&lane.thread)?
+            && existing.state == ThreadState::Active
+        {
+            return Err(anyhow!(fanout_lane_unavailable_advice(
+                "agent_fanout_thread_exists",
+                lane,
+                format!(
+                    "fanout lane '{}' already has an active thread record",
+                    lane.thread
+                ),
+                "Drop or finish the existing thread before reusing the lane name.",
+            )));
+        }
+        let prepared = plan_worktree_target(repo, &lane.path, Some(&lane.thread))?;
+        if !seen_paths.insert(prepared.path.clone()) {
+            return Err(anyhow!(fanout_lane_unavailable_advice(
+                "agent_fanout_duplicate_path",
+                lane,
+                format!(
+                    "fanout lane '{}' resolves to a checkout path used by another lane",
+                    lane.thread
+                ),
+                "Use a distinct checkout path for each child lane.",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn fanout_lane_unavailable_advice(
+    kind: &'static str,
+    lane: &FanoutLaneSpec,
+    error: String,
+    guidance: &'static str,
+) -> RecoveryAdvice {
+    RecoveryAdvice::invalid_usage(
+        kind,
+        error,
+        guidance,
+        format!(
+            "heddle agent fanout plan --title <title> --lane {}=<path>:<title>",
+            lane.thread
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_fanout_output(
+    repo: &Repository,
+    output_kind: &'static str,
+    title: String,
+    parent_thread: String,
+    base_state: String,
+    base_root: String,
+    coordination_discussion_id: Option<String>,
+    parent_task: Option<AgentTaskOutput>,
+    lanes: Vec<AgentFanoutLaneOutput>,
+) -> AgentFanoutOutput {
+    let commands = if output_kind == "agent_fanout_plan" {
+        let mut argv = vec![
+            "heddle".to_string(),
+            "agent".to_string(),
+            "fanout".to_string(),
+            "start".to_string(),
+            "--title".to_string(),
+            title.clone(),
+        ];
+        if let Some(discussion_id) = coordination_discussion_id.as_ref() {
+            argv.push("--coordination-discussion-id".to_string());
+            argv.push(discussion_id.clone());
+        }
+        for lane in &lanes {
+            argv.push("--lane".to_string());
+            argv.push(format!("{}={}:{}", lane.thread, lane.path, lane.title));
+        }
+        let command = argv
+            .iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec![AgentFanoutCommandOutput {
+            lane_thread: "all".to_string(),
+            command,
+            argv,
+        }]
+    } else {
+        Vec::new()
+    };
+    AgentFanoutOutput {
+        output_kind,
+        title,
+        parent_thread,
+        base_state,
+        base_root,
+        coordination_discussion_id,
+        parent_task,
+        lanes,
+        commands,
+        trust: build_repository_verification_state(repo),
+    }
+}
+
+fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+    println!(
+        "Agent fanout {}: {}",
+        output
+            .output_kind
+            .strip_prefix("agent_fanout_")
+            .unwrap_or(output.output_kind),
+        output.title
+    );
+    if let Some(parent_task) = &output.parent_task {
+        println!(
+            "  parent task: {}",
+            crate::cli::style::accent(&parent_task.task_id)
+        );
+    }
+    for lane in &output.lanes {
+        println!(
+            "  {} [{}] {}",
+            crate::cli::style::accent(&lane.thread),
+            lane.status,
+            crate::cli::style::dim(&lane.path),
+        );
+        if let Some(task) = &lane.task {
+            println!("    task: {}", crate::cli::style::dim(&task.task_id));
+        }
+    }
+    if output.output_kind == "agent_fanout_plan" {
+        println!("Commands:");
+        for command in &output.commands {
+            println!("  {}", command.command);
+        }
+    }
+    Ok(())
 }
 
 fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<()> {
@@ -1034,5 +1489,8 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentTaskEnvelope": schemars::schema_for!(AgentTaskEnvelope),
         "AgentTaskListOutput": schemars::schema_for!(AgentTaskListOutput),
         "AgentTaskOutput": schemars::schema_for!(AgentTaskOutput),
+        "AgentFanoutOutput": schemars::schema_for!(AgentFanoutOutput),
+        "AgentFanoutLaneOutput": schemars::schema_for!(AgentFanoutLaneOutput),
+        "AgentFanoutCommandOutput": schemars::schema_for!(AgentFanoutCommandOutput),
     })
 }

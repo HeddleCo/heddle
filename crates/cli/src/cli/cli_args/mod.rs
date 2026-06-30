@@ -33,22 +33,23 @@ pub use commands_advanced::{
     CheckpointArgs, TransactionAbortArgs, TransactionBeginArgs, TransactionCommands,
     TransactionIdArgs,
 };
-pub use commands_agent::{AgentCommands, AgentServeArgs, AgentTaskCommands};
+pub use commands_agent::{AgentCommands, AgentFanoutCommands, AgentServeArgs, AgentTaskCommands};
 pub use commands_args::{
     ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-    AgentApiListArgs, AgentCaptureArgs, AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs,
-    AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs, AgentTaskListArgs,
-    AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs, CollapseArgs,
-    CommitArgs, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
-    DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs, MergeArgs, PullArgs, PushArgs,
-    ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs, SessionListArgs,
-    SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs,
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+    AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
+    AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg,
+    AgentTaskUpdateArgs, CloneArgs, CollapseArgs, CommitArgs, DiagnoseArgs, DiffArgs, DoctorArgs,
+    DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
+    MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
+    SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
+    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
+    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
+    ThreadShowArgs, ThreadStartArgs, TimelineArgs, TimelineCommands, TimelineForkArgs,
+    TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs,
+    TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs,
+    WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};

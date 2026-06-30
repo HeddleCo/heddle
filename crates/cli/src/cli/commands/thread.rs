@@ -61,7 +61,7 @@ use crate::{
         worktree_status_options,
     },
     config::{UserConfig, UserThreadWorkspaceMode},
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
@@ -1459,14 +1459,35 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     }
 
     if profile_enabled() {
-        emit_profile(
-            "thread list phases",
-            &[
-                ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
-                ProfileField::millis("verification_ms", verification_ms),
-                ProfileField::duration("command_body_ms", body_start.elapsed()),
-            ],
-        );
+        let fields = [
+            ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
+            ProfileField::millis("verification_ms", verification_ms),
+            ProfileField::duration("command_body_ms", body_start.elapsed()),
+        ];
+        match profile_mode() {
+            ProfileMode::Off => {}
+            ProfileMode::Human => emit_profile("thread list phases", &fields),
+            ProfileMode::Jsonl => {
+                emit_profile(
+                    "thread list collect summaries",
+                    &[ProfileField::millis(
+                        "collect_summaries_ms",
+                        collect_summaries_ms,
+                    )],
+                );
+                emit_profile(
+                    "thread list verification",
+                    &[ProfileField::millis("verification_ms", verification_ms)],
+                );
+                emit_profile(
+                    "thread list command body",
+                    &[ProfileField::duration(
+                        "command_body_ms",
+                        body_start.elapsed(),
+                    )],
+                );
+            }
+        }
     }
 
     Ok(())

@@ -23,7 +23,7 @@ use super::{
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
 
 pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
@@ -37,15 +37,46 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
             .with_start_path(start.clone()),
     )?;
     if profile_enabled() {
-        emit_profile(
-            "verify phases",
-            &[
-                ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
-                ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
-                ProfileField::millis("verification_ms", output.profile.verification_ms),
-                ProfileField::duration("command_body_ms", body_start.elapsed()),
-            ],
-        );
+        let fields = [
+            ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
+            ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+            ProfileField::millis("verification_ms", output.profile.verification_ms),
+            ProfileField::duration("command_body_ms", body_start.elapsed()),
+        ];
+        match profile_mode() {
+            ProfileMode::Off => {}
+            ProfileMode::Human => emit_profile("verify phases", &fields),
+            ProfileMode::Jsonl => {
+                emit_profile(
+                    "verify plain git probe",
+                    &[ProfileField::millis(
+                        "plain_git_probe_ms",
+                        output.profile.plain_git_probe_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify repo open",
+                    &[ProfileField::millis(
+                        "repo_open_ms",
+                        output.profile.repo_open_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify repository checks",
+                    &[ProfileField::millis(
+                        "verification_ms",
+                        output.profile.verification_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify command body",
+                    &[ProfileField::duration(
+                        "command_body_ms",
+                        body_start.elapsed(),
+                    )],
+                );
+            }
+        }
     }
     let repo_config = output
         .trust

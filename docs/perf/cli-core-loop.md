@@ -13,9 +13,28 @@ HEDDLE_PROFILE=1 heddle status --output json
 
 The command's normal stdout is unchanged, so JSON output remains parseable.
 Top-level profiles include config load, logging init, command body, and total
-wall-clock time. Some commands also emit command-specific phases; `status`
-reports repository open, state lookup, operation lookup, remote tracking,
-import hints, and worktree scan time.
+wall-clock time. Some commands also emit command-specific timings.
+
+Set `HEDDLE_PROFILE=jsonl` to write one structured JSON line to stderr:
+
+```sh
+HEDDLE_PROFILE=jsonl heddle status --output json
+```
+
+The JSONL trace uses static command and phase names with numeric metrics only.
+It must not include paths, argv, object ids, remote URLs, environment variables,
+or filenames. This makes it safe to collect while preserving stdout for normal
+machine output.
+
+The current named phase coverage includes:
+
+- `status`: repository open, current state, operation, remote tracking, import
+  hints, Git overlay status and health, verification, Git index, worktree
+  status, thread summaries, parallel thread state, late state, materialized
+  threads, advice, build total, render, and detailed worktree scanner counters.
+- `thread list`: summary collection, repository verification, and command body.
+- `verify`: plain-Git probe, repository open, repository checks, and command
+  body.
 
 Use this when a real repository feels slow and the next move is unclear. The
 phase split should make it obvious whether to inspect startup/config overhead,
@@ -49,6 +68,6 @@ multiple threads, leaves one dirty file, then times the core loop:
 - `heddle ready --output json`
 
 The test is ignored by default because release builds and wall-clock budgets are
-too expensive and environment-sensitive for the normal test loop. In release
-mode, each command has a generous budget intended to catch obvious regressions,
-not tiny variance.
+too expensive and environment-sensitive for the normal test loop. Treat it as a
+manual smoke check for obvious command-loop regressions rather than a CI gate or
+a claim about expected speed.

@@ -51,7 +51,7 @@ use crate::{
     bridge::git_core::principal_is_default_unknown,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
 
 #[derive(Serialize)]
@@ -81,42 +81,44 @@ fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
     let Some(profile) = profile else {
         return;
     };
-    emit_profile(
-        "status worktree",
-        &[
-            ProfileField::millis("index_load_ms", profile.index_load_ms),
-            ProfileField::millis("index_snapshot_load_ms", profile.index_snapshot_load_ms),
-            ProfileField::millis("index_journal_replay_ms", profile.index_journal_replay_ms),
-            ProfileField::millis("monitor_prepare_ms", profile.monitor_prepare_ms),
-            ProfileField::millis("compare_ms", profile.compare_ms),
-            ProfileField::millis("tracked_refresh_ms", profile.tracked_refresh_ms),
-            ProfileField::millis("untracked_scan_ms", profile.untracked_scan_ms),
-            ProfileField::millis("hashing_ms", profile.hashing_ms),
-            ProfileField::millis(
-                "directory_cache_compare_ms",
-                profile.directory_cache_compare_ms,
-            ),
-            ProfileField::millis("index_save_ms", profile.index_save_ms),
-            ProfileField::millis("monitor_persist_ms", profile.monitor_persist_ms),
-            ProfileField::millis("untracked_flatten_ms", profile.untracked_flatten_ms),
-            ProfileField::count(
-                "untracked_flattened_paths",
-                profile.untracked_flattened_paths as u128,
-            ),
-            ProfileField::count("directories_scanned", profile.directories_scanned as u128),
-            ProfileField::count("directories_skipped", profile.directories_skipped as u128),
-            ProfileField::count("files_hashed", profile.files_hashed as u128),
-            ProfileField::count("cache_hits", profile.cache_hits as u128),
-            ProfileField::count(
-                "monitor_changed_paths",
-                profile.monitor_changed_paths as u128,
-            ),
-            ProfileField::count(
-                "monitor_skipped_directories",
-                profile.monitor_skipped_directories as u128,
-            ),
-        ],
-    );
+    let fields = [
+        ProfileField::millis("index_load_ms", profile.index_load_ms),
+        ProfileField::millis("index_snapshot_load_ms", profile.index_snapshot_load_ms),
+        ProfileField::millis("index_journal_replay_ms", profile.index_journal_replay_ms),
+        ProfileField::millis("monitor_prepare_ms", profile.monitor_prepare_ms),
+        ProfileField::millis("compare_ms", profile.compare_ms),
+        ProfileField::millis("tracked_refresh_ms", profile.tracked_refresh_ms),
+        ProfileField::millis("untracked_scan_ms", profile.untracked_scan_ms),
+        ProfileField::millis("hashing_ms", profile.hashing_ms),
+        ProfileField::millis(
+            "directory_cache_compare_ms",
+            profile.directory_cache_compare_ms,
+        ),
+        ProfileField::millis("index_save_ms", profile.index_save_ms),
+        ProfileField::millis("monitor_persist_ms", profile.monitor_persist_ms),
+        ProfileField::millis("untracked_flatten_ms", profile.untracked_flatten_ms),
+        ProfileField::count(
+            "untracked_flattened_paths",
+            profile.untracked_flattened_paths as u128,
+        ),
+        ProfileField::count("directories_scanned", profile.directories_scanned as u128),
+        ProfileField::count("directories_skipped", profile.directories_skipped as u128),
+        ProfileField::count("files_hashed", profile.files_hashed as u128),
+        ProfileField::count("cache_hits", profile.cache_hits as u128),
+        ProfileField::count(
+            "monitor_changed_paths",
+            profile.monitor_changed_paths as u128,
+        ),
+        ProfileField::count(
+            "monitor_skipped_directories",
+            profile.monitor_skipped_directories as u128,
+        ),
+    ];
+    match profile_mode() {
+        ProfileMode::Off => {}
+        ProfileMode::Human => emit_profile("status worktree", &fields),
+        ProfileMode::Jsonl => emit_profile("status worktree detail", &fields),
+    }
 }
 
 pub async fn cmd_status(
@@ -579,35 +581,149 @@ fn emit_status_profile(output: &StatusOutput) {
         return;
     }
     emit_status_worktree_profile(output.profile.worktree_profile.as_ref());
+    let fields = [
+        ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+        ProfileField::millis("current_state_ms", output.profile.current_state_ms),
+        ProfileField::millis("operation_ms", output.profile.operation_ms),
+        ProfileField::millis("remote_tracking_ms", output.profile.remote_tracking_ms),
+        ProfileField::millis("import_hint_ms", output.profile.import_hint_ms),
+        ProfileField::millis(
+            "git_overlay_status_ms",
+            output.profile.git_overlay_status_ms,
+        ),
+        ProfileField::millis(
+            "git_overlay_health_ms",
+            output.profile.git_overlay_health_ms,
+        ),
+        ProfileField::millis("verification_ms", output.profile.verification_ms),
+        ProfileField::millis("git_index_ms", output.profile.git_index_ms),
+        ProfileField::millis("worktree_status_ms", output.profile.worktree_status_ms),
+        ProfileField::millis("thread_summary_ms", output.profile.thread_summary_ms),
+        ProfileField::millis("parallel_threads_ms", output.profile.parallel_threads_ms),
+        ProfileField::millis("late_state_ms", output.profile.late_state_ms),
+        ProfileField::millis(
+            "materialized_threads_ms",
+            output.profile.materialized_threads_ms,
+        ),
+        ProfileField::millis("advice_ms", output.profile.advice_ms),
+        ProfileField::millis("build_total_ms", output.profile.build_total_ms),
+    ];
+    match profile_mode() {
+        ProfileMode::Off => {}
+        ProfileMode::Human => emit_profile("status phases", &fields),
+        ProfileMode::Jsonl => emit_profile_status_jsonl_phases(output),
+    }
+}
+
+fn emit_profile_status_jsonl_phases(output: &StatusOutput) {
     emit_profile(
-        "status phases",
-        &[
-            ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
-            ProfileField::millis("current_state_ms", output.profile.current_state_ms),
-            ProfileField::millis("operation_ms", output.profile.operation_ms),
-            ProfileField::millis("remote_tracking_ms", output.profile.remote_tracking_ms),
-            ProfileField::millis("import_hint_ms", output.profile.import_hint_ms),
-            ProfileField::millis(
-                "git_overlay_status_ms",
-                output.profile.git_overlay_status_ms,
-            ),
-            ProfileField::millis(
-                "git_overlay_health_ms",
-                output.profile.git_overlay_health_ms,
-            ),
-            ProfileField::millis("verification_ms", output.profile.verification_ms),
-            ProfileField::millis("git_index_ms", output.profile.git_index_ms),
-            ProfileField::millis("worktree_status_ms", output.profile.worktree_status_ms),
-            ProfileField::millis("thread_summary_ms", output.profile.thread_summary_ms),
-            ProfileField::millis("parallel_threads_ms", output.profile.parallel_threads_ms),
-            ProfileField::millis("late_state_ms", output.profile.late_state_ms),
-            ProfileField::millis(
-                "materialized_threads_ms",
-                output.profile.materialized_threads_ms,
-            ),
-            ProfileField::millis("advice_ms", output.profile.advice_ms),
-            ProfileField::millis("build_total_ms", output.profile.build_total_ms),
-        ],
+        "status repo open",
+        &[ProfileField::millis(
+            "repo_open_ms",
+            output.profile.repo_open_ms,
+        )],
+    );
+    emit_profile(
+        "status current state",
+        &[ProfileField::millis(
+            "current_state_ms",
+            output.profile.current_state_ms,
+        )],
+    );
+    emit_profile(
+        "status operation",
+        &[ProfileField::millis(
+            "operation_ms",
+            output.profile.operation_ms,
+        )],
+    );
+    emit_profile(
+        "status remote tracking",
+        &[ProfileField::millis(
+            "remote_tracking_ms",
+            output.profile.remote_tracking_ms,
+        )],
+    );
+    emit_profile(
+        "status import hint",
+        &[ProfileField::millis(
+            "import_hint_ms",
+            output.profile.import_hint_ms,
+        )],
+    );
+    emit_profile(
+        "status git overlay status",
+        &[ProfileField::millis(
+            "git_overlay_status_ms",
+            output.profile.git_overlay_status_ms,
+        )],
+    );
+    emit_profile(
+        "status git overlay health",
+        &[ProfileField::millis(
+            "git_overlay_health_ms",
+            output.profile.git_overlay_health_ms,
+        )],
+    );
+    emit_profile(
+        "status verification",
+        &[ProfileField::millis(
+            "verification_ms",
+            output.profile.verification_ms,
+        )],
+    );
+    emit_profile(
+        "status git index",
+        &[ProfileField::millis(
+            "git_index_ms",
+            output.profile.git_index_ms,
+        )],
+    );
+    emit_profile(
+        "status worktree status",
+        &[ProfileField::millis(
+            "worktree_status_ms",
+            output.profile.worktree_status_ms,
+        )],
+    );
+    emit_profile(
+        "status thread summary",
+        &[ProfileField::millis(
+            "thread_summary_ms",
+            output.profile.thread_summary_ms,
+        )],
+    );
+    emit_profile(
+        "status parallel threads",
+        &[ProfileField::millis(
+            "parallel_threads_ms",
+            output.profile.parallel_threads_ms,
+        )],
+    );
+    emit_profile(
+        "status late state",
+        &[ProfileField::millis(
+            "late_state_ms",
+            output.profile.late_state_ms,
+        )],
+    );
+    emit_profile(
+        "status materialized threads",
+        &[ProfileField::millis(
+            "materialized_threads_ms",
+            output.profile.materialized_threads_ms,
+        )],
+    );
+    emit_profile(
+        "status advice",
+        &[ProfileField::millis("advice_ms", output.profile.advice_ms)],
+    );
+    emit_profile(
+        "status build total",
+        &[ProfileField::millis(
+            "build_total_ms",
+            output.profile.build_total_ms,
+        )],
     );
 }
 

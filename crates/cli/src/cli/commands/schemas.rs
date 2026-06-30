@@ -154,6 +154,7 @@ schema_registry! {
     (&["agent list"], AgentReservationListSchema),
     (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
     (&["agent task list"], AgentTaskListSchema),
+    (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
@@ -1932,6 +1933,38 @@ pub struct AgentTaskSchema {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutSchema {
+    pub output_kind: String,
+    pub title: String,
+    pub parent_thread: String,
+    pub base_state: String,
+    pub base_root: String,
+    pub coordination_discussion_id: Option<String>,
+    pub parent_task: Option<AgentTaskSchema>,
+    pub lanes: Vec<AgentFanoutLaneSchema>,
+    pub commands: Vec<AgentFanoutCommandSchema>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutLaneSchema {
+    pub thread: String,
+    pub path: String,
+    pub title: String,
+    pub task: Option<AgentTaskSchema>,
+    pub session_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutCommandSchema {
+    pub lane_thread: String,
+    pub command: String,
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -74,6 +74,7 @@ pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
         AgentCommands::Release(args) => super::agent_cmd::cmd_agent_release(cli, args.clone()),
         AgentCommands::List(args) => super::agent_cmd::cmd_agent_list(cli, args.clone()),
         AgentCommands::Task(command) => super::agent_cmd::cmd_agent_task(cli, command.clone()),
+        AgentCommands::Fanout(command) => super::agent_cmd::cmd_agent_fanout(cli, command.clone()),
     }
 }
 
