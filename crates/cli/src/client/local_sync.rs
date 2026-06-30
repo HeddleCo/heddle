@@ -7,7 +7,7 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{ChangeId, ContentHash},
+    object::{ChangeId, ContentHash, EntryType, Tree},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -15,6 +15,117 @@ use repo::Repository;
 /// Synchronize objects from a local source repository to a target repository.
 pub struct LocalSync {
     source: Repository,
+}
+
+struct TreeTransferPlan {
+    trees: Vec<PlannedTree>,
+    blobs: Vec<ContentHash>,
+}
+
+struct PlannedTree {
+    hash: ContentHash,
+    tree: Tree,
+}
+
+impl TreeTransferPlan {
+    fn gather(
+        source: &Repository,
+        roots: impl IntoIterator<Item = ContentHash>,
+        require_complete: bool,
+    ) -> Result<Self> {
+        let mut visitor = TreeTransferVisitor::new(source, require_complete);
+        for root in roots {
+            visitor.visit_tree(&root)?;
+        }
+        Ok(visitor.finish())
+    }
+
+    fn propagate_redactions(&self, sync: &LocalSync, target: &Repository) -> Result<()> {
+        for blob in &self.blobs {
+            sync.propagate_redactions_for_blob(target, blob)?;
+        }
+        Ok(())
+    }
+
+    fn copy_objects(
+        &self,
+        sync: &LocalSync,
+        target: &Repository,
+        copied: &mut usize,
+    ) -> Result<()> {
+        for hash in &self.blobs {
+            if !target.store().has_blob(hash)? {
+                let blob = sync.source.require_blob(hash)?;
+                target.store().put_blob(&blob)?;
+                *copied += 1;
+            }
+        }
+        for planned in &self.trees {
+            if !target.store().has_tree(&planned.hash)? {
+                target.store().put_tree(&planned.tree)?;
+                *copied += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct TreeTransferVisitor<'source> {
+    source: &'source Repository,
+    require_complete: bool,
+    visited_trees: HashSet<ContentHash>,
+    visited_blobs: HashSet<ContentHash>,
+    plan: TreeTransferPlan,
+}
+
+impl<'source> TreeTransferVisitor<'source> {
+    fn new(source: &'source Repository, require_complete: bool) -> Self {
+        Self {
+            source,
+            require_complete,
+            visited_trees: HashSet::new(),
+            visited_blobs: HashSet::new(),
+            plan: TreeTransferPlan {
+                trees: Vec::new(),
+                blobs: Vec::new(),
+            },
+        }
+    }
+
+    fn visit_tree(&mut self, tree_hash: &ContentHash) -> Result<()> {
+        if !self.visited_trees.insert(*tree_hash) {
+            return Ok(());
+        }
+
+        let Some(tree) = self.source.store().get_tree(tree_hash)? else {
+            if self.require_complete {
+                return Err(anyhow!("Tree {} not found in source", tree_hash));
+            }
+            return Ok(());
+        };
+
+        for entry in tree.entries() {
+            match entry.entry_type {
+                EntryType::Blob | EntryType::Symlink => {
+                    if self.visited_blobs.insert(entry.hash) {
+                        self.plan.blobs.push(entry.hash);
+                    }
+                }
+                EntryType::Tree => {
+                    self.visit_tree(&entry.hash)?;
+                }
+            }
+        }
+        self.plan.trees.push(PlannedTree {
+            hash: *tree_hash,
+            tree,
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> TreeTransferPlan {
+        self.plan
+    }
 }
 
 impl LocalSync {
@@ -113,24 +224,17 @@ impl LocalSync {
         // Always propagate per-state visibility and per-blob redactions,
         // regardless of whether the objects themselves need copying.
         self.propagate_state_visibility_for_state(target, state_id)?;
-        let mut propagated_trees: HashSet<ContentHash> = HashSet::new();
-        self.propagate_redactions_in_tree(target, &state.tree, &mut propagated_trees)?;
-        if let Some(provenance_root) = state.provenance {
-            self.propagate_redactions_in_tree(target, &provenance_root, &mut propagated_trees)?;
-        }
-        if let Some(context_root) = state.context {
-            self.propagate_redactions_in_tree(target, &context_root, &mut propagated_trees)?;
-        }
+        let transfer_plan = TreeTransferPlan::gather(
+            &self.source,
+            [Some(state.tree), state.provenance, state.context]
+                .into_iter()
+                .flatten(),
+            !state_already_present,
+        )?;
+        transfer_plan.propagate_redactions(self, target)?;
 
         if !state_already_present {
-            // Copy tree recursively
-            self.copy_tree_recursive(target, &state.tree, copied)?;
-            if let Some(provenance_root) = state.provenance {
-                self.copy_tree_recursive(target, &provenance_root, copied)?;
-            }
-            if let Some(context_root) = state.context {
-                self.copy_tree_recursive(target, &context_root, copied)?;
-            }
+            transfer_plan.copy_objects(self, target, copied)?;
         }
         self.copy_state_blob_dependencies(target, &state, copied)?;
 
@@ -197,97 +301,6 @@ impl LocalSync {
         let blob = self.source.require_blob(hash)?;
         target.store().put_blob(&blob)?;
         *copied += 1;
-        Ok(())
-    }
-
-    fn copy_tree_recursive(
-        &self,
-        target: &Repository,
-        tree_hash: &ContentHash,
-        copied: &mut usize,
-    ) -> Result<()> {
-        // Check if target already has this tree
-        if target.store().has_tree(tree_hash)? {
-            return Ok(());
-        }
-
-        // Get the tree from source
-        let tree = self
-            .source
-            .store()
-            .get_tree(tree_hash)?
-            .ok_or_else(|| anyhow!("Tree {} not found in source", tree_hash))?;
-
-        // Copy all blobs and sub-trees. Redaction propagation lives
-        // in `propagate_redactions_in_tree`, called by
-        // `copy_state_recursive` regardless of whether the tree was
-        // already present — so it's intentionally absent here.
-        for entry in tree.entries() {
-            match entry.entry_type {
-                objects::object::EntryType::Blob => {
-                    if !target.store().has_blob(&entry.hash)? {
-                        let blob = self.source.require_blob(&entry.hash)?;
-                        target.store().put_blob(&blob)?;
-                        *copied += 1;
-                    }
-                }
-                objects::object::EntryType::Tree => {
-                    self.copy_tree_recursive(target, &entry.hash, copied)?;
-                }
-                objects::object::EntryType::Symlink => {
-                    if !target.store().has_blob(&entry.hash)? {
-                        let blob = self.source.require_blob(&entry.hash)?;
-                        target.store().put_blob(&blob)?;
-                        *copied += 1;
-                    }
-                }
-            }
-        }
-
-        // Store the tree in target
-        target.store().put_tree(&tree)?;
-        *copied += 1;
-
-        Ok(())
-    }
-
-    /// Walk a source-side tree and propagate any redaction sidecars
-    /// found for the blobs it references. Runs regardless of whether
-    /// the tree (or its parent state) is already present on the
-    /// target — the whole point is to recover from the "redact-after-
-    /// peer-fetched" flow where the object graph is unchanged but a
-    /// new sidecar exists upstream.
-    ///
-    /// `propagated_trees` dedups within a single sync so we don't
-    /// re-walk the same subtree across `state.tree`, `provenance`,
-    /// and `context` roots that happen to share content.
-    fn propagate_redactions_in_tree(
-        &self,
-        target: &Repository,
-        tree_hash: &ContentHash,
-        propagated_trees: &mut HashSet<ContentHash>,
-    ) -> Result<()> {
-        if !propagated_trees.insert(*tree_hash) {
-            return Ok(());
-        }
-
-        // Tree must come from the source — if it's missing there, we
-        // can't enumerate blob hashes for sidecar lookup. Treat as a
-        // gap in propagation (best-effort), not a hard failure.
-        let Some(tree) = self.source.store().get_tree(tree_hash)? else {
-            return Ok(());
-        };
-
-        for entry in tree.entries() {
-            match entry.entry_type {
-                objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                    self.propagate_redactions_for_blob(target, &entry.hash)?;
-                }
-                objects::object::EntryType::Tree => {
-                    self.propagate_redactions_in_tree(target, &entry.hash, propagated_trees)?;
-                }
-            }
-        }
         Ok(())
     }
 

@@ -973,6 +973,7 @@ impl ObjectStore for FsStore {
         for (id, data) in state_entries {
             self.put_state_serialized(&data, id)?;
         }
+        self.clear_recent_object_caches();
         Ok(ids)
     }
 

@@ -6,10 +6,9 @@
 //! [`OperationLogQuery`] / [`IndexedOperation`] types. No state changes,
 //! no idempotency wrapper.
 
-use std::{collections::BTreeMap, path::Path, pin::Pin};
+use std::{collections::BTreeMap, path::Path};
 
 use chrono::TimeZone;
-use futures::Stream;
 use grpc::heddle::v1::{
     OperationHit, QueryOperationsRequest, QueryOperationsResponse, StreamOperationsRequest,
     operation_log_query_service_server::OperationLogQueryService,
@@ -248,7 +247,7 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
 
 #[tonic::async_trait]
 impl OperationLogQueryService for LocalOperationLogQueryService {
-    type StreamOperationsStream = Pin<Box<dyn Stream<Item = Result<OperationHit, Status>> + Send>>;
+    type StreamOperationsStream = ReceiverStream<Result<OperationHit, Status>>;
 
     async fn query_operations(
         &self,
@@ -278,7 +277,7 @@ impl OperationLogQueryService for LocalOperationLogQueryService {
                 }
             }
         });
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

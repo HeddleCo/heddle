@@ -4,9 +4,8 @@
 //! window. The actual signal *computation* lands in R3 (`crates/state_review`);
 //! this service exposes whatever's already on disk.
 
-use std::{collections::HashMap, pin::Pin};
+use std::collections::HashMap;
 
-use futures::Stream;
 use grpc::heddle::v1::{
     ComputeStateSignalsRequest, ComputeStateSignalsResponse, GetRepoSignalHealthRequest,
     PathSymbolRef, RepoSignalHealthReport, RiskSignal as ProtoRiskSignal,
@@ -40,8 +39,7 @@ impl LocalSignalService {
 
 #[tonic::async_trait]
 impl SignalService for LocalSignalService {
-    type SubscribeSignalUpdatesStream =
-        Pin<Box<dyn Stream<Item = Result<SignalUpdate, Status>> + Send>>;
+    type SubscribeSignalUpdatesStream = ReceiverStream<Result<SignalUpdate, Status>>;
 
     async fn compute_state_signals(
         &self,
@@ -134,7 +132,7 @@ impl SignalService for LocalSignalService {
         // channel that closes immediately — clients see EOF and reconnect
         // when the producer becomes available.
         let (_tx, rx) = tokio::sync::mpsc::channel::<Result<SignalUpdate, Status>>(1);
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

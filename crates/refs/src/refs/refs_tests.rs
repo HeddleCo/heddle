@@ -779,6 +779,59 @@ mod chokepoint {
         }
     }
 
+    struct DelayedSharedRefReconciler {
+        generation_calls: AtomicU64,
+        republish: Vec<RefUpdate>,
+    }
+
+    impl RefReconciler for DelayedSharedRefReconciler {
+        fn generation(&self) -> Result<u64> {
+            let call = self.generation_calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if call <= 2 { Ok(1) } else { Ok(2) }
+        }
+
+        fn reconcile(
+            &self,
+            req: &LoadRequest,
+            raw: Loaded,
+            _since: u64,
+        ) -> Result<ReconcileOutcome> {
+            let loaded = match req {
+                LoadRequest::Thread(name) => self
+                    .republish
+                    .iter()
+                    .find_map(|update| match update {
+                        RefUpdate::Thread {
+                            name: update_name,
+                            new,
+                            ..
+                        } if update_name == name => Some(Loaded::Point(*new)),
+                        _ => None,
+                    })
+                    .unwrap_or(raw),
+                LoadRequest::Marker(name) => self
+                    .republish
+                    .iter()
+                    .find_map(|update| match update {
+                        RefUpdate::Marker {
+                            name: update_name,
+                            new,
+                            ..
+                        } if update_name == name => Some(Loaded::Point(*new)),
+                        _ => None,
+                    })
+                    .unwrap_or(raw),
+                _ => raw,
+            };
+            Ok(ReconcileOutcome {
+                loaded,
+                republish: self.republish.clone(),
+                remote_updates: Vec::new(),
+                undo_recovery: None,
+            })
+        }
+    }
+
     type CommitCall = (Vec<Vec<u8>>, Option<String>);
 
     struct FakeCommitter {
@@ -966,6 +1019,58 @@ mod chokepoint {
             before,
             "watermark caught up ⇒ hot path"
         );
+    }
+
+    #[test]
+    fn delete_thread_uses_expected_old_when_committed_tail_updates_ref() {
+        let (_t, dir) = manager();
+        let name = ThreadName::new("feature/delete-race");
+        let old = ChangeId::generate();
+        let new = ChangeId::generate();
+        RefManager::new(&dir).set_thread(&name, &old).unwrap();
+
+        let refs = RefManager::new(&dir).with_reconciler(Arc::new(DelayedSharedRefReconciler {
+            generation_calls: AtomicU64::new(0),
+            republish: vec![RefUpdate::Thread {
+                name: name.clone(),
+                expected: RefExpectation::Any,
+                new: Some(new),
+            }],
+        }));
+
+        let result = refs.delete_thread(&name);
+
+        assert!(
+            result.is_err(),
+            "delete_thread must conflict rather than delete a newer reconciled value"
+        );
+        assert_eq!(refs.get_thread(&name).unwrap(), Some(new));
+    }
+
+    #[test]
+    fn delete_marker_uses_expected_old_when_committed_tail_updates_ref() {
+        let (_t, dir) = manager();
+        let name = MarkerName::new("delete-race");
+        let old = ChangeId::generate();
+        let new = ChangeId::generate();
+        RefManager::new(&dir).create_marker(&name, &old).unwrap();
+
+        let refs = RefManager::new(&dir).with_reconciler(Arc::new(DelayedSharedRefReconciler {
+            generation_calls: AtomicU64::new(0),
+            republish: vec![RefUpdate::Marker {
+                name: name.clone(),
+                expected: RefExpectation::Any,
+                new: Some(new),
+            }],
+        }));
+
+        let result = refs.delete_marker(&name);
+
+        assert!(
+            result.is_err(),
+            "delete_marker must conflict rather than delete a newer reconciled value"
+        );
+        assert_eq!(refs.get_marker(&name).unwrap(), Some(new));
     }
 
     /// `commit_and_publish` appends the ref-carrying records (phase 4) before

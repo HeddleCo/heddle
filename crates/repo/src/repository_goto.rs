@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use objects::{lock::RepositoryLockExt, object::ChangeId, store::ObjectStore};
 use oplog::OpLogRecorder;
-use refs::Head;
+use refs::{Head, RefExpectation, RefUpdate};
 use tracing::debug;
 
 use super::{
@@ -23,6 +23,12 @@ enum WorktreeBaseline {
     Materialized(Option<ChangeId>),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum HeadPublishMode {
+    Detach,
+    PreserveAttached,
+}
+
 impl Repository {
     /// Move worktree to a different state.
     pub fn goto(&self, target: &ChangeId) -> Result<()> {
@@ -32,6 +38,7 @@ impl Repository {
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -43,6 +50,7 @@ impl Repository {
             false,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -63,6 +71,7 @@ impl Repository {
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
             WorktreeBaseline::Materialized(materialized.copied()),
+            HeadPublishMode::Detach,
         )
     }
 
@@ -158,29 +167,14 @@ impl Repository {
         dirty_behavior: WorktreeApplyDirtyBehavior,
         baseline: WorktreeBaseline,
     ) -> Result<()> {
-        let head_before = self.refs.read_head()?;
-        if record {
-            self.goto_internal(target, true, false, dirty_behavior, baseline)?;
-        } else {
-            self.goto_internal(target, false, false, dirty_behavior, baseline)?;
-        }
-        if let Head::Attached {
-            thread: current_thread,
-        } = &head_before
-        {
-            self.refs.set_thread(current_thread, target)?;
-            self.refs.write_head(&Head::Attached {
-                thread: current_thread.clone(),
-            })?;
-            let thread_manager = ThreadManager::new(self.heddle_dir());
-            if let Some(mut current_meta) = thread_manager.find_by_thread(current_thread)? {
-                current_meta.current_state = Some(target.short());
-                current_meta.updated_at = chrono::Utc::now();
-                current_meta.freshness = ThreadFreshness::Current;
-                thread_manager.save(&current_meta)?;
-            }
-        }
-        Ok(())
+        self.goto_internal(
+            target,
+            record,
+            false,
+            dirty_behavior,
+            baseline,
+            HeadPublishMode::PreserveAttached,
+        )
     }
 
     pub fn goto_verified_clean(&self, target: &ChangeId) -> Result<()> {
@@ -190,6 +184,7 @@ impl Repository {
             true,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -200,6 +195,7 @@ impl Repository {
             true,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -210,6 +206,7 @@ impl Repository {
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -220,6 +217,7 @@ impl Repository {
             false,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
             WorktreeBaseline::Head,
+            HeadPublishMode::Detach,
         )
     }
 
@@ -230,6 +228,7 @@ impl Repository {
         current_worktree_verified_clean: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
         baseline: WorktreeBaseline,
+        head_publish_mode: HeadPublishMode,
     ) -> Result<()> {
         let total_start = Instant::now();
         let _lock = self
@@ -306,7 +305,7 @@ impl Repository {
                 .record_goto(target, prev_head.as_ref(), Some(&self.op_scope()))?;
             objects::fault_inject::maybe_panic_at("goto_after_oplog_commit_before_ref_publish");
         }
-        self.refs.write_head(&Head::Detached { state: *target })?;
+        self.publish_goto_refs(target, &prev_head_ref, prev_head, head_publish_mode, record)?;
 
         debug!(
             load_duration_ms,
@@ -337,15 +336,68 @@ impl Repository {
         );
         Ok(())
     }
+
+    fn publish_goto_refs(
+        &self,
+        target: &ChangeId,
+        prev_head_ref: &Head,
+        prev_head: Option<ChangeId>,
+        head_publish_mode: HeadPublishMode,
+        record: bool,
+    ) -> Result<()> {
+        let recorded_head = Head::Detached { state: *target };
+        let expected_head = if record {
+            RefExpectation::Value(recorded_head)
+        } else {
+            RefExpectation::Value(prev_head_ref.clone())
+        };
+        match (head_publish_mode, prev_head_ref) {
+            (HeadPublishMode::PreserveAttached, Head::Attached { thread }) => {
+                let expected_thread = match prev_head {
+                    Some(change_id) => RefExpectation::Value(change_id),
+                    None => RefExpectation::Missing,
+                };
+                self.refs.update_refs(&[
+                    RefUpdate::Thread {
+                        name: thread.clone(),
+                        expected: expected_thread,
+                        new: Some(*target),
+                    },
+                    RefUpdate::Head {
+                        expected: expected_head,
+                        new: Head::Attached {
+                            thread: thread.clone(),
+                        },
+                    },
+                ])?;
+                ThreadManager::new(self.heddle_dir()).update_current_state_for_thread(
+                    thread.as_str(),
+                    target,
+                    ThreadFreshness::Current,
+                )?;
+            }
+            _ => {
+                self.refs
+                    .write_head_cas(expected_head, &Head::Detached { state: *target })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
+    use chrono::Utc;
     use objects::object::ThreadName;
     use refs::Head;
     use tempfile::TempDir;
+
+    use crate::{
+        Thread, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMode,
+        ThreadVerificationSummary, thread_model::ThreadState,
+    };
 
     use super::*;
 
@@ -365,6 +417,45 @@ mod tests {
         repo.snapshot(Some(path.to_string()), None)
             .unwrap()
             .change_id
+    }
+
+    fn save_thread_metadata(
+        repo: &Repository,
+        root: &std::path::Path,
+        thread_name: &str,
+        current_state: &ChangeId,
+    ) {
+        let now = Utc::now();
+        ThreadManager::new(repo.heddle_dir())
+            .save(&Thread {
+                id: format!("{thread_name}-metadata"),
+                thread: thread_name.to_string(),
+                target_thread: Some(thread_name.to_string()),
+                parent_thread: None,
+                mode: ThreadMode::Materialized,
+                state: ThreadState::Active,
+                base_state: current_state.short(),
+                base_root: "base-root".to_string(),
+                current_state: Some(current_state.short()),
+                merged_state: None,
+                task: None,
+                execution_path: root.to_path_buf(),
+                materialized_path: Some(root.to_path_buf()),
+                changed_paths: Vec::new(),
+                impact_categories: Vec::new(),
+                heavy_impact_paths: Vec::new(),
+                promotion_suggested: false,
+                freshness: ThreadFreshness::Stale,
+                verification_summary: ThreadVerificationSummary::default(),
+                confidence_summary: ThreadConfidenceSummary::default(),
+                integration_policy_result: ThreadIntegrationPolicy::default(),
+                created_at: now,
+                updated_at: now,
+                ephemeral: None,
+                auto: false,
+                shared_target_dir: None,
+            })
+            .unwrap();
     }
 
     #[test]
@@ -397,7 +488,7 @@ mod tests {
             .unwrap()
             .change_id;
 
-        repo.goto(&pre_target).unwrap();
+        repo.goto_without_record(&pre_target).unwrap();
         repo.refs()
             .write_head(&Head::Detached { state: target })
             .unwrap();
@@ -427,7 +518,7 @@ mod tests {
             .unwrap()
             .change_id;
 
-        repo.goto(&base).unwrap();
+        repo.goto_without_record(&base).unwrap();
         fs::write(&tracked, "local edit\n").unwrap();
         fs::write(temp.path().join("local.txt"), "local only\n").unwrap();
 
@@ -447,7 +538,7 @@ mod tests {
             .unwrap()
             .change_id;
 
-        repo.goto(&base).unwrap();
+        repo.goto_without_record(&base).unwrap();
         let thread = ThreadName::new("main");
         repo.refs().set_thread(&thread, &target).unwrap();
         repo.refs()
@@ -468,5 +559,43 @@ mod tests {
             fs::read_to_string(temp.path().join("next.txt")).unwrap(),
             "next\n"
         );
+    }
+
+    #[test]
+    fn attached_fast_forward_keeps_ref_head_and_metadata_consistent() {
+        let (temp, repo) = create_repo();
+        let base = write_snapshot(&repo, temp.path(), "base.txt", "base\n");
+        fs::write(temp.path().join("next.txt"), "next\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto_without_record(&base).unwrap();
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &base).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+        save_thread_metadata(&repo, temp.path(), thread.as_str(), &base);
+
+        repo.fast_forward_attached_without_record(&target).unwrap();
+
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(target));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+        let metadata = ThreadManager::new(repo.heddle_dir())
+            .find_by_thread(thread.as_str())
+            .unwrap()
+            .expect("thread metadata should exist");
+        assert_eq!(
+            metadata.current_state.as_deref(),
+            Some(target.short().as_str())
+        );
+        assert!(matches!(metadata.freshness, ThreadFreshness::Current));
     }
 }

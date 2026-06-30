@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use async_trait::async_trait;
+use std::future::Future;
+
 use base64::Engine;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -9,9 +10,11 @@ use crate::{Result, errors::ReviewError, types::ReviewJobKey};
 
 const GITHUB_API: &str = "https://api.github.com";
 
-#[async_trait]
 pub trait GitHubInstallationLookup: Send + Sync {
-    async fn installation_id_for_repo(&self, key: &ReviewJobKey) -> Result<Option<i64>>;
+    fn installation_id_for_repo(
+        &self,
+        key: &ReviewJobKey,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send;
 }
 
 #[derive(Debug, Clone)]

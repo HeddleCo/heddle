@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use async_trait::async_trait;
+use std::future::Future;
+
 use uuid::Uuid;
 
 use crate::{
@@ -70,27 +71,43 @@ impl ReviewProgressUpdate {
     }
 }
 
-#[async_trait]
 pub trait ReviewJobStore: Send + Sync {
-    async fn create_job(&self, request: &ReviewAnalysisRequest) -> Result<ReviewJobRecord>;
-    async fn latest_job(&self, key: &ReviewJobKey) -> Result<Option<ReviewJobRecord>>;
-    async fn job_by_id(&self, job_id: Uuid) -> Result<Option<ReviewJobRecord>>;
-    async fn status_by_selector(
+    fn create_job(
+        &self,
+        request: &ReviewAnalysisRequest,
+    ) -> impl Future<Output = Result<ReviewJobRecord>> + Send;
+    fn latest_job(
+        &self,
+        key: &ReviewJobKey,
+    ) -> impl Future<Output = Result<Option<ReviewJobRecord>>> + Send;
+    fn job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> impl Future<Output = Result<Option<ReviewJobRecord>>> + Send;
+    fn status_by_selector(
         &self,
         job_id: Option<Uuid>,
         key: Option<&ReviewJobKey>,
-    ) -> Result<Option<ReviewStatusSnapshot>>;
-    async fn result_by_selector(
+    ) -> impl Future<Output = Result<Option<ReviewStatusSnapshot>>> + Send;
+    fn result_by_selector(
         &self,
         job_id: Option<Uuid>,
         key: Option<&ReviewJobKey>,
-    ) -> Result<Option<ReviewAnalysisResult>>;
-    async fn attach_metadata(
+    ) -> impl Future<Output = Result<Option<ReviewAnalysisResult>>> + Send;
+    fn attach_metadata(
         &self,
         job_id: Uuid,
         head_sha: &str,
         metadata: &PrMetadata,
-    ) -> Result<()>;
-    async fn update_progress(&self, job_id: Uuid, update: ReviewProgressUpdate) -> Result<()>;
-    async fn complete_job(&self, job_id: Uuid, result: &ReviewAnalysisResult) -> Result<()>;
+    ) -> impl Future<Output = Result<()>> + Send;
+    fn update_progress(
+        &self,
+        job_id: Uuid,
+        update: ReviewProgressUpdate,
+    ) -> impl Future<Output = Result<()>> + Send;
+    fn complete_job(
+        &self,
+        job_id: Uuid,
+        result: &ReviewAnalysisResult,
+    ) -> impl Future<Output = Result<()>> + Send;
 }

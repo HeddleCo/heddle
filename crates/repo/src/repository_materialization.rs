@@ -524,13 +524,13 @@ impl Repository {
                 hash,
                 validation_root,
             } => {
-                let blob = self
+                let blob_bytes = self
                     .store
-                    .get_blob(hash)?
+                    .get_blob_bytes(hash)?
                     .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
                 #[cfg(unix)]
                 {
-                    let target = std::str::from_utf8(blob.content()).map_err(|_| {
+                    let target = std::str::from_utf8(blob_bytes.as_ref()).map_err(|_| {
                         HeddleError::InvalidObject("invalid symlink target".to_string())
                     })?;
                     let target_path = Path::new(target);
@@ -549,7 +549,7 @@ impl Repository {
                 // bindings rather than ship a half-implementation.
                 #[cfg(not(unix))]
                 {
-                    let _ = (blob, path, validation_root);
+                    let _ = (blob_bytes, path, validation_root);
                 }
             }
         }
@@ -673,16 +673,16 @@ impl Repository {
             }
         }
 
-        let blob = self
+        let bytes = self
             .store
-            .get_blob(hash)?
+            .get_blob_bytes(hash)?
             .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
         // Remove any stale dest before writing. We don't share inodes
         // with the canonical store anymore (no hardlinks), but a
         // previous `goto` could still have left an unrelated file
         // here that we should overwrite cleanly.
         let _ = fs::remove_file(dest);
-        fs::write(dest, blob.content())?;
+        fs::write(dest, bytes.as_ref())?;
         set_file_mode(dest, executable)?;
         context.record_copy();
         Ok(())

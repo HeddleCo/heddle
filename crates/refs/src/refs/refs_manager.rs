@@ -760,12 +760,8 @@ impl RefManager {
 
     pub fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         let state = self.get_thread(name)?;
-        if state.is_some() {
-            self.update_refs(&[RefUpdate::Thread {
-                name: name.clone(),
-                expected: RefExpectation::Any,
-                new: None,
-            }])?;
+        if let Some(state) = state {
+            self.delete_thread_cas(name, RefExpectation::Value(state))?;
         }
         Ok(state)
     }
@@ -812,8 +808,8 @@ impl RefManager {
 
     pub fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         let state = self.get_marker(name)?;
-        if state.is_some() {
-            self.delete_marker_cas(name, RefExpectation::Any)?;
+        if let Some(state) = state {
+            self.delete_marker_cas(name, RefExpectation::Value(state))?;
         }
         Ok(state)
     }

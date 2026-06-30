@@ -308,6 +308,30 @@ impl ThreadManager {
             .max_by_key(|thread_entry| thread_entry.updated_at))
     }
 
+    pub(crate) fn update_current_state_for_thread(
+        &self,
+        thread_name: &str,
+        state: &ChangeId,
+        freshness: ThreadFreshness,
+    ) -> Result<bool> {
+        let _lock = self.write_lock()?;
+        let Some(record) = self
+            .list_record_files()?
+            .into_iter()
+            .filter(|record| record.thread == thread_name)
+            .max_by_key(|record| record.updated_at)
+        else {
+            return Ok(false);
+        };
+        let mut thread = self.hydrate_thread_from_record(record)?;
+        thread.current_state = Some(state.short());
+        thread.updated_at = Utc::now();
+        thread.freshness = freshness;
+        self.save_record_file(&thread.to_record())?;
+        self.save_workspace_file(&thread.id, &thread.workspace_state())?;
+        Ok(true)
+    }
+
     pub fn find_by_execution_root(&self, root: &Path) -> Result<Option<Thread>> {
         let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         Ok(self.list()?.into_iter().find(|thread| {

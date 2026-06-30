@@ -9,8 +9,8 @@ use std::{
 use anyhow::{Result, anyhow};
 use objects::{
     object::{
-        AnnotationStatus, Blob, ChangeId, ContextTarget, DiffKind, EntryType, FileChangeSet,
-        FileMode, State, Tree, TreeEntry,
+        AnnotationStatus, Blob, ChangeId, ContentHash, ContextTarget, DiffKind, EntryType,
+        FileChangeSet, FileMode, State, Tree, TreeEntry,
     },
     store::ObjectStore,
     worktree::diff_blobs,
@@ -52,6 +52,113 @@ const BINARY_DIFF_ERROR: &str = "binary file";
 struct SemanticDiffResult {
     changes: Vec<objects::object::SemanticChange>,
     file_changes: FileChangeSet,
+}
+
+struct DiffGatherContext<'repo> {
+    repo: &'repo Repository,
+    from_id: Option<ChangeId>,
+    from_state: Option<State>,
+    from_tree: Option<Tree>,
+    to_state: Option<State>,
+    to_tree: Option<Tree>,
+}
+
+impl<'repo> DiffGatherContext<'repo> {
+    fn gather(
+        repo: &'repo Repository,
+        from: Option<&str>,
+        to: Option<&str>,
+        git_overlay_head_worktree_diff: bool,
+    ) -> Result<Self> {
+        let from_id = if git_overlay_head_worktree_diff {
+            None
+        } else if let Some(spec) = from {
+            Some(resolve_state_id(repo, spec)?)
+        } else {
+            repo.head()?
+        };
+        let from_state = from_id
+            .as_ref()
+            .map(|id| require_resolved_state(repo, id))
+            .transpose()?;
+        let from_tree = from_state
+            .as_ref()
+            .map(|state| repo.store().get_tree(&state.tree))
+            .transpose()?
+            .flatten();
+        let to_state = to
+            .map(|spec| {
+                let to_id = resolve_state_id(repo, spec)?;
+                require_resolved_state(repo, &to_id)
+            })
+            .transpose()?;
+        let to_tree = to_state
+            .as_ref()
+            .map(|state| repo.store().get_tree(&state.tree))
+            .transpose()?
+            .flatten();
+        Ok(Self {
+            repo,
+            from_id,
+            from_state,
+            from_tree,
+            to_state,
+            to_tree,
+        })
+    }
+
+    fn base_tree_hash(&self) -> ContentHash {
+        self.from_state
+            .as_ref()
+            .map(|state| state.tree)
+            .unwrap_or_else(|| Tree::new().hash())
+    }
+
+    fn base_tree(&self) -> Option<&Tree> {
+        self.from_tree.as_ref()
+    }
+
+    fn to_tree(&self) -> Option<&Tree> {
+        self.to_tree.as_ref()
+    }
+
+    fn context_state(&self, show_context: bool, to_requested: bool) -> Result<Option<State>> {
+        if !show_context {
+            return Ok(None);
+        }
+        if to_requested {
+            return Ok(self.to_state.clone());
+        }
+        if self.from_state.is_some() {
+            return Ok(self.from_state.clone());
+        }
+        Ok(self.repo.current_state()?)
+    }
+}
+
+struct DiffPathFacts {
+    old_mode: Option<FileMode>,
+    mode: Option<FileMode>,
+    symlink: Option<SymlinkChange>,
+}
+
+impl DiffPathFacts {
+    fn for_single_path(
+        repo: &Repository,
+        from_tree: Option<&Tree>,
+        to_tree: Option<&Tree>,
+        kind: &str,
+        path: &str,
+    ) -> Self {
+        let (old_mode, mode) = change_file_modes(repo, from_tree, to_tree, path, kind);
+        let symlink =
+            symlink_change_for_paths(repo, from_tree, to_tree, kind, path, path, old_mode, mode);
+        Self {
+            old_mode,
+            mode,
+            symlink,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -112,11 +219,11 @@ pub fn cmd_diff(
             Some(&repo),
         );
     }
-    let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
-        && to.is_none()
-        && matches!(from.as_deref(), Some("HEAD" | "@"));
+    let current_state_missing = repo.current_state()?.is_none();
+    let git_overlay_head_worktree_diff =
+        current_state_missing && to.is_none() && matches!(from.as_deref(), Some("HEAD" | "@"));
     if !git_overlay_head_worktree_diff
-        && repo.current_state()?.is_none()
+        && current_state_missing
         && (matches!(from.as_deref(), Some("HEAD" | "@"))
             || matches!(to.as_deref(), Some("HEAD" | "@")))
     {
@@ -126,26 +233,12 @@ pub fn cmd_diff(
             Some("Bootstrap git-overlay before diffing HEAD".to_string()),
         )?;
     }
-
-    let from_id = if git_overlay_head_worktree_diff {
-        None
-    } else if let Some(ref spec) = from {
-        Some(resolve_state_id(&repo, spec)?)
-    } else {
-        repo.head()?
-    };
-
-    let from_state = if let Some(id) = from_id {
-        Some(require_resolved_state(&repo, &id)?)
-    } else {
-        None
-    };
-
-    let from_tree = if let Some(ref state) = from_state {
-        repo.store().get_tree(&state.tree)?
-    } else {
-        None
-    };
+    let gather = DiffGatherContext::gather(
+        &repo,
+        from.as_deref(),
+        to.as_deref(),
+        git_overlay_head_worktree_diff,
+    )?;
     let status_options = worktree_status_options(Some(repo.config()));
 
     let semantic_diff_result: Option<SemanticDiffResult> = if semantic {
@@ -160,25 +253,17 @@ pub fn cmd_diff(
         {
             let options = SemanticDiffOptions::default();
 
-            if let Some(ref to_spec) = to {
-                let to_id = resolve_state_id(&repo, to_spec)?;
-                let to_state = require_resolved_state(&repo, &to_id)?;
-
-                let from_hash = from_state
-                    .as_ref()
-                    .map(|s| s.tree)
-                    .unwrap_or_else(|| Tree::new().hash());
-
-                Some(semantic_diff(&repo, &from_hash, &to_state.tree, &options)?)
+            if let Some(ref to_state) = gather.to_state {
+                Some(semantic_diff(
+                    &repo,
+                    &gather.base_tree_hash(),
+                    &to_state.tree,
+                    &options,
+                )?)
             } else {
-                let from_hash = from_state
-                    .as_ref()
-                    .map(|s| s.tree)
-                    .unwrap_or_else(|| Tree::new().hash());
-
                 Some(semantic_diff_worktree(
                     &repo,
-                    &from_hash,
+                    &gather.base_tree_hash(),
                     &options,
                     &status_options,
                 )?)
@@ -192,24 +277,10 @@ pub fn cmd_diff(
     // "new" blob bytes for line-diff rendering); the worktree path
     // reads new bytes from disk instead and doesn't need this. Semantic
     // diff is additive: it should not suppress normal unified hunks.
-    let mut to_tree: Option<Tree> = None;
-    if let Some(ref to_spec) = to {
-        let to_id = resolve_state_id(&repo, to_spec)?;
-        let to_state = require_resolved_state(&repo, &to_id)?;
-        to_tree = repo.store().get_tree(&to_state.tree)?;
-    }
     let changes: FileChangeSet = if let Some(ref result) = semantic_diff_result {
         result.file_changes.clone()
-    } else if let Some(ref to_spec) = to {
-        let to_id = resolve_state_id(&repo, to_spec)?;
-        let to_state = require_resolved_state(&repo, &to_id)?;
-
-        let from_hash = from_state
-            .as_ref()
-            .map(|s| s.tree)
-            .unwrap_or_else(|| Tree::new().hash());
-
-        repo.diff_trees(&from_hash, &to_state.tree)?
+    } else if let Some(ref to_state) = gather.to_state {
+        repo.diff_trees(&gather.base_tree_hash(), &to_state.tree)?
     } else if git_overlay_head_worktree_diff {
         let status = repo.git_overlay_worktree_status()?.unwrap_or_default();
 
@@ -225,7 +296,7 @@ pub fn cmd_diff(
         }
         changes
     } else {
-        let tree = from_tree.clone().unwrap_or_default();
+        let tree = gather.from_tree.clone().unwrap_or_default();
         let status = repo.compare_worktree_cached_with_options(&tree, &status_options)?;
 
         let mut changes = FileChangeSet::with_capacity(status.change_count());
@@ -261,8 +332,8 @@ pub fn cmd_diff(
             .map(|change| {
                 make_status_only_change(
                     Some(&repo),
-                    from_tree.as_ref(),
-                    to_tree.as_ref(),
+                    gather.base_tree(),
+                    gather.to_tree(),
                     &change.path,
                     &change.kind.to_string(),
                 )
@@ -288,23 +359,23 @@ pub fn cmd_diff(
                 // path that is now a directory into a deletion (file→dir
                 // type change); state-to-state diffs read from trees and
                 // never hit the filesystem, so they keep `change.kind`.
-                let effective_kind = if to_tree.is_none() {
+                let effective_kind = if gather.to_tree().is_none() {
                     worktree_modified_type_change(repo.root(), &change.path, change.kind)
                         .map(|(_, diff_kind)| diff_kind)
                         .unwrap_or(change.kind)
                 } else {
                     change.kind
                 };
-                let diff_result = if let Some(ref tree) = to_tree {
+                let diff_result = if let Some(tree) = gather.to_tree() {
                     get_state_diff(
                         &repo,
-                        from_tree.as_ref(),
+                        gather.base_tree(),
                         tree,
                         &change.path,
                         &effective_kind,
                     )
                 } else {
-                    get_worktree_diff(&repo, from_tree.as_ref(), &change.path, &effective_kind)
+                    get_worktree_diff(&repo, gather.base_tree(), &change.path, &effective_kind)
                 };
                 let binary = diff_result.as_ref().err().is_some_and(is_binary_diff_error);
                 let (raw_lines, eol) = match diff_result {
@@ -329,33 +400,23 @@ pub fn cmd_diff(
                 };
 
                 let kind = effective_kind.to_string();
-                let (old_mode, mode) = change_file_modes(
+                let path_facts = DiffPathFacts::for_single_path(
                     &repo,
-                    from_tree.as_ref(),
-                    to_tree.as_ref(),
-                    &change.path,
-                    &kind,
-                );
-                let symlink = symlink_change_for_paths(
-                    &repo,
-                    from_tree.as_ref(),
-                    to_tree.as_ref(),
+                    gather.base_tree(),
+                    gather.to_tree(),
                     &kind,
                     &change.path,
-                    &change.path,
-                    old_mode,
-                    mode,
                 );
                 FileChange {
                     path: change.path.clone(),
                     kind,
-                    binary: binary && symlink.is_none(),
+                    binary: binary && path_facts.symlink.is_none(),
                     lines,
                     line_counts,
                     eol,
-                    mode,
-                    old_mode,
-                    symlink,
+                    mode: path_facts.mode,
+                    old_mode: path_facts.old_mode,
+                    symlink: path_facts.symlink,
                     ..Default::default()
                 }
             })
@@ -368,16 +429,16 @@ pub fn cmd_diff(
     // committed diffs round-trip too, before renames are detected.
     let file_changes = expand_type_changes(
         &repo,
-        from_tree.as_ref(),
-        to_tree.as_ref(),
+        gather.base_tree(),
+        gather.to_tree(),
         file_changes,
         want_hunks,
         unified,
     )?;
     let file_changes = detect_clear_renames(
         &repo,
-        from_tree.as_ref(),
-        to_tree.as_ref(),
+        gather.base_tree(),
+        gather.to_tree(),
         file_changes,
         want_hunks,
         unified,
@@ -390,22 +451,11 @@ pub fn cmd_diff(
             .collect()
     });
 
-    let context_state = if show_context {
-        if let Some(ref to_spec) = to {
-            let to_id = resolve_state_id(&repo, to_spec)?;
-            Some(require_resolved_state(&repo, &to_id)?)
-        } else if let Some(state) = from_state.clone() {
-            Some(state)
-        } else {
-            repo.current_state()?
-        }
-    } else {
-        None
-    };
+    let context_state = gather.context_state(show_context, to.is_some())?;
 
     let stats = DiffStats::from_changes(&file_changes, semantic_changes.as_deref());
     let mut output = DiffOutput::with_stats(
-        from_id.map(|id| id.short()),
+        gather.from_id.as_ref().map(|id| id.short()),
         to.clone(),
         file_changes,
         semantic_changes,
@@ -1112,7 +1162,7 @@ fn build_worktree_change(
     diff_kind: DiffKind,
     unified: usize,
 ) -> FileChange {
-    let (old_mode, mode) = change_file_modes(repo, from_tree, None, path_str, kind);
+    let path_facts = DiffPathFacts::for_single_path(repo, from_tree, None, kind, path_str);
     let (lines, eol, binary) = match get_worktree_diff(repo, from_tree, path_str, &diff_kind) {
         Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
@@ -1122,18 +1172,15 @@ fn build_worktree_change(
         // body, matching git's behaviour for transient races.
         Err(_) => (None, FileEolState::default(), false),
     };
-    let symlink = symlink_change_for_paths(
-        repo, from_tree, None, kind, path_str, path_str, old_mode, mode,
-    );
     FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
-        binary: binary && symlink.is_none(),
+        binary: binary && path_facts.symlink.is_none(),
         lines,
         eol,
-        mode,
-        old_mode,
-        symlink,
+        mode: path_facts.mode,
+        old_mode: path_facts.old_mode,
+        symlink: path_facts.symlink,
         ..Default::default()
     }
 }
@@ -1359,32 +1406,22 @@ fn build_state_change(
     diff_kind: DiffKind,
     unified: usize,
 ) -> FileChange {
-    let (old_mode, mode) = change_file_modes(repo, from_tree, Some(to_tree), path_str, kind);
+    let path_facts = DiffPathFacts::for_single_path(repo, from_tree, Some(to_tree), kind, path_str);
     let (lines, eol, binary) = match get_state_diff(repo, from_tree, to_tree, path_str, &diff_kind)
     {
         Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
         Err(_) => (None, FileEolState::default(), false),
     };
-    let symlink = symlink_change_for_paths(
-        repo,
-        from_tree,
-        Some(to_tree),
-        kind,
-        path_str,
-        path_str,
-        old_mode,
-        mode,
-    );
     FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
-        binary: binary && symlink.is_none(),
+        binary: binary && path_facts.symlink.is_none(),
         lines,
         eol,
-        mode,
-        old_mode,
-        symlink,
+        mode: path_facts.mode,
+        old_mode: path_facts.old_mode,
+        symlink: path_facts.symlink,
         ..Default::default()
     }
 }

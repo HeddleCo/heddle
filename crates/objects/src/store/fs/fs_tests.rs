@@ -114,6 +114,20 @@ fn put_blobs_packed_writes_a_single_packfile_no_loose_blobs() {
 
     store.put_blobs_packed(blobs.clone()).unwrap();
 
+    assert_eq!(
+        count_packs(&store),
+        1,
+        "bulk blob install should create exactly one streaming pack"
+    );
+    let entry_types = single_pack_entry_types(&store);
+    assert_eq!(entry_types.len(), blobs.len());
+    assert!(
+        entry_types
+            .iter()
+            .all(|obj_type| *obj_type == PackObjectType::Blob),
+        "snapshot-time bulk pack should contain only direct blob entries"
+    );
+
     // Loose-blobs dir is empty (everything went into a pack).
     let loose_count = std::fs::read_dir(blobs_dir(store.root()))
         .map(|iter| iter.count())
@@ -436,6 +450,56 @@ fn install_pack_refreshes_state_as_loose_authoritative_copy() {
     );
 }
 
+#[test]
+fn default_gc_streaming_repack_preserves_loose_state_shadow() {
+    let (_temp, store) = create_test_store();
+
+    let tree = Tree::new();
+    let tree_hash = tree.hash();
+    store.put_tree(&tree).unwrap();
+    let attribution = Attribution::human(Principal::new("GC", "gc@example.com"));
+    let packed = State::new(tree_hash, vec![], attribution).with_intent("stale-packed");
+    let change_id = packed.change_id;
+
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add_id(
+        PackObjectId::ChangeId(change_id),
+        PackObjectType::State,
+        rmp_serde::to_vec_named(&packed).unwrap(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    let fresh = packed.clone().with_intent("fresh-loose");
+    store.put_state(&fresh).unwrap();
+
+    // Force default GC to repack the existing state pack plus new
+    // loose content. The streaming GC path must install the pack
+    // files directly, not route through `install_pack_streaming`,
+    // which would rewrite the stale packed state as loose.
+    let loose_blob = Blob::from("loose blob forcing default streaming gc");
+    store.put_blob(&loose_blob).unwrap();
+    let (packed_count, _) = store.pack_objects(false).unwrap();
+    assert!(
+        packed_count >= 2,
+        "default gc should repack loose + packed objects"
+    );
+
+    assert!(
+        single_pack_entry_types(&store)
+            .iter()
+            .all(|obj_type| *obj_type != PackObjectType::Delta),
+        "default gc streaming repack must preserve the no-delta default path"
+    );
+
+    store.clear_recent_object_caches();
+    assert_eq!(
+        store.get_state(&change_id).unwrap().unwrap().intent,
+        Some("fresh-loose".to_string()),
+        "default gc must keep loose state shadowing a stale packed state"
+    );
+}
+
 #[cfg(feature = "zstd")]
 #[test]
 fn install_pack_accepts_valid_compressed_blob_pack() {
@@ -480,6 +544,35 @@ fn count_packs(store: &FsStore) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+fn single_pack_entry_types(store: &FsStore) -> Vec<PackObjectType> {
+    let pack_paths: Vec<_> = std::fs::read_dir(packs_dir(store.root()))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext == "pack")
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(pack_paths.len(), 1, "expected exactly one pack file");
+    let pack_path = &pack_paths[0];
+    let pack_data = std::fs::read(pack_path).unwrap();
+    let (_, header_len, content_end) =
+        crate::store::pack::verify_container(&pack_data, crate::store::pack::pack_container_spec())
+            .unwrap();
+    let mut pos = header_len;
+    let mut types = Vec::new();
+    while pos < content_end {
+        let header =
+            crate::store::pack::decode_tagged_entry_header(&pack_data[pos..content_end]).unwrap();
+        types.push(header.obj_type);
+        pos += header.header_len + header.compressed_size;
+    }
+    types
 }
 
 fn count_loose_objects(store: &FsStore) -> usize {

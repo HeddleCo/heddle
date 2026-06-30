@@ -13,6 +13,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+- Changed: snapshot-time bulk blob packing and default GC repack now write packs through the streaming pack builder; aggressive GC keeps the existing delta-capable pack builder path.
+- Performance: removed avoidable dispatch/allocation overhead in daemon
+  streams, review async trait seams, materialization fallback reads, and
+  semantic symbol traversal.
+- Tests: covered streaming snapshot pack shape and default GC state-shadow preservation.
+
 ## 0.6.0 - Unreleased
 
 ### Added

@@ -14,22 +14,26 @@
 //!    being written), but the writer never holds more than one
 //!    object's worth of data plus its `BufWriter` capacity.
 //!
-//! 2. **External sorting the index** via 512 hash-prefix bucket files
-//!    on disk (256 for `Hash` ids, 256 for `ChangeId` ids). Each
-//!    `add()` appends one fixed-shape `(id, offset)` record to the
-//!    bucket whose first byte matches the id's first inner byte. At
-//!    finalize, each bucket is small enough to sort in memory; the
-//!    concatenation of `Hash` buckets followed by `ChangeId` buckets
-//!    in byte order produces the exact same global sort `PackBuilder`
-//!    would have via `entries.sort_by_key(|e| e.id)`.
+//! 2. **Adaptive index sorting**. Small packs keep `(id, offset)`
+//!    records in memory and sort once at finalize, avoiding thousands
+//!    of tiny bucket-file appends on snapshot-sized batches. Once the
+//!    in-memory scratch crosses a fixed object-count threshold, the
+//!    builder spills to the bounded external sorter: 512 hash-prefix
+//!    bucket files on disk (256 for `Hash` ids, 256 for `ChangeId`
+//!    ids). At finalize, each bucket is small enough to sort in
+//!    memory; concatenating `Hash` buckets followed by `ChangeId`
+//!    buckets in byte order produces the exact same global sort
+//!    `PackBuilder` would have via `entries.sort_by_key(|e| e.id)`.
 //!
 //! ## Memory bound
 //!
 //! - Pack data on disk: streamed; only one compressed object held in
 //!   memory at a time.
-//! - Index entries in bucket buffers: at most 32 bucket files are held
-//!   open at once, each behind a default-capacity `BufWriter` (~8 KB),
-//!   so peak buffering is ~256 KB.
+//! - Index entries: up to 16K `(id, offset)` pairs are held in memory
+//!   for small packs; larger packs spill to bucket files. Once
+//!   spilled, at most 32 bucket files are held open at once, each
+//!   behind a default-capacity `BufWriter` (~8 KB), so peak buffering
+//!   is ~256 KB plus the spill threshold.
 //! - Sort scratch at finalize: O(largest bucket). For uniformly-
 //!   distributed BLAKE3 hashes / ULID change-ids and N total objects,
 //!   the largest bucket is ~N/256 entries ≈ 40 bytes each. Even at
@@ -64,7 +68,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
+use super::{pack_container_spec, write_container_header, ObjectType, PackObjectId, PackStats};
 
 /// How many bytes to reserve for the compressed-size varint in the
 /// streaming path. 10 is enough to encode any `u64` (max 9 7-bit
@@ -75,7 +79,7 @@ use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_cont
 const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{compression::CompressionConfig, Result, StoreError},
 };
 
 /// Number of buckets per id variant. 256 = one bucket per first byte
@@ -90,6 +94,10 @@ const TOTAL_BUCKETS: usize = BUCKETS_PER_VARIANT * 2;
 /// processes commonly inherit a 256-fd soft limit; imports also need
 /// room for Git pack/index files, sqlite maps, the output pack, etc.
 const MAX_OPEN_BUCKET_WRITERS: usize = 32;
+/// Keep small-pack index entries in memory. This preserves the
+/// streaming pack-body shape while avoiding disk-bucket overhead for
+/// common snapshot batches of hundreds or a few thousand files.
+const IN_MEMORY_INDEX_ENTRY_LIMIT: usize = 16 * 1024;
 
 /// Variant indices into the `bucket_*` arrays. `Hash` ids fill the
 /// lower half (matches the variant order in `PackObjectId` which makes
@@ -137,6 +145,9 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// Bytes are written incrementally as buckets are sorted, so the
     /// index never sits in memory in its entirety.
     index_path: PathBuf,
+    /// Small packs use one sorted in-memory index scratch. `None`
+    /// means entries have spilled to the external bucket sorter.
+    in_memory_index_entries: Option<Vec<(PackObjectId, u64)>>,
     /// Set true on `finalize` so `Drop` knows the bucket dir was
     /// already cleaned and shouldn't be removed again.
     finalized: bool,
@@ -270,6 +281,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             bucket_access_tick: 0,
             bucket_paths,
             index_path,
+            in_memory_index_entries: Some(Vec::new()),
             finalized: false,
         })
     }
@@ -454,6 +466,30 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             }
         }
 
+        self.record_index_entry(id, offset)?;
+
+        self.object_count += 1;
+        Ok(())
+    }
+
+    fn record_index_entry(&mut self, id: PackObjectId, offset: u64) -> Result<()> {
+        match self.in_memory_index_entries.as_mut() {
+            Some(entries) if entries.len() < IN_MEMORY_INDEX_ENTRY_LIMIT => {
+                entries.push((id, offset));
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        if let Some(entries) = self.in_memory_index_entries.take() {
+            for (spilled_id, spilled_offset) in entries {
+                self.write_bucket_index_entry(spilled_id, spilled_offset)?;
+            }
+        }
+        self.write_bucket_index_entry(id, offset)
+    }
+
+    fn write_bucket_index_entry(&mut self, id: PackObjectId, offset: u64) -> Result<()> {
         // Append the index entry (id || u64 BE offset) to the bucket
         // matching the id's first inner byte. The bucket file is opened
         // lazily so a sparse pack only creates files it actually uses.
@@ -462,10 +498,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         let mut idx_entry = Vec::with_capacity(33 + 8);
         id.encode_tagged(&mut idx_entry);
         idx_entry.extend_from_slice(&offset.to_be_bytes());
-        bucket.write_all(&idx_entry).map_err(StoreError::from)?;
-
-        self.object_count += 1;
-        Ok(())
+        bucket.write_all(&idx_entry).map_err(StoreError::from)
     }
 
     fn get_or_open_bucket(&mut self, idx: usize) -> Result<&mut BufWriter<File>> {
@@ -524,17 +557,20 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// just a small amount of disk churn until the next clean
     /// finalize.
     pub fn finalize(mut self) -> Result<(W, PackStats)> {
-        // 1. Flush every bucket so reads in the next phase see all
-        //    queued entries. `flatten()` skips the never-opened slots.
-        for bucket in self.bucket_writers.iter_mut().flatten() {
-            bucket.writer.flush().map_err(StoreError::from)?;
+        let in_memory_index_entries = self.in_memory_index_entries.take();
+        if in_memory_index_entries.is_none() {
+            // 1. Flush every bucket so reads in the next phase see all
+            //    queued entries. `flatten()` skips the never-opened slots.
+            for bucket in self.bucket_writers.iter_mut().flatten() {
+                bucket.writer.flush().map_err(StoreError::from)?;
+            }
+            // Drop the writers so the OS file handles close before we
+            // re-open the same paths for reading.
+            for slot in self.bucket_writers.iter_mut() {
+                *slot = None;
+            }
+            self.open_bucket_writers = 0;
         }
-        // Drop the writers so the OS file handles close before we
-        // re-open the same paths for reading.
-        for slot in self.bucket_writers.iter_mut() {
-            *slot = None;
-        }
-        self.open_bucket_writers = 0;
 
         // 2. Patch the pack header with the real object count unless the
         //    caller declared it up front, then re-stream the [header][body]
@@ -603,20 +639,28 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         let mut idx_writer = BufWriter::new(idx_file);
         write_index_header(&mut idx_writer, self.object_count)?;
         let mut entries_written: u64 = 0;
-        for path in self.bucket_paths.iter() {
-            if !path.exists() {
-                continue;
-            }
-            let bucket_bytes = std::fs::read(path).map_err(StoreError::from)?;
-            let mut entries = decode_bucket_file(&bucket_bytes)?;
-            // Local sort by `PackObjectId` matches the global sort
-            // because all entries in a bucket share the same variant
-            // tag *and* the same first inner byte; only the remaining
-            // bytes differ between them.
+        if let Some(mut entries) = in_memory_index_entries {
             entries.sort_by_key(|(id, _)| *id);
             for (id, offset) in entries {
                 write_index_entry(&mut idx_writer, id, offset)?;
                 entries_written += 1;
+            }
+        } else {
+            for path in self.bucket_paths.iter() {
+                if !path.exists() {
+                    continue;
+                }
+                let bucket_bytes = std::fs::read(path).map_err(StoreError::from)?;
+                let mut entries = decode_bucket_file(&bucket_bytes)?;
+                // Local sort by `PackObjectId` matches the global sort
+                // because all entries in a bucket share the same variant
+                // tag *and* the same first inner byte; only the remaining
+                // bytes differ between them.
+                entries.sort_by_key(|(id, _)| *id);
+                for (id, offset) in entries {
+                    write_index_entry(&mut idx_writer, id, offset)?;
+                    entries_written += 1;
+                }
             }
         }
         idx_writer.flush().map_err(StoreError::from)?;
@@ -761,6 +805,15 @@ mod tests {
         bytes[0] = seed;
         for (i, b) in bytes.iter_mut().enumerate().skip(1) {
             *b = seed.wrapping_mul(31).wrapping_add(i as u8);
+        }
+        ContentHash::from_bytes(bytes)
+    }
+
+    fn deterministic_hash_from_u64(seed: u64) -> ContentHash {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_be_bytes());
+        for (i, b) in bytes.iter_mut().enumerate().skip(8) {
+            *b = (seed as u8).wrapping_mul(31).wrapping_add(i as u8);
         }
         ContentHash::from_bytes(bytes)
     }
@@ -1151,15 +1204,13 @@ mod tests {
         .unwrap();
         let error = b.finalize().unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("streaming pack declared 2 object(s) but added 1")
-        );
+        assert!(error
+            .to_string()
+            .contains("streaming pack declared 2 object(s) but added 1"));
     }
 
     #[test]
-    fn bucket_files_are_cleaned_on_successful_finalize() {
+    fn spilled_bucket_files_are_cleaned_on_successful_finalize() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bucket_dir = tmp.path().join("buckets");
         let idx_path = tmp.path().join("test.idx");
@@ -1171,9 +1222,13 @@ mod tests {
             bucket_dir.clone(),
         )
         .unwrap();
-        for i in 0..50u8 {
-            b.add(deterministic_hash(i), ObjectType::Blob, vec![i; 32])
-                .unwrap();
+        for i in 0..=IN_MEMORY_INDEX_ENTRY_LIMIT {
+            b.add(
+                deterministic_hash_from_u64(i as u64),
+                ObjectType::Blob,
+                vec![i as u8; 32],
+            )
+            .unwrap();
         }
         // Buckets exist and contain data.
         assert!(bucket_dir.exists());

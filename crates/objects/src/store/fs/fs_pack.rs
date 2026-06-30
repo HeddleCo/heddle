@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack and prune operations for FsStore.
 
-use std::fs;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use super::{
     FsStore,
@@ -12,7 +16,10 @@ use crate::{
     object::ContentHash,
     store::{
         HeddleError, ObjectStore, Result,
-        pack::{ObjectType as PackObjectType, PackBuilder},
+        pack::{
+            ObjectType as PackObjectType, PackBuilder, PackObjectId, PackStats,
+            StreamingPackBuilder,
+        },
     },
 };
 
@@ -49,32 +56,32 @@ impl FsStore {
         // path only optimizes durability + write throughput.
         let mut compression = self.compression;
         compression.max_delta_size = 0;
-        let mut builder = PackBuilder::new(compression);
         let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(blobs.len());
         for (hash, data) in blobs {
             if ObjectStore::has_blob(self, &hash)? {
                 continue;
             }
-            staged.push((hash, data.clone()));
-            builder.add(hash, PackObjectType::Blob, data);
+            staged.push((hash, data));
         }
         if staged.is_empty() {
             return Ok(());
         }
-        let (pack_data, index_data, _stats) = builder.build()?;
 
-        // Install the pack files. `install_pack_files` clears the
-        // recent-objects caches because a generic pack install (e.g.
-        // received over the network) might shadow loose objects we
-        // didn't write. For our locally-built pack we know exactly
-        // what we just installed, so we re-populate `recent_blobs`
-        // with the staged contents immediately afterwards. Without
-        // this the snapshot hot path takes a cache miss on every
-        // blob it just wrote, and `seed_large_repository` style
-        // benchmarks that snapshot-many-times-in-a-loop end up
-        // re-reading every parent state from disk between
-        // iterations.
-        self.install_pack_files(&pack_data, &index_data)?;
+        let (mut builder, pack_path, index_path) = self.begin_streaming_pack(compression)?;
+        for (hash, data) in &staged {
+            builder.add(*hash, PackObjectType::Blob, data.clone())?;
+        }
+        self.finalize_streaming_pack(builder, &pack_path, &index_path)?;
+
+        // Install the pack files directly: this local snapshot pack
+        // cannot shadow unrelated loose objects. Keep `recent_blobs`
+        // warm with the staged contents so tight snapshot loops don't
+        // immediately miss on every blob they just wrote.
+        let install_result = self.install_pack_files_streaming(&pack_path, &index_path);
+        if install_result.is_err() {
+            remove_staged_pack_files(&pack_path, &index_path);
+        }
+        install_result?;
         if let Ok(mut cache) = self.recent_blobs.write() {
             for (hash, data) in staged {
                 cache.insert(hash, crate::object::Blob::from_slice(&data));
@@ -144,13 +151,28 @@ impl FsStore {
         // pack at all costs" case. This mirrors the snapshot hot path
         // (`put_blobs_packed_impl`), which disables delta for the same
         // reason.
-        let mut compression = self.compression;
-        if !aggressive {
-            compression.max_delta_size = 0;
+        if aggressive {
+            return self.pack_objects_aggressive(
+                loose_blobs,
+                loose_trees,
+                existing_ids,
+                old_pack_files,
+            );
         }
+
+        self.pack_objects_streaming(loose_blobs, loose_trees, existing_ids, old_pack_files)
+    }
+
+    fn pack_objects_aggressive(
+        &self,
+        loose_blobs: Vec<ContentHash>,
+        loose_trees: Vec<ContentHash>,
+        existing_ids: Vec<PackObjectId>,
+        old_pack_files: Vec<(PathBuf, PathBuf)>,
+    ) -> Result<(u64, u64)> {
+        let compression = self.compression;
         let mut builder = PackBuilder::new(compression);
-        let mut seen: std::collections::HashSet<crate::store::pack::PackObjectId> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<PackObjectId> = std::collections::HashSet::new();
 
         // 1. Carry forward everything already in a pack so the old packs
         //    can be retired. `get_object` resolves the body + type for
@@ -174,7 +196,7 @@ impl FsStore {
         // 2. Fold in the loose blobs and trees. Skip any whose hash is
         //    already covered by a carried-forward pack entry.
         for hash in &loose_blobs {
-            let id = crate::store::pack::PackObjectId::Hash(*hash);
+            let id = PackObjectId::Hash(*hash);
             if seen.contains(&id) {
                 continue;
             }
@@ -184,7 +206,7 @@ impl FsStore {
             }
         }
         for hash in &loose_trees {
-            let id = crate::store::pack::PackObjectId::Hash(*hash);
+            let id = PackObjectId::Hash(*hash);
             if seen.contains(&id) {
                 continue;
             }
@@ -205,9 +227,9 @@ impl FsStore {
         // `prune_loose_objects`). Bust the recent-objects caches so
         // a subsequent get_* doesn't return a stale `Blob`/`Tree`
         // pointing at a path we're about to delete. The snapshot hot
-        // path doesn't go through here — it calls
-        // `install_pack_files` directly via `put_blobs_packed_impl`,
-        // which keeps its caches warm.
+        // path doesn't go through here — it installs the streaming
+        // pack directly via `put_blobs_packed_impl`, which keeps its
+        // caches warm.
         self.clear_recent_object_caches();
 
         // Retire the superseded packs now that the consolidated pack is
@@ -215,12 +237,152 @@ impl FsStore {
         // forward. The consolidated pack is content-addressed, so if it
         // happened to hash-collide with an old pack (a store that was
         // already a single consolidated pack) that file is excluded here.
-        let new_pack_name = blake3::hash(&pack_data).to_hex();
-        for (pack_path, index_path) in &old_pack_files {
+        let new_pack_name = blake3::hash(&pack_data).to_hex().to_string();
+        self.retire_superseded_packs(&old_pack_files, &new_pack_name)?;
+
+        let saved = stats
+            .total_uncompressed
+            .saturating_sub(stats.total_compressed);
+        Ok((stats.object_count, saved))
+    }
+
+    fn pack_objects_streaming(
+        &self,
+        loose_blobs: Vec<ContentHash>,
+        loose_trees: Vec<ContentHash>,
+        existing_ids: Vec<PackObjectId>,
+        old_pack_files: Vec<(PathBuf, PathBuf)>,
+    ) -> Result<(u64, u64)> {
+        let mut compression = self.compression;
+        compression.max_delta_size = 0;
+        let (mut builder, pack_path, index_path) = self.begin_streaming_pack(compression)?;
+        let mut seen: std::collections::HashSet<PackObjectId> = std::collections::HashSet::new();
+
+        // Carry forward everything already in a pack so the old packs
+        // can be retired. `add_id` preserves ChangeId-keyed states.
+        for id in existing_ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            let obj_type = {
+                let manager = self.pack_manager().read().map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?;
+                manager.get_object(&id)?
+            };
+            if let Some((obj_type, data)) = obj_type {
+                builder.add_id(id, obj_type, data)?;
+            }
+        }
+
+        // Fold in the loose blobs and trees. Skip any whose hash is
+        // already covered by a carried-forward pack entry.
+        for hash in &loose_blobs {
+            let id = PackObjectId::Hash(*hash);
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(blob) = ObjectStore::get_blob(self, hash)? {
+                seen.insert(id);
+                builder.add(*hash, PackObjectType::Blob, blob.content().to_vec())?;
+            }
+        }
+        for hash in &loose_trees {
+            let id = PackObjectId::Hash(*hash);
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(tree) = ObjectStore::get_tree(self, hash)? {
+                let data = rmp_serde::to_vec(&tree)?;
+                seen.insert(id);
+                builder.add(*hash, PackObjectType::Tree, data)?;
+            }
+        }
+
+        if seen.is_empty() {
+            drop(builder);
+            remove_staged_pack_files(&pack_path, &index_path);
+            return Ok((0, 0));
+        }
+
+        let install_result: Result<(PackStats, String)> = (|| {
+            let stats = self.finalize_streaming_pack(builder, &pack_path, &index_path)?;
+            let new_pack_name = stream_hash_file(&pack_path)?.to_hex().to_string();
+            self.install_pack_files_streaming(&pack_path, &index_path)?;
+            Ok((stats, new_pack_name))
+        })();
+        if install_result.is_err() {
+            remove_staged_pack_files(&pack_path, &index_path);
+        }
+        let (stats, new_pack_name) = install_result?;
+
+        // GC packs *replace* loose objects (followed by
+        // `prune_loose_objects`). Bust the recent-objects caches so
+        // subsequent get_* calls don't return values pointing at paths
+        // we're about to delete.
+        self.clear_recent_object_caches();
+        self.retire_superseded_packs(&old_pack_files, &new_pack_name)?;
+
+        let saved = stats
+            .total_uncompressed
+            .saturating_sub(stats.total_compressed);
+        Ok((stats.object_count, saved))
+    }
+
+    fn begin_streaming_pack(
+        &self,
+        compression: crate::store::compression::CompressionConfig,
+    ) -> Result<(StreamingPackBuilder<File>, PathBuf, PathBuf)> {
+        let packs = packs_dir(&self.root);
+        fs::create_dir_all(&packs)?;
+
+        let pack_path = crate::store::atomic::temp_path(&packs.join("streaming.pack"));
+        let index_path = crate::store::atomic::temp_path(&packs.join("streaming.idx"));
+        let bucket_dir = crate::store::atomic::temp_path(&packs.join("streaming-buckets"));
+        let pack_file = open_streaming_pack_file(&pack_path)?;
+
+        match StreamingPackBuilder::new(
+            pack_file,
+            index_path.clone(),
+            compression,
+            bucket_dir.clone(),
+        ) {
+            Ok(builder) => Ok((builder, pack_path, index_path)),
+            Err(error) => {
+                let _ = fs::remove_file(&pack_path);
+                let _ = fs::remove_dir(&bucket_dir);
+                Err(error)
+            }
+        }
+    }
+
+    fn finalize_streaming_pack(
+        &self,
+        builder: StreamingPackBuilder<File>,
+        pack_path: &Path,
+        index_path: &Path,
+    ) -> Result<PackStats> {
+        let result = builder.finalize().and_then(|(pack_file, stats)| {
+            pack_file.sync_all()?;
+            drop(pack_file);
+            Ok(stats)
+        });
+        if result.is_err() {
+            remove_staged_pack_files(pack_path, index_path);
+        }
+        result
+    }
+
+    fn retire_superseded_packs(
+        &self,
+        old_pack_files: &[(PathBuf, PathBuf)],
+        new_pack_name: &str,
+    ) -> Result<()> {
+        for (pack_path, index_path) in old_pack_files {
             let is_new_pack = pack_path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(|stem| stem == new_pack_name.as_str())
+                .map(|stem| stem == new_pack_name)
                 .unwrap_or(false);
             if is_new_pack {
                 continue;
@@ -232,9 +394,7 @@ impl FsStore {
         // not pick this up — force a full reload of the pack list.
         self.reload_packs()?;
         self.clear_recent_object_caches();
-
-        let saved = stats.total_uncompressed - stats.total_compressed;
-        Ok((stats.object_count, saved))
+        Ok(())
     }
 
     pub(super) fn install_pack_files(&self, pack_data: &[u8], index_data: &[u8]) -> Result<()> {
@@ -265,74 +425,32 @@ impl FsStore {
     /// installation step never load the full pack or index into
     /// memory.
     ///
-    /// Both source files are `rename(2)`'d into place; the index is
-    /// no longer copied through memory the way `install_pack_files`
-    /// did via `write_pack_atomic`. Cross-device renames fall back to
-    /// copy + remove for the rare EXDEV case.
+    /// Both source files are fsynced and `rename(2)`'d into place;
+    /// the index is no longer copied through memory the way
+    /// `install_pack_files` did via `write_pack_atomic`.
+    /// Cross-device renames fall back to copy + fsync + remove for
+    /// the rare EXDEV case.
     pub(super) fn install_pack_files_streaming(
         &self,
         src_pack_path: &std::path::Path,
         src_index_path: &std::path::Path,
     ) -> Result<()> {
-        use std::io::Read;
-
         let packs = packs_dir(&self.root);
         fs::create_dir_all(&packs)?;
 
         // Stream-hash the pack file to derive its name. 64 KiB chunks
         // keep the hasher's working set tiny.
-        let mut hasher = blake3::Hasher::new();
-        let mut file = fs::File::open(src_pack_path)?;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        drop(file);
-        let pack_hash = hasher.finalize();
+        let pack_hash = stream_hash_file(src_pack_path)?;
         let pack_name = format!("{}", pack_hash.to_hex());
         let pack_path = packs.join(format!("{}.pack", pack_name));
         let index_path = packs.join(format!("{}.idx", pack_name));
 
-        // Move the staged pack file into the store. `rename` is
-        // atomic on POSIX when both paths are on the same filesystem;
-        // the heddle store keeps its staging dir under the same root,
-        // so this should always satisfy that constraint.
-        match fs::rename(src_pack_path, &pack_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Same pack already installed (content-addressed).
-                // Drop the staging copy so it doesn't accumulate.
-                let _ = fs::remove_file(src_pack_path);
-            }
-            Err(e) => {
-                // Fall back to copy + remove for the (rare) case of
-                // a cross-device rename. EXDEV is not on a stable
-                // ErrorKind variant; match by raw_os_error if needed
-                // on Linux.
-                let _ = fs::copy(src_pack_path, &pack_path)?;
-                let _ = fs::remove_file(src_pack_path);
-                let _ = e; // silence unused-var if EXDEV path didn't fire
-            }
-        }
+        durable_install_existing_file(src_pack_path, &pack_path, &packs)?;
 
-        // Move the index file alongside the pack. Same rename
-        // semantics as the pack: atomic on same-filesystem POSIX,
-        // copy+remove fallback for cross-device.
-        match fs::rename(src_index_path, &index_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(src_index_path);
-            }
-            Err(_) => {
-                let _ = fs::copy(src_index_path, &index_path)?;
-                let _ = fs::remove_file(src_index_path);
-            }
-        }
-        self.clear_recent_object_caches();
+        // Move the index file alongside the pack. Same rename semantics
+        // as the pack: atomic on same-filesystem POSIX, copy+remove
+        // fallback for cross-device.
+        durable_install_existing_file(src_index_path, &index_path, &packs)?;
         self.reload_packs()?;
         Ok(())
     }
@@ -387,4 +505,56 @@ impl FsStore {
 
         Ok((removed, bytes_freed))
     }
+}
+
+fn open_streaming_pack_file(path: &Path) -> Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644);
+    }
+    Ok(opts.open(path)?)
+}
+
+fn stream_hash_file(path: &Path) -> Result<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = File::open(path)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize())
+}
+
+fn durable_install_existing_file(src: &Path, dst: &Path, parent: &Path) -> Result<()> {
+    File::open(src)?.sync_all()?;
+    match fs::rename(src, dst) {
+        Ok(()) => {
+            crate::fs_atomic::sync_directory(parent)?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(src);
+            Ok(())
+        }
+        Err(e) if crate::fs_atomic::is_cross_device_link(&e) => {
+            fs::copy(src, dst)?;
+            File::open(dst)?.sync_all()?;
+            let _ = fs::remove_file(src);
+            crate::fs_atomic::sync_directory(parent)?;
+            Ok(())
+        }
+        Err(e) => Err(HeddleError::from(e)),
+    }
+}
+
+fn remove_staged_pack_files(pack_path: &Path, index_path: &Path) {
+    let _ = fs::remove_file(pack_path);
+    let _ = fs::remove_file(index_path);
 }

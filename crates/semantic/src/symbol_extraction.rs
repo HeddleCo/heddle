@@ -58,11 +58,7 @@ pub(crate) fn find_definitions(
                 // public API documents matches in source order.
                 let impl_type_name: Option<Rc<str>> =
                     extract_impl_type_name(&node, source).map(Rc::from);
-                let mut cursor = node.walk();
-                let children: Vec<_> = node.children(&mut cursor).collect();
-                for child in children.into_iter().rev() {
-                    stack.push((child, impl_type_name.clone()));
-                }
+                push_children_reverse(node, impl_type_name, &mut stack);
                 descended_with_new_parent = true;
             }
             "struct_item" | "enum_item" | "type_item" | "trait_item" => {
@@ -109,11 +105,7 @@ pub(crate) fn find_definitions(
                     });
                 }
 
-                let mut cursor = node.walk();
-                let children: Vec<_> = node.children(&mut cursor).collect();
-                for child in children.into_iter().rev() {
-                    stack.push((child, class_name.clone()));
-                }
+                push_children_reverse(node, class_name, &mut stack);
                 descended_with_new_parent = true;
             }
 
@@ -197,11 +189,7 @@ pub(crate) fn find_definitions(
                     });
                 }
 
-                let mut cursor = node.walk();
-                let children: Vec<_> = node.children(&mut cursor).collect();
-                for child in children.into_iter().rev() {
-                    stack.push((child, class_name.clone()));
-                }
+                push_children_reverse(node, class_name, &mut stack);
                 descended_with_new_parent = true;
             }
             "lexical_declaration" | "variable_declaration" => {
@@ -266,14 +254,22 @@ pub(crate) fn find_definitions(
         // arms above, which already pushed their children with a new
         // parent.
         if !descended_with_new_parent {
-            let mut cursor = node.walk();
-            let children: Vec<_> = node.children(&mut cursor).collect();
-            for child in children.into_iter().rev() {
-                stack.push((child, parent.clone()));
-            }
+            push_children_reverse(node, parent, &mut stack);
         }
     }
     results
+}
+
+fn push_children_reverse<'tree>(
+    node: tree_sitter::Node<'tree>,
+    parent: Option<Rc<str>>,
+    stack: &mut Vec<(tree_sitter::Node<'tree>, Option<Rc<str>>)>,
+) {
+    for index in (0..node.child_count()).rev() {
+        if let Some(child) = node.child(index as u32) {
+            stack.push((child, parent.clone()));
+        }
+    }
 }
 
 /// Extract the type name from a Rust `impl` block.
