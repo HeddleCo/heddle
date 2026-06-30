@@ -285,10 +285,10 @@ fn status_on_corrupted_state_is_data_err_with_recovery_path() {
 }
 
 #[test]
-fn unconfigured_remote_keeps_no_default_remote_phrasing() {
-    // Regression guard for the string sentinel `from_error` relies on for
-    // the raw `resolve_remote` path (HeddleCo/heddle#252). If the
-    // `RemoteError::NotFound` phrasing changes, the sentinel must follow.
+fn unconfigured_remote_uses_typed_remote_error_exit_code() {
+    // Regression guard for the no-default-remote path (HeddleCo/heddle#252).
+    // `resolve_remote` preserves `RemoteError::NotFound` in the chain, so the
+    // exit code is typed instead of depending on the rendered message.
     let repo = init_repo();
     let output = heddle_output(&["--output", "json", "pull"], Some(repo.path()))
         .expect("spawn pull --output json");

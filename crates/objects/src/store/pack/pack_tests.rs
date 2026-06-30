@@ -4,10 +4,11 @@
 use tempfile::TempDir;
 
 use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
+use heddle_format::{compression::CompressionConfig, delta::MAX_DELTA_OUTPUT_SIZE};
+
 use crate::{
-    delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
-    store::{StoreError, compression::CompressionConfig, pack::pack_container_spec},
+    store::{StoreError, pack::pack_container_spec},
 };
 
 fn create_test_hash(n: u8) -> ContentHash {

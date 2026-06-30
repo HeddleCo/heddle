@@ -8,6 +8,8 @@ use std::{
 
 use tracing::{debug, instrument, trace};
 
+use heddle_format::compression::{header_uncompressed_size, is_compressed};
+
 use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
@@ -20,7 +22,6 @@ use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{
         HeddleError, ObjectStore, Result, codec,
-        compression::{header_uncompressed_size, is_compressed},
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };

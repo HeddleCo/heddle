@@ -455,7 +455,8 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Annotation, AnnotationKind, Blob, ChangeId};
+    use crypto::{Ed25519Signer, StateSigningExt};
+    use objects::object::{Annotation, AnnotationKind, Attribution, Blob, ChangeId, Principal};
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -582,6 +583,41 @@ mod tests {
         let entries = repo.list_context_entries(&root, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].target, target);
+    }
+
+    #[test]
+    fn legacy_direct_context_cannot_be_canonicalized_without_signature_decision() {
+        let (_dir, repo) = setup();
+        let target = ContextTarget::file("src/main.rs").unwrap();
+        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
+        let legacy_root = legacy_context_root(&repo, "src/main.rs", &blob);
+        let canonical_root = repo.set_context_blob(None, &target, &blob).unwrap();
+        assert_ne!(
+            legacy_root, canonical_root,
+            "legacy direct-path and canonical context roots must be distinct fixtures",
+        );
+        assert_eq!(
+            repo.get_context_blob(&legacy_root, &target).unwrap(),
+            Some(blob),
+            "the current reader still needs the legacy direct-path fallback",
+        );
+
+        let signer = Ed25519Signer::generate().expect("generate signer");
+        let mut state = State::new_snapshot(
+            ContentHash::compute(b"tree"),
+            vec![],
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .with_context(legacy_root);
+        state.sign(&signer).expect("sign legacy-context state");
+        state
+            .verify_signature()
+            .expect("legacy context state verifies before rewrite");
+
+        let rewritten = state.clone().with_context(canonical_root);
+        rewritten
+            .verify_signature()
+            .expect_err("canonicalizing context root without re-signing invalidates the signature");
     }
 
     #[test]

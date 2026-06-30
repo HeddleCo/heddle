@@ -9,7 +9,7 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Throughput};
 use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(feature = "zstd")]
-use objects::store::compression::{compress_zstd, decompress_zstd};
+use heddle_format::compression::{compress_zstd, decompress_zstd};
 
 #[cfg(feature = "zstd")]
 const LEVELS: &[i32] = &[1, 3, 19];

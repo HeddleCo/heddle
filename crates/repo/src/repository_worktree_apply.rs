@@ -9,6 +9,7 @@ use std::{
 };
 
 use objects::{
+    RecoveryDetails,
     fs_atomic::{enrich_fs_error, is_directory_not_empty as fs_is_directory_not_empty},
     object::{EntryType, Tree, TreeEntry},
     store::ObjectStore,
@@ -1051,10 +1052,17 @@ fn full_rematerialize_dirty_refusal(
     reason: WorktreeApplyFallbackReason,
     at_risk_paths: Vec<String>,
 ) -> HeddleError {
-    HeddleError::Conflict(format!(
-        "dirty worktree would be overwritten by full rematerialize ({reason}); unsnapped edits at risk: {paths}. Capture, commit, or stash them first, or rerun with --force to discard local changes.",
-        reason = reason.as_str(),
-        paths = format_at_risk_paths(&at_risk_paths),
+    let reason = reason.as_str();
+    let paths = format_at_risk_paths(&at_risk_paths);
+    HeddleError::recovery(RecoveryDetails::safety_refusal(
+        "dirty_worktree",
+        format!(
+            "dirty worktree would be overwritten by full rematerialize ({reason}); unsnapped edits at risk: {paths}. Capture, commit, or stash them first, or rerun with --force to discard local changes."
+        ),
+        "Capture, commit, or stash the worktree changes first, or rerun with --force to discard local changes.",
+        format!("unsnapped edits at risk: {paths}"),
+        format!("full rematerialize ({reason}) would write another tree into the worktree"),
+        "repository state and worktree files were left unchanged",
     ))
 }
 
@@ -1313,6 +1321,12 @@ mod tests {
         fs::write(&notes, "local notes\n").unwrap();
 
         let err = repo.goto(&state_two.change_id).unwrap_err();
+        match &err {
+            HeddleError::Recovery(details) => {
+                assert_eq!(details.kind, "dirty_worktree");
+            }
+            other => panic!("dirty refusal should use typed recovery advice, got {other:?}"),
+        }
         let msg = err.to_string();
         assert!(
             msg.contains("dirty worktree")

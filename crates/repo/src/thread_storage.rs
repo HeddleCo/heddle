@@ -911,4 +911,47 @@ mod tests {
             "legacy records (no `auto` key on disk) must deserialize as auto=false"
         );
     }
+
+    /// Deletion-wave guard: this is the smallest durable pre-current
+    /// thread-record shape the reader still accepts. The eventual
+    /// `0002_canonicalize_thread_records` migration should invert this test by
+    /// rewriting such records to the full current shape before the serde
+    /// defaults are removed.
+    #[test]
+    fn thread_record_defaults_keep_minimal_legacy_shape_readable() {
+        let raw = r#"
+id = "legacy-minimal"
+thread = "legacy/minimal"
+mode = "solid"
+state = "active"
+base_state = "abc123"
+base_root = "def456"
+created_at = "2024-01-01T00:00:00Z"
+updated_at = "2024-01-01T00:00:01Z"
+"#;
+
+        let record: ThreadRecord = toml::from_str(raw).expect("legacy record deserializes");
+
+        assert_eq!(record.id, "legacy-minimal");
+        assert_eq!(record.thread, "legacy/minimal");
+        assert_eq!(record.mode, ThreadMode::Solid);
+        assert_eq!(record.state, ThreadState::Active);
+        assert_eq!(record.target_thread, None);
+        assert_eq!(record.parent_thread, None);
+        assert_eq!(record.current_state, None);
+        assert_eq!(record.merged_state, None);
+        assert_eq!(record.task, None);
+        assert!(record.changed_paths.is_empty());
+        assert!(record.impact_categories.is_empty());
+        assert!(record.heavy_impact_paths.is_empty());
+        assert!(!record.promotion_suggested);
+        assert_eq!(record.freshness, ThreadFreshness::Unknown);
+        assert!(record.verification_summary.tests_passed.is_none());
+        assert!(record.confidence_summary.value.is_none());
+        assert!(record.integration_policy_result.status.is_none());
+        assert!(!record.integration_policy_result.conflicts_resolved_manually);
+        assert!(record.ephemeral.is_none());
+        assert!(!record.auto);
+        assert!(record.shared_target_dir.is_none());
+    }
 }

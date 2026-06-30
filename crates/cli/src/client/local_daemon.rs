@@ -37,7 +37,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use daemon::local_daemon::is_heddle_process;
+use daemon::local_daemon::{PidFileContents, is_heddle_process};
 
 use crate::util::OnceMap;
 
@@ -344,7 +344,7 @@ pub enum LocalDaemonStatus {
     Running { pid: u32 },
     /// Pidfile exists but the pid is dead. The socket may be a leftover.
     Stale { pid: u32 },
-    /// No pidfile or socket.
+    /// No current-format pidfile.
     Absent,
 }
 
@@ -398,17 +398,18 @@ pub fn probe(heddle_dir: &Path) -> LocalDaemonProbe {
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
-    // The hardened pidfile written by `daemon::local_daemon` has three
-    // lines: `<pid>\nheddle-agent\n<unix_secs>\n`. We only need the
-    // first line for liveness checks. Parse the leading line, falling
-    // back to the entire file (legacy single-line format) so older
-    // pidfiles still resolve.
     let raw = std::fs::read_to_string(path).ok()?;
-    let first = raw.lines().next().unwrap_or("").trim();
-    first
-        .parse::<u32>()
-        .ok()
-        .or_else(|| raw.trim().parse::<u32>().ok())
+    parse_pidfile(&raw)
+}
+
+#[cfg(unix)]
+fn parse_pidfile(raw: &str) -> Option<u32> {
+    u32::try_from(PidFileContents::parse(raw)?.pid).ok()
+}
+
+#[cfg(not(unix))]
+fn parse_pidfile(_raw: &str) -> Option<u32> {
+    None
 }
 
 #[cfg(unix)]
@@ -455,9 +456,19 @@ fn pid_alive(_pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use tempfile::TempDir;
 
     use super::*;
+
+    fn write_pidfile(sockets: &Path, pid: u32) {
+        std::fs::write(
+            sockets.join("grpc.pid"),
+            format!("{pid}\nheddle-agent\n1700000000\n"),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn absent_when_no_files() {
@@ -472,7 +483,7 @@ mod tests {
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
         // PID 2_147_483_646 is well beyond pid_max and not in use.
-        std::fs::write(sockets.join("grpc.pid"), "2147483646").unwrap();
+        write_pidfile(&sockets, 2_147_483_646);
         let probe = probe(temp.path());
         assert!(matches!(probe.status, LocalDaemonStatus::Stale { .. }));
     }
@@ -482,7 +493,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
-        std::fs::write(sockets.join("grpc.pid"), std::process::id().to_string()).unwrap();
+        write_pidfile(&sockets, std::process::id());
         let probe = probe(temp.path());
         match probe.status {
             LocalDaemonStatus::Running { pid } => assert_eq!(pid, std::process::id()),
@@ -501,7 +512,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
-        std::fs::write(sockets.join("grpc.pid"), child.id().to_string()).unwrap();
+        write_pidfile(&sockets, child.id());
 
         let probe = probe(temp.path());
 
@@ -518,7 +529,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
-        std::fs::write(sockets.join("grpc.pid"), std::process::id().to_string()).unwrap();
+        write_pidfile(&sockets, std::process::id());
         let target = detect_local_daemon(temp.path()).expect("daemon detected");
         assert_eq!(target.pid, std::process::id());
         assert!(
@@ -534,6 +545,18 @@ mod tests {
         // A fresh temp dir with no `sockets/` subtree — probe returns
         // Absent, detect collapses that to None.
         assert!(detect_local_daemon(temp.path()).is_none());
+    }
+
+    #[test]
+    fn absent_when_pidfile_is_bare_pid() {
+        let temp = TempDir::new().unwrap();
+        let sockets = temp.path().join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::write(sockets.join("grpc.pid"), "2147483646\n").unwrap();
+
+        let probe = probe(temp.path());
+
+        assert_eq!(probe.status, LocalDaemonStatus::Absent);
     }
 
     #[cfg(unix)]
@@ -559,7 +582,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let sockets = temp.path().join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
-        std::fs::write(sockets.join("grpc.pid"), std::process::id().to_string()).unwrap();
+        write_pidfile(&sockets, std::process::id());
         let result = detect_local_daemon_with_connect_probe(
             temp.path(),
             std::time::Duration::from_millis(50),
@@ -587,7 +610,7 @@ mod tests {
             }
             Err(err) => panic!("bind local daemon socket: {err}"),
         };
-        std::fs::write(sockets.join("grpc.pid"), std::process::id().to_string()).unwrap();
+        write_pidfile(&sockets, std::process::id());
         let result = detect_local_daemon_with_connect_probe(
             temp.path(),
             std::time::Duration::from_millis(200),

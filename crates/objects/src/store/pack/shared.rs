@@ -5,9 +5,11 @@ use super::{
     ObjectType, varint,
     versioned_header::{HeaderChecksum, VersionedHeader},
 };
+use heddle_format::compression::CompressionConfig;
+
 use crate::{
     object::{ChangeId, ContentHash},
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{Result, StoreError},
 };
 
 pub const PACK_CHECKSUM_LEN: usize = 32;

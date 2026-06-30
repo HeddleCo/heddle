@@ -58,6 +58,17 @@ pub struct Migration {
     pub run: fn(&mut MigrationCtx) -> Result<()>,
 }
 
+/// A future migration that is intentionally NOT registered in [`MIGRATIONS`]
+/// yet. These entries reserve the deletion-wave hooks and name the safety gate
+/// that must be satisfied before the runtime backcompat reader can be removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedDeletionMigration {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub applies_to: SchemaTarget,
+    pub safe_to_register_when: &'static str,
+}
+
 /// Coarse-grained subsystem a migration touches. Useful for logging and for
 /// future per-target conditional skip logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +91,32 @@ pub enum SchemaTarget {
 pub struct MigrationCtx<'a> {
     pub repo: &'a Repository,
 }
+
+/// Reserved hooks for the next legacy-deletion wave. Keep this list in sync
+/// with `docs/LEGACY_DELETION_NEXT_WAVE.md`.
+///
+/// These are planning markers only. They must stay out of [`MIGRATIONS`] until
+/// the corresponding migration body exists and the named safety gate is true.
+pub const NEXT_DELETION_WAVE_MIGRATIONS: &[PlannedDeletionMigration] = &[
+    PlannedDeletionMigration {
+        id: "0002_canonicalize_thread_records",
+        description: "Rewrite durable thread records so readers no longer need serde defaults",
+        applies_to: SchemaTarget::ThreadRecords,
+        safe_to_register_when: "old-record fixture opens, rewrites to the current complete record shape, reopens without relying on ThreadRecord/Thread defaults, and CLI thread workflows still pass",
+    },
+    PlannedDeletionMigration {
+        id: "0003_canonicalize_context_roots",
+        description: "Rewrite legacy direct-path context roots to __files/__states roots without breaking signed states",
+        applies_to: SchemaTarget::ContextBlobs,
+        safe_to_register_when: "unsigned and locally owned signed states are rewritten, locally owned signatures are re-signed with Repository::resign_if_owned, and foreign signed states are reported or rejected by an explicit contract",
+    },
+    PlannedDeletionMigration {
+        id: "0004_resecure_pre_fidelity_signatures",
+        description: "Backfill pre-fidelity state signatures so compute_hash_pre_fidelity can be removed",
+        applies_to: SchemaTarget::Mixed,
+        safe_to_register_when: "locally owned legacy signatures are re-signed over current hashes, unsigned states remain unsigned, and foreign/corrupted legacy signatures are preserved or rejected by an explicit contract",
+    },
+];
 
 /// Per-migration outcome. Returned by [`apply_pending`] for telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +293,41 @@ mod tests {
             for id in applied {
                 assert!(raw.contains(id), "missing {id} in ledger");
             }
+        }
+    }
+
+    #[test]
+    fn next_deletion_wave_hooks_are_reserved_not_registered() {
+        let registered = MIGRATIONS
+            .iter()
+            .map(|migration| migration.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let planned = NEXT_DELETION_WAVE_MIGRATIONS
+            .iter()
+            .map(|migration| migration.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            planned,
+            vec![
+                "0002_canonicalize_thread_records",
+                "0003_canonicalize_context_roots",
+                "0004_resecure_pre_fidelity_signatures",
+            ],
+            "the deletion-wave migration ids are an ordered, reviewable queue",
+        );
+
+        for migration in NEXT_DELETION_WAVE_MIGRATIONS {
+            assert!(
+                !registered.contains(migration.id),
+                "{} is a future destructive cleanup and must not run until its safety gate is met",
+                migration.id,
+            );
+            assert!(
+                !migration.safe_to_register_when.trim().is_empty(),
+                "{} must name the contract that makes registration safe",
+                migration.id,
+            );
         }
     }
 }

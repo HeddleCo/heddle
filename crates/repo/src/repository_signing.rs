@@ -742,6 +742,77 @@ mod tests {
         });
     }
 
+    /// A foreign pre-fidelity signature may be valid over the old hash, but
+    /// this repo cannot reproduce the key. The deletion-wave backfill must not
+    /// re-sign it as if this device authored it.
+    #[test]
+    fn resign_if_owned_refuses_foreign_pre_fidelity_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let foreign = Ed25519Signer::generate().expect("foreign key");
+
+            let mut state = unsigned_state();
+            let legacy_hash = state.compute_hash_pre_fidelity();
+            state.signature = Some(
+                crypto::state_signature_from_signer(&legacy_hash, &foreign)
+                    .expect("foreign-sign legacy hash"),
+            );
+            let original_signature = state.signature.clone();
+
+            let before = state.compute_hash();
+            let before_pre_fidelity = state.compute_hash_pre_fidelity();
+            let mut updated = state.with_raw_message(b"legacy commit message\n");
+
+            assert_eq!(
+                repo.resign_if_owned(&mut updated, &[before, before_pre_fidelity]),
+                ResignOutcome::Unreproducible,
+                "foreign pre-fidelity signatures need an explicit preserve/reject contract",
+            );
+            assert_eq!(
+                updated.signature, original_signature,
+                "foreign signature is left untouched, not re-signed by this repo",
+            );
+        });
+    }
+
+    /// A locally owned pre-fidelity signature that is corrupted must not be
+    /// laundered into a fresh valid signature. Ownership alone is not enough:
+    /// the old signature also has to verify over one of the caller-supplied old
+    /// hash candidates.
+    #[test]
+    fn resign_if_owned_refuses_corrupted_pre_fidelity_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let signer = repo.signing_signer().expect("local signer resolves");
+
+            let mut state = unsigned_state();
+            let legacy_hash = state.compute_hash_pre_fidelity();
+            let mut signature = crypto::state_signature_from_signer(&legacy_hash, &*signer)
+                .expect("sign legacy hash");
+            let mut bytes = hex::decode(&signature.signature).expect("decode sig");
+            bytes[0] ^= 0xff;
+            signature.signature = hex::encode(&bytes);
+            state.signature = Some(signature.clone());
+
+            let before = state.compute_hash();
+            let before_pre_fidelity = state.compute_hash_pre_fidelity();
+            let mut updated = state.with_raw_message(b"legacy commit message\n");
+
+            assert_eq!(
+                repo.resign_if_owned(&mut updated, &[before, before_pre_fidelity]),
+                ResignOutcome::Unreproducible,
+                "corrupted pre-fidelity signatures must not be laundered",
+            );
+            assert_eq!(
+                updated.signature,
+                Some(signature),
+                "the corrupted signature stays visible for preserve/reject handling",
+            );
+        });
+    }
+
     /// An owned signature that does NOT verify over the old hash (corrupted, or
     /// made over different content) must NOT be re-signed: re-signing would
     /// launder a never-valid signature into a fresh, valid-looking one. The

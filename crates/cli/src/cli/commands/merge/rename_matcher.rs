@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use heddle_format::delta::DeltaEncoder;
 use objects::{
-    delta::DeltaEncoder,
     object::{ContentHash, EntryType, Tree},
     store::ObjectStore,
 };

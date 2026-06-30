@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle core domain modules extracted from the monolith.
 
-pub mod delta;
 pub mod error;
 pub mod fault_inject;
 pub mod fs_atomic;

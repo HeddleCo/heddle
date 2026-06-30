@@ -165,7 +165,7 @@ impl DiffReport {
 
 impl JsonSchema for DiffReport {
     fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("DiffOutput")
+        Cow::Borrowed("DiffReport")
     }
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {

@@ -356,11 +356,9 @@ pub async fn cmd_push(
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
-    let (target, server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
     #[cfg(not(feature = "client"))]
-    let (target, _server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, _server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
 
     // Prevalidate auth/TLS config (including the credential-store fallback)
     // before any irreversible state mutation below; a rejected security

@@ -10,11 +10,9 @@ command's catalogued codes live on its `CommandContract.exit_codes` entry in
 [`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs).
 
 Classification is keyed on typed error kinds — the `RecoveryAdvice.kind`
-discriminator and `HeddleError` variants — never on user-visible message
-text, so rewording an error can't silently change its exit code. A small
-set of legacy string sentinels remains only for raw-string error paths
-that carry no typed kind; each typed kind→code pair is pinned by a
-regression test in `exit.rs`.
+discriminator, `HeddleError` variants, and typed remote/config errors — never on
+user-visible message text, so rewording an error can't silently change its exit
+code. Each typed kind-to-code pair is pinned by a regression test in `exit.rs`.
 
 ## Codes
 

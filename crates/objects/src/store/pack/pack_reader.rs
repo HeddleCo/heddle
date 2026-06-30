@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
+use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 
 use super::{
     ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
@@ -14,7 +15,7 @@ use crate::{
     store::{Result, StoreError},
 };
 
-const MAX_PACK_DELTA_OUTPUT_SIZE: usize = crate::delta::MAX_DELTA_OUTPUT_SIZE;
+const MAX_PACK_DELTA_OUTPUT_SIZE: usize = MAX_DELTA_OUTPUT_SIZE;
 const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 
 /// Pack reader for extracting objects.
@@ -339,7 +340,7 @@ impl<'a> PackReader<'a> {
         let base_type = base_record.obj_type;
         let base_data = base_record.data;
 
-        let decoded = crate::delta::DeltaDecoder::decode(&base_data, delta, uncompressed_size)
+        let decoded = DeltaDecoder::decode(&base_data, delta, uncompressed_size)
             .map_err(|error| StoreError::InvalidObject(format!("Delta decode failed: {error}")))?;
 
         Ok((base_type, decoded))

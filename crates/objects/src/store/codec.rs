@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Object body codecs for loose-object backends.
 
+use heddle_format::compression::{CompressionConfig, compress, decompress, is_compressed};
+
 use crate::{
     object::{Action, ActionId, ContentHash, State, Tree},
-    store::{
-        CompressionConfig, Result,
-        compression::{compress, decompress, is_compressed},
-    },
+    store::Result,
 };
 
 pub fn encode_blob_content(content: &[u8], config: &CompressionConfig) -> Result<Vec<u8>> {

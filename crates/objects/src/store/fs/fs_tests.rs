@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{TimeZone, Utc};
+use heddle_format::compression::CompressionConfig;
 use tempfile::TempDir;
 
 use super::{
@@ -14,7 +15,6 @@ use crate::{
     },
     store::{
         HeddleError, ObjectStore,
-        compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },
     sync::RwLockExt,

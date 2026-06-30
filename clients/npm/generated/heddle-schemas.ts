@@ -920,7 +920,7 @@ export interface DiffChangesGroupedSchema {
 
 export type DiffChangesSchema = DiffChangesGroupedSchema | FileChange[];
 
-export interface DiffOutput {
+export interface DiffReport {
   broader_guidance?: ContextSnippet[] | null;
   changed_path_count: number;
   changes: DiffChangesSchema;
@@ -3448,7 +3448,7 @@ export interface HeddleVerbOutputs {
   "daemon serve": DaemonServeSchema;
   "daemon status": DaemonStatusSchema;
   "daemon stop": DaemonStopSchema;
-  diff: DiffOutput;
+  diff: DiffReport;
   "discuss append": DiscussAppendSchema;
   "discuss list": DiscussionListSchema;
   "discuss open": DiscussOpenSchema;

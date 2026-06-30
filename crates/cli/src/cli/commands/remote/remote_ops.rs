@@ -311,11 +311,9 @@ pub async fn cmd_pull(
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
-    let (target, server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
     #[cfg(not(feature = "client"))]
-    let (target, _server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, _server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
 
     let head_ref = repo.head_ref()?;
     let remote_thread = default_pull_thread_name(thread, repo.capability(), &head_ref);

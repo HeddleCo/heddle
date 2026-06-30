@@ -4,38 +4,28 @@ This note tracks cleanup that should come after the current deletion wave. The
 project is pre-1.0 and should prefer the current model over compatibility shims,
 but durable signed data still needs a deletion path that preserves verification.
 
-## Ready After Mechanical Migration
+## Deleted In The Current Wave
 
-### `objects::delta` and `objects::store::compression` re-export shims
+- `objects::delta` and `objects::store::compression` re-export modules were
+  removed. Callers now import canonical `heddle_format::delta` and
+  `heddle_format::compression` APIs directly.
+- The raw exit-code string sentinels in `crates/cli/src/exit.rs` were removed.
+  Exit classification now depends on typed `RecoveryAdvice`,
+  `HeddleError::Recovery`, `HeddleError::Config`, and `RemoteError::NotFound`
+  values.
+- The dirty-worktree full-rematerialize refusal now returns typed
+  `RecoveryDetails` instead of relying on rendered message text for exit-code
+  behavior.
+- The local daemon single-line pidfile fallback was removed. Probe logic now
+  accepts only the structured `daemon::local_daemon::PidFileContents` format.
+- The public diff schema title and generated TypeScript interface were renamed
+  from `DiffOutput` to `DiffReport`.
 
-Current imports are mostly benchmarks and internal call sites that can point at
-the canonical `heddle-format` modules instead.
-
-Plan:
-- Rewrite benchmark imports to use `heddle_format::delta` and
-  `heddle_format::compression` directly.
-- Rewrite any remaining internal imports to the canonical module.
-- Delete the old re-export modules once `rg "objects::delta|store::compression"`
-  is empty outside changelog/docs.
-
-Verification:
-- `cargo test -p heddle-objects --lib`
-- `cargo check --benches -p heddle-objects`
-- `cargo check --benches -p heddle-mount`
-
-### Remaining raw exit-code sentinels
-
-`HeddleError::Recovery` and typed CLI recovery envelopes now give this a better
-home than string matching.
-
-Plan:
-- Inventory `crates/cli/src/exit.rs` string classification cases.
-- Move durable cases to typed errors at their source.
-- Keep message text strictly as rendering, not control flow.
-
-Verification:
-- `cargo test -p heddle-cli --lib exit -- --nocapture`
-- `cargo test -p heddle-cli --test cli_integration output_kind_invariant -- --nocapture`
+Migration hooks for this wave are reserved, but intentionally not registered, in
+`crates/repo/src/migration.rs` as `NEXT_DELETION_WAVE_MIGRATIONS`. Registering
+one of them means the migration body exists, the safety gate in that hook is
+satisfied, and the tests named below have been inverted or extended to prove the
+runtime fallback is no longer needed.
 
 ## Blocked On A Deliberate Contract Decision
 
@@ -46,12 +36,24 @@ clean up a matching legacy direct-path leaf. The read fallback remains because
 `State.context` participates in `State::compute_hash()`, so rewriting historical
 states from direct-path roots to canonical roots changes author-signature input.
 
-Deletion requires one of these decisions:
-- Provide an explicit migration that only rewrites unsigned states and locally
-  owned signatures using `Repository::resign_if_owned`, while reporting foreign
-  signed states that must stay on the fallback path.
-- Or decide that pre-1.0 repositories with foreign signed legacy context roots
-  may be rejected and document the break loudly.
+Prepared hook: `0003_canonicalize_context_roots`.
+
+Deletion requires an explicit contract:
+- Safe migration path: rewrite unsigned states and locally owned signed states
+  from direct-path context roots to canonical roots. For signed states, compute
+  the old hash candidates before rewriting and call `Repository::resign_if_owned`
+  after the new root is attached.
+- Foreign or corrupted signed states must not be rewritten silently. The
+  migration must either preserve them and report "still needs legacy fallback",
+  or reject the repo with an explicit pre-1.0 break message.
+- Only after the migration reports zero fallback-dependent states may
+  `lookup_context_leaf_for_target` and `context_target_from_entry_path` drop the
+  direct-path fallback.
+
+Prepared tests:
+- `repository_context::tests::legacy_direct_context_cannot_be_canonicalized_without_signature_decision`
+  signs a state that points at a legacy direct-path context root and proves a
+  naive canonical-root rewrite invalidates the signature.
 
 Verification before deletion:
 - Signed-state fixture with a locally owned legacy context root re-signs and
@@ -61,34 +63,32 @@ Verification before deletion:
 - `cargo test -p heddle-repo repository_context::tests:: -- --nocapture`
 - `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`
 
-### `DiffOutput` public schema title
-
-The Rust type is now `DiffReport`, but the JSON schema title still reports
-`DiffOutput` to avoid an accidental public-schema rename during cleanup.
-
-Deletion/rename requires:
-- Decide whether schema titles are public for pre-1.0 generated docs.
-- If not public, rename the schema title to `DiffReport` and regenerate schema
-  docs.
-- If public, keep the old title until the next explicit schema compatibility
-  break.
-
-Verification:
-- `cargo test -p heddle-core diff::patch -- --nocapture`
-- `cargo test -p heddle-cli --test cli_integration diff_patch_conformance -- --nocapture`
-- `cargo test -p heddle-cli --test cli_integration output_kind_invariant -- --nocapture`
-
 ### Thread-record serde defaults
 
 Thread metadata still carries serde defaults for fields such as execution mode
 and shared-target metadata. These are durable records, not just CLI aliases.
 
+Prepared hook: `0002_canonicalize_thread_records`.
+
 Deletion requires:
-- A repository migration that rewrites every thread record to the current shape.
-- A fixture with an old record proving `Repository::open` no longer needs the
-  defaults.
+- A repository migration that loads every thread record while the defaults still
+  exist, then saves it back in the full current shape through `ThreadManager`.
+- The migration must be idempotent and should not invent values for genuinely
+  unknown optional metadata; it should persist the current semantic defaults
+  (`freshness = unknown`, `auto = false`, empty path/impact vectors, empty
+  summaries, `shared_target_dir = None`, etc.).
+- After migration, add or invert an old-record fixture proving `Repository::open`
+  no longer relies on `ThreadRecord`/`Thread` serde defaults.
+
+Prepared tests:
+- `thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable`
+  documents the smallest legacy shape the current reader still accepts. The
+  deletion commit should invert this fixture: first open+migrate the legacy
+  shape, then assert the rewritten file contains the current complete shape.
 
 Verification:
+- `cargo test -p heddle-repo thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable -- --nocapture`
+- `cargo test -p heddle-repo migration::tests:: -- --nocapture`
 - `cargo test -p heddle-cli --test multi_agent_worktrees -- --nocapture`
 - `cargo test -p heddle-cli --test cli_integration thread -- --nocapture`
 
@@ -97,11 +97,30 @@ Verification:
 `State::compute_hash_pre_fidelity()` is still needed to verify states signed
 before the git-fidelity hash bump.
 
+Prepared hook: `0004_resecure_pre_fidelity_signatures`.
+
 Deletion requires:
-- A backfill that re-signs locally owned legacy states or a decision to reject
-  those signatures.
-- Fixtures for locally owned, unsigned, foreign signed, and corrupted legacy
-  states.
+- A backfill that scans legacy signed states, verifies the existing signature
+  against both the current hash and `compute_hash_pre_fidelity()`, and re-signs
+  only when `Repository::resign_if_owned` reports `Resigned`.
+- Unsigned states remain unsigned; they do not need compatibility handling.
+- Foreign signed and corrupted signed states must not be laundered into this
+  repo's identity. The migration must either preserve/report them or reject the
+  repo under an explicit pre-1.0 contract.
+- Only after the backfill proves no state needs the pre-fidelity candidate may
+  `State::compute_hash_pre_fidelity()` and the `resign_if_owned` old-hash
+  candidate path be removed.
+
+Prepared tests:
+- `repository_signing::tests::resign_if_owned_accepts_legacy_pre_fidelity_signature`
+  covers the locally owned re-sign path.
+- `repository_signing::tests::resign_if_owned_refuses_foreign_pre_fidelity_signature`
+  covers the preserve/reject path for valid signatures from keys this repo does
+  not control.
+- `repository_signing::tests::resign_if_owned_refuses_corrupted_pre_fidelity_signature`
+  covers the no-laundering path for owned-key signatures that do not verify.
+- Existing unsigned-state coverage remains
+  `repository_signing::tests::resign_if_owned_reports_unsigned`.
 
 Verification:
 - `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`
