@@ -36,6 +36,34 @@ pub trait OpLogBackend: Send + Sync {
         scope: Option<&str>,
     ) -> Result<Vec<u64>>;
 
+    /// Append many independent batches in a single write.
+    ///
+    /// Each element of `groups` becomes its own logical batch — its own
+    /// `batch_id`, its own scope, its own undo/redo granularity — exactly as
+    /// if it had been passed to [`record_batch_scoped`] on its own. The only
+    /// difference is durability cost: the file-backed `OpLog` rewrites the
+    /// whole log once per *call* (see TODO #423 write-amplification in
+    /// `packed_oplog::append_entries`), so N separate `record_batch_scoped`
+    /// calls are O(N²) total while one `record_batches_scoped` of N groups is
+    /// O(N). This is the importer's path: a reflog with N entries emits N
+    /// per-event batches that must stay independently undoable but must not
+    /// pay N full-log rewrites.
+    ///
+    /// Returns one id-vector per input group, in order; empty groups yield an
+    /// empty id-vector and consume no batch id. The default implementation is
+    /// the naive loop (correct, but pays the per-call cost) — backends with no
+    /// per-append amplification (e.g. the Postgres table) keep it; `OpLog`
+    /// overrides it to coalesce into one `append_entries`.
+    fn record_batches_scoped(
+        &self,
+        groups: Vec<(Vec<OpRecord>, Option<&str>)>,
+    ) -> Result<Vec<Vec<u64>>> {
+        groups
+            .into_iter()
+            .map(|(ops, scope)| self.record_batch_scoped(ops, scope))
+            .collect()
+    }
+
     /// Atomic dedup+append for transaction-scoped batches: scan the
     /// most recent `recent_window` batches under the same write lock
     /// used by [`OpLogBackend::record_batch_scoped`] for an
