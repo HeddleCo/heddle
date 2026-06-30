@@ -7662,6 +7662,25 @@ fn legacy_global_json_flag_is_not_supported() {
 }
 
 #[test]
+fn legacy_phase_2_root_aliases_are_not_rewritten() {
+    const CASES: &[(&str, &[&str])] = &[
+        ("blame", &["blame", "file.txt"]),
+        ("purge", &["purge", "apply"]),
+    ];
+
+    for (alias, args) in CASES {
+        let output = heddle_output(args, None).expect("invoke heddle");
+        assert!(!output.status.success(), "{alias} alias should be rejected");
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("unrecognized subcommand '{alias}'"))
+                || stderr.contains(&format!("unexpected argument '{alias}'")),
+            "clap should reject removed alias {alias}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -11760,7 +11779,7 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
 }
 
 #[test]
-fn blame_drops_email_when_attribution_overflows_column() {
+fn query_attribution_drops_email_when_attribution_overflows_column() {
     // `Ada Lovelace <ada@really.long.example.com>` blew the 20-char column,
     // truncating to `Ada Lovelace <ada...` — keeping the noise and
     // dropping the signal. The fit_author helper drops the email
@@ -11781,30 +11800,30 @@ fn blame_drops_email_when_attribution_overflows_column() {
     )
     .unwrap();
 
-    let blame = heddle_output_with_env(
-        &["--output", "text", "blame", "note.txt"],
+    let attribution = heddle_output_with_env(
+        &["--output", "text", "query", "--attribution", "note.txt"],
         Some(temp.path()),
         &[("HEDDLE_CONFIG", user_cfg.to_str().unwrap())],
     )
-    .expect("blame note.txt");
+    .expect("query --attribution note.txt");
     assert!(
-        blame.status.success(),
-        "blame should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&blame.stdout),
-        String::from_utf8_lossy(&blame.stderr)
+        attribution.status.success(),
+        "query --attribution should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&attribution.stdout),
+        String::from_utf8_lossy(&attribution.stderr)
     );
-    let output = String::from_utf8_lossy(&blame.stdout);
+    let output = String::from_utf8_lossy(&attribution.stdout);
     assert!(
         output.contains("Ada Lovelace"),
-        "blame must show the principal name: {output}"
+        "query attribution must show the principal name: {output}"
     );
     assert!(
         !output.contains("Ada Loveli...") && !output.contains("Ada Lovela..."),
-        "blame must not mid-name-truncate when the name itself fits: {output}"
+        "query attribution must not mid-name-truncate when the name itself fits: {output}"
     );
     assert!(
         !output.contains("really.long"),
-        "blame must drop the email when the name fits the column: {output}"
+        "query attribution must drop the email when the name fits the column: {output}"
     );
 }
 

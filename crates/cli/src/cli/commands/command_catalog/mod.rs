@@ -295,6 +295,7 @@ struct CommandContract {
     destructive_data: bool,
     operator_envelope: bool,
     json_kind: &'static str,
+    report_contract: Option<CoreReportContract>,
     json_discriminators: &'static [CommandJsonDiscriminatorSpec],
     schema_verbs: &'static [&'static str],
     documented_schema_verbs: &'static [&'static str],
@@ -702,6 +703,7 @@ const READ_JSON: CommandContract = CommandContract {
     destructive_data: false,
     operator_envelope: false,
     json_kind: "json",
+    report_contract: None,
     json_discriminators: &[],
     schema_verbs: &[],
     documented_schema_verbs: &[],
@@ -906,6 +908,18 @@ const fn documented_report_schema(
     }
 }
 
+const fn documented_core_report_schema(
+    contract: CommandContract,
+    report_contract: CoreReportContract,
+) -> CommandContract {
+    CommandContract {
+        supports_json: true,
+        json_kind: machine_output_kind_json_kind(report_contract.machine_output_kind),
+        report_contract: Some(report_contract),
+        ..contract
+    }
+}
+
 const fn opaque_schemas(
     contract: CommandContract,
     schema_verbs: &'static [&'static str],
@@ -954,6 +968,47 @@ const fn report_json_discriminator(
         },
         None => panic!("report contract has no payload discriminator"),
     }
+}
+
+fn contract_schema_verbs(contract: CommandContract) -> impl Iterator<Item = &'static str> {
+    contract
+        .report_contract
+        .into_iter()
+        .map(|report_contract| report_contract.schema_name)
+        .chain(contract.schema_verbs.iter().copied())
+}
+
+fn contract_documented_schema_verbs(
+    contract: CommandContract,
+) -> impl Iterator<Item = &'static str> {
+    contract
+        .report_contract
+        .into_iter()
+        .map(|report_contract| report_contract.schema_name)
+        .chain(contract.documented_schema_verbs.iter().copied())
+}
+
+fn contract_json_discriminators(
+    contract: CommandContract,
+) -> impl Iterator<Item = CommandJsonDiscriminatorSpec> {
+    contract
+        .report_contract
+        .into_iter()
+        .filter_map(report_json_discriminator_from_contract)
+        .chain(contract.json_discriminators.iter().copied())
+}
+
+fn report_json_discriminator_from_contract(
+    report_contract: CoreReportContract,
+) -> Option<CommandJsonDiscriminatorSpec> {
+    report_contract
+        .output_discriminator
+        .map(|discriminator| CommandJsonDiscriminatorSpec {
+            schema_verb: Some(report_contract.schema_name),
+            field: discriminator.field,
+            value: discriminator.value,
+            no_schema_reason: None,
+        })
 }
 
 const fn machine_output_kind_json_kind(kind: MachineOutputKind) -> &'static str {
@@ -1036,21 +1091,10 @@ const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[
         "query_attribution",
     ),
 ];
-const FSCK_COMMAND_SCHEMA_VERBS: &[&str] = &[FsckReport::CONTRACT.schema_name];
 const STATUS_COMMAND_SCHEMA_VERBS: &[&str] = &[StatusReport::CONTRACT.schema_name];
 const STATUS_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
     Some(StatusReport::CONTRACT.schema_name),
     StatusReport::CONTRACT,
-)];
-const DIFF_COMMAND_SCHEMA_VERBS: &[&str] = &[DiffReport::CONTRACT.schema_name];
-const DIFF_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
-    Some(DiffReport::CONTRACT.schema_name),
-    DiffReport::CONTRACT,
-)];
-const VERIFY_COMMAND_SCHEMA_VERBS: &[&str] = &[VerifyReport::CONTRACT.schema_name];
-const VERIFY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
-    Some(VerifyReport::CONTRACT.schema_name),
-    VerifyReport::CONTRACT,
 )];
 
 const fn exits(
@@ -1878,14 +1922,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["diff"],
         front_door(
-            json_discriminators(
-                documented_report_schema(
-                    READ_JSON,
-                    DiffReport::CONTRACT,
-                    DIFF_COMMAND_SCHEMA_VERBS,
-                ),
-                DIFF_JSON_DISCRIMINATORS,
-            ),
+            documented_core_report_schema(READ_JSON, DiffReport::CONTRACT),
             20,
         ),
     ),
@@ -2003,7 +2040,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
-            documented_report_schema(MUTATING, FsckReport::CONTRACT, FSCK_COMMAND_SCHEMA_VERBS),
+            documented_core_report_schema(MUTATING, FsckReport::CONTRACT),
             "recovery",
         ),
     ),
@@ -3111,14 +3148,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["verify"],
         exits(
             front_door(
-                json_discriminators(
-                    documented_report_schema(
-                        READ_JSON,
-                        VerifyReport::CONTRACT,
-                        VERIFY_COMMAND_SCHEMA_VERBS,
-                    ),
-                    VERIFY_JSON_DISCRIMINATORS,
-                ),
+                documented_core_report_schema(READ_JSON, VerifyReport::CONTRACT),
                 110,
             ),
             &[
@@ -3288,10 +3318,8 @@ fn walk_commands(
 ) {
     for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
-        if !removed_phase_1_2_catalog_path(prefix) {
-            out.push(catalog_entry(subcommand, prefix, op_id_option));
-            walk_commands(subcommand, prefix, out, op_id_option);
-        }
+        out.push(catalog_entry(subcommand, prefix, op_id_option));
+        walk_commands(subcommand, prefix, out, op_id_option);
         prefix.pop();
     }
 }
@@ -3314,9 +3342,6 @@ fn append_feature_gated_command_entries(
         out.iter().map(|entry| entry.path.clone()).collect();
     for entry in CONTRACTS.iter() {
         if entry.contract.feature_gate.is_none() {
-            continue;
-        }
-        if removed_phase_1_2_contract_path(entry.path) {
             continue;
         }
         let owned_path: Vec<String> = entry.path.iter().map(|s| (*s).to_string()).collect();
@@ -3399,15 +3424,11 @@ fn feature_gated_catalog_entry(
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
-        schema_verbs: contract
-            .schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        schema_verbs: contract_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
-        documented_schema_verbs: contract
-            .documented_schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        documented_schema_verbs: contract_documented_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
         options,
         arguments: Vec::new(),
@@ -3420,38 +3441,6 @@ fn feature_gated_catalog_entry(
             })
             .collect(),
     }
-}
-
-fn removed_phase_1_2_catalog_path(path: &[String]) -> bool {
-    path.first()
-        .is_some_and(|root| removed_phase_1_2_root(root.as_str()))
-}
-
-fn removed_phase_1_2_root(root: &str) -> bool {
-    matches!(
-        root,
-        "attempt"
-            | "blame"
-            | "branch"
-            | "conflict"
-            | "delegate"
-            | "fork"
-            | "goto"
-            | "inspect"
-            | "marker"
-            | "purge"
-            | "stack"
-            | "workspace"
-    )
-}
-
-pub fn command_contract_removed_alias_root(root: &str) -> bool {
-    removed_phase_1_2_root(root)
-}
-
-fn removed_phase_1_2_contract_path(path: &[&str]) -> bool {
-    path.first()
-        .is_some_and(|root| removed_phase_1_2_root(root))
 }
 
 fn catalog_entry(
@@ -3530,15 +3519,11 @@ fn catalog_entry(
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
-        schema_verbs: contract
-            .schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        schema_verbs: contract_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
-        documented_schema_verbs: contract
-            .documented_schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        documented_schema_verbs: contract_documented_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
         options,
         arguments,
@@ -3983,12 +3968,10 @@ pub(crate) fn sibling_documented_schema_verbs(schema_verb: &str) -> Vec<&'static
     active_command_contract_entries()
         .iter()
         .filter(|entry| {
-            entry
-                .contract
-                .documented_schema_verbs
-                .contains(&schema_verb)
+            contract_documented_schema_verbs(entry.contract)
+                .any(|documented| documented == schema_verb)
         })
-        .flat_map(|entry| entry.contract.documented_schema_verbs.iter().copied())
+        .flat_map(|entry| contract_documented_schema_verbs(entry.contract))
         .filter(|documented| *documented != schema_verb)
         .collect()
 }
@@ -4048,13 +4031,9 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
     advertised_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .flat_map(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+            contract_json_discriminators(entry.contract)
+                .map(move |discriminator| json_discriminator_metadata(entry.path, &discriminator))
         })
         .collect()
 }
@@ -4084,28 +4063,22 @@ pub fn command_json_discriminators_for_schema_verb(
         .iter()
         .copied()
         .filter(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
+            contract_json_discriminators(entry.contract)
                 .any(|discriminator| discriminator.schema_verb == Some(schema_verb))
         })
         .flat_map(|entry| {
-            let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
-                && entry.contract.schema_verbs[0] == schema_verb;
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .filter_map(move |discriminator| {
-                    if discriminator.schema_verb == Some(schema_verb)
-                        || (include_same_command_siblings && discriminator.schema_verb.is_none())
-                    {
-                        Some(json_discriminator_metadata(entry.path, discriminator))
-                    } else {
-                        None
-                    }
-                })
+            let schema_verbs = contract_schema_verbs(entry.contract).collect::<Vec<_>>();
+            let include_same_command_siblings =
+                schema_verbs.len() == 1 && schema_verbs[0] == schema_verb;
+            contract_json_discriminators(entry.contract).filter_map(move |discriminator| {
+                if discriminator.schema_verb == Some(schema_verb)
+                    || (include_same_command_siblings && discriminator.schema_verb.is_none())
+                {
+                    Some(json_discriminator_metadata(entry.path, &discriminator))
+                } else {
+                    None
+                }
+            })
         })
         .collect()
 }
@@ -4117,14 +4090,10 @@ fn json_discriminators_for_path<'a>(
     advertised_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .filter(|entry| entry.path == path.as_slice())
         .flat_map(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+            contract_json_discriminators(entry.contract)
+                .map(move |discriminator| json_discriminator_metadata(entry.path, &discriminator))
         })
         .collect()
 }
@@ -4716,32 +4685,30 @@ pub(crate) fn split_recommended_action(action: &str) -> std::result::Result<Vec<
 }
 
 pub(crate) fn schema_verbs() -> Vec<&'static str> {
-    let mut verbs = collect_schema_verbs(|contract| contract.schema_verbs);
+    let mut verbs = collect_schema_verbs(contract_schema_verbs);
     verbs.push("error");
     verbs
 }
 
 pub(crate) fn documented_schema_verbs() -> Vec<&'static str> {
-    let mut verbs = collect_schema_verbs(|contract| contract.documented_schema_verbs);
+    let mut verbs = collect_schema_verbs(contract_documented_schema_verbs);
     verbs.push("error");
     verbs
 }
 
 pub(crate) fn opaque_schema_verbs() -> Vec<&'static str> {
-    collect_schema_verbs(|contract| contract.opaque_schema_verbs)
+    collect_schema_verbs(|contract| contract.opaque_schema_verbs.iter().copied())
 }
 
-fn collect_schema_verbs(
-    select: impl Fn(CommandContract) -> &'static [&'static str],
-) -> Vec<&'static str> {
+fn collect_schema_verbs<I>(select: impl Fn(CommandContract) -> I) -> Vec<&'static str>
+where
+    I: IntoIterator<Item = &'static str>,
+{
     let mut verbs = Vec::new();
     for entry in advertised_command_contract_entries().iter().copied() {
-        if removed_phase_1_2_contract_path(entry.path) {
-            continue;
-        }
         for verb in select(entry.contract) {
-            if !verbs.contains(verb) {
-                verbs.push(*verb);
+            if !verbs.contains(&verb) {
+                verbs.push(verb);
             }
         }
     }

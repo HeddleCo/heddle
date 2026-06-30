@@ -156,8 +156,7 @@ async fn async_main() -> Result<()> {
         // arg form `heddle help <topic>` also goes through clap.
     }
     let raw_argv: Vec<String> = std::env::args().collect();
-    let parse_argv = rewrite_phase_2_alias_argv(&raw_argv).unwrap_or(raw_argv);
-    let cli = match Cli::try_parse_from(parse_argv) {
+    let cli = match Cli::try_parse_from(raw_argv) {
         Ok(cli) => cli,
         Err(err) => {
             let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -879,58 +878,6 @@ fn is_harness_relay_invocation(command: &Commands) -> bool {
             command: IntegrationCommands::Relay(_),
         }
     )
-}
-
-fn rewrite_phase_2_alias_argv(argv: &[String]) -> Option<Vec<String>> {
-    let root = first_command_index(argv)?;
-    match argv[root].as_str() {
-        "blame" => {
-            let mut rewritten = Vec::with_capacity(argv.len() + 1);
-            rewritten.extend_from_slice(&argv[..root]);
-            rewritten.push("query".to_string());
-            rewritten.push("--attribution".to_string());
-            rewritten.extend_from_slice(&argv[root + 1..]);
-            Some(rewritten)
-        }
-        "purge" => {
-            let mut rewritten = Vec::with_capacity(argv.len() + 1);
-            rewritten.extend_from_slice(&argv[..root]);
-            rewritten.push("redact".to_string());
-            rewritten.push("purge".to_string());
-            rewritten.extend_from_slice(&argv[root + 1..]);
-            Some(rewritten)
-        }
-        _ => None,
-    }
-}
-
-fn first_command_index(argv: &[String]) -> Option<usize> {
-    let mut index = 1;
-    while index < argv.len() {
-        let arg = argv[index].as_str();
-        match arg {
-            "--" => return None,
-            "--output" | "--repo" | "-C" | "--op-id" => index += 2,
-            "--no-color" | "--verbose" | "--quiet" | "-v" | "-q" => index += 1,
-            _ if arg.starts_with("--output=")
-                || arg.starts_with("--repo=")
-                || arg.starts_with("--op-id=")
-                || (arg.starts_with("-C") && arg.len() > 2)
-                || short_verbose_quiet_cluster(arg) =>
-            {
-                index += 1;
-            }
-            _ => return Some(index),
-        }
-    }
-    None
-}
-
-fn short_verbose_quiet_cluster(arg: &str) -> bool {
-    arg.len() > 2
-        && arg.starts_with('-')
-        && !arg.starts_with("--")
-        && arg[1..].chars().all(|ch| matches!(ch, 'v' | 'q'))
 }
 
 /// True when the raw argv (after the program name) contains only global

@@ -850,21 +850,14 @@ mod blame {
     }
 
     #[test]
-    fn test_blame_alias_routes_to_query_attribution_output() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "content\n").unwrap();
-        heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
-
-        let raw = heddle(
-            &["--output", "json", "blame", "file.txt"],
-            Some(temp.path()),
-        )
-        .expect("blame alias should route through query --attribution");
-        let output: Value = serde_json::from_str(&raw).expect("should be JSON");
-        assert_eq!(output["output_kind"], "query_attribution");
-        assert!(output.get("lines").is_some(), "should have 'lines' field");
+    fn test_blame_root_alias_is_rejected() {
+        let err = heddle(&["blame", "file.txt"], None)
+            .expect_err("removed blame root alias should fail through clap");
+        assert!(
+            err.contains("unrecognized subcommand 'blame'")
+                || err.contains("unexpected argument 'blame'"),
+            "clap should reject the removed blame alias: {err}"
+        );
     }
 
     #[test]

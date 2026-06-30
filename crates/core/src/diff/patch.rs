@@ -595,3 +595,508 @@ fn write_patch_line<W: Write>(writer: &mut W, line: &LineDiff) -> io::Result<()>
     writer.write_all(line.content.as_bytes())?;
     writer.write_all(b"\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use objects::object::FileMode;
+
+    use super::{quote_path_for_patch, render_diff_patch, render_diff_patch_bytes};
+    use crate::diff::{DiffOutput, FileChange, FileEolState, LineDiff, SymlinkChange};
+
+    fn modified_change_with_eol(path: &str, lines: Vec<LineDiff>, eol: FileEolState) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            kind: "modified".to_string(),
+            lines: Some(lines),
+            eol,
+            ..Default::default()
+        }
+    }
+
+    fn diff_output_with(changes: Vec<FileChange>) -> DiffOutput {
+        DiffOutput::new(None, None, changes, None, None, None)
+    }
+
+    #[cfg(unix)]
+    fn hermetic_git_command(dir: &std::path::Path, args: &[&str]) -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Heddle Test")
+            .env("GIT_AUTHOR_EMAIL", "heddle@example.com")
+            .env("GIT_COMMITTER_NAME", "Heddle Test")
+            .env("GIT_COMMITTER_EMAIL", "heddle@example.com");
+        command
+    }
+
+    #[cfg(unix)]
+    fn hermetic_git(dir: &std::path::Path, args: &[&str]) {
+        let status = hermetic_git_command(dir, args)
+            .status()
+            .unwrap_or_else(|err| panic!("git {args:?} should spawn: {err}"));
+        assert!(status.success(), "git {args:?} should succeed");
+    }
+
+    #[cfg(unix)]
+    fn pipe_git_apply(dir: &std::path::Path, args: &[&str], patch: &[u8]) -> std::process::Output {
+        use std::{io::Write, process::Stdio};
+
+        let mut child = hermetic_git_command(dir, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|err| panic!("git {args:?} should spawn: {err}"));
+        child.stdin.as_mut().unwrap().write_all(patch).unwrap();
+        child
+            .wait_with_output()
+            .unwrap_or_else(|err| panic!("git {args:?} should finish: {err}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn render_diff_patch_bytes_applies_non_utf8_symlink_target_byte_exactly() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let target = b"target-\xff\xfe";
+        let change = FileChange {
+            path: "linky".to_string(),
+            kind: "added".to_string(),
+            mode: Some(FileMode::Symlink),
+            symlink: Some(SymlinkChange {
+                old: None,
+                new: Some(target.to_vec()),
+            }),
+            ..Default::default()
+        };
+        let patch = render_diff_patch_bytes(&diff_output_with(vec![change]));
+        assert!(
+            patch.windows(target.len()).any(|window| window == target),
+            "patch must carry the raw non-UTF-8 target bytes:\n{}",
+            String::from_utf8_lossy(&patch)
+        );
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        hermetic_git(scratch.path(), &["init", "-q"]);
+        hermetic_git(scratch.path(), &["checkout", "-q", "-b", "main"]);
+
+        let check = pipe_git_apply(scratch.path(), &["apply", "--check"], &patch);
+        assert!(
+            check.status.success(),
+            "git apply --check rejected patch;\nstderr={}\npatch=\n{}",
+            String::from_utf8_lossy(&check.stderr),
+            String::from_utf8_lossy(&patch)
+        );
+        let applied = pipe_git_apply(scratch.path(), &["apply"], &patch);
+        assert!(
+            applied.status.success(),
+            "git apply rejected patch;\nstderr={}\npatch=\n{}",
+            String::from_utf8_lossy(&applied.stderr),
+            String::from_utf8_lossy(&patch)
+        );
+
+        let applied_target = std::fs::read_link(scratch.path().join("linky")).unwrap();
+        assert_eq!(
+            applied_target.as_os_str().as_bytes(),
+            target,
+            "applied symlink target must be byte-exact"
+        );
+    }
+
+    /// A mode-only modify (exec-bit flip, no content change) must render
+    /// as a header-only `diff --git` + `old mode`/`new mode` block with
+    /// no `@@` hunk. Regressing this drops the chmod from the patch so
+    /// `git apply` can't reproduce the permission change (cid 3318629228).
+    #[test]
+    fn render_diff_patch_emits_mode_only_header_for_chmod() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("diff --git a/run.sh b/run.sh"),
+            "chmod-only must emit the `diff --git` header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "chmod-only must emit `old mode`/`new mode`:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("@@") && !rendered.contains("--- a/"),
+            "chmod-only is header-only — no hunk body:\n{rendered}"
+        );
+    }
+
+    /// A modify that changes BOTH content and mode emits the mode-header
+    /// pair AND the usual `--- /+++` line-diff body.
+    #[test]
+    fn render_diff_patch_emits_mode_headers_with_content_hunk() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(vec![
+                LineDiff::with_lines("@", "@ -1,1 +1,1 @@", None, None),
+                LineDiff::with_lines("-", "echo old", Some(1), None),
+                LineDiff::with_lines("+", "echo new", None, Some(1)),
+            ]),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "content+mode change must still emit the mode headers:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("--- a/run.sh")
+                && rendered.contains("+++ b/run.sh")
+                && rendered.contains("+echo new"),
+            "content+mode change must still emit the line-diff body:\n{rendered}"
+        );
+    }
+
+    /// An unchanged mode on a modify with no hunk body is a genuine
+    /// no-op and must emit nothing — guards against the mode branch
+    /// firing when `old_mode == mode`.
+    #[test]
+    fn render_diff_patch_skips_modify_with_same_mode_and_no_body() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.is_empty(),
+            "no-op modify (same mode, no body) must emit nothing:\n{rendered}"
+        );
+    }
+
+    /// A binary content modify (`binary: true`, `lines: None`) must emit
+    /// git's `Binary files … differ` marker with a *placeholder* index
+    /// line. Silently dropping it would let `git apply` "succeed" while
+    /// the binary content stayed stale (cid 3319484747); the index line
+    /// flips git into binary-patch mode so it refuses the whole patch
+    /// instead of skipping the block.
+    #[test]
+    fn render_diff_patch_binary_modify_emits_marker_with_index() {
+        let change = FileChange {
+            path: "binary.bin".to_string(),
+            kind: "modified".to_string(),
+            binary: true,
+            lines: None,
+            mode: Some(FileMode::Normal),
+            old_mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("diff --git a/binary.bin b/binary.bin"),
+            "binary modify must emit a diff header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("index 0000000..0000000 100644"),
+            "binary modify must emit a placeholder index line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Binary files a/binary.bin and b/binary.bin differ"),
+            "binary modify must emit the binary marker:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("--- a/binary.bin"),
+            "binary modify must not emit a text hunk header:\n{rendered}"
+        );
+    }
+
+    /// A binary modify whose mode *also* changed emits the
+    /// `old mode`/`new mode` pair (so the chmod is recorded) followed by
+    /// the placeholder index + binary marker — never a mode-only chmod
+    /// patch that git apply would accept while leaving stale binary
+    /// content (cid 3319484747).
+    #[test]
+    fn render_diff_patch_binary_modify_with_mode_change_keeps_marker() {
+        let change = FileChange {
+            path: "binary.bin".to_string(),
+            kind: "modified".to_string(),
+            binary: true,
+            lines: None,
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "binary+mode change must still record the chmod:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("index 0000000..0000000"),
+            "binary+mode change must emit the placeholder index line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Binary files a/binary.bin and b/binary.bin differ"),
+            "binary+mode change must still emit the binary marker:\n{rendered}"
+        );
+    }
+
+    /// A binary add emits `new file mode` + placeholder index + marker;
+    /// a binary delete mirrors it with `deleted file mode`.
+    #[test]
+    fn render_diff_patch_binary_add_and_delete_emit_markers() {
+        let added = FileChange {
+            path: "added.bin".to_string(),
+            kind: "added".to_string(),
+            binary: true,
+            lines: None,
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![added]));
+        assert!(
+            rendered.contains("new file mode 100644")
+                && rendered.contains("index 0000000..0000000")
+                && rendered.contains("Binary files /dev/null and b/added.bin differ"),
+            "binary add marker:\n{rendered}"
+        );
+
+        let deleted = FileChange {
+            path: "gone.bin".to_string(),
+            kind: "deleted".to_string(),
+            binary: true,
+            lines: None,
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![deleted]));
+        assert!(
+            rendered.contains("deleted file mode 100644")
+                && rendered.contains("index 0000000..0000000")
+                && rendered.contains("Binary files a/gone.bin and /dev/null differ"),
+            "binary delete marker:\n{rendered}"
+        );
+    }
+
+    /// A change whose `lines` vector is present but empty must also
+    /// be skipped — the file path is known but there's no hunk body
+    /// to render. Mixed batches (one renderable, one empty) must keep
+    /// rendering the renderable change.
+    #[test]
+    fn render_diff_patch_skips_change_with_empty_lines() {
+        let empty = FileChange {
+            path: "empty.txt".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            ..Default::default()
+        };
+        let real = modified_change_with_eol(
+            "real.txt",
+            vec![
+                LineDiff::with_lines("@", "@ -1,1 +1,1 @@", None, None),
+                LineDiff::with_lines("-", "old", Some(1), None),
+                LineDiff::with_lines("+", "new", None, Some(1)),
+            ],
+            FileEolState::default(),
+        );
+        let rendered = render_diff_patch(&diff_output_with(vec![empty, real]));
+        assert!(
+            !rendered.contains("empty.txt"),
+            "skipped change must not emit a header: {rendered}"
+        );
+        assert!(
+            rendered.contains("--- a/real.txt"),
+            "renderable change must still be emitted: {rendered}"
+        );
+    }
+
+    /// When both sides lack a trailing newline AND their tails land on
+    /// the same context line, the renderer emits the line once and a
+    /// single `\ No newline at end of file` marker that documents both
+    /// sides' state. `git diff` does the same — two markers in a row
+    /// would be a corruption.
+    #[test]
+    fn render_diff_patch_collapses_both_side_no_eol_marker_on_shared_tail() {
+        // `more` is the tail for both sides; the change is on the line
+        // above (hello -> world). Both blobs end without `\n`.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,2 @@", None, None),
+            LineDiff::with_lines("-", "hello", Some(1), None),
+            LineDiff::with_lines("+", "world", None, Some(1)),
+            LineDiff::with_lines(" ", "more", Some(2), Some(2)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: false,
+            old_line_count: 2,
+            new_line_count: 2,
+        };
+        let change = modified_change_with_eol("tail.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "shared-tail double-no-eol must emit exactly one marker, got:\n{rendered}"
+        );
+        // The context line must NOT be split into `-more`/`+more` —
+        // that's the wrong branch and would confuse `git apply` about
+        // whether the line is being modified.
+        assert!(
+            !rendered.contains("-more\n"),
+            "context tail must not be split when both sides agree:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("+more\n"),
+            "context tail must not be split when both sides agree:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(" more\n\\ No newline at end of file\n"),
+            "marker must sit immediately after the shared context line:\n{rendered}"
+        );
+    }
+
+    /// When only the OLD side lacks a trailing newline and its tail is
+    /// a context line, the renderer must split that line into a
+    /// `-content` (with the marker after it) + `+content` pair so the
+    /// patch unambiguously documents that the OLD file ends without
+    /// `\n` while the NEW file ends with one.
+    #[test]
+    fn render_diff_patch_splits_context_tail_when_only_old_lacks_newline() {
+        // Diff for OLD `hello` (no eol) -> NEW `hello\nmore\n`:
+        // ` hello` is the old tail; `+more` is the trailing addition.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,1 +1,2 @@", None, None),
+            LineDiff::with_lines(" ", "hello", Some(1), Some(1)),
+            LineDiff::with_lines("+", "more", None, Some(2)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: true,
+            old_line_count: 1,
+            new_line_count: 2,
+        };
+        let change = modified_change_with_eol("old.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-hello\n\\ No newline at end of file\n+hello\n"),
+            "OLD-side context-tail split must emit `-hello` + marker + `+hello`:\n{rendered}"
+        );
+        // Only the OLD side carries a marker — the NEW side ends with
+        // `\n` so its tail line must NOT be followed by a marker.
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "exactly one marker expected (OLD side only):\n{rendered}"
+        );
+    }
+
+    /// Mirror of the OLD-only case: when only the NEW side lacks a
+    /// trailing newline and its tail is a shared context line, the
+    /// split emits `-content` + `+content` + marker so the patch
+    /// states "the file ends without `\n` after applying".
+    #[test]
+    fn render_diff_patch_splits_context_tail_when_only_new_lacks_newline() {
+        // Diff for OLD `hello\nmore\n` -> NEW `hello` (no eol):
+        // ` hello` is the new tail; `-more` is the removal.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,1 @@", None, None),
+            LineDiff::with_lines(" ", "hello", Some(1), Some(1)),
+            LineDiff::with_lines("-", "more", Some(2), None),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: true,
+            new_has_final_newline: false,
+            old_line_count: 2,
+            new_line_count: 1,
+        };
+        let change = modified_change_with_eol("new.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-hello\n+hello\n\\ No newline at end of file\n"),
+            "NEW-side context-tail split must emit `-hello` + `+hello` + marker:\n{rendered}"
+        );
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "exactly one marker expected (NEW side only):\n{rendered}"
+        );
+    }
+
+    /// When the tail is a `-` (deletion) on the OLD side and the OLD
+    /// blob lacked a trailing newline, the marker goes right after the
+    /// `-line` — same as `git diff` for a delete-the-last-line patch
+    /// against a no-eol source. The `+` branch is the mirror.
+    #[test]
+    fn render_diff_patch_marker_after_minus_line_when_old_tail_is_deletion() {
+        // OLD has 2 lines (no eol on `tail`), NEW has 1 line (`only`,
+        // with eol). The diff is two replacements; the second `-tail`
+        // is the OLD tail.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,1 @@", None, None),
+            LineDiff::with_lines("-", "only", Some(1), None),
+            LineDiff::with_lines("-", "tail", Some(2), None),
+            LineDiff::with_lines("+", "only", None, Some(1)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: true,
+            old_line_count: 2,
+            new_line_count: 1,
+        };
+        let change = modified_change_with_eol("del.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-tail\n\\ No newline at end of file\n"),
+            "marker must follow the OLD tail deletion line:\n{rendered}"
+        );
+    }
+
+    /// Pin git's C-style path quoting byte-for-byte. The conformance
+    /// harness round-trips the common classes through real `git apply`;
+    /// this covers the exact escape spellings (including the `\a \b \v \f
+    /// \r` controls and octal fallback) the integration cells don't reach.
+    #[test]
+    fn quote_path_matches_git_c_style() {
+        // Simple paths — and spaces, which git leaves bare — emit unquoted.
+        assert_eq!(quote_path_for_patch("a/", "src/main.rs"), "a/src/main.rs");
+        assert_eq!(
+            quote_path_for_patch("a/", "with space.txt"),
+            "a/with space.txt"
+        );
+        // Tab/newline/quote/backslash force quoting; the prefix is escaped
+        // inside the quotes, matching git's `quote_two`.
+        assert_eq!(quote_path_for_patch("a/", "tab\there"), "\"a/tab\\there\"");
+        assert_eq!(
+            quote_path_for_patch("b/", "line\nbreak"),
+            "\"b/line\\nbreak\""
+        );
+        assert_eq!(quote_path_for_patch("a/", "quo\"te"), "\"a/quo\\\"te\"");
+        assert_eq!(
+            quote_path_for_patch("a/", "back\\slash"),
+            "\"a/back\\\\slash\""
+        );
+        // Non-ASCII (UTF-8 é = 0xC3 0xA9) → per-byte octal.
+        assert_eq!(quote_path_for_patch("a/", "café"), "\"a/caf\\303\\251\"");
+        // `rename from`/`rename to` quote the bare path (empty prefix).
+        assert_eq!(quote_path_for_patch("", "x\ty"), "\"x\\ty\"");
+        // The remaining named C-escapes plus a low control byte (octal).
+        assert_eq!(
+            quote_path_for_patch("", "\u{07}\u{08}\u{0b}\u{0c}\r\u{01}"),
+            "\"\\a\\b\\v\\f\\r\\001\""
+        );
+    }
+}
