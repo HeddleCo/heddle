@@ -357,6 +357,8 @@ impl Repository {
                     Some(change_id) => RefExpectation::Value(change_id),
                     None => RefExpectation::Missing,
                 };
+                // Thread ref and attached HEAD publish as one expected-old batch;
+                // metadata convergence runs only after that authoritative move.
                 self.refs.update_refs(&[
                     RefUpdate::Thread {
                         name: thread.clone(),
@@ -597,5 +599,62 @@ mod tests {
             Some(target.short().as_str())
         );
         assert!(matches!(metadata.freshness, ThreadFreshness::Current));
+    }
+
+    #[test]
+    fn attached_fast_forward_conflict_does_not_advance_thread_metadata() {
+        let (temp, repo) = create_repo();
+        let base = write_snapshot(&repo, temp.path(), "base.txt", "base\n");
+        fs::write(temp.path().join("target.txt"), "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+        fs::write(temp.path().join("concurrent.txt"), "concurrent\n").unwrap();
+        let concurrent = repo
+            .snapshot(Some("concurrent".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &base).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+        save_thread_metadata(&repo, temp.path(), thread.as_str(), &base);
+
+        repo.refs().set_thread(&thread, &concurrent).unwrap();
+        let result = repo.publish_goto_refs(
+            &target,
+            &Head::Attached {
+                thread: thread.clone(),
+            },
+            Some(base),
+            HeadPublishMode::PreserveAttached,
+            false,
+        );
+
+        assert!(
+            result.is_err(),
+            "attached fast-forward must fail when the thread ref moved after it was read"
+        );
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(concurrent));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+
+        let metadata = ThreadManager::new(repo.heddle_dir())
+            .find_by_thread(thread.as_str())
+            .unwrap()
+            .expect("thread metadata should exist");
+        assert_eq!(
+            metadata.current_state.as_deref(),
+            Some(base.short().as_str()),
+            "metadata must not advance when the authoritative ref publish conflicts"
+        );
+        assert!(matches!(metadata.freshness, ThreadFreshness::Stale));
     }
 }

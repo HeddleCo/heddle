@@ -197,6 +197,56 @@ fn test_track_cas_conflict() {
         Some(id1)
     );
 }
+
+#[test]
+fn stale_expected_old_update_conflicts_after_thread_moves() {
+    let (_temp, refs) = create_ref_manager();
+    let thread = ThreadName::new("main");
+    let observed = ChangeId::generate();
+    let winner = ChangeId::generate();
+    let stale_update = ChangeId::generate();
+
+    refs.set_thread(&thread, &observed).unwrap();
+    let expected_old = refs
+        .get_thread(&thread)
+        .unwrap()
+        .expect("thread exists before racing updates");
+
+    refs.set_thread_cas(&thread, RefExpectation::Value(expected_old), &winner)
+        .unwrap();
+    let result = refs.set_thread_cas(&thread, RefExpectation::Value(expected_old), &stale_update);
+
+    assert!(
+        matches!(result, Err(HeddleError::Conflict(_))),
+        "a stale expected-old update must not overwrite the winner"
+    );
+    assert_eq!(refs.get_thread(&thread).unwrap(), Some(winner));
+}
+
+#[test]
+fn stale_expected_old_delete_conflicts_after_thread_moves() {
+    let (_temp, refs) = create_ref_manager();
+    let thread = ThreadName::new("main");
+    let observed = ChangeId::generate();
+    let winner = ChangeId::generate();
+
+    refs.set_thread(&thread, &observed).unwrap();
+    let expected_old = refs
+        .get_thread(&thread)
+        .unwrap()
+        .expect("thread exists before delete-vs-update interleaving");
+
+    refs.set_thread_cas(&thread, RefExpectation::Value(expected_old), &winner)
+        .unwrap();
+    let result = refs.delete_thread_cas(&thread, RefExpectation::Value(expected_old));
+
+    assert!(
+        matches!(result, Err(HeddleError::Conflict(_))),
+        "a stale expected-old delete must not remove the winner"
+    );
+    assert_eq!(refs.get_thread(&thread).unwrap(), Some(winner));
+}
+
 #[test]
 fn test_update_refs_transaction_success() {
     let (_temp, refs) = create_ref_manager();

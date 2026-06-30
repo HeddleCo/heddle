@@ -314,6 +314,8 @@ impl ThreadManager {
         state: &ChangeId,
         freshness: ThreadFreshness,
     ) -> Result<bool> {
+        // Select-latest, hydrate, and rewrite under one metadata lock so a
+        // convergence write cannot mix records across same-name writers.
         let _lock = self.write_lock()?;
         let Some(record) = self
             .list_record_files()?

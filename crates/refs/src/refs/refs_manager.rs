@@ -761,6 +761,8 @@ impl RefManager {
     pub fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         let state = self.get_thread(name)?;
         if let Some(state) = state {
+            // Expected-old protects delete-after-read: a later update must
+            // conflict here instead of being removed by this delete.
             self.delete_thread_cas(name, RefExpectation::Value(state))?;
         }
         Ok(state)
@@ -809,6 +811,8 @@ impl RefManager {
     pub fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         let state = self.get_marker(name)?;
         if let Some(state) = state {
+            // Expected-old protects delete-after-read: a later update must
+            // conflict here instead of being removed by this delete.
             self.delete_marker_cas(name, RefExpectation::Value(state))?;
         }
         Ok(state)
