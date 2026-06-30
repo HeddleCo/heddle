@@ -154,6 +154,25 @@ pub struct SnapshotAgentOverrides {
     pub no_agent: bool,
 }
 
+struct SnapshotGatherContext<'repo> {
+    repo: &'repo Repository,
+    current_state: Option<objects::object::State>,
+    base_tree: Option<Tree>,
+    merge_resolution_complete: bool,
+    pre_capture_worktree_status: repo::Result<Option<WorktreeStatus>>,
+}
+
+struct SnapshotComputedFacts {
+    has_capture_work: bool,
+    merge_resolution_complete: bool,
+}
+
+impl SnapshotComputedFacts {
+    fn should_refuse_nothing_to_capture(&self) -> bool {
+        !self.merge_resolution_complete && !self.has_capture_work
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct AgentEnv {
     provider: Option<String>,
@@ -194,37 +213,19 @@ pub async fn cmd_snapshot(
     if let Some(advice) = unimported_git_history_advice(&repo, "capture")? {
         return Err(anyhow!(advice));
     }
-    let complete_thread_resolution =
-        repo.merge_state_manager()
-            .load()?
-            .is_some_and(|merge_state| {
-                merge_state
-                    .conflicts
-                    .iter()
-                    .all(|path| merge_state.resolved.contains(path))
-            });
-    if !complete_thread_resolution && !capture_has_worktree_changes(&repo)? {
+    let gather = gather_snapshot_context(&repo)?;
+    let computed = compute_snapshot_facts(&gather)?;
+    if computed.should_refuse_nothing_to_capture() {
         return Err(anyhow!(nothing_to_capture_advice()));
     }
-    // Compute the git-overlay worktree status ONCE and thread it through both
-    // PRE-mutation consumers: the large-capture safety preflight and the
-    // capture mutation preflight inside `create_snapshot`. Both build from a
-    // full worktree walk that re-reads + SHA-1s every tracked file; before this
-    // the non-`--force` git-overlay capture path paid that walk twice here
-    // (plus a third, post-capture verification walk that must stay FRESH — the
-    // capture advances the Heddle state and flips the git-overlay health
-    // classification, so it is NOT threaded). Both pre-mutation consumers
-    // observe the same pre-capture git state, so reuse is sound and the
-    // classification stays byte-identical.
-    let worktree_status = repo.git_overlay_worktree_status();
-    preflight_large_capture_with_status(force, &worktree_status)?;
+    preflight_large_capture_with_status(force, &gather.pre_capture_worktree_status)?;
     let mut output = match create_snapshot_with_worktree_status(
         &repo,
         &user_config,
         Some(intent),
         confidence,
         agent,
-        &worktree_status,
+        &gather.pre_capture_worktree_status,
     ) {
         Ok(output) => output,
         Err(err) => {
@@ -243,7 +244,7 @@ pub async fn cmd_snapshot(
             return Err(err);
         }
     };
-    if complete_thread_resolution
+    if computed.merge_resolution_complete
         && let Some(next_action) = complete_current_thread_manual_resolution(&repo)?
     {
         output.next_action = Some(next_action.clone());
@@ -392,21 +393,70 @@ fn nothing_to_capture_advice() -> RecoveryAdvice {
     )
 }
 
-fn capture_has_worktree_changes(repo: &Repository) -> Result<bool> {
-    if repo.current_state()?.is_none()
-        && let Some(status) = repo.git_overlay_worktree_status()?
-    {
-        return Ok(!status.is_clean());
-    }
-    let tree = match repo.current_state()? {
-        Some(state) => repo.require_tree(&state.tree)?,
-        None => Tree::new(),
+fn gather_snapshot_context(repo: &Repository) -> Result<SnapshotGatherContext<'_>> {
+    let current_state = repo.current_state()?;
+    let merge_resolution_complete = repo
+        .merge_state_manager()
+        .load()?
+        .is_some_and(|merge_state| {
+            merge_state
+                .conflicts
+                .iter()
+                .all(|path| merge_state.resolved.contains(path))
+        });
+    let needs_capture_work_check = !merge_resolution_complete;
+    let pre_capture_worktree_status = if needs_capture_work_check && current_state.is_none() {
+        Ok(repo.git_overlay_worktree_status()?)
+    } else {
+        repo.git_overlay_worktree_status()
     };
-    let status = repo.compare_worktree_cached_with_options(
-        &tree,
-        &worktree_status_options(Some(repo.config())),
-    )?;
-    Ok(!status.is_clean())
+    let git_status_supplies_work_check = needs_capture_work_check
+        && current_state.is_none()
+        && matches!(&pre_capture_worktree_status, Ok(Some(_)));
+    let base_tree = if needs_capture_work_check && !git_status_supplies_work_check {
+        Some(snapshot_base_tree(repo, current_state.as_ref())?)
+    } else {
+        None
+    };
+
+    Ok(SnapshotGatherContext {
+        repo,
+        current_state,
+        base_tree,
+        merge_resolution_complete,
+        pre_capture_worktree_status,
+    })
+}
+
+fn snapshot_base_tree(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+) -> Result<Tree> {
+    match current_state {
+        Some(state) => Ok(repo.require_tree(&state.tree)?),
+        None => Ok(Tree::new()),
+    }
+}
+
+fn compute_snapshot_facts(gather: &SnapshotGatherContext<'_>) -> Result<SnapshotComputedFacts> {
+    let has_capture_work = if gather.current_state.is_none()
+        && let Ok(Some(status)) = &gather.pre_capture_worktree_status
+    {
+        !status.is_clean()
+    } else if let Some(base_tree) = gather.base_tree.as_ref() {
+        let status = gather.repo.compare_worktree_cached_with_options(
+            base_tree,
+            &worktree_status_options(Some(gather.repo.config())),
+        )?;
+        !status.is_clean()
+    } else {
+        false
+    };
+
+    Ok(SnapshotComputedFacts {
+        has_capture_work,
+        merge_resolution_complete: gather.merge_resolution_complete,
+    })
 }
 
 fn missing_capture_identity_advice() -> RecoveryAdvice {
@@ -1296,6 +1346,42 @@ mod tests {
             no_policy: false,
             no_agent: false,
         }
+    }
+
+    #[test]
+    fn snapshot_facts_detect_clean_and_dirty_native_worktree_from_gathered_tree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("file.txt"), "initial").unwrap();
+        create_snapshot(
+            &repo,
+            &user_config_with_principal(),
+            Some("initial".to_string()),
+            None,
+            empty_agent_overrides(),
+        )
+        .unwrap();
+
+        let clean_gather = gather_snapshot_context(&repo).unwrap();
+        assert!(
+            clean_gather.base_tree.is_some(),
+            "native no-work checks should carry the gathered current tree"
+        );
+        let clean_facts = compute_snapshot_facts(&clean_gather).unwrap();
+        assert!(
+            !clean_facts.has_capture_work,
+            "unchanged worktree should not be capturable"
+        );
+        assert!(clean_facts.should_refuse_nothing_to_capture());
+
+        std::fs::write(temp.path().join("file.txt"), "changed").unwrap();
+        let dirty_gather = gather_snapshot_context(&repo).unwrap();
+        let dirty_facts = compute_snapshot_facts(&dirty_gather).unwrap();
+        assert!(
+            dirty_facts.has_capture_work,
+            "modified worktree should be capturable"
+        );
+        assert!(!dirty_facts.should_refuse_nothing_to_capture());
     }
 
     #[test]
