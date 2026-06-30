@@ -197,6 +197,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["pull"], &["pull"]),
     sample(&["push"], &["push"]),
     sample(&["query"], &["query"]),
+    #[cfg(feature = "git-overlay")]
+    sample(
+        &["reconcile"],
+        &["reconcile", "--prefer", "heddle", "--ref", "main"],
+    ),
     sample(&["ready"], &["ready"]),
     sample(&["rebase"], &["rebase"]),
     sample(
@@ -1365,6 +1370,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "query",
             "ready",
             "rebase",
+            "reconcile",
             "redact apply",
             "redact list",
             "redact show",

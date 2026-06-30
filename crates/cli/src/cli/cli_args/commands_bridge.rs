@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 /// Source for a git import: either a local filesystem path or a URL that
 /// sley can fetch from.
@@ -120,20 +120,7 @@ pub enum GitCommands {
     },
 
     /// Preview a recovery path when a Git branch and Heddle thread diverge.
-    Reconcile {
-        /// Which local side should be treated as authoritative when applying.
-        ///
-        /// Omit with `--preview` to inspect both local repair choices without
-        /// changing refs, remotes, index, or worktree files.
-        #[arg(long, value_parser = ["git", "heddle"])]
-        prefer: Option<String>,
-        /// Branch/ref to reconcile.
-        #[arg(long = "ref", value_name = "BRANCH")]
-        ref_name: String,
-        /// Show the planned recovery without changing refs.
-        #[arg(long)]
-        preview: bool,
-    },
+    Reconcile(BridgeGitReconcileArgs),
 
     /// Push to Git remote.
     Push {
@@ -184,4 +171,22 @@ pub enum GitCommands {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct BridgeGitReconcileArgs {
+    /// Which local side should be treated as authoritative when applying.
+    ///
+    /// Omit with `--preview` to inspect both local repair choices without
+    /// changing refs, remotes, index, or worktree files.
+    #[arg(long, value_parser = ["git", "heddle"])]
+    pub prefer: Option<String>,
+
+    /// Branch/ref to reconcile.
+    #[arg(long = "ref", value_name = "BRANCH")]
+    pub ref_name: String,
+
+    /// Show the planned recovery without changing refs.
+    #[arg(long)]
+    pub preview: bool,
 }

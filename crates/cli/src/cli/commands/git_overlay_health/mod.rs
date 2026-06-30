@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::{object::ThreadName, worktree::WorktreeStatus};
+use objects::{
+    object::{ChangeId, ThreadName},
+    worktree::WorktreeStatus,
+};
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
@@ -206,6 +209,26 @@ struct VerificationActionPlan {
     remote_action: Option<String>,
     workflow_action: Option<String>,
     machine_contract_action: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StaleIntegrationMetadataDiagnostic {
+    thread_name: String,
+    target_thread: String,
+    candidate_state: ChangeId,
+    target_tip: ChangeId,
+}
+
+impl StaleIntegrationMetadataDiagnostic {
+    fn details_line(&self) -> String {
+        format!(
+            "{} claims merged into {} at {}, but target is {}",
+            self.thread_name,
+            self.target_thread,
+            self.candidate_state.short(),
+            self.target_tip.short()
+        )
+    }
 }
 
 impl GitOverlayHealth {
@@ -3011,12 +3034,13 @@ fn build_git_overlay_health_inner(
     match stale_integration_metadata_check(repo) {
         Ok(Some(check)) => {
             let summary = check.summary.clone();
+            let recovery_commands = stale_integration_metadata_recovery_commands(&check);
             checks.push(check);
             return GitOverlayHealth {
                 status: "stale_integration_metadata".to_string(),
                 clean: false,
                 summary,
-                recovery_commands: vec!["heddle thread list".to_string()],
+                recovery_commands,
                 checks,
             };
         }
@@ -3158,13 +3182,12 @@ fn stale_integration_metadata_check(
             continue;
         };
         if !graph.is_ancestor(&candidate, &target_tip).unwrap_or(false) {
-            stale.push(format!(
-                "{} claims merged into {} at {}, but target is {}",
-                thread.thread,
-                target_thread,
-                candidate.short(),
-                target_tip.short()
-            ));
+            stale.push(StaleIntegrationMetadataDiagnostic {
+                thread_name: thread.thread.clone(),
+                target_thread: target_thread.to_string(),
+                candidate_state: candidate,
+                target_tip,
+            });
         }
     }
 
@@ -3173,8 +3196,34 @@ fn stale_integration_metadata_check(
     }
 
     let mut details = BTreeMap::new();
+    let first = stale
+        .first()
+        .expect("stale integration metadata diagnostics must be non-empty");
+    let stale_thread_names = stale
+        .iter()
+        .map(|diagnostic| diagnostic.thread_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stale_threads = stale
+        .iter()
+        .map(StaleIntegrationMetadataDiagnostic::details_line)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let safe_recovery_command = heddle_action(["thread", "show", first.thread_name.as_str()]);
     details.insert("stale_thread_count".to_string(), stale.len().to_string());
-    details.insert("stale_threads".to_string(), stale.join("; "));
+    details.insert("stale_threads".to_string(), stale_threads);
+    details.insert("stale_thread_names".to_string(), stale_thread_names);
+    details.insert("first_stale_thread".to_string(), first.thread_name.clone());
+    details.insert(
+        "first_target_thread".to_string(),
+        first.target_thread.clone(),
+    );
+    details.insert(
+        "first_candidate_state".to_string(),
+        first.candidate_state.to_string(),
+    );
+    details.insert("first_target_tip".to_string(), first.target_tip.to_string());
+    details.insert("safe_recovery_command".to_string(), safe_recovery_command);
     Ok(Some(GitOverlayHealthCheck {
         name: "thread_integration_metadata".to_string(),
         status: "stale_integration_metadata".to_string(),
@@ -3184,6 +3233,25 @@ fn stale_integration_metadata_check(
         ),
         details,
     }))
+}
+
+fn stale_integration_metadata_recovery_commands(check: &GitOverlayHealthCheck) -> Vec<String> {
+    let mut commands = Vec::new();
+    if let Some(first) = check
+        .details
+        .get("first_stale_thread")
+        .filter(|thread| !thread.trim().is_empty())
+    {
+        commands.push(heddle_action(["thread", "show", first.as_str()]));
+    }
+    commands.push(heddle_action([
+        "thread",
+        "cleanup",
+        "--merged",
+        "--dry-run",
+    ]));
+    commands.push(heddle_action(["thread", "list"]));
+    commands
 }
 
 fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {

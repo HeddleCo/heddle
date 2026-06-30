@@ -34,7 +34,7 @@ pub use cli_args::{
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
-pub use cli_args::{BridgeCommands, GitCommands};
+pub use cli_args::{BridgeCommands, BridgeGitReconcileArgs, GitCommands};
 #[cfg(feature = "semantic")]
 pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 use repo::{Config, OutputFormat};

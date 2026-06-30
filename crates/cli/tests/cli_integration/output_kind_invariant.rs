@@ -146,6 +146,7 @@ const SWEPT: &[&str] = &[
     "push",
     "query",
     "ready",
+    "reconcile",
     "remote add",
     "remote list",
     "remote remove",
@@ -276,6 +277,9 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // Timeline navigation subcommands intentionally share one action
         // envelope so agents can handle fork/reset/recover uniformly.
         "timeline fork" | "timeline reset" | "timeline recover" => Some("timeline_action"),
+        // Top-level `reconcile` is an alias for `bridge git reconcile`
+        // and intentionally preserves that wire discriminator.
+        "reconcile" => Some("bridge_git_reconcile"),
         _ => None,
     }
 }

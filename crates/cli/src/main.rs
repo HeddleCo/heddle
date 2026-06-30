@@ -10,7 +10,7 @@ use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands,
-    commands::{cmd_bridge_git, cmd_git_overlay_guide},
+    commands::{cmd_bridge_git, cmd_bridge_git_reconcile, cmd_git_overlay_guide},
 };
 use cli::{
     cli::{
@@ -330,6 +330,9 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => cmd_git_overlay_guide(&cli),
 
+        #[cfg(feature = "git-overlay")]
+        Commands::Reconcile(args) => cmd_bridge_git_reconcile(&cli, args.clone()),
+
         Commands::Start(args) => cmd_start(&cli, args.clone()),
 
         Commands::Run(RunArgs { thread, command }) => {
@@ -360,6 +363,7 @@ async fn async_main() -> Result<()> {
             thread,
             message,
             no_squash,
+            no_git_checkpoint,
             push,
             no_push,
             remote,
@@ -370,6 +374,7 @@ async fn async_main() -> Result<()> {
                     thread: thread.clone(),
                     message: message.clone(),
                     no_squash: *no_squash,
+                    no_git_checkpoint: *no_git_checkpoint,
                     push: *push,
                     no_push: *no_push,
                     remote: remote.clone(),

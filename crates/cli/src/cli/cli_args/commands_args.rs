@@ -888,6 +888,14 @@ pub struct LandArgs {
     #[arg(long)]
     pub no_squash: bool,
 
+    /// Integrate Heddle state without writing the Git checkpoint.
+    #[arg(
+        long = "no-git-checkpoint",
+        visible_alias = "apply-only",
+        conflicts_with_all = ["push", "remote", "no_squash"]
+    )]
+    pub no_git_checkpoint: bool,
+
     /// Push after integration completes.
     #[arg(long)]
     pub push: bool,

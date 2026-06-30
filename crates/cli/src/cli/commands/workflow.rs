@@ -13,10 +13,12 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    checkpoint::create_git_checkpoint,
+    checkpoint::{create_git_checkpoint, preflight_git_checkpoint_ref_update},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_health::{
-        RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        remote_drift_decision,
     },
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json},
@@ -309,6 +311,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )));
     }
     let should_push = args.push;
+    let skip_git_checkpoint =
+        args.no_git_checkpoint && repo.capability() == repo::RepositoryCapability::GitOverlay;
+    let intends_git_checkpoint =
+        repo.capability() == repo::RepositoryCapability::GitOverlay && !args.no_git_checkpoint;
     let planned_push_remote = if should_push {
         match args
             .remote
@@ -326,9 +332,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         None
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
-    if let Some(advice) = land_checkpoint_preflight_advice(&repo, &thread.id) {
-        return Err(anyhow!(advice));
-    }
+    preflight_land_checkpoint_intent(&repo, &thread.id, intends_git_checkpoint)?;
 
     let mut captured = false;
     if let Some(thread_repo) = thread_repo.as_ref() {
@@ -412,7 +416,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
                     performed_steps: land_performed_steps(captured, false, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, false, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, false, false, false, false, false),
                 },
             );
         }
@@ -469,7 +473,9 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         performed_steps: land_performed_steps(
                             captured, synced, false, false, false,
                         ),
-                        skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                        skipped_steps: land_skipped_steps(
+                            captured, synced, false, false, false, false,
+                        ),
                     },
                 );
             }
@@ -503,6 +509,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 "heddle land --thread <name>",
             )?;
         }
+        preflight_land_checkpoint_intent(&repo, &merge_thread.id, intends_git_checkpoint)?;
         let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
         let mut checkpointed = false;
         let mut git_commit = None;
@@ -512,7 +519,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "auto_integrated",
             "accepted manually resolved integration state",
         )?;
-        if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        if intends_git_checkpoint {
             let checkpoint_message = land_checkpoint_message(
                 &repo,
                 &merge_thread,
@@ -570,7 +577,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             .conflicts_resolved_manually;
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
         let trust = build_repository_verification_state(&repo);
-        let post_land_action = integrated_land_next_action(true, pushed, &trust);
+        let post_land_action =
+            integrated_land_next_action(true, pushed, &trust, skip_git_checkpoint);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
             action: OperatorAction::Land,
@@ -597,10 +605,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             next_action: post_land_action.clone(),
             recommended_action: post_land_action,
         };
-        operator.block_success_claim_if_verification_blocked(
+        block_land_success_claim_if_verification_blocked(
+            &mut operator,
             &trust,
-            "land",
-            VerificationClaimPolicy::strict().allow_land_publish_followup(),
+            skip_git_checkpoint,
         );
         return write_land_output(
             cli,
@@ -618,8 +626,17 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 merge_state: Some(merge_state),
                 trust,
                 performed_steps: land_performed_steps(captured, synced, true, checkpointed, pushed),
-                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed, pushed),
-                chosen_path: if checkpointed {
+                skipped_steps: land_skipped_steps(
+                    captured,
+                    synced,
+                    true,
+                    checkpointed,
+                    pushed,
+                    skip_git_checkpoint,
+                ),
+                chosen_path: if skip_git_checkpoint {
+                    "capture_sync_manual_resolution_apply_only".to_string()
+                } else if checkpointed {
                     if pushed {
                         "capture_sync_manual_resolution_checkpoint_push".to_string()
                     } else {
@@ -675,7 +692,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
                     performed_steps: land_performed_steps(captured, synced, false, false, false),
-                    skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, synced, false, false, false, false),
                 },
             );
         }
@@ -712,7 +729,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 trust: build_repository_verification_state(&repo),
                 chosen_path: "blocked".to_string(),
                 performed_steps: land_performed_steps(captured, synced, false, false, false),
-                skipped_steps: land_skipped_steps(captured, synced, false, false, false),
+                skipped_steps: land_skipped_steps(captured, synced, false, false, false, false),
             },
         );
     }
@@ -732,6 +749,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )?;
     }
 
+    preflight_land_checkpoint_intent(&repo, &merge_thread.id, intends_git_checkpoint)?;
     let merge_output = merge_thread_into_current(
         &repo,
         &merge_thread.id,
@@ -760,7 +778,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         },
     )?;
 
-    if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
+    if integrated && intends_git_checkpoint {
         let checkpoint_message = land_checkpoint_message(
             &repo,
             &merge_thread,
@@ -818,7 +836,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     }
 
     let trust = build_repository_verification_state(&repo);
-    let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
+    let integrated_next_action =
+        integrated_land_next_action(integrated, pushed, &trust, skip_git_checkpoint);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
         action: OperatorAction::Land,
@@ -840,11 +859,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             merge_output.operator.recommended_action.clone()
         },
     };
-    operator.block_success_claim_if_verification_blocked(
-        &trust,
-        "land",
-        VerificationClaimPolicy::strict().allow_land_publish_followup(),
-    );
+    block_land_success_claim_if_verification_blocked(&mut operator, &trust, skip_git_checkpoint);
 
     write_land_output(
         cli,
@@ -868,12 +883,21 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 checkpointed,
                 pushed,
             ),
-            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed, pushed),
+            skipped_steps: land_skipped_steps(
+                captured,
+                synced,
+                integrated,
+                checkpointed,
+                pushed,
+                skip_git_checkpoint,
+            ),
             chosen_path: if integrated {
                 if pushed {
                     "capture_sync_merge_checkpoint_push"
                 } else if checkpointed {
                     "capture_sync_merge_checkpoint"
+                } else if skip_git_checkpoint {
+                    "capture_sync_merge_apply_only"
                 } else {
                     "capture_sync_merge"
                 }
@@ -887,6 +911,28 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
 
 fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
     !args.no_squash && user_config.land.squash
+}
+
+fn preflight_land_checkpoint_intent(
+    repo: &Repository,
+    thread_id: &str,
+    intends_git_checkpoint: bool,
+) -> Result<()> {
+    if !intends_git_checkpoint {
+        return Ok(());
+    }
+    preflight_git_checkpoint_ref_update(repo, "land")?;
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        repo,
+        "land",
+        GitOverlayMutationPreflight::checkpoint_like(),
+    )? {
+        return Err(anyhow!(advice));
+    }
+    if let Some(advice) = land_checkpoint_preflight_advice(repo, thread_id) {
+        return Err(anyhow!(advice));
+    }
+    Ok(())
 }
 
 fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Result<bool> {
@@ -1081,12 +1127,20 @@ fn land_skipped_steps(
     integrated: bool,
     checkpointed: bool,
     pushed: bool,
+    checkpoint_skipped_apply_only: bool,
 ) -> Vec<String> {
     [
         (!captured, "capture(no changes)"),
         (!synced, "sync(current)"),
         (!integrated, "merge(blocked)"),
-        (!checkpointed && integrated, "checkpoint(not needed)"),
+        (
+            !checkpointed && integrated && checkpoint_skipped_apply_only,
+            "checkpoint(apply-only)",
+        ),
+        (
+            !checkpointed && integrated && !checkpoint_skipped_apply_only,
+            "checkpoint(not needed)",
+        ),
         (!checkpointed && !integrated, "checkpoint(not reached)"),
         (!pushed && integrated, "push(not requested)"),
         (!pushed && !integrated, "push(not reached)"),
@@ -1101,15 +1155,38 @@ fn integrated_land_next_action(
     integrated: bool,
     pushed: bool,
     trust: &RepositoryVerificationState,
+    checkpoint_skipped_apply_only: bool,
 ) -> Option<String> {
     if !integrated {
         return None;
+    }
+    if checkpoint_skipped_apply_only {
+        return Some("heddle checkpoint -m \"...\"".to_string());
     }
     if !pushed && trust.recommended_action == "heddle push" {
         Some(trust.recommended_action.clone())
     } else {
         Some("heddle thread cleanup --merged --dry-run".to_string())
     }
+}
+
+fn block_land_success_claim_if_verification_blocked(
+    operator: &mut OperatorCommandOutput,
+    trust: &RepositoryVerificationState,
+    checkpoint_skipped_apply_only: bool,
+) {
+    let checkpoint_followup_allowed = checkpoint_skipped_apply_only
+        && operator.status == "landed"
+        && trust.status == "needs_checkpoint"
+        && trust.recommended_action.starts_with("heddle checkpoint -m");
+    if checkpoint_followup_allowed {
+        return;
+    }
+    operator.block_success_claim_if_verification_blocked(
+        trust,
+        "land",
+        VerificationClaimPolicy::strict().allow_land_publish_followup(),
+    );
 }
 
 fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
@@ -1279,14 +1356,13 @@ fn coalesce_land_integration_and_checkpoint(
     let Some(merge_state) = merge_state else {
         return Ok(());
     };
-    let Some(git_commit) = git_commit else {
-        return Ok(());
-    };
 
     let integration_batch = find_recent_land_integration_batch(repo, merge_state)?;
-    let checkpoint_batch = find_recent_land_git_checkpoint_batch(repo, git_commit)?;
-    repo.oplog()
-        .coalesce_batches(integration_batch.id, checkpoint_batch.id)?;
+    if let Some(git_commit) = git_commit {
+        let checkpoint_batch = find_recent_land_git_checkpoint_batch(repo, git_commit)?;
+        repo.oplog()
+            .coalesce_batches(integration_batch.id, checkpoint_batch.id)?;
+    }
     if let Some(collapse_state) = collapse_state {
         let collapse_batch = find_recent_land_collapse_batch(repo, collapse_state)?;
         repo.oplog()
@@ -1670,6 +1746,16 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                 "not pushed".to_string()
             };
             println!("  {}", style::field("push", &push_status));
+            if output
+                .skipped_steps
+                .iter()
+                .any(|step| step == "checkpoint(apply-only)")
+            {
+                println!(
+                    "  {}",
+                    style::field("checkpoint", "apply-only (Git commit skipped)")
+                );
+            }
         } else {
             if !output.performed_steps.is_empty() {
                 println!(
@@ -1745,6 +1831,7 @@ fn land_text_step(step: &str) -> String {
         "push" => "pushed".to_string(),
         "capture(no changes)" => "no unsaved changes".to_string(),
         "sync(current)" => "already refreshed".to_string(),
+        "checkpoint(apply-only)" => "Git checkpoint skipped (apply only)".to_string(),
         "merge(blocked)" => "merge blocked".to_string(),
         "checkpoint(not needed)" => "no Git commit needed".to_string(),
         "checkpoint(not reached)" => "Git commit not reached".to_string(),

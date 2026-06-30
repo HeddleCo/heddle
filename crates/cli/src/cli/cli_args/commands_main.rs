@@ -3,8 +3,6 @@
 
 use clap::Subcommand;
 
-#[cfg(feature = "git-overlay")]
-use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
@@ -23,6 +21,8 @@ use super::{
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
+#[cfg(feature = "git-overlay")]
+use super::{BridgeCommands, BridgeGitReconcileArgs};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -107,6 +107,10 @@ Examples:
     /// Show the low-friction Git-overlay workflow.
     #[cfg(feature = "git-overlay")]
     GitOverlay,
+
+    /// Top-level alias for `heddle bridge git reconcile`.
+    #[cfg(feature = "git-overlay")]
+    Reconcile(BridgeGitReconcileArgs),
 
     /// Print the JSON Schema for a `--output json`-emitting verb.
     ///

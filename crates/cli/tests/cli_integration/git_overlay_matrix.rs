@@ -2369,18 +2369,36 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
     assert_eq!(status["git_overlay_health"]["status"], "clean");
     assert_eq!(status["recommended_action"], Value::Null);
 
+    let preview = json(temp.path(), &["reconcile", "--ref", "main", "--preview"]);
+    assert_eq!(preview["output_kind"], "bridge_git_reconcile");
+    assert_eq!(preview["action"], "bridge git reconcile");
+    assert_eq!(preview["status"], "preview");
+    assert_eq!(preview["prefer"], Value::Null);
+
+    let no_direction = heddle_output(
+        &["--output", "json", "reconcile", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke top-level reconcile without --prefer");
+    assert!(
+        !no_direction.status.success(),
+        "top-level reconcile without --prefer should fail"
+    );
+    let stderr = std::str::from_utf8(&no_direction.stderr).expect("stderr utf8");
+    let envelope: Value = serde_json::from_str(stderr)
+        .expect("top-level no-direction reconcile should emit JSON envelope");
+    assert_eq!(envelope["kind"], "reconcile_direction_required");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle bridge git reconcile --ref main --preview"
+    );
+
     let reconcile = json(
         temp.path(),
-        &[
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            "git",
-            "--ref",
-            "main",
-        ],
+        &["reconcile", "--prefer", "git", "--ref", "main"],
     );
+    assert_eq!(reconcile["output_kind"], "bridge_git_reconcile");
+    assert_eq!(reconcile["action"], "bridge git reconcile");
     assert_eq!(reconcile["status"], "completed");
 
     let status = json(temp.path(), &["status", "--output", "json"]);
@@ -6440,6 +6458,146 @@ fn git_overlay_matrix_land_squashes_thread_to_one_git_commit_by_default() {
 }
 
 #[test]
+fn git_overlay_matrix_land_no_git_checkpoint_applies_only_and_recommends_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/apply-only");
+    let before_state = thread_tip(temp.path(), "main");
+    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/apply-only",
+            "--no-git-checkpoint",
+        ],
+    );
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(land["integrated"], true, "{land}");
+    assert_eq!(land["checkpointed"], false, "{land}");
+    assert_eq!(land["git_commit"], Value::Null, "{land}");
+    assert_eq!(
+        land["next_action"], "heddle checkpoint -m \"...\"",
+        "{land}"
+    );
+    assert_eq!(
+        land["recommended_action"], "heddle checkpoint -m \"...\"",
+        "{land}"
+    );
+    assert_eq!(
+        land["verification"]["recommended_action"], "heddle checkpoint -m \"...\"",
+        "{land}"
+    );
+    assert_eq!(land["chosen_path"], "capture_sync_merge_apply_only");
+    assert!(
+        land["skipped_steps"]
+            .as_array()
+            .expect("skipped_steps array")
+            .iter()
+            .any(|step| step == "checkpoint(apply-only)"),
+        "apply-only land should make the skipped checkpoint explicit: {land}"
+    );
+    assert!(
+        !land["performed_steps"]
+            .as_array()
+            .expect("performed_steps array")
+            .iter()
+            .any(|step| step == "checkpoint"),
+        "apply-only land must not claim a Git checkpoint was written: {land}"
+    );
+
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        before_git,
+        "apply-only land must leave Git HEAD unchanged"
+    );
+    assert_eq!(before_git, base);
+    assert_ne!(
+        thread_tip(temp.path(), "main"),
+        before_state,
+        "apply-only land should still advance the Heddle parent thread"
+    );
+    assert!(temp.path().join("one.txt").exists());
+    assert!(temp.path().join("two.txt").exists());
+}
+
+#[test]
+fn git_overlay_matrix_land_no_git_checkpoint_conflicts_before_mutation() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/apply-conflict");
+    let before_state = thread_tip(temp.path(), "main");
+    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    let before_refs = git_ref_snapshot(temp.path());
+
+    let cases = [
+        (
+            vec![
+                "--output",
+                "json",
+                "land",
+                "--thread",
+                "feature/apply-conflict",
+                "--no-git-checkpoint",
+                "--push",
+            ],
+            "--push",
+        ),
+        (
+            vec![
+                "--output",
+                "json",
+                "land",
+                "--thread",
+                "feature/apply-conflict",
+                "--no-git-checkpoint",
+                "--remote",
+                "origin",
+            ],
+            "--remote",
+        ),
+        (
+            vec![
+                "--output",
+                "json",
+                "land",
+                "--thread",
+                "feature/apply-conflict",
+                "--apply-only",
+                "--no-squash",
+            ],
+            "--no-squash",
+        ),
+    ];
+
+    for (args, conflicting_flag) in cases {
+        let output = heddle_output(&args, Some(temp.path())).expect("invoke conflicting land");
+        assert!(
+            !output.status.success(),
+            "land {:?} should reject conflicting apply-only options",
+            args
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "conflict should fail before writing JSON stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot be used with")
+                && stderr.contains(conflicting_flag)
+                && (stderr.contains("--no-git-checkpoint") || stderr.contains("--apply-only")),
+            "conflict error should name both options: {stderr}"
+        );
+        assert_eq!(thread_tip(temp.path(), "main"), before_state);
+        assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
+        assert_eq!(git_ref_snapshot(temp.path()), before_refs);
+    }
+}
+
+#[test]
 fn git_overlay_matrix_expand_squashed_land_by_state_and_git_oid() {
     let temp = TempDir::new().unwrap();
     let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/expand");
@@ -6825,6 +6983,26 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     std::fs::write(&thread_record_path, stale_record).unwrap();
     let stale_verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(stale_verify["status"], "stale_integration_metadata");
+    assert_eq!(
+        stale_verify["recommended_action"],
+        "heddle thread show feature/land-undo"
+    );
+    assert_eq!(
+        stale_verify["recovery_commands"],
+        serde_json::json!([
+            "heddle thread show feature/land-undo",
+            "heddle thread cleanup --merged --dry-run",
+            "heddle thread list"
+        ])
+    );
+    assert!(
+        stale_verify["recovery_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command != "heddle thread cleanup --merged"),
+        "verify must not recommend non-dry-run cleanup as stale metadata repair: {stale_verify}"
+    );
     let workflow = stale_verify["checks"]
         .as_array()
         .unwrap()
@@ -6832,6 +7010,32 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
         .find(|check| check["name"] == "Workflow")
         .unwrap_or_else(|| panic!("verify should include Workflow check: {stale_verify}"));
     assert_eq!(workflow["status"], "stale_integration_metadata");
+    let details = workflow["details"]
+        .as_object()
+        .unwrap_or_else(|| panic!("stale workflow should include details: {workflow}"));
+    assert_eq!(details["stale_thread_count"], "1");
+    assert_eq!(details["stale_thread_names"], "feature/land-undo");
+    assert_eq!(details["first_stale_thread"], "feature/land-undo");
+    assert_eq!(details["first_target_thread"], "main");
+    assert_eq!(
+        details["safe_recovery_command"],
+        "heddle thread show feature/land-undo"
+    );
+    assert!(
+        details["stale_threads"]
+            .as_str()
+            .is_some_and(|value| value.contains("feature/land-undo claims merged into main")),
+        "existing stale_threads scalar should remain descriptive: {workflow}"
+    );
+    assert!(
+        details["first_candidate_state"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+            && details["first_target_tip"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+        "stale metadata should expose full first candidate/target ids: {workflow}"
+    );
 
     std::fs::write(temp.path().join("local-dirty.txt"), "local dirty\n").unwrap();
     let redo_refusal = heddle_output(&["--output", "json", "undo", "--redo"], Some(temp.path()))

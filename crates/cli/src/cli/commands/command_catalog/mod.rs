@@ -2144,6 +2144,28 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "threads",
         ),
     ),
+    entry(
+        &["reconcile"],
+        exits(
+            git_adapter_action(
+                json_discriminators(
+                    documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
+                    &[json_discriminator(
+                        Some("bridge git reconcile"),
+                        "output_kind",
+                        "bridge_git_reconcile",
+                    )],
+                ),
+                "bridge git reconcile",
+                "direct_command",
+                "Alias for the bridge Git reconcile command.",
+            ),
+            &[
+                (0, "ok"),
+                (65, "unmergeable divergence; manual resolution required"),
+            ],
+        ),
+    ),
     entry(&["redact"], category(GROUP, "recovery")),
     entry(
         &["redact", "apply"],
@@ -4550,6 +4572,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],
+        #[cfg(feature = "git-overlay")]
+        Commands::Reconcile(_) => vec!["reconcile"],
         Commands::Schemas { .. } => vec!["schemas"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
@@ -4720,7 +4744,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 GitCommands::Export { .. } => vec!["bridge", "git", "export"],
                 GitCommands::Import { .. } => vec!["bridge", "git", "import"],
                 GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
-                GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
+                GitCommands::Reconcile(_) => vec!["bridge", "git", "reconcile"],
                 GitCommands::Push { .. } => vec!["bridge", "git", "push"],
                 GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
                 #[cfg(feature = "ingest")]

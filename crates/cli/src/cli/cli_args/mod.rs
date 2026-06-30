@@ -49,7 +49,7 @@ pub use commands_args::{
     UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};
+pub use commands_bridge::{BridgeCommands, BridgeGitReconcileArgs, GitCommands, GitSource};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
