@@ -7,125 +7,15 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{ChangeId, ContentHash, EntryType, Tree},
+    object::{ChangeId, ContentHash},
     store::ObjectStore,
 };
 use repo::Repository;
+use wire::{ObjectId, ObjectTransferPlan, ObjectType, StateClosureOptions};
 
 /// Synchronize objects from a local source repository to a target repository.
 pub struct LocalSync {
     source: Repository,
-}
-
-struct TreeTransferPlan {
-    trees: Vec<PlannedTree>,
-    blobs: Vec<ContentHash>,
-}
-
-struct PlannedTree {
-    hash: ContentHash,
-    tree: Tree,
-}
-
-impl TreeTransferPlan {
-    fn gather(
-        source: &Repository,
-        roots: impl IntoIterator<Item = ContentHash>,
-        require_complete: bool,
-    ) -> Result<Self> {
-        let mut visitor = TreeTransferVisitor::new(source, require_complete);
-        for root in roots {
-            visitor.visit_tree(&root)?;
-        }
-        Ok(visitor.finish())
-    }
-
-    fn propagate_redactions(&self, sync: &LocalSync, target: &Repository) -> Result<()> {
-        for blob in &self.blobs {
-            sync.propagate_redactions_for_blob(target, blob)?;
-        }
-        Ok(())
-    }
-
-    fn copy_objects(
-        &self,
-        sync: &LocalSync,
-        target: &Repository,
-        copied: &mut usize,
-    ) -> Result<()> {
-        for hash in &self.blobs {
-            if !target.store().has_blob(hash)? {
-                let blob = sync.source.require_blob(hash)?;
-                target.store().put_blob(&blob)?;
-                *copied += 1;
-            }
-        }
-        for planned in &self.trees {
-            if !target.store().has_tree(&planned.hash)? {
-                target.store().put_tree(&planned.tree)?;
-                *copied += 1;
-            }
-        }
-        Ok(())
-    }
-}
-
-struct TreeTransferVisitor<'source> {
-    source: &'source Repository,
-    require_complete: bool,
-    visited_trees: HashSet<ContentHash>,
-    visited_blobs: HashSet<ContentHash>,
-    plan: TreeTransferPlan,
-}
-
-impl<'source> TreeTransferVisitor<'source> {
-    fn new(source: &'source Repository, require_complete: bool) -> Self {
-        Self {
-            source,
-            require_complete,
-            visited_trees: HashSet::new(),
-            visited_blobs: HashSet::new(),
-            plan: TreeTransferPlan {
-                trees: Vec::new(),
-                blobs: Vec::new(),
-            },
-        }
-    }
-
-    fn visit_tree(&mut self, tree_hash: &ContentHash) -> Result<()> {
-        if !self.visited_trees.insert(*tree_hash) {
-            return Ok(());
-        }
-
-        let Some(tree) = self.source.store().get_tree(tree_hash)? else {
-            if self.require_complete {
-                return Err(anyhow!("Tree {} not found in source", tree_hash));
-            }
-            return Ok(());
-        };
-
-        for entry in tree.entries() {
-            match entry.entry_type {
-                EntryType::Blob | EntryType::Symlink => {
-                    if self.visited_blobs.insert(entry.hash) {
-                        self.plan.blobs.push(entry.hash);
-                    }
-                }
-                EntryType::Tree => {
-                    self.visit_tree(&entry.hash)?;
-                }
-            }
-        }
-        self.plan.trees.push(PlannedTree {
-            hash: *tree_hash,
-            tree,
-        });
-        Ok(())
-    }
-
-    fn finish(self) -> TreeTransferPlan {
-        self.plan
-    }
 }
 
 impl LocalSync {
@@ -221,22 +111,24 @@ impl LocalSync {
             None => return Err(anyhow!("State {} not found in source", state_id)),
         };
 
-        // Always propagate per-state visibility and per-blob redactions,
-        // regardless of whether the objects themselves need copying.
-        self.propagate_state_visibility_for_state(target, state_id)?;
-        let transfer_plan = TreeTransferPlan::gather(
-            &self.source,
-            [Some(state.tree), state.provenance, state.context]
-                .into_iter()
-                .flatten(),
-            !state_already_present,
-        )?;
-        transfer_plan.propagate_redactions(self, target)?;
-
-        if !state_already_present {
-            transfer_plan.copy_objects(self, target, copied)?;
+        let transfer_plan = match wire::plan_state_transfer_with_options(
+            self.source.store(),
+            *state_id,
+            StateClosureOptions {
+                depth: Some(0),
+                exclude_states: Vec::new(),
+            },
+        ) {
+            Ok(plan) => Some(plan),
+            Err(wire::ProtocolError::ObjectNotFound(_)) if state_already_present => None,
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(transfer_plan) = transfer_plan {
+            self.apply_transfer_plan(target, &transfer_plan, !state_already_present, copied)?;
+        } else {
+            self.propagate_state_visibility_for_state(target, state_id)?;
+            self.copy_state_blob_dependencies(target, &state, copied)?;
         }
-        self.copy_state_blob_dependencies(target, &state, copied)?;
 
         // Copy parent states recursively (if depth allows). We recurse
         // on parents even when the current state was already present —
@@ -269,6 +161,55 @@ impl LocalSync {
         Ok(())
     }
 
+    fn apply_transfer_plan(
+        &self,
+        target: &Repository,
+        plan: &ObjectTransferPlan,
+        copy_objects: bool,
+        copied: &mut usize,
+    ) -> Result<()> {
+        for object in plan.objects() {
+            match (&object.id, object.obj_type) {
+                (ObjectId::Hash(hash), ObjectType::Blob) if copy_objects => {
+                    if self.copy_blob(target, hash)? {
+                        *copied += 1;
+                    }
+                }
+                (ObjectId::Hash(_), ObjectType::Blob) => {}
+                (ObjectId::Hash(hash), ObjectType::Tree) if copy_objects => {
+                    self.copy_tree(target, hash, copied)?;
+                }
+                (ObjectId::Hash(_), ObjectType::Tree) => {}
+                (ObjectId::ChangeId(_), ObjectType::State) => {}
+                (ObjectId::Hash(blob), ObjectType::Redaction) => {
+                    self.propagate_redactions_for_blob(target, blob)?;
+                }
+                (ObjectId::ChangeId(state), ObjectType::StateVisibility) => {
+                    self.propagate_state_visibility_for_state(target, state)?;
+                }
+                (_, ObjectType::Action) => {
+                    return Err(anyhow!("Action transfer is not supported by local sync"));
+                }
+                _ => return Err(anyhow!("object id/type mismatch in local transfer plan")),
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_tree(&self, target: &Repository, hash: &ContentHash, copied: &mut usize) -> Result<()> {
+        if target.store().has_tree(hash)? {
+            return Ok(());
+        }
+        let tree = self
+            .source
+            .store()
+            .get_tree(hash)?
+            .ok_or_else(|| anyhow!("Tree {} not found in source", hash))?;
+        target.store().put_tree(&tree)?;
+        *copied += 1;
+        Ok(())
+    }
+
     fn copy_state_blob_dependencies(
         &self,
         target: &Repository,
@@ -284,23 +225,10 @@ impl LocalSync {
         .into_iter()
         .flatten()
         {
-            self.copy_blob_dependency(target, &hash, copied)?;
+            if self.copy_blob(target, &hash)? {
+                *copied += 1;
+            }
         }
-        Ok(())
-    }
-
-    fn copy_blob_dependency(
-        &self,
-        target: &Repository,
-        hash: &ContentHash,
-        copied: &mut usize,
-    ) -> Result<()> {
-        if target.store().has_blob(hash)? {
-            return Ok(());
-        }
-        let blob = self.source.require_blob(hash)?;
-        target.store().put_blob(&blob)?;
-        *copied += 1;
         Ok(())
     }
 
@@ -361,4 +289,45 @@ fn state_metadata_roots_changed(
         || target_state.review_signatures != source_state.review_signatures
         || target_state.discussions != source_state.discussions
         || target_state.structured_conflicts != source_state.structured_conflicts
+}
+
+#[cfg(test)]
+mod tests {
+    use objects::{object::Blob, store::ObjectStore};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn fetch_state_copies_tail_metadata_blobs_from_transfer_plan() {
+        let source_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        std::fs::write(source_dir.path().join("README.md"), "hello\n").unwrap();
+        let state = source.snapshot(Some("seed".to_string()), None).unwrap();
+        let risk = source
+            .store()
+            .put_blob(&Blob::from("risk signals\n"))
+            .unwrap();
+        let state_with_risk = state.with_risk_signals(risk);
+        let state_id = state_with_risk.change_id;
+        source.store().put_state(&state_with_risk).unwrap();
+
+        let sync = LocalSync::open(source_dir.path()).unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let target = Repository::init_default(target_dir.path()).unwrap();
+
+        let copied = sync.fetch_state(&target, &state_id).unwrap();
+
+        assert!(copied > 0);
+        assert!(target.store().has_blob(&risk).unwrap());
+        assert_eq!(
+            target
+                .store()
+                .get_state(&state_id)
+                .unwrap()
+                .unwrap()
+                .risk_signals,
+            Some(risk)
+        );
+    }
 }

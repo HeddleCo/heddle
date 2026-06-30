@@ -47,11 +47,15 @@ pub use native_pack::{
     PackFileChunkReader, build_native_pack, install_received_pack, is_native_packable_object_type,
     native_pack_excluded_object_types, next_pack_chunk, receive_pack_chunk,
 };
-pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
+pub use object_availability::{
+    ObjectAvailabilityPlan, has_object, has_planned_object, plan_object_availability,
+    plan_planned_object_availability,
+};
 pub use object_graph::{
-    ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions, enumerate_state_closure,
-    enumerate_state_closure_plan, enumerate_state_closure_plan_with_options,
-    enumerate_state_closure_with_options, is_ancestor,
+    ObjectId, ObjectInfo, ObjectTransferPlan, ObjectType, PlannedObject, StateClosureOptions,
+    enumerate_state_closure, enumerate_state_closure_plan,
+    enumerate_state_closure_plan_with_options, enumerate_state_closure_with_options, is_ancestor,
+    plan_state_transfer, plan_state_transfer_with_options,
 };
 pub use object_transfer::{
     MAX_PULL_DECODE_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,

@@ -2,7 +2,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ChangeId, ContentHash, EntryType},
+    object::{ChangeId, ContentHash, EntryType, State},
     store::ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,55 @@ pub struct ObjectInfo {
 pub struct PlannedObject {
     pub id: ObjectId,
     pub obj_type: ObjectType,
+}
+
+impl PlannedObject {
+    pub fn to_object_info(&self) -> ObjectInfo {
+        ObjectInfo {
+            id: self.id.clone(),
+            obj_type: self.obj_type,
+            size: 0,
+            delta_base: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectTransferPlan {
+    objects: Vec<PlannedObject>,
+}
+
+impl ObjectTransferPlan {
+    pub fn from_objects(objects: Vec<PlannedObject>) -> Self {
+        Self { objects }
+    }
+
+    pub fn objects(&self) -> &[PlannedObject] {
+        &self.objects
+    }
+
+    pub fn into_objects(self) -> Vec<PlannedObject> {
+        self.objects
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, PlannedObject> {
+        self.objects.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    pub fn object_infos(&self, store: &impl ObjectStore) -> Result<Vec<ObjectInfo>> {
+        self.objects
+            .iter()
+            .map(|object| planned_object_info(store, object))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,14 +177,8 @@ pub fn enumerate_state_closure_with_options(
                 &mut out,
             )?;
         }
-        if let Some(discussions_blob) = state.discussions {
-            enumerate_blob_filtered(
-                store,
-                discussions_blob,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )?;
+        for blob in state_blob_dependencies(&state) {
+            enumerate_blob_filtered(store, blob, &excluded_hashes, &mut seen_hashes, &mut out)?;
         }
     }
 
@@ -146,7 +189,7 @@ pub fn enumerate_state_closure_plan(
     store: &impl ObjectStore,
     state_id: ChangeId,
 ) -> Result<Vec<PlannedObject>> {
-    enumerate_state_closure_plan_with_options(store, state_id, StateClosureOptions::default())
+    Ok(plan_state_transfer(store, state_id)?.into_objects())
 }
 
 pub fn enumerate_state_closure_plan_with_options(
@@ -154,6 +197,21 @@ pub fn enumerate_state_closure_plan_with_options(
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
+    Ok(plan_state_transfer_with_options(store, state_id, options)?.into_objects())
+}
+
+pub fn plan_state_transfer(
+    store: &impl ObjectStore,
+    state_id: ChangeId,
+) -> Result<ObjectTransferPlan> {
+    plan_state_transfer_with_options(store, state_id, StateClosureOptions::default())
+}
+
+pub fn plan_state_transfer_with_options(
+    store: &impl ObjectStore,
+    state_id: ChangeId,
+    options: StateClosureOptions,
+) -> Result<ObjectTransferPlan> {
     let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
 
     let mut out = Vec::new();
@@ -211,10 +269,10 @@ pub fn enumerate_state_closure_plan_with_options(
                 &mut out,
             )?;
         }
-        if let Some(discussions_blob) = state.discussions {
+        for blob in state_blob_dependencies(&state) {
             enumerate_blob_plan_filtered(
                 store,
-                discussions_blob,
+                blob,
                 &excluded_hashes,
                 &mut seen_hashes,
                 &mut out,
@@ -222,7 +280,66 @@ pub fn enumerate_state_closure_plan_with_options(
         }
     }
 
-    Ok(out)
+    Ok(ObjectTransferPlan::from_objects(out))
+}
+
+fn state_blob_dependencies(state: &State) -> impl Iterator<Item = ContentHash> + '_ {
+    [
+        state.risk_signals,
+        state.review_signatures,
+        state.discussions,
+        state.structured_conflicts,
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn planned_object_info(store: &impl ObjectStore, object: &PlannedObject) -> Result<ObjectInfo> {
+    let size = match (&object.id, object.obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Blob) => store
+            .get_blob(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
+            .size() as u64,
+        (ObjectId::Hash(hash), ObjectType::Tree) => {
+            let tree = store
+                .get_tree(hash)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+            rmp_serde::to_vec_named(&tree)?.len() as u64
+        }
+        (ObjectId::ChangeId(change_id), ObjectType::State) => {
+            let state = store
+                .get_state(change_id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string()))?;
+            rmp_serde::to_vec_named(&state)?.len() as u64
+        }
+        (ObjectId::Hash(hash), ObjectType::Action) => {
+            let action_id = objects::object::ActionId::from_hash(*hash);
+            let action = store
+                .get_action(&action_id)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+            rmp_serde::to_vec_named(&action)?.len() as u64
+        }
+        (ObjectId::Hash(hash), ObjectType::Redaction) => store
+            .get_redactions_bytes_for_blob(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
+            .len() as u64,
+        (ObjectId::ChangeId(change_id), ObjectType::StateVisibility) => store
+            .get_state_visibility_bytes_for_state(change_id)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string_full()))?
+            .len() as u64,
+        _ => {
+            return Err(ProtocolError::InvalidState(
+                "object id/type mismatch".to_string(),
+            ));
+        }
+    };
+
+    Ok(ObjectInfo {
+        id: object.id.clone(),
+        obj_type: object.obj_type,
+        size,
+        delta_base: None,
+    })
 }
 
 fn enumerate_tree_closure_filtered(
@@ -496,8 +613,8 @@ fn collect_excluded(
         if let Some(context_root) = state.context {
             collect_tree_hashes(store, context_root, &mut excluded_hashes)?;
         }
-        if let Some(discussions_blob) = state.discussions {
-            excluded_hashes.insert(discussions_blob);
+        for blob in state_blob_dependencies(&state) {
+            excluded_hashes.insert(blob);
         }
     }
 
@@ -583,6 +700,7 @@ mod tests {
     use super::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
         enumerate_state_closure_plan_with_options, enumerate_state_closure_with_options,
+        plan_state_transfer_with_options,
     };
 
     fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
@@ -655,6 +773,37 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::ChangeId(_)))
+        );
+    }
+
+    #[test]
+    fn transfer_plan_enriches_object_infos_from_planned_closure() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        let plan = plan_state_transfer_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let planned_infos = plan.object_infos(repo.store()).unwrap();
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(pairs_from_full(&planned_infos), pairs_from_full(&full));
+        assert!(
+            planned_infos
+                .iter()
+                .filter(|info| !matches!(info.obj_type, ObjectType::Redaction))
+                .all(|info| info.size > 0),
+            "planned info enrichment must carry sizes for primary objects"
         );
     }
 
@@ -945,5 +1094,62 @@ mod tests {
                 .any(|p| p.obj_type == ObjectType::Blob && p.id == ObjectId::Hash(discussion_hash)),
             "plan closure must include the discussions blob referenced by the state"
         );
+    }
+
+    #[test]
+    fn enumerate_state_closure_emits_state_tail_metadata_blobs() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        let risk = repo
+            .store()
+            .put_blob(&Blob::from("risk signals\n"))
+            .expect("put risk signals");
+        let review = repo
+            .store()
+            .put_blob(&Blob::from("review signatures\n"))
+            .expect("put review signatures");
+        let conflicts = repo
+            .store()
+            .put_blob(&Blob::from("structured conflicts\n"))
+            .expect("put structured conflicts");
+        let state_with_tail = state
+            .with_risk_signals(risk)
+            .with_review_signatures(review)
+            .with_structured_conflicts(conflicts);
+        repo.store()
+            .put_state(&state_with_tail)
+            .expect("put state with tail metadata");
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state_with_tail.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state_with_tail.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        for hash in [risk, review, conflicts] {
+            assert!(
+                full.iter().any(
+                    |info| info.obj_type == ObjectType::Blob && info.id == ObjectId::Hash(hash)
+                ),
+                "full closure must include state tail metadata blob {}",
+                hash.to_hex()
+            );
+            assert!(
+                plan.iter()
+                    .any(|p| p.obj_type == ObjectType::Blob && p.id == ObjectId::Hash(hash)),
+                "plan closure must include state tail metadata blob {}",
+                hash.to_hex()
+            );
+        }
     }
 }

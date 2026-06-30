@@ -288,9 +288,9 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let object_plan = wire::enumerate_state_closure_plan(repo.store(), local_state)?;
+        let object_plan = wire::plan_state_transfer(repo.store(), local_state)?;
         let full_objects = if object_plan.len() <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
-            Some(wire::enumerate_state_closure(repo.store(), local_state)?)
+            Some(object_plan.object_infos(repo.store())?)
         } else {
             None
         };
@@ -360,11 +360,11 @@ impl HostedGrpcClient {
                 .map(|info| (descriptor_id_from_info(&info), info))
                 .collect::<HashMap<_, _>>(),
             None => object_plan
-                .into_iter()
+                .iter()
                 .map(|object| {
                     (
-                        descriptor_id_from_plan(&object),
-                        object_info_from_plan(&object),
+                        descriptor_id_from_plan(object),
+                        object_info_from_plan(object),
                     )
                 })
                 .collect::<HashMap<_, _>>(),
@@ -1184,12 +1184,7 @@ fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedT
 }
 
 fn object_info_from_plan(object: &PlannedObject) -> ObjectInfo {
-    ObjectInfo {
-        id: object.id.clone(),
-        obj_type: object.obj_type,
-        size: 0,
-        delta_base: None,
-    }
+    object.to_object_info()
 }
 
 fn to_proto_planned_object(object: &PlannedObject) -> ObjectDescriptor {

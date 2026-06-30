@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::store::ObjectStore;
 
-use crate::{ObjectId, ObjectInfo, ObjectType, Result};
+use crate::{ObjectId, ObjectInfo, ObjectType, PlannedObject, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectAvailabilityPlan {
@@ -15,7 +15,15 @@ pub struct ObjectAvailabilityPlan {
 }
 
 pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
-    match (&info.id, info.obj_type) {
+    has_object_id(store, &info.id, info.obj_type)
+}
+
+pub fn has_planned_object(store: &impl ObjectStore, object: &PlannedObject) -> Result<bool> {
+    has_object_id(store, &object.id, object.obj_type)
+}
+
+fn has_object_id(store: &impl ObjectStore, id: &ObjectId, obj_type: ObjectType) -> Result<bool> {
+    match (id, obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
         // State identity deliberately excludes mutable tail fields such as
@@ -43,15 +51,35 @@ pub fn plan_object_availability(
     store: &impl ObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<ObjectAvailabilityPlan> {
+    plan_availability(
+        objects.iter().map(|info| (&info.id, info.obj_type)),
+        |id, obj_type| has_object_id(store, id, obj_type),
+    )
+}
+
+pub fn plan_planned_object_availability(
+    store: &impl ObjectStore,
+    objects: &[PlannedObject],
+) -> Result<ObjectAvailabilityPlan> {
+    plan_availability(
+        objects.iter().map(|object| (&object.id, object.obj_type)),
+        |id, obj_type| has_object_id(store, id, obj_type),
+    )
+}
+
+fn plan_availability<'a>(
+    objects: impl IntoIterator<Item = (&'a ObjectId, ObjectType)>,
+    mut has_object: impl FnMut(&ObjectId, ObjectType) -> Result<bool>,
+) -> Result<ObjectAvailabilityPlan> {
     let mut plan = ObjectAvailabilityPlan::default();
 
-    for info in objects {
-        if has_object(store, info)? {
-            plan.have_objects.push(info.id.clone());
-            plan.present_objects.push(info.id.clone());
+    for (id, obj_type) in objects {
+        if has_object(id, obj_type)? {
+            plan.have_objects.push(id.clone());
+            plan.present_objects.push(id.clone());
         } else {
-            plan.want_objects.push(info.id.clone());
-            plan.missing_objects.push(info.id.clone());
+            plan.want_objects.push(id.clone());
+            plan.missing_objects.push(id.clone());
         }
     }
 
@@ -206,6 +234,31 @@ mod tests {
         assert!(plan.have_objects.is_empty());
         assert_eq!(plan.want_objects, vec![ObjectId::ChangeId(state)]);
         assert_eq!(plan.missing_objects, vec![ObjectId::ChangeId(state)]);
+    }
+
+    #[test]
+    fn planned_object_availability_uses_same_presence_rules() {
+        let blob = Blob::new(b"hello".to_vec());
+        let blob_hash = blob.hash();
+        let store = DummyStore {
+            blob: Some(blob_hash),
+        };
+        let state = ChangeId::from_bytes([4; 16]);
+        let objects = vec![
+            PlannedObject {
+                id: ObjectId::Hash(blob_hash),
+                obj_type: ObjectType::Blob,
+            },
+            PlannedObject {
+                id: ObjectId::ChangeId(state),
+                obj_type: ObjectType::State,
+            },
+        ];
+
+        let plan = plan_planned_object_availability(&store, &objects).unwrap();
+
+        assert_eq!(plan.have_objects, vec![ObjectId::Hash(blob_hash)]);
+        assert_eq!(plan.want_objects, vec![ObjectId::ChangeId(state)]);
     }
 
     #[test]
