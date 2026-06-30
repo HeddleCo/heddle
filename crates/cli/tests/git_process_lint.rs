@@ -12,7 +12,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ALLOWED_GIT_SPAWNS: &[(&str, &str, &str)] = &[];
+const GIT_BOUNDARY_MAP: &str = include_str!("../../../docs/GIT_BOUNDARY_MAP.md");
+
+#[derive(Debug)]
+struct AllowedGitSpawn {
+    file: &'static str,
+    function: &'static str,
+    category: &'static str,
+    owner: &'static str,
+    reason: &'static str,
+    desired_end_state: &'static str,
+}
+
+const ALLOWED_GIT_SPAWNS: &[AllowedGitSpawn] = &[];
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct SpawnSite {
@@ -30,20 +42,17 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
         walk_rust_files(&dir, &mut |path| scan_file(&workspace, path, &mut sites));
     }
 
-    let allowed: BTreeMap<(&str, &str), &str> = ALLOWED_GIT_SPAWNS
+    let allowed: BTreeMap<(&str, &str), &AllowedGitSpawn> = ALLOWED_GIT_SPAWNS
         .iter()
-        .map(|(file, function, reason)| ((*file, *function), *reason))
+        .map(|entry| ((entry.file, entry.function), entry))
         .collect();
 
     let mut unexpected = Vec::new();
     let mut seen = BTreeSet::new();
     for site in &sites {
         let key = (site.file.as_str(), site.function.as_str());
-        if let Some(reason) = allowed.get(&key) {
-            assert!(
-                !reason.trim().is_empty(),
-                "allowlist reason must be nonempty"
-            );
+        if let Some(entry) = allowed.get(&key) {
+            assert_valid_allowlist_entry(entry);
             seen.insert(key);
         } else {
             unexpected.push(site.clone());
@@ -71,6 +80,65 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
     assert!(
         missing.is_empty(),
         "git-process allowlist entry no longer matches a production spawn; remove or update it: {missing:?}"
+    );
+}
+
+#[test]
+fn git_process_lint_is_documented_by_boundary_map() {
+    for required in [
+        "# Git Boundary Map",
+        "## Sley-backed",
+        "## Sley facade gap",
+        "## Test oracle",
+        "## Intentional subprocess",
+        "crates/cli/tests/git_process_lint.rs",
+    ] {
+        assert!(
+            GIT_BOUNDARY_MAP.contains(required),
+            "Git boundary map must document {required:?}"
+        );
+    }
+
+    if ALLOWED_GIT_SPAWNS.is_empty() {
+        assert!(
+            GIT_BOUNDARY_MAP.contains("Current production subprocess allowlist: empty."),
+            "empty production git subprocess allowlist must be stated in the boundary map"
+        );
+    }
+
+    for entry in ALLOWED_GIT_SPAWNS {
+        assert_valid_allowlist_entry(entry);
+        for required in [entry.file, entry.function, entry.owner] {
+            assert!(
+                GIT_BOUNDARY_MAP.contains(required),
+                "git-process allowlist entry must be documented in Git boundary map: {required}"
+            );
+        }
+    }
+}
+
+fn assert_valid_allowlist_entry(entry: &AllowedGitSpawn) {
+    assert!(!entry.file.trim().is_empty(), "allowlist file is required");
+    assert!(
+        !entry.function.trim().is_empty(),
+        "allowlist function is required"
+    );
+    assert!(
+        matches!(entry.category, "Intentional subprocess" | "Sley facade gap"),
+        "allowlist category must be a production boundary category, got {:?}",
+        entry.category
+    );
+    assert!(
+        !entry.owner.trim().is_empty(),
+        "allowlist owner is required"
+    );
+    assert!(
+        !entry.reason.trim().is_empty(),
+        "allowlist reason must be nonempty"
+    );
+    assert!(
+        !entry.desired_end_state.trim().is_empty(),
+        "allowlist desired end state is required"
     );
 }
 
