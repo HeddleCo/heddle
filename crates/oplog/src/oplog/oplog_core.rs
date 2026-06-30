@@ -523,6 +523,53 @@ impl OpLogBackend for OpLog {
         Ok(ids)
     }
 
+    fn record_batches_scoped(
+        &self,
+        groups: Vec<(Vec<OpRecord>, Option<&str>)>,
+    ) -> Result<Vec<Vec<u64>>> {
+        // Drop empty groups but remember their slot so the returned shape
+        // matches the input 1:1 (an empty group consumes no id and no
+        // batch).
+        if groups.iter().all(|(ops, _)| ops.is_empty()) {
+            return Ok(groups.iter().map(|_| Vec::new()).collect());
+        }
+
+        let _lock = self.write_lock()?;
+        // Reload from disk to catch any writes from other processes — same
+        // freshness contract as the single-batch path.
+        let index = self.open_index_for_write()?;
+
+        let timestamp = Utc::now();
+        // One id space across the whole call: ids stay globally monotonic and
+        // sequential across all groups (so replay order == emit order), while
+        // each group keeps a distinct `batch_id` (= the id of its first
+        // entry) so it remains an independent undo/redo unit.
+        let mut next_id = index.head_id() + 1;
+        let mut all_entries: Vec<OpEntry> = Vec::new();
+        let mut result: Vec<Vec<u64>> = Vec::with_capacity(groups.len());
+
+        for (operations, scope) in groups {
+            if operations.is_empty() {
+                result.push(Vec::new());
+                continue;
+            }
+            let scope_owned = scope.map(str::to_string);
+            let entries =
+                Self::build_entries(&self.actor, operations, next_id, timestamp, &scope_owned);
+            let ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
+            next_id += entries.len() as u64;
+            all_entries.extend(entries);
+            result.push(ids);
+        }
+
+        // Single full-log rewrite for every batch in the call — this is the
+        // O(N²)→O(N) win for the importer's reflog→oplog emit.
+        let updated = index.append_entries(&all_entries)?;
+        *self.cached.lock_or_poisoned() = Some(updated);
+
+        Ok(result)
+    }
+
     async fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
