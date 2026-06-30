@@ -180,7 +180,7 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
     };
 
     let stats = DiffStats::from_changes(&file_changes, semantic_changes.as_deref());
-    let mut output = DiffOutput::with_stats(
+    let mut output = DiffReport::with_stats(
         from_id.map(|id| id.short()),
         options.to.clone(),
         file_changes,
@@ -344,7 +344,7 @@ pub fn diff_worktree_status(
     } else {
         changes
     };
-    let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    let mut output = DiffReport::new(Some("HEAD".to_string()), None, changes, None, None, None);
     output.worktree_mode = true;
     finalize_diff_report(output, options)
 }
@@ -354,14 +354,14 @@ pub fn diff_worktree_status(
 pub fn plain_git_head_diff(probe: &PlainGitDiffProbe, options: &DiffOptions) -> Result<DiffReport> {
     if options.include_patch_text {
         let changes = plain_git_file_changes_with_hunks(probe, options.unified)?;
-        let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+        let mut output = DiffReport::new(Some("HEAD".to_string()), None, changes, None, None, None);
         output.worktree_mode = true;
         return finalize_diff_report(output, options);
     }
     diff_worktree_status(&probe.changes, options, None, false)
 }
 
-fn finalize_diff_report(mut output: DiffOutput, options: &DiffOptions) -> Result<DiffReport> {
+fn finalize_diff_report(mut output: DiffReport, options: &DiffOptions) -> Result<DiffReport> {
     if options.include_patch_text {
         populate_patch_text(&mut output);
     }
@@ -372,7 +372,7 @@ fn finalize_diff_report(mut output: DiffOutput, options: &DiffOptions) -> Result
 }
 
 /// Render and stash the standard unified-diff text on the output payload.
-fn populate_patch_text(output: &mut DiffOutput) {
+fn populate_patch_text(output: &mut DiffReport) {
     let text = render_diff_patch(output);
     if !text.is_empty() {
         output.patch = Some(text);
@@ -1241,7 +1241,7 @@ fn head_from_tree(repo: &Repository) -> Result<Option<Tree>> {
 /// Reuses the same line-rendering pipeline as `cmd_diff`'s state-to-state
 /// path: object-store lookups for both sides, `diff_blobs` for modified
 /// files, hunk grouping via `unified_hunks`. The result is the same
-/// `DiffOutput` shape that `cmd_diff` serializes, so callers can embed
+/// `DiffReport` shape that `cmd_diff` serializes, so callers can embed
 /// it inside their own JSON payload.
 ///
 /// Used by `heddle merge --with-diff` to surface the diff that would
@@ -1256,7 +1256,7 @@ pub fn compute_state_diff(
     to_change_id: &ChangeId,
     semantic: bool,
     unified: usize,
-) -> Result<DiffOutput> {
+) -> Result<DiffReport> {
     let from_state = repo.store().get_state(from_change_id)?;
     let from_tree = if let Some(ref state) = from_state {
         repo.store().get_tree(&state.tree)?
@@ -1326,7 +1326,7 @@ pub fn compute_state_diff(
             .collect()
     });
 
-    let mut output = DiffOutput::new(
+    let mut output = DiffReport::new(
         Some(from_change_id.short()),
         Some(to_change_id.short()),
         file_changes,
@@ -1351,7 +1351,7 @@ pub fn compute_tree_diff(
     to_label: impl Into<String>,
     semantic: bool,
     unified: usize,
-) -> Result<DiffOutput> {
+) -> Result<DiffReport> {
     let from_state = repo.store().get_state(from_change_id)?;
     let from_tree = if let Some(ref state) = from_state {
         repo.store().get_tree(&state.tree)?
@@ -1416,7 +1416,7 @@ pub fn compute_tree_diff(
             .collect()
     });
 
-    let mut output = DiffOutput::new(
+    let mut output = DiffReport::new(
         Some(from_change_id.short()),
         Some(to_label.into()),
         file_changes,

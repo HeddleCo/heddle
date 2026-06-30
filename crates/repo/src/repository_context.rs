@@ -3,7 +3,7 @@
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use objects::{
@@ -106,13 +106,12 @@ impl Repository {
         context_root: &ContentHash,
         target: &ContextTarget,
     ) -> Result<Option<ContentHash>> {
-        let mut current = self.remove_leaf_at_path(context_root, &target.storage_path())?;
-        if current.is_none()
-            && let Some(legacy_path) = target.legacy_storage_path()
-        {
-            current = self.remove_leaf_at_path(context_root, &legacy_path)?;
-        }
-        Ok(current)
+        let current = self.remove_leaf_at_path(context_root, &target.storage_path())?;
+        let Some(legacy_path) = target.legacy_storage_path() else {
+            return Ok(current);
+        };
+        let legacy_base = current.as_ref().unwrap_or(context_root);
+        self.remove_leaf_at_path(legacy_base, &legacy_path)
     }
 
     /// List all context entries in the tree, optionally filtered by file prefix.
@@ -275,7 +274,7 @@ impl Repository {
                     }
                 }
                 EntryType::Blob => {
-                    let Some(target) = ContextTarget::from_storage_path(&entry_path) else {
+                    let Some(target) = context_target_from_entry_path(&entry_path) else {
                         continue;
                     };
                     if let Some(prefix) = prefix
@@ -433,6 +432,18 @@ fn context_entry_key(target: &ContextTarget) -> String {
     }
 }
 
+fn context_target_from_entry_path(path: &Path) -> Option<ContextTarget> {
+    ContextTarget::from_storage_path(path).or_else(|| legacy_context_target_from_path(path))
+}
+
+fn legacy_context_target_from_path(path: &Path) -> Option<ContextTarget> {
+    match path.components().next()? {
+        Component::Normal(part) if part == "__files" || part == "__states" => None,
+        Component::Normal(_) => ContextTarget::file(path.to_string_lossy().to_string()).ok(),
+        _ => None,
+    }
+}
+
 fn split_path(path: &Path) -> Option<(&str, &Path)> {
     let mut components = path.components();
     let first = components.next()?;
@@ -444,7 +455,7 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Annotation, AnnotationKind, ChangeId};
+    use objects::object::{Annotation, AnnotationKind, Blob, ChangeId};
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -466,6 +477,13 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn legacy_context_root(repo: &Repository, path: &str, blob: &ContextBlob) -> ContentHash {
+        let bytes = blob.encode().unwrap();
+        let blob_hash = repo.store.put_blob(&Blob::new(bytes)).unwrap();
+        repo.insert_leaf_at_path(&Tree::new(), Path::new(path), blob_hash)
+            .unwrap()
     }
 
     #[test]
@@ -550,6 +568,53 @@ mod tests {
             .list_context_entries(&root3, Some(Path::new("tests/test.rs")))
             .unwrap();
         assert_eq!(exact_root_file.len(), 1);
+    }
+
+    #[test]
+    fn legacy_direct_file_context_remains_readable() {
+        let (_dir, repo) = setup();
+        let target = ContextTarget::file("src/main.rs").unwrap();
+        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
+        let root = legacy_context_root(&repo, "src/main.rs", &blob);
+
+        assert_eq!(repo.get_context_blob(&root, &target).unwrap(), Some(blob));
+
+        let entries = repo.list_context_entries(&root, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].target, target);
+    }
+
+    #[test]
+    fn set_context_blob_cleans_matching_legacy_direct_leaf() {
+        let (_dir, repo) = setup();
+        let target = ContextTarget::file("src/main.rs").unwrap();
+        let legacy_blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
+        let current_blob =
+            ContextBlob::new(vec![make_annotation(AnnotationScope::File, "current")]);
+        let root = legacy_context_root(&repo, "src/main.rs", &legacy_blob);
+
+        let new_root = repo
+            .set_context_blob(Some(&root), &target, &current_blob)
+            .unwrap();
+
+        assert_eq!(
+            repo.get_context_blob(&new_root, &target).unwrap(),
+            Some(current_blob)
+        );
+        let tree = repo.store.get_tree(&new_root).unwrap().unwrap();
+        assert!(tree.get("src").is_none());
+        assert!(tree.get("__files").is_some());
+    }
+
+    #[test]
+    fn remove_context_target_removes_legacy_direct_leaf() {
+        let (_dir, repo) = setup();
+        let target = ContextTarget::file("src/main.rs").unwrap();
+        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
+        let root = legacy_context_root(&repo, "src/main.rs", &blob);
+
+        let new_root = repo.remove_context_target(&root, &target).unwrap();
+        assert!(new_root.is_none());
     }
 
     #[test]

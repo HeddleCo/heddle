@@ -4226,7 +4226,7 @@ fn heddle_output_without_principal_env(
     cwd: &std::path::Path,
 ) -> Result<std::process::Output, String> {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     cmd.current_dir(cwd);
     cmd.env("HEDDLE_CONFIG", cwd.join(".heddle-user/config.toml"));
     cmd.env_remove("HEDDLE_PRINCIPAL_NAME");
@@ -10232,7 +10232,7 @@ fn agent_reserve_reports_path_for_existing_materialized_thread() {
 }
 
 #[test]
-fn index_json_emits_one_value_even_for_hidden_compat_alias() {
+fn index_json_emits_one_value_for_maintenance_index() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
     let index = json_value(temp.path(), &["maintenance", "index", "--output", "json"]);

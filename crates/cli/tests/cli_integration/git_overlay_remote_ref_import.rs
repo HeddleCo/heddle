@@ -100,6 +100,7 @@ fn git_overlay_import_missing_local_branch_suggests_remote_tracking_ref() {
     let err = heddle(
         &[
             "bridge",
+            "git",
             "import",
             "--path",
             ".",

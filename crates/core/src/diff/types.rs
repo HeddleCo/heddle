@@ -11,10 +11,8 @@ use crate::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
 };
 
-pub type DiffReport = DiffOutput;
-
 #[derive(Clone, Debug)]
-pub struct DiffOutput {
+pub struct DiffReport {
     pub output_kind: &'static str,
     pub status: &'static str,
     pub from_state: Option<String>,
@@ -33,13 +31,13 @@ pub struct DiffOutput {
     pub worktree_mode: bool,
 }
 
-impl Serialize for DiffOutput {
+impl Serialize for DiffReport {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         #[derive(Serialize)]
-        struct DiffOutputView<'a> {
+        struct DiffReportView<'a> {
             output_kind: &'static str,
             status: &'static str,
             from_state: &'a Option<String>,
@@ -57,7 +55,7 @@ impl Serialize for DiffOutput {
             patch: Option<&'a String>,
         }
 
-        DiffOutputView {
+        DiffReportView {
             output_kind: self.output_kind,
             status: self.status,
             from_state: &self.from_state,
@@ -88,7 +86,7 @@ struct DiffChangesGroupedRefs<'a> {
     deleted: Vec<&'a FileChange>,
 }
 
-fn diff_changes_value(output: &DiffOutput) -> DiffChangesValue<'_> {
+fn diff_changes_value(output: &DiffReport) -> DiffChangesValue<'_> {
     if !output.worktree_mode {
         return DiffChangesValue::Flat(&output.changes);
     }
@@ -108,7 +106,7 @@ fn diff_changes_value(output: &DiffOutput) -> DiffChangesValue<'_> {
     DiffChangesValue::Grouped(grouped)
 }
 
-impl DiffOutput {
+impl DiffReport {
     pub const CONTRACT: ReportContract = ReportContract {
         schema_name: "diff",
         machine_output_kind: MachineOutputKind::Json,
@@ -116,7 +114,7 @@ impl DiffOutput {
             field: "output_kind",
             value: "diff",
         }),
-        schema: schema_for_report::<DiffOutput>,
+        schema: schema_for_report::<DiffReport>,
     };
 
     pub fn new(
@@ -165,23 +163,23 @@ impl DiffOutput {
     }
 }
 
-impl JsonSchema for DiffOutput {
+impl JsonSchema for DiffReport {
     fn schema_name() -> Cow<'static, str> {
         Cow::Borrowed("DiffOutput")
     }
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        DiffOutputSchema::json_schema(generator)
+        DiffReportSchema::json_schema(generator)
     }
 }
 
-impl HeddleReport for DiffOutput {
-    const CONTRACT: ReportContract = DiffOutput::CONTRACT;
+impl HeddleReport for DiffReport {
+    const CONTRACT: ReportContract = DiffReport::CONTRACT;
 }
 
 #[derive(Debug, JsonSchema)]
 #[allow(dead_code)]
-struct DiffOutputSchema {
+struct DiffReportSchema {
     pub output_kind: String,
     pub status: String,
     pub from_state: Option<String>,

@@ -14,10 +14,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    fs_atomic::write_file_atomic,
     lock::RepoLock,
     store::{
         HeddleError, Result,
-        atomic::write_file_atomic,
         liveness::{Liveness, is_owner_alive},
     },
 };

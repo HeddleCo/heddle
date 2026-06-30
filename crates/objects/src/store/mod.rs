@@ -7,7 +7,6 @@ use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
 pub mod agent_registry;
 pub mod agent_task;
-pub mod atomic;
 pub mod codec;
 pub mod compression;
 pub mod fs;

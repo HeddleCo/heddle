@@ -69,7 +69,6 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 
 schema_registry! {
     (&["init"], InitSchema),
-    (&["status"], StatusSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
@@ -673,26 +672,6 @@ pub enum CoordinationStatusSchema {
 pub struct ActorInfoSchema {
     pub provider: Option<String>,
     pub model: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StateInfoSchema {
-    pub change_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitCheckpointInfoSchema {
-    pub git_commit: String,
-    pub committed_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ChangesInfoSchema {
-    pub modified: Vec<String>,
-    pub added: Vec<String>,
-    pub deleted: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2116,13 +2095,6 @@ pub struct GitUpstreamConfiguredSchema {
     pub remote: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ParallelThreadInfoSchema {
-    pub name: String,
-    pub coordination_status: CoordinationStatusSchema,
-    pub current_state: Option<String>,
-}
-
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
 /// shape is internal. `Value` here means "any JSON object or null".
@@ -2134,76 +2106,6 @@ pub struct RepositoryContextInfoSchema {
     pub parent_repository: Option<String>,
     pub target_thread: Option<String>,
     pub parent_thread: Option<String>,
-}
-
-// ---- status ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StatusSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    pub git_overlay_health: GitOverlayHealthSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub thread: Option<String>,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub current_state: Option<String>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<ActorInfoSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_summary: OpaqueObject,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_progress_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_flush_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    pub thread_mode: Option<ThreadModeSchema>,
-    pub thread_state: Option<ThreadStateSchema>,
-    pub freshness: Option<ThreadFreshnessSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_thread: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_thread: Option<String>,
-    pub child_threads: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    pub promotion_suggested: bool,
-    pub impact_categories: Vec<ThreadImpactCategorySchema>,
-    pub heavy_impact_paths: Vec<String>,
-    pub changed_path_count: usize,
-    pub worktree_changed_path_count: usize,
-    pub thread_changed_path_count: usize,
-    pub blockers: Vec<String>,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub thread_health: String,
-    pub coordination_status: CoordinationStatusSchema,
-    pub is_isolated: bool,
-    pub parallel_threads: Vec<ParallelThreadInfoSchema>,
-    pub state: Option<StateInfoSchema>,
-    pub git_checkpoint: Option<GitCheckpointInfoSchema>,
-    pub changes: ChangesInfoSchema,
-    pub git_index: Option<GitIndexInfoSchema>,
 }
 
 // ---- verify ---------------------------------------------------------------

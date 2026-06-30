@@ -24,27 +24,6 @@ mod refs_and_remotes;
 #[path = "core_functionality/undo_and_special.rs"]
 mod undo_and_special;
 
-fn translate_legacy_args(args: &[&str]) -> Vec<String> {
-    let mut prefix = Vec::new();
-    let mut i = 0;
-    while i < args.len() && args[i].starts_with("--") {
-        prefix.push(args[i].to_string());
-        i += 1;
-    }
-    let rest = &args[i..];
-    let translated = match rest {
-        ["thread", "delete", name] => vec![
-            "thread".into(),
-            "drop".into(),
-            (*name).into(),
-            "--delete-thread".into(),
-        ],
-        _ => rest.iter().map(|arg| (*arg).to_string()).collect(),
-    };
-    prefix.extend(translated);
-    prefix
-}
-
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     heddle_with_env(args, cwd, &[])
 }
@@ -55,7 +34,7 @@ fn heddle_with_env(
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     // Pin a principal identity so captures don't refuse under bare
     // CI environments. Explicit `envs` overrides win because they're
     // applied after.
@@ -87,7 +66,7 @@ fn heddle_with_env(
 }
 
 fn heddle_must_succeed(args: &[&str], cwd: &std::path::Path) -> String {
-    heddle(args, Some(cwd)).unwrap_or_else(|_| panic!("Command failed: {:?}", args))
+    heddle(args, Some(cwd)).unwrap_or_else(|err| panic!("Command failed: {:?}\n{}", args, err))
 }
 
 fn write_nested_tracked_heddle_fixture(root: &std::path::Path, head: &str) {

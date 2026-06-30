@@ -1419,7 +1419,11 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
         "direct Git-backed refs should not require import before bridge sync: {before}"
     );
 
-    let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed_import: serde_json::Value =
         serde_json::from_str(&import_output).unwrap_or(serde_json::Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
@@ -1684,11 +1688,15 @@ fn test_cli_bridge_git_import_defaults_to_current_repo_even_after_mirror_exists(
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["branch", "support/import-latest"], temp.path());
 
-    let import_output = heddle(&["bridge", "import"], Some(temp.path())).unwrap();
+    let import_output = heddle(&["bridge", "git", "import"], Some(temp.path())).unwrap();
     let parsed_import: Value = serde_json::from_str(&import_output).unwrap_or(Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
     assert!(

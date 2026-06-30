@@ -9,7 +9,7 @@
 //! we tried to delete. Heddle #271 deletes `auto` entirely from both the
 //! CLI surface and the repo/user config; this file pins the contract.
 //!
-//! No backcompat alias. Pre-1.0; legacy configs error loudly with a typed
+//! No migration alias. Pre-1.0; legacy configs error loudly with a typed
 //! `Next:` envelope rather than silently mapping to text.
 
 use std::{process::Command, str};

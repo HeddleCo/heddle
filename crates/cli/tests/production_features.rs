@@ -11,30 +11,9 @@ use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
 
-fn translate_legacy_args(args: &[&str]) -> Vec<String> {
-    let mut prefix = Vec::new();
-    let mut i = 0;
-    while i < args.len() && args[i].starts_with("--") {
-        prefix.push(args[i].to_string());
-        i += 1;
-    }
-    let rest = &args[i..];
-    let translated = match rest {
-        ["thread", "delete", name] => vec![
-            "thread".into(),
-            "drop".into(),
-            (*name).into(),
-            "--delete-thread".into(),
-        ],
-        _ => rest.iter().map(|arg| (*arg).to_string()).collect(),
-    };
-    prefix.extend(translated);
-    prefix
-}
-
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
         .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
 
@@ -65,7 +44,7 @@ fn heddle_with_env(
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

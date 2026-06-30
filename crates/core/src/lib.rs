@@ -14,8 +14,8 @@ pub use contract::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
 };
 pub use diff::{
-    ContextSnippet, DiffOptions, DiffOutput, DiffReport, DiffStats, FileChange, FileContextEntry,
-    FileEolState, LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
+    ContextSnippet, DiffOptions, DiffReport, DiffStats, FileChange, FileContextEntry, FileEolState,
+    LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
     change_line_counts, compute_state_diff, compute_tree_diff, diff, diff_worktree_status,
     plain_git_head_diff, render_diff_patch, render_diff_patch_bytes, should_render_modified_pair,
     trim_added_decorations_for_display, write_diff_patch,

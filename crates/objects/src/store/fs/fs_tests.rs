@@ -7,13 +7,13 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir},
 };
 use crate::{
+    fs_atomic::temp_path,
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
     },
     store::{
         HeddleError, ObjectStore,
-        atomic::temp_path,
         compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },

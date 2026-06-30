@@ -23997,7 +23997,7 @@
     },
     "status": {
       "$defs": {
-        "ActionTemplateSchema": {
+        "ActionTemplate": {
           "properties": {
             "action": {
               "type": "string"
@@ -24027,7 +24027,7 @@
           ],
           "type": "object"
         },
-        "ActorInfoSchema": {
+        "ActorInfo": {
           "properties": {
             "model": {
               "type": [
@@ -24044,7 +24044,7 @@
           },
           "type": "object"
         },
-        "ChangesInfoSchema": {
+        "ChangesInfo": {
           "properties": {
             "added": {
               "items": {
@@ -24072,7 +24072,7 @@
           ],
           "type": "object"
         },
-        "CoordinationStatusSchema": {
+        "CoordinationStatus": {
           "enum": [
             "clean",
             "ahead",
@@ -24082,7 +24082,7 @@
           ],
           "type": "string"
         },
-        "GitCheckpointInfoSchema": {
+        "GitCheckpointInfo": {
           "properties": {
             "committed_at": {
               "type": "string"
@@ -24097,7 +24097,7 @@
           ],
           "type": "object"
         },
-        "GitIndexInfoSchema": {
+        "GitIndexPlan": {
           "properties": {
             "commit_mode": {
               "type": "string"
@@ -24147,30 +24147,11 @@
           ],
           "type": "object"
         },
-        "GitOverlayHealthCheckSchema": {
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "status": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "name",
-            "status",
-            "summary"
-          ],
-          "type": "object"
-        },
-        "GitOverlayHealthSchema": {
+        "GitOverlayHealth": {
           "properties": {
             "checks": {
               "items": {
-                "$ref": "#/$defs/GitOverlayHealthCheckSchema"
+                "$ref": "#/$defs/GitOverlayHealthCheck"
               },
               "type": "array"
             },
@@ -24199,7 +24180,32 @@
           ],
           "type": "object"
         },
-        "MachineContractCoverageSchema": {
+        "GitOverlayHealthCheck": {
+          "properties": {
+            "details": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "summary"
+          ],
+          "type": "object"
+        },
+        "MachineContractCoverage": {
           "properties": {
             "accepted_opaque_schema_examples": {
               "items": {
@@ -24464,20 +24470,39 @@
           ],
           "type": "object"
         },
-        "NullableStringSchema": {
-          "anyOf": [
-            {
+        "MaterializedThreadInfo": {
+          "properties": {
+            "file_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
               "type": "string"
             },
-            {
-              "type": "null"
+            "stale": {
+              "type": "boolean"
+            },
+            "state_id": {
+              "type": "string"
+            },
+            "tree_hash_short": {
+              "type": "string"
             }
-          ]
+          },
+          "required": [
+            "name",
+            "state_id",
+            "tree_hash_short",
+            "file_count",
+            "stale"
+          ],
+          "type": "object"
         },
-        "ParallelThreadInfoSchema": {
+        "ParallelThreadInfo": {
           "properties": {
             "coordination_status": {
-              "$ref": "#/$defs/CoordinationStatusSchema"
+              "$ref": "#/$defs/CoordinationStatus"
             },
             "current_state": {
               "type": [
@@ -24495,7 +24520,7 @@
           ],
           "type": "object"
         },
-        "RepositoryContextInfoSchema": {
+        "RepositoryContextInfo": {
           "properties": {
             "kind": {
               "type": "string"
@@ -24524,7 +24549,7 @@
           ],
           "type": "object"
         },
-        "RepositoryVerificationStateSchema": {
+        "RepositoryVerificationState": {
           "properties": {
             "active_operation": {
               "type": [
@@ -24534,7 +24559,7 @@
             },
             "checks": {
               "items": {
-                "$ref": "#/$defs/VerificationCheckSchema"
+                "$ref": "#/$defs/VerificationCheck"
               },
               "type": "array"
             },
@@ -24569,7 +24594,7 @@
               "type": "string"
             },
             "machine_contract_coverage": {
-              "$ref": "#/$defs/MachineContractCoverageSchema"
+              "$ref": "#/$defs/MachineContractCoverage"
             },
             "mapping_state": {
               "type": "string"
@@ -24583,7 +24608,7 @@
             "recommended_action_template": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/ActionTemplateSchema"
+                  "$ref": "#/$defs/ActionTemplate"
                 },
                 {
                   "type": "null"
@@ -24592,7 +24617,7 @@
             },
             "recovery_action_templates": {
               "items": {
-                "$ref": "#/$defs/ActionTemplateSchema"
+                "$ref": "#/$defs/ActionTemplate"
               },
               "type": "array"
             },
@@ -24652,7 +24677,7 @@
           ],
           "type": "object"
         },
-        "StateInfoSchema": {
+        "StateInfo": {
           "properties": {
             "change_id": {
               "type": "string"
@@ -24673,45 +24698,7 @@
           ],
           "type": "object"
         },
-        "ThreadFreshnessSchema": {
-          "enum": [
-            "current",
-            "stale",
-            "unknown"
-          ],
-          "type": "string"
-        },
-        "ThreadImpactCategorySchema": {
-          "enum": [
-            "dependency_graph",
-            "build_runtime_config",
-            "generated_outputs",
-            "repo_wide_refactor",
-            "public_api_surface"
-          ],
-          "type": "string"
-        },
-        "ThreadModeSchema": {
-          "enum": [
-            "materialized",
-            "virtualized",
-            "solid"
-          ],
-          "type": "string"
-        },
-        "ThreadStateSchema": {
-          "enum": [
-            "draft",
-            "active",
-            "ready",
-            "blocked",
-            "merged",
-            "abandoned",
-            "promoted"
-          ],
-          "type": "string"
-        },
-        "VerificationCheckSchema": {
+        "VerificationCheck": {
           "properties": {
             "clean": {
               "type": "boolean"
@@ -24720,6 +24707,7 @@
               "additionalProperties": {
                 "type": "string"
               },
+              "default": {},
               "type": "object"
             },
             "name": {
@@ -24734,7 +24722,7 @@
             "recommended_action_template": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/ActionTemplateSchema"
+                  "$ref": "#/$defs/ActionTemplate"
                 },
                 {
                   "type": "null"
@@ -24743,7 +24731,7 @@
             },
             "recovery_action_templates": {
               "items": {
-                "$ref": "#/$defs/ActionTemplateSchema"
+                "$ref": "#/$defs/ActionTemplate"
               },
               "type": "array"
             },
@@ -24766,8 +24754,7 @@
             "clean",
             "summary",
             "recovery_commands",
-            "recovery_action_templates",
-            "details"
+            "recovery_action_templates"
           ],
           "type": "object"
         }
@@ -24777,7 +24764,7 @@
         "actor": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ActorInfoSchema"
+              "$ref": "#/$defs/ActorInfo"
             },
             {
               "type": "null"
@@ -24814,7 +24801,7 @@
           "type": "integer"
         },
         "changes": {
-          "$ref": "#/$defs/ChangesInfoSchema"
+          "$ref": "#/$defs/ChangesInfo"
         },
         "child_threads": {
           "items": {
@@ -24823,7 +24810,7 @@
           "type": "array"
         },
         "coordination_status": {
-          "$ref": "#/$defs/CoordinationStatusSchema"
+          "$ref": "#/$defs/CoordinationStatus"
         },
         "current_state": {
           "type": [
@@ -24838,19 +24825,15 @@
           ]
         },
         "freshness": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ThreadFreshnessSchema"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "git_checkpoint": {
           "anyOf": [
             {
-              "$ref": "#/$defs/GitCheckpointInfoSchema"
+              "$ref": "#/$defs/GitCheckpointInfo"
             },
             {
               "type": "null"
@@ -24860,7 +24843,7 @@
         "git_index": {
           "anyOf": [
             {
-              "$ref": "#/$defs/GitIndexInfoSchema"
+              "$ref": "#/$defs/GitIndexPlan"
             },
             {
               "type": "null"
@@ -24868,7 +24851,7 @@
           ]
         },
         "git_overlay_health": {
-          "$ref": "#/$defs/GitOverlayHealthSchema"
+          "$ref": "#/$defs/GitOverlayHealth"
         },
         "harness": {
           "type": [
@@ -24891,9 +24874,15 @@
         "hosted_enabled": {
           "type": "boolean"
         },
+        "identity_notice": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "impact_categories": {
           "items": {
-            "$ref": "#/$defs/ThreadImpactCategorySchema"
+            "type": "string"
           },
           "type": "array"
         },
@@ -24906,6 +24895,13 @@
             "null"
           ]
         },
+        "materialized_threads": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MaterializedThreadInfo"
+          },
+          "type": "array"
+        },
         "operation": true,
         "output_kind": {
           "enum": [
@@ -24915,7 +24911,7 @@
         },
         "parallel_threads": {
           "items": {
-            "$ref": "#/$defs/ParallelThreadInfoSchema"
+            "$ref": "#/$defs/ParallelThreadInfo"
           },
           "type": "array"
         },
@@ -24935,12 +24931,15 @@
           "type": "boolean"
         },
         "recommended_action": {
-          "$ref": "#/$defs/NullableStringSchema"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recommended_action_template": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ActionTemplateSchema"
+              "$ref": "#/$defs/ActionTemplate"
             },
             {
               "type": "null"
@@ -24949,7 +24948,7 @@
         },
         "recovery_action_templates": {
           "items": {
-            "$ref": "#/$defs/ActionTemplateSchema"
+            "$ref": "#/$defs/ActionTemplate"
           },
           "type": "array"
         },
@@ -24972,7 +24971,7 @@
         "repository_context": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RepositoryContextInfoSchema"
+              "$ref": "#/$defs/RepositoryContextInfo"
             },
             {
               "type": "null"
@@ -24991,7 +24990,7 @@
         "state": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StateInfoSchema"
+              "$ref": "#/$defs/StateInfo"
             },
             {
               "type": "null"
@@ -25036,7 +25035,12 @@
         "thread_mode": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ThreadModeSchema"
+              "enum": [
+                "materialized",
+                "virtualized",
+                "solid"
+              ],
+              "type": "string"
             },
             {
               "type": "null"
@@ -25044,18 +25048,14 @@
           ]
         },
         "thread_state": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ThreadStateSchema"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "usage_summary": true,
         "verification": {
-          "$ref": "#/$defs/RepositoryVerificationStateSchema"
+          "$ref": "#/$defs/RepositoryVerificationState"
         },
         "worktree_changed_path_count": {
           "format": "uint",
@@ -25064,12 +25064,13 @@
         }
       },
       "required": [
+        "output_kind",
         "repository_capability",
         "repository_label",
         "storage_model",
         "hosted_enabled",
-        "git_overlay_health",
         "verification",
+        "git_overlay_health",
         "child_threads",
         "promotion_suggested",
         "impact_categories",
@@ -25078,7 +25079,6 @@
         "worktree_changed_path_count",
         "thread_changed_path_count",
         "blockers",
-        "recommended_action",
         "recovery_commands",
         "recovery_action_templates",
         "thread_health",
@@ -25086,7 +25086,7 @@
         "is_isolated",
         "parallel_threads",
         "changes",
-        "output_kind"
+        "recommended_action"
       ],
       "title": "StatusSchema",
       "type": "object"

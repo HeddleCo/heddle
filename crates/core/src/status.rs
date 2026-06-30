@@ -109,6 +109,7 @@ impl StatusDetail {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(rename = "StatusSchema")]
 pub struct StatusReport {
     pub output_kind: &'static str,
     pub repository_capability: String,

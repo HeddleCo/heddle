@@ -894,20 +894,6 @@ const fn documented_schemas(
     }
 }
 
-const fn documented_report_schema(
-    contract: CommandContract,
-    report_contract: CoreReportContract,
-    schema_verbs: &'static [&'static str],
-) -> CommandContract {
-    CommandContract {
-        supports_json: true,
-        json_kind: machine_output_kind_json_kind(report_contract.machine_output_kind),
-        schema_verbs,
-        documented_schema_verbs: schema_verbs,
-        ..contract
-    }
-}
-
 const fn documented_core_report_schema(
     contract: CommandContract,
     report_contract: CoreReportContract,
@@ -952,21 +938,6 @@ const fn json_discriminator(
         field,
         value,
         no_schema_reason: None,
-    }
-}
-
-const fn report_json_discriminator(
-    schema_verb: Option<&'static str>,
-    report_contract: CoreReportContract,
-) -> CommandJsonDiscriminatorSpec {
-    match report_contract.output_discriminator {
-        Some(discriminator) => CommandJsonDiscriminatorSpec {
-            schema_verb,
-            field: discriminator.field,
-            value: discriminator.value,
-            no_schema_reason: None,
-        },
-        None => panic!("report contract has no payload discriminator"),
     }
 }
 
@@ -1078,23 +1049,11 @@ const fn feature_gated(contract: CommandContract, feature_gate: &'static str) ->
     }
 }
 
-const QUERY_COMMAND_SCHEMA_VERBS: &[&str] =
-    &[QueryReport::CONTRACT.schema_name, "query --attribution"];
-const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[
-    report_json_discriminator(
-        Some(QueryReport::CONTRACT.schema_name),
-        QueryReport::CONTRACT,
-    ),
-    json_discriminator(
-        Some("query --attribution"),
-        "output_kind",
-        "query_attribution",
-    ),
-];
-const STATUS_COMMAND_SCHEMA_VERBS: &[&str] = &[StatusReport::CONTRACT.schema_name];
-const STATUS_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
-    Some(StatusReport::CONTRACT.schema_name),
-    StatusReport::CONTRACT,
+const QUERY_ATTRIBUTION_SCHEMA_VERBS: &[&str] = &["query --attribution"];
+const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[json_discriminator(
+    Some("query --attribution"),
+    "output_kind",
+    "query_attribution",
 )];
 
 const fn exits(
@@ -2311,10 +2270,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["query"],
         category(
             json_discriminators(
-                documented_report_schema(
-                    READ_JSON,
-                    QueryReport::CONTRACT,
-                    QUERY_COMMAND_SCHEMA_VERBS,
+                documented_schemas(
+                    documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
+                    QUERY_ATTRIBUTION_SCHEMA_VERBS,
                 ),
                 QUERY_JSON_DISCRIMINATORS,
             ),
@@ -2764,12 +2722,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["status"],
         exits(
             front_door(
-                json_discriminators(
-                    documented_schemas(
-                        compact_json(READ_JSON_OR_JSONL),
-                        STATUS_COMMAND_SCHEMA_VERBS,
-                    ),
-                    STATUS_JSON_DISCRIMINATORS,
+                documented_core_report_schema(
+                    compact_json(READ_JSON_OR_JSONL),
+                    StatusReport::CONTRACT,
                 ),
                 10,
             ),

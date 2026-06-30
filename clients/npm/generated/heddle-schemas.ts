@@ -117,6 +117,11 @@ export interface ActorExplainSchema {
   winning_rule?: string | null;
 }
 
+export interface ActorInfo {
+  model?: string | null;
+  provider?: string | null;
+}
+
 export interface ActorInfoSchema {
   model?: string | null;
   provider?: string | null;
@@ -625,7 +630,7 @@ export interface CaptureSchema {
   task_assignment_id?: string | null;
 }
 
-export interface ChangesInfoSchema {
+export interface ChangesInfo {
   added: string[];
   deleted: string[];
   modified: string[];
@@ -871,6 +876,8 @@ export interface ContinueSchema {
   status: string;
   warnings: string[];
 }
+
+export type CoordinationStatus = "clean" | "ahead" | "diverged" | "blocked" | "merge-ready";
 
 export type CoordinationStatusSchema = "clean" | "ahead" | "diverged" | "blocked" | "merge-ready";
 
@@ -1188,7 +1195,7 @@ export interface FsckReport {
   warnings: string[];
 }
 
-export interface GitCheckpointInfoSchema {
+export interface GitCheckpointInfo {
   committed_at: string;
   git_commit: string;
 }
@@ -1203,10 +1210,35 @@ export interface GitIndexInfoSchema {
   will_commit: string[];
 }
 
+export interface GitIndexPlan {
+  commit_mode: string;
+  has_staged_changes: boolean;
+  preserved_after_commit: string[];
+  staged_paths: string[];
+  unstaged_paths: string[];
+  untracked_paths: string[];
+  will_commit: string[];
+}
+
 export interface GitOverlayGuideSchema {
   steps: string[];
   summary: string;
   topic: string;
+}
+
+export interface GitOverlayHealth {
+  checks: GitOverlayHealthCheck[];
+  clean: boolean;
+  recovery_commands: string[];
+  status: string;
+  summary: string;
+}
+
+export interface GitOverlayHealthCheck {
+  details?: Record<string, string>;
+  name: string;
+  status: string;
+  summary: string;
 }
 
 export interface GitOverlayHealthCheckSchema {
@@ -1528,6 +1560,14 @@ export interface MaintenanceRunSchema {
   [key: string]: unknown;
 }
 
+export interface MaterializedThreadInfo {
+  file_count: number;
+  name: string;
+  stale: boolean;
+  state_id: string;
+  tree_hash_short: string;
+}
+
 export interface MergePreviewSchema {
   action?: string | null;
   applied: boolean;
@@ -1579,8 +1619,8 @@ export interface OplogRecoverSchema {
   [key: string]: unknown;
 }
 
-export interface ParallelThreadInfoSchema {
-  coordination_status: CoordinationStatusSchema;
+export interface ParallelThreadInfo {
+  coordination_status: CoordinationStatus;
   current_state?: string | null;
   name: string;
 }
@@ -1861,6 +1901,33 @@ export interface RepositoryContextInfoSchema {
   parent_repository?: string | null;
   parent_thread?: string | null;
   target_thread?: string | null;
+}
+
+export interface RepositoryVerificationState {
+  active_operation?: string | null;
+  checks: VerificationCheck[];
+  clone_verification: string;
+  default_remote?: string | null;
+  git_branch?: string | null;
+  heddle_initialized: boolean;
+  heddle_thread?: string | null;
+  import_state: string;
+  machine_contract: string;
+  machine_contract_coverage: MachineContractCoverage;
+  mapping_state: string;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
+  recovery_commands: string[];
+  remote_drift: string;
+  repository_mode: string;
+  status: string;
+  summary: string;
+  verified: boolean;
+  workflow_status: string;
+  workflow_summary: string;
+  worktree_dirty: boolean;
+  worktree_state: string;
 }
 
 export interface RepositoryVerificationStateSchema {
@@ -2264,52 +2331,54 @@ export interface StateEntrySchema {
   principal: string;
 }
 
-export interface StateInfoSchema {
+export interface StateInfo {
   change_id: string;
   content_hash: string;
   intent?: string | null;
 }
 
 export interface StatusSchema {
-  actor?: ActorInfoSchema | null;
+  actor?: ActorInfo | null;
   attach_reason?: string | null;
   base_root?: string | null;
   base_state?: string | null;
   blockers: string[];
   changed_path_count: number;
-  changes: ChangesInfoSchema;
+  changes: ChangesInfo;
   child_threads: string[];
-  coordination_status: CoordinationStatusSchema;
+  coordination_status: CoordinationStatus;
   current_state?: string | null;
   execution_path?: string | null;
-  freshness?: ThreadFreshnessSchema | null;
-  git_checkpoint?: GitCheckpointInfoSchema | null;
-  git_index?: GitIndexInfoSchema | null;
-  git_overlay_health: GitOverlayHealthSchema;
+  freshness?: string | null;
+  git_checkpoint?: GitCheckpointInfo | null;
+  git_index?: GitIndexPlan | null;
+  git_overlay_health: GitOverlayHealth;
   harness?: string | null;
   heavy_impact_paths: string[];
   heddle_session_id?: string | null;
   hosted_enabled: boolean;
-  impact_categories: ThreadImpactCategorySchema[];
+  identity_notice?: string | null;
+  impact_categories: string[];
   is_isolated: boolean;
   last_progress_at?: string | null;
+  materialized_threads?: MaterializedThreadInfo[];
   operation?: unknown;
   output_kind: "status";
-  parallel_threads: ParallelThreadInfoSchema[];
+  parallel_threads: ParallelThreadInfo[];
   parent_thread?: string | null;
   path?: string | null;
   promotion_suggested: boolean;
-  recommended_action: NullableStringSchema;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_action_templates: ActionTemplateSchema[];
+  recommended_action: string | null;
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
   recovery_commands: string[];
   remote_tracking?: unknown;
   report_flush_state?: string | null;
   repository_capability: string;
-  repository_context?: RepositoryContextInfoSchema | null;
+  repository_context?: RepositoryContextInfo | null;
   repository_label: string;
   session_id?: string | null;
-  state?: StateInfoSchema | null;
+  state?: StateInfo | null;
   storage_model: string;
   target_thread?: string | null;
   task?: string | null;
@@ -2317,10 +2386,10 @@ export interface StatusSchema {
   thread?: string | null;
   thread_changed_path_count: number;
   thread_health: string;
-  thread_mode?: ThreadModeSchema | null;
-  thread_state?: ThreadStateSchema | null;
+  thread_mode?: "materialized" | "virtualized" | "solid" | null;
+  thread_state?: string | null;
   usage_summary?: unknown;
-  verification: RepositoryVerificationStateSchema;
+  verification: RepositoryVerificationState;
   worktree_changed_path_count: number;
 }
 

@@ -376,9 +376,7 @@ impl ContextTarget {
                     .ok()
                     .map(|change_id| Self::State { change_id })
             }
-            _ => Some(Self::File {
-                path: path.to_string_lossy().to_string(),
-            }),
+            _ => None,
         }
     }
 
@@ -678,5 +676,25 @@ mod tests {
             ContextTarget::from_storage_path(&state.storage_path()),
             Some(state)
         );
+    }
+
+    #[test]
+    fn context_target_storage_rejects_legacy_direct_paths() {
+        assert_eq!(
+            ContextTarget::from_storage_path(Path::new("src/main.rs")),
+            None
+        );
+    }
+
+    #[test]
+    fn file_targets_expose_legacy_storage_path_for_read_migration() {
+        let file = ContextTarget::file("src/main.rs").unwrap();
+        assert_eq!(
+            file.legacy_storage_path(),
+            Some(PathBuf::from("src/main.rs"))
+        );
+
+        let state = ContextTarget::state(ChangeId::generate());
+        assert_eq!(state.legacy_storage_path(), None);
     }
 }

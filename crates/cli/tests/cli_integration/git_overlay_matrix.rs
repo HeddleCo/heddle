@@ -4907,7 +4907,11 @@ fn git_overlay_matrix_import_marks_branch_tip_history_as_imported() {
     );
     assert_eq!(before["history_imported"], false);
 
-    heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let after = json(
         temp.path(),
@@ -5193,7 +5197,11 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     assert_eq!(before["git_overlay_import_hint"], Value::Null);
     assert_eq!(before["verification"]["status"], "needs_init");
 
-    let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "bridge import should report branch sync activity: {import_output}"
@@ -7482,7 +7490,11 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     git_commit_all(temp.path(), "alpha one");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "bridge import should report branch sync activity: {import_output}"
@@ -7528,7 +7540,11 @@ fn git_overlay_matrix_imported_branch_delete_and_recreate_same_name_reappears_in
     git_commit_all(temp.path(), "first reborn");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["branch", "-D", "support/reborn"], temp.path());
     git(&["checkout", "-b", "support/reborn"], temp.path());
@@ -8101,7 +8117,11 @@ fn git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint() {
     git_commit_all(temp.path(), "support base");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["checkout", "support/merge-drift"], temp.path());
     git(&["checkout", "-b", "support/merge-drift-side"], temp.path());

@@ -601,7 +601,7 @@ mod tests {
     use objects::object::FileMode;
 
     use super::{quote_path_for_patch, render_diff_patch, render_diff_patch_bytes};
-    use crate::diff::{DiffOutput, FileChange, FileEolState, LineDiff, SymlinkChange};
+    use crate::diff::{DiffReport, FileChange, FileEolState, LineDiff, SymlinkChange};
 
     fn modified_change_with_eol(path: &str, lines: Vec<LineDiff>, eol: FileEolState) -> FileChange {
         FileChange {
@@ -613,8 +613,8 @@ mod tests {
         }
     }
 
-    fn diff_output_with(changes: Vec<FileChange>) -> DiffOutput {
-        DiffOutput::new(None, None, changes, None, None, None)
+    fn diff_report_with(changes: Vec<FileChange>) -> DiffReport {
+        DiffReport::new(None, None, changes, None, None, None)
     }
 
     #[cfg(unix)]
@@ -672,7 +672,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let patch = render_diff_patch_bytes(&diff_output_with(vec![change]));
+        let patch = render_diff_patch_bytes(&diff_report_with(vec![change]));
         assert!(
             patch.windows(target.len()).any(|window| window == target),
             "patch must carry the raw non-UTF-8 target bytes:\n{}",
@@ -720,7 +720,7 @@ mod tests {
             mode: Some(FileMode::Executable),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
         assert!(
             rendered.contains("diff --git a/run.sh b/run.sh"),
             "chmod-only must emit the `diff --git` header:\n{rendered}"
@@ -751,7 +751,7 @@ mod tests {
             mode: Some(FileMode::Executable),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
         assert!(
             rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
             "content+mode change must still emit the mode headers:\n{rendered}"
@@ -777,7 +777,7 @@ mod tests {
             mode: Some(FileMode::Normal),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
         assert!(
             rendered.is_empty(),
             "no-op modify (same mode, no body) must emit nothing:\n{rendered}"
@@ -801,7 +801,7 @@ mod tests {
             old_mode: Some(FileMode::Normal),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
         assert!(
             rendered.contains("diff --git a/binary.bin b/binary.bin"),
             "binary modify must emit a diff header:\n{rendered}"
@@ -836,7 +836,7 @@ mod tests {
             mode: Some(FileMode::Executable),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
         assert!(
             rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
             "binary+mode change must still record the chmod:\n{rendered}"
@@ -863,7 +863,7 @@ mod tests {
             mode: Some(FileMode::Normal),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![added]));
+        let rendered = render_diff_patch(&diff_report_with(vec![added]));
         assert!(
             rendered.contains("new file mode 100644")
                 && rendered.contains("index 0000000..0000000")
@@ -879,7 +879,7 @@ mod tests {
             mode: Some(FileMode::Normal),
             ..Default::default()
         };
-        let rendered = render_diff_patch(&diff_output_with(vec![deleted]));
+        let rendered = render_diff_patch(&diff_report_with(vec![deleted]));
         assert!(
             rendered.contains("deleted file mode 100644")
                 && rendered.contains("index 0000000..0000000")
@@ -909,7 +909,7 @@ mod tests {
             ],
             FileEolState::default(),
         );
-        let rendered = render_diff_patch(&diff_output_with(vec![empty, real]));
+        let rendered = render_diff_patch(&diff_report_with(vec![empty, real]));
         assert!(
             !rendered.contains("empty.txt"),
             "skipped change must not emit a header: {rendered}"
@@ -942,7 +942,7 @@ mod tests {
             new_line_count: 2,
         };
         let change = modified_change_with_eol("tail.txt", lines, eol);
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
 
         let marker_count = rendered.matches("\\ No newline at end of file").count();
         assert_eq!(
@@ -987,7 +987,7 @@ mod tests {
             new_line_count: 2,
         };
         let change = modified_change_with_eol("old.txt", lines, eol);
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
 
         assert!(
             rendered.contains("-hello\n\\ No newline at end of file\n+hello\n"),
@@ -1022,7 +1022,7 @@ mod tests {
             new_line_count: 1,
         };
         let change = modified_change_with_eol("new.txt", lines, eol);
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
 
         assert!(
             rendered.contains("-hello\n+hello\n\\ No newline at end of file\n"),
@@ -1057,7 +1057,7 @@ mod tests {
             new_line_count: 1,
         };
         let change = modified_change_with_eol("del.txt", lines, eol);
-        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
 
         assert!(
             rendered.contains("-tail\n\\ No newline at end of file\n"),

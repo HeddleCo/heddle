@@ -9,14 +9,14 @@ use std::{
 
 use crate::cli::style;
 use heddle_core::{
-    DiffOutput, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+    DiffReport, LineDiff, SemanticChangeEntry, should_render_modified_pair,
     trim_added_decorations_for_display,
 };
 
 const PAGER_LINE_THRESHOLD: usize = 200;
 const SIGNATURE_CHANGE_SEPARATOR: &str = "\u{1f}";
 
-pub(crate) fn print_stat(output: &DiffOutput) {
+pub(crate) fn print_stat(output: &DiffReport) {
     for change in &output.changes {
         match change.kind.as_str() {
             "added" => {
@@ -67,7 +67,7 @@ pub(crate) fn print_stat(output: &DiffOutput) {
     );
 }
 
-pub(crate) fn print_diff_patch(output: &DiffOutput) {
+pub(crate) fn print_diff_patch(output: &DiffReport) {
     // Write the raw patch BYTES, not `output.patch` (a lossy String): a
     // symlink's target can be non-UTF-8, and the round-trip surface
     // (`heddle diff --patch | git apply`) must carry those bytes verbatim.
@@ -79,7 +79,7 @@ pub(crate) fn print_diff_patch(output: &DiffOutput) {
     let _ = heddle_core::write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
 }
 
-pub(crate) fn print_diff(output: &DiffOutput) {
+pub(crate) fn print_diff(output: &DiffReport) {
     if should_page(display_line_count(output))
         && let Ok(mut child) = pager_command().stdin(Stdio::piped()).spawn()
     {
@@ -96,7 +96,7 @@ pub(crate) fn print_diff(output: &DiffOutput) {
     let _ = write_diff_human(output, &mut writer).and_then(|_| writer.flush());
 }
 
-fn write_diff_human<W: Write>(output: &DiffOutput, writer: &mut W) -> io::Result<()> {
+fn write_diff_human<W: Write>(output: &DiffReport, writer: &mut W) -> io::Result<()> {
     for change in &output.changes {
         // File-header rows: `--- a/...` / `+++ b/...` are dim;
         // they're navigation, not data.
@@ -154,7 +154,7 @@ fn write_diff_human<W: Write>(output: &DiffOutput, writer: &mut W) -> io::Result
     Ok(())
 }
 
-fn display_line_count(output: &DiffOutput) -> usize {
+fn display_line_count(output: &DiffReport) -> usize {
     let mut count = 0;
     for change in &output.changes {
         count += 2;
@@ -394,7 +394,7 @@ impl TokenKind {
     }
 }
 
-pub(crate) fn print_context(output: &DiffOutput) {
+pub(crate) fn print_context(output: &DiffReport) {
     if let Some(guidance) = &output.broader_guidance
         && !guidance.is_empty()
     {

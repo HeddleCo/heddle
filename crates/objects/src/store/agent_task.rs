@@ -11,8 +11,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    fs_atomic::write_file_atomic,
     lock::RepoLock,
-    store::{HeddleError, Result, atomic::write_file_atomic},
+    store::{HeddleError, Result},
 };
 
 /// Current agent task TOML schema version.
