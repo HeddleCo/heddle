@@ -11,8 +11,8 @@ use std::{
 use objects::{
     object::{Blob, ChangeId, ContentHash},
     store::{
-        pack::ObjectType as PackObjectType, CompressionConfig, ObjectStore, PackBuilder,
-        PackObjectId,
+        CompressionConfig, ObjectStore, PackBuilder, PackObjectId,
+        pack::ObjectType as PackObjectType,
     },
 };
 use repo::Repository;
@@ -532,12 +532,12 @@ fn test_performance_fixture_suite_smoke_scaffold() {
     );
     assert!(metrics.pack_count > 0, "smoke fixture should create a pack");
     assert!(
-        metrics.logical_bytes_written >= 2 * 1024 * 1024,
-        "smoke fixture should include a multi-MB payload"
+        metrics.logical_bytes_written >= 3 * 2 * 1024 * 1024,
+        "smoke fixture should include several multi-MB payloads"
     );
     assert!(
-        metrics.logical_bytes_read >= 2 * 1024 * 1024,
-        "smoke fixture should read back the multi-MB payload"
+        metrics.logical_bytes_read >= 3 * 2 * 1024 * 1024,
+        "smoke fixture should read back the multi-MB payloads"
     );
     assert!(
         metrics.thread_ref_count >= 8,

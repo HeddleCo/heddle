@@ -68,7 +68,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::{pack_container_spec, write_container_header, ObjectType, PackObjectId, PackStats};
+use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
 
 /// How many bytes to reserve for the compressed-size varint in the
 /// streaming path. 10 is enough to encode any `u64` (max 9 7-bit
@@ -79,7 +79,7 @@ use super::{pack_container_spec, write_container_header, ObjectType, PackObjectI
 const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
-    store::{compression::CompressionConfig, Result, StoreError},
+    store::{Result, StoreError, compression::CompressionConfig},
 };
 
 /// Number of buckets per id variant. 256 = one bucket per first byte
@@ -1204,9 +1204,11 @@ mod tests {
         .unwrap();
         let error = b.finalize().unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("streaming pack declared 2 object(s) but added 1"));
+        assert!(
+            error
+                .to_string()
+                .contains("streaming pack declared 2 object(s) but added 1")
+        );
     }
 
     #[test]
@@ -1311,6 +1313,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn many_small_and_several_multi_mb_blobs_round_trip_from_disk_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bucket_dir = tmp.path().join("buckets");
+        let pack_path = tmp.path().join("pack.dat");
+        let idx_path = tmp.path().join("pack.idx");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&pack_path)
+            .unwrap();
+        let mut b = StreamingPackBuilder::new(
+            file,
+            idx_path.clone(),
+            CompressionConfig::default(),
+            bucket_dir,
+        )
+        .unwrap();
+
+        let small_count = IN_MEMORY_INDEX_ENTRY_LIMIT + 8;
+        for i in 0..small_count {
+            b.add(
+                deterministic_hash_from_u64(i as u64),
+                ObjectType::Blob,
+                format!("small payload {i:05}").into_bytes(),
+            )
+            .unwrap();
+        }
+
+        let mut large_payloads = Vec::new();
+        for i in 0..3u64 {
+            let hash = deterministic_hash_from_u64(1_000_000 + i);
+            let payload: Vec<u8> = (0..2 * 1024 * 1024u32)
+                .map(|offset| ((offset as u64 * 131 + i * 17) & 0xff) as u8)
+                .collect();
+            b.add(hash, ObjectType::Blob, payload.clone()).unwrap();
+            large_payloads.push((hash, payload));
+        }
+
+        let (file, stats) = b.finalize().unwrap();
+        drop(file);
+        assert_eq!(stats.object_count, small_count as u64 + 3);
+        assert_eq!(stats.delta_count, 0, "streaming builder never deltas");
+
+        let reader = PackReader::open(&pack_path, &idx_path).unwrap();
+        assert_eq!(reader.list_ids().len(), small_count + 3);
+        for i in [0, IN_MEMORY_INDEX_ENTRY_LIMIT, small_count - 1] {
+            let id = PackObjectId::Hash(deterministic_hash_from_u64(i as u64));
+            let (_ty, data) = reader.get_object(&id).unwrap().unwrap();
+            assert_eq!(data, format!("small payload {i:05}").into_bytes());
+        }
+        for (hash, payload) in large_payloads {
+            let (_ty, data) = reader
+                .get_object(&PackObjectId::Hash(hash))
+                .unwrap()
+                .unwrap();
+            assert_eq!(data, payload);
+        }
     }
 
     #[test]

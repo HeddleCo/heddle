@@ -15,7 +15,7 @@ use crate::{
         HeddleError, ObjectStore,
         atomic::temp_path,
         compression::CompressionConfig,
-        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
     },
     sync::RwLockExt,
 };
@@ -141,6 +141,78 @@ fn put_blobs_packed_writes_a_single_packfile_no_loose_blobs() {
             store.get_pack_object(&id).unwrap().is_some(),
             "blob {hash:?} not visible after put_blobs_packed",
         );
+    }
+}
+
+#[test]
+fn install_pack_streaming_accepts_many_small_and_several_multi_mb_blobs() {
+    let (temp, store) = create_test_store();
+    let pack_path = temp.path().join("incoming-streaming.pack");
+    let index_path = temp.path().join("incoming-streaming.idx");
+    let bucket_dir = temp.path().join("incoming-streaming-buckets");
+    let pack_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)
+        .unwrap();
+    let mut builder = StreamingPackBuilder::new(
+        pack_file,
+        index_path.clone(),
+        CompressionConfig::default(),
+        bucket_dir,
+    )
+    .unwrap();
+
+    let mut expected = Vec::new();
+    for i in 0..1_024 {
+        let content = format!("streaming install small blob {i:04}").into_bytes();
+        let blob = Blob::from_slice(&content);
+        builder
+            .add(blob.hash(), PackObjectType::Blob, content.clone())
+            .unwrap();
+        expected.push((blob.hash(), content));
+    }
+    for i in 0..3 {
+        let content = deterministic_bytes_for_test(i, 2 * 1024 * 1024);
+        let blob = Blob::from_slice(&content);
+        builder
+            .add(blob.hash(), PackObjectType::Blob, content.clone())
+            .unwrap();
+        expected.push((blob.hash(), content));
+    }
+
+    let (_pack_file, stats) = builder.finalize().unwrap();
+    assert_eq!(stats.object_count, expected.len() as u64);
+    assert_eq!(
+        stats.delta_count, 0,
+        "streaming install pack must not delta"
+    );
+
+    let ids = store
+        .install_pack_streaming(&pack_path, &index_path)
+        .unwrap();
+    assert_eq!(ids.len(), expected.len());
+    assert!(
+        !pack_path.exists() && !index_path.exists(),
+        "streaming install should move staged files into the store"
+    );
+    assert_eq!(count_packs(&store), 1);
+    assert!(
+        single_pack_entry_types(&store)
+            .iter()
+            .all(|obj_type| *obj_type == PackObjectType::Blob),
+        "streaming install should preserve direct blob entries"
+    );
+
+    for (hash, content) in expected
+        .iter()
+        .take(3)
+        .chain(expected.iter().skip(1_023).take(1))
+        .chain(expected.iter().skip(1_024))
+    {
+        let blob = store.get_blob(hash).unwrap().unwrap();
+        assert_eq!(blob.content(), content.as_slice());
     }
 }
 
@@ -573,6 +645,12 @@ fn single_pack_entry_types(store: &FsStore) -> Vec<PackObjectType> {
         pos += header.header_len + header.compressed_size;
     }
     types
+}
+
+fn deterministic_bytes_for_test(seed: usize, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|offset| ((offset * 131 + seed * 17 + (offset >> 8)) & 0xff) as u8)
+        .collect()
 }
 
 fn count_loose_objects(store: &FsStore) -> usize {

@@ -9,9 +9,9 @@ rows are opt-in fixture contracts until a benchmark or ignored test lands.
 
 | Fixture | Status | Shape | Default scale | Heavy gate |
 |---|---|---|---:|---|
-| `native-core-smoke` | Shipped smoke | Small native repository combining many small files, one multi-MB blob, short linear history, several refs, and a rename/move. | 24 small files, 1 x 2 MiB blob, 4 user snapshots, 8 extra refs | None; normal `cargo test` |
+| `native-core-smoke` | Shipped smoke | Small native repository combining many small files, several multi-MB blobs, short linear history, several refs, and a rename/move. | 24 small files, 3 x 2 MiB blobs, 4 user snapshots, 8 extra refs | None; normal `cargo test` |
 | `many-small-files` | Planned harness | Snapshot, status, pack, and transfer paths over thousands to millions of tiny source files spread across directories. | Covered only by smoke subset | `--ignored` or Criterion; `HEDDLE_PERF_FIXTURE_SCALE=large` |
-| `multi-mb-blobs` | Planned harness | Few large binary blobs sized to local limits; multi-GB-class should be scaled down unless run on dedicated hardware. | Covered by one 2 MiB smoke blob | Release/nightly; `HEDDLE_PERF_LARGE_BLOB_BYTES` |
+| `multi-mb-blobs` | Planned harness | Few large binary blobs sized to local limits; multi-GB-class should be scaled down unless run on dedicated hardware. | Covered by three 2 MiB smoke blobs | Release/nightly; `HEDDLE_PERF_LARGE_BLOB_BYTES` |
 | `deep-history` | Planned harness | Long linear history with small deltas, plus log/goto/sync traversals. | Covered by 4 user snapshots | `--ignored`; release mode for budgets |
 | `many-refs` | Planned harness | Wide local thread, marker, and remote-ref sets that exercise packed refs and summaries. | Covered by 8 extra thread refs | Criterion or `--ignored`; `HEDDLE_PERF_REF_COUNT` |
 | `rename-move` | Planned harness | File and directory moves with mostly unchanged content, used by diff, merge, Git bridge, and semantic rename detection. | Covered by one file move | `--ignored` for large trees |

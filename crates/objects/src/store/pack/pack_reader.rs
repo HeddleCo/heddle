@@ -58,9 +58,8 @@ impl PackReader<'static> {
     /// its own mmap decision); read-into-heap otherwise.
     pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
         let pack_bytes = crate::store::fs::read_file_bytes_for_pack(pack_path)?;
-        let index_data = std::fs::read(index_path)?;
         let (_, _, content_end) = verify_container(&pack_bytes, pack_container_spec())?;
-        let index = PackIndex::from_bytes(&index_data)?;
+        let index = PackIndex::open(index_path)?;
         Ok(Self {
             data: PackData::Owned(pack_bytes),
             index,

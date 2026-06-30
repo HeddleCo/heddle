@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack index for fast object lookup within packfiles.
 
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::Path,
+};
+
 use crate::store::{
     Result,
     pack::{
@@ -97,6 +103,35 @@ impl PackIndex {
         }
         Ok(Self { entries })
     }
+
+    /// Open and deserialize an index file without first copying the
+    /// whole `.idx` into a temporary `Vec<u8>`.
+    pub(super) fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(crate::store::StoreError::from)?;
+        let len = file
+            .metadata()
+            .map_err(crate::store::StoreError::from)?
+            .len();
+        let mut reader = BufReader::new(file);
+        let count = read_index_header(&mut reader)?;
+        validate_index_capacity(count, len)?;
+        let count = usize::try_from(count).map_err(|_| {
+            crate::store::StoreError::InvalidObject(
+                "Index entry count exceeds platform limits".to_string(),
+            )
+        })?;
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = read_tagged_id(&mut reader)?;
+            let mut offset_bytes = [0u8; 8];
+            read_exact_invalid(&mut reader, &mut offset_bytes, "Index data truncated")?;
+            entries.push(IndexEntry {
+                id,
+                offset: u64::from_be_bytes(offset_bytes),
+            });
+        }
+        Ok(Self { entries })
+    }
 }
 
 impl PackIndex {
@@ -121,5 +156,78 @@ pub(super) fn index_header() -> VersionedHeader {
         invalid_magic: "Invalid index magic",
         unsupported_version: "Unsupported index version",
         checksum_mismatch: "",
+    }
+}
+
+fn validate_index_capacity(count: u64, data_len: u64) -> Result<()> {
+    if data_len < super::versioned_header::VERSIONED_HEADER_LEN as u64 {
+        return Err(crate::store::StoreError::InvalidObject(
+            "Index too short".to_string(),
+        ));
+    }
+    let available = data_len - super::versioned_header::VERSIONED_HEADER_LEN as u64;
+    let max_entries = available / MIN_INDEX_ENTRY_LEN as u64;
+    if count > max_entries {
+        return Err(crate::store::StoreError::InvalidObject(format!(
+            "Index entry count {} exceeds available data capacity {}",
+            count, max_entries
+        )));
+    }
+    Ok(())
+}
+
+fn read_index_header<R: Read>(reader: &mut R) -> Result<u64> {
+    let mut header = [0u8; super::versioned_header::VERSIONED_HEADER_LEN];
+    read_exact_invalid(reader, &mut header, "Index too short")?;
+    if &header[..4] != INDEX_MAGIC {
+        return Err(crate::store::StoreError::InvalidObject(
+            "Invalid index magic".to_string(),
+        ));
+    }
+
+    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    if version != INDEX_VERSION {
+        return Err(crate::store::StoreError::InvalidObject(format!(
+            "Unsupported index version: {version}"
+        )));
+    }
+
+    Ok(u64::from_be_bytes([
+        header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+        header[15],
+    ]))
+}
+
+fn read_tagged_id<R: Read>(reader: &mut R) -> Result<PackObjectId> {
+    let mut tag = [0u8; 1];
+    read_exact_invalid(reader, &mut tag, "missing pack object id tag")?;
+    match tag[0] {
+        0 => {
+            let mut bytes = [0u8; 32];
+            read_exact_invalid(reader, &mut bytes, "hash pack object id truncated")?;
+            Ok(PackObjectId::Hash(crate::object::ContentHash::from_bytes(
+                bytes,
+            )))
+        }
+        1 => {
+            let mut bytes = [0u8; 16];
+            read_exact_invalid(reader, &mut bytes, "change id pack object id truncated")?;
+            Ok(PackObjectId::ChangeId(crate::object::ChangeId::from_bytes(
+                bytes,
+            )))
+        }
+        tag => Err(crate::store::StoreError::InvalidObject(format!(
+            "unknown pack object id tag {tag}"
+        ))),
+    }
+}
+
+fn read_exact_invalid<R: Read>(reader: &mut R, buf: &mut [u8], message: &str) -> Result<()> {
+    match reader.read_exact(buf) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+            Err(crate::store::StoreError::InvalidObject(message.to_string()))
+        }
+        Err(error) => Err(crate::store::StoreError::from(error)),
     }
 }

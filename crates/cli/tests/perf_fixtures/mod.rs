@@ -12,6 +12,7 @@ use repo::Repository;
 use tempfile::TempDir;
 
 const SMOKE_SMALL_FILE_COUNT: usize = 24;
+const SMOKE_LARGE_BLOB_COUNT: usize = 3;
 const SMOKE_LARGE_BLOB_BYTES: usize = 2 * 1024 * 1024;
 const SMOKE_EXTRA_REF_COUNT: usize = 8;
 
@@ -150,7 +151,8 @@ pub fn build_default_smoke_fixture() -> BuiltFixture {
     let mut logical_bytes_written = 0_u64;
 
     logical_bytes_written += write_many_small_files(temp.path(), SMOKE_SMALL_FILE_COUNT);
-    logical_bytes_written += write_large_blob(temp.path(), SMOKE_LARGE_BLOB_BYTES);
+    logical_bytes_written +=
+        write_large_blobs(temp.path(), SMOKE_LARGE_BLOB_COUNT, SMOKE_LARGE_BLOB_BYTES);
     let base = repo
         .snapshot(Some("perf smoke base".to_string()), None)
         .unwrap();
@@ -197,9 +199,7 @@ pub fn build_default_smoke_fixture() -> BuiltFixture {
     let warm_status_wall_time = warm_start.elapsed();
     assert!(warm_status.is_clean());
 
-    let logical_bytes_read = fs::read(temp.path().join("assets/large-blob-00.bin"))
-        .map(|bytes| bytes.len() as u64)
-        .unwrap_or(0);
+    let logical_bytes_read = read_large_blob_fixture_bytes(temp.path(), SMOKE_LARGE_BLOB_COUNT);
     let metrics = FixtureMetrics {
         build_wall_time: started.elapsed(),
         peak_rss_bytes: peak_rss_bytes(),
@@ -238,18 +238,32 @@ fn write_many_small_files(root: &Path, count: usize) -> u64 {
     bytes
 }
 
-fn write_large_blob(root: &Path, size: usize) -> u64 {
+fn write_large_blobs(root: &Path, count: usize, size: usize) -> u64 {
     let dir = root.join("assets");
     fs::create_dir_all(&dir).unwrap();
-    let bytes = deterministic_bytes(size);
-    fs::write(dir.join("large-blob-00.bin"), &bytes).unwrap();
-    bytes.len() as u64
+    let mut total = 0_u64;
+    for index in 0..count {
+        let bytes = deterministic_bytes(size, index);
+        fs::write(dir.join(format!("large-blob-{index:02}.bin")), &bytes).unwrap();
+        total += bytes.len() as u64;
+    }
+    total
 }
 
-fn deterministic_bytes(size: usize) -> Vec<u8> {
+fn read_large_blob_fixture_bytes(root: &Path, count: usize) -> u64 {
+    (0..count)
+        .map(|index| {
+            fs::read(root.join(format!("assets/large-blob-{index:02}.bin")))
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn deterministic_bytes(size: usize, seed: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(size);
     for index in 0..size {
-        bytes.push(((index * 131 + (index >> 7) * 17) & 0xff) as u8);
+        bytes.push(((index * 131 + seed * 17 + (index >> 7) * 17) & 0xff) as u8);
     }
     bytes
 }

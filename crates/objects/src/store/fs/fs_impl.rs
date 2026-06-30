@@ -961,13 +961,11 @@ impl ObjectStore for FsStore {
         // copied into the heap — the memory-bounded promise survives.
         // Drop the reader (releasing the mmap) before the rename so
         // the file move isn't racing an open mapping.
-        let ids = {
+        let (ids, state_entries) = {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            validate_and_list_pack(&reader)?
-        };
-        let state_entries = {
-            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            state_entries_from_pack(&reader, &ids)?
+            let ids = validate_and_list_pack(&reader)?;
+            let state_entries = state_entries_from_pack(&reader, &ids)?;
+            (ids, state_entries)
         };
         self.install_pack_files_streaming(pack_path, index_path)?;
         for (id, data) in state_entries {
