@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Declarative repository migrations.
 //!
-//! Replaces the ad-hoc `migrate_legacy_tracks()` callsites that used to live
-//! in `Repository::open_raw`/`open` with a single registered, ordered list.
-//! Each migration is forward-only; `apply_pending` walks the list and runs
-//! anything missing from `.heddle/state/schema_versions.toml`.
+//! A single registered, ordered list of forward-only migrations applied on
+//! repo open. `apply_pending` walks the list and runs anything missing from
+//! `.heddle/state/schema_versions.toml`. The list is currently empty (a clean
+//! no-op); the framework stays so future schema changes have a place to land
+//! without tangling `Repository::open_raw`/`open`.
 //!
 //! # Adding a migration
 //!
@@ -155,17 +156,12 @@ fn ledger_path(repo: &Repository) -> PathBuf {
 /// Registered migrations, run in this order. New migrations append at the
 /// tail; never reorder existing ids.
 ///
-/// `0001_legacy_tracks` formalises the long-standing track-shape fix-up
-/// that used to live inline in `Repository::open` as
-/// `RefManager::migrate_legacy_tracks`. It's the only registered migration
-/// today — the framework exists so future schema changes have a place to
-/// land without tangling `Repository::open_raw`.
-pub static MIGRATIONS: &[Migration] = &[Migration {
-    id: "0001_legacy_tracks",
-    description: "Rewrite legacy thread/track refs into the post-2024 layout",
-    applies_to: SchemaTarget::RefSummary,
-    run: run_legacy_tracks,
-}];
+/// Currently empty: the framework exists so future schema changes have a
+/// place to land without tangling `Repository::open_raw`. The former
+/// `0001_legacy_tracks` migration (which renamed a pre-v0.2.0 `tracks/`
+/// layout that was never publicly produced) was removed — `apply_pending`
+/// over an empty list is a clean no-op.
+pub static MIGRATIONS: &[Migration] = &[];
 
 /// Apply any registered migration not yet present in
 /// `<repo>/.heddle/state/schema_versions.toml`. Idempotent: a second
@@ -199,17 +195,6 @@ pub fn apply_pending(repo: &Repository) -> Result<MigrationReport> {
     }
 
     Ok(MigrationReport { outcomes })
-}
-
-fn run_legacy_tracks(ctx: &mut MigrationCtx<'_>) -> Result<()> {
-    // `RefManager::migrate_legacy_tracks` lives on the manager type, not on
-    // the `RefBackend` trait that `Repository::refs()` exposes — so we
-    // construct a manager pointed at the same `.heddle/` directory rather
-    // than reaching through the repo. The manager is a thin wrapper, no
-    // heavy state to share.
-    let refs = refs::RefManager::new(ctx.repo.heddle_dir());
-    refs.migrate_legacy_tracks()?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -259,14 +244,18 @@ mod tests {
         if ledger_file.exists() {
             std::fs::remove_file(&ledger_file).unwrap();
         }
-        apply_pending(&repo).unwrap();
-        let raw = std::fs::read_to_string(&ledger_file).unwrap();
-        for migration in MIGRATIONS {
-            assert!(
-                raw.contains(migration.id),
-                "missing {} in ledger",
-                migration.id
-            );
+        let report = apply_pending(&repo).unwrap();
+        let applied: Vec<&str> = report.applied().collect();
+        // Every id that `apply_pending` reports as Applied must be durable in
+        // the ledger. When the registry is empty nothing is applied and no
+        // ledger is written — that is the correct no-op.
+        if applied.is_empty() {
+            assert!(!ledger_file.exists());
+        } else {
+            let raw = std::fs::read_to_string(&ledger_file).unwrap();
+            for id in applied {
+                assert!(raw.contains(id), "missing {id} in ledger");
+            }
         }
     }
 }

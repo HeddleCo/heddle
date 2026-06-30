@@ -87,24 +87,6 @@ impl RefManager {
                 }
             }
         }
-        if name.contains('/') {
-            let legacy_path = self.legacy_thread_path(name)?;
-            if legacy_path != path {
-                let legacy_raw = self.read_optional_string(&legacy_path)?;
-                if let Some(ref contents) = legacy_raw {
-                    match parse_change_id_text(contents) {
-                        Ok(id) => return Ok((legacy_path, Some(id), legacy_raw)),
-                        Err(_) => {
-                            return Err(HeddleError::InvalidObject(format!(
-                                "invalid thread {}: {}",
-                                name,
-                                contents.trim()
-                            )));
-                        }
-                    }
-                }
-            }
-        }
         let packed_id = PackedRefs::load(&self.packed_refs_path())?.get_thread(name);
         let effective_prev = packed_id.map(|id| format_change_id_text(&id));
         Ok((path, packed_id, effective_prev))

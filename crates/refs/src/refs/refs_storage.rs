@@ -52,13 +52,6 @@ impl RefManager {
     pub(super) fn flat_threads_dir(&self) -> PathBuf {
         self.threads_dir().join(FLAT_THREADS_DIR_NAME)
     }
-    pub(super) fn legacy_tracks_dir(&self) -> PathBuf {
-        self.refs_dir().join("tracks")
-    }
-    pub(super) fn legacy_track_path(&self, name: &str) -> Result<PathBuf> {
-        validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
-        Ok(self.legacy_tracks_dir().join(name))
-    }
     pub(super) fn markers_dir(&self) -> PathBuf {
         self.refs_dir().join("markers")
     }
@@ -97,23 +90,24 @@ impl RefManager {
     pub(crate) fn ref_summary_index_path(&self) -> PathBuf {
         self.refs_dir().join("ref-summary-index")
     }
+    /// On-disk path for a thread ref.
+    ///
+    /// Slashed names are stored in the flat layout (`threads/__heddle_flat/<hex>`),
+    /// which has been the only write target since v0.2.0 — no per-ref `statx`
+    /// fallback to a nested legacy layout is performed. Top-level (non-slashed)
+    /// names never needed nesting and are stored plainly at `threads/<name>`.
     pub(super) fn thread_path(&self, name: &ThreadName) -> Result<PathBuf> {
         validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
         if name.contains('/') {
-            let flat = self.flat_thread_path(name)?;
-            if flat.exists() {
-                return Ok(flat);
-            }
-            let legacy = self.legacy_thread_path(name)?;
-            if legacy.exists() {
-                return Ok(legacy);
-            }
-            Ok(flat)
+            self.flat_thread_path(name)
         } else {
-            self.legacy_thread_path(name)
+            self.plain_thread_path(name)
         }
     }
-    pub(super) fn legacy_thread_path(&self, name: &str) -> Result<PathBuf> {
+    /// Plain (non-flat-encoded) path under `threads/` for a top-level thread
+    /// name. Only valid for non-slashed names; slashed names use the flat
+    /// layout via [`flat_thread_path`](Self::flat_thread_path).
+    pub(super) fn plain_thread_path(&self, name: &str) -> Result<PathBuf> {
         validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
         Ok(self.threads_dir().join(name))
     }
