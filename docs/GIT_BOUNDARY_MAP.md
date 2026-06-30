@@ -21,7 +21,11 @@ Git helpers.
 
 The mechanical gate is `crates/cli/tests/git_process_lint.rs`. It scans runtime
 source directories for production `Command::new("git")` sites, skips test-only
-modules, and keeps the production subprocess allowlist reviewed.
+modules, and keeps the production subprocess allowlist reviewed. The lint also
+checks that every runtime workspace crate source directory is in the scan set;
+`crates/devtools/src` is the only intentionally unscanned workspace crate
+because it contains developer-only audit and benchmark helpers that are not
+linked into public Heddle workflows.
 
 Current production subprocess allowlist: empty.
 

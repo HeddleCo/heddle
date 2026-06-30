@@ -26,6 +26,21 @@ struct AllowedGitSpawn {
 
 const ALLOWED_GIT_SPAWNS: &[AllowedGitSpawn] = &[];
 
+#[derive(Debug)]
+struct AllowedUnscannedSourceDir {
+    path: &'static str,
+    reason: &'static str,
+}
+
+const ALLOWED_UNSCANNED_SOURCE_DIRS: &[AllowedUnscannedSourceDir] = &[
+    // Developer-only audit and benchmark helpers may spawn external tools,
+    // including Git, without becoming part of Heddle's runtime boundary.
+    AllowedUnscannedSourceDir {
+        path: "crates/devtools/src",
+        reason: "developer-only helper binaries are not linked into runtime Heddle workflows",
+    },
+];
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct SpawnSite {
     file: String,
@@ -80,6 +95,49 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
     assert!(
         missing.is_empty(),
         "git-process allowlist entry no longer matches a production spawn; remove or update it: {missing:?}"
+    );
+}
+
+#[test]
+fn git_process_lint_scans_every_runtime_workspace_crate() {
+    let workspace = workspace_root();
+    let scanned: BTreeSet<_> = default_cli_runtime_source_dirs(&workspace)
+        .into_iter()
+        .map(|path| relative_workspace_path(&workspace, &path))
+        .collect();
+    let allowed_unscanned: BTreeMap<_, _> = ALLOWED_UNSCANNED_SOURCE_DIRS
+        .iter()
+        .map(|entry| {
+            assert!(
+                !entry.reason.trim().is_empty(),
+                "unscanned source dir must explain why it is outside runtime lint scope: {}",
+                entry.path
+            );
+            (entry.path, entry)
+        })
+        .collect();
+
+    let mut missing = Vec::new();
+    for path in workspace_crate_source_dirs(&workspace) {
+        let rel = relative_workspace_path(&workspace, &path);
+        if !scanned.contains(&rel) && !allowed_unscanned.contains_key(rel.as_str()) {
+            missing.push(rel);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "git-process lint must scan every runtime workspace crate source dir; add the crate to default_cli_runtime_source_dirs or document why it is non-runtime:\n{}",
+        missing.join("\n")
+    );
+
+    let stale_allowed: Vec<_> = allowed_unscanned
+        .keys()
+        .copied()
+        .filter(|path| scanned.contains(*path) || !workspace.join(path).exists())
+        .collect();
+    assert!(
+        stale_allowed.is_empty(),
+        "unscanned source dir allowlist entry is stale; remove or update it: {stale_allowed:?}"
     );
 }
 
@@ -197,9 +255,14 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
 
     let source =
         fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    scan_source(&rel, &source, sites);
+}
+
+fn scan_source(rel: &str, source: &str, sites: &mut Vec<SpawnSite>) {
     let mut function = String::from("<module>");
     let mut git_command_aliases = BTreeSet::new();
     let mut pending_command_new: Option<(usize, String, String, usize)> = None;
+    let mut pending_shell_command: Option<(usize, String, String, usize)> = None;
     let mut pending_cfg_test = false;
     let mut test_module_depth: Option<usize> = None;
     for (idx, line) in source.lines().enumerate() {
@@ -227,6 +290,7 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
             function = name.to_string();
             git_command_aliases.clear();
             pending_command_new = None;
+            pending_shell_command = None;
         }
         if let Some((line, source, function, remaining)) = pending_command_new.take() {
             if line_mentions_git_command_arg(trimmed, &git_command_aliases) {
@@ -242,6 +306,20 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
                 pending_command_new = Some((line, source, function, remaining - 1));
             }
         }
+        if let Some((line, source, function, remaining)) = pending_shell_command.take() {
+            if line_mentions_git_shell_arg(trimmed) {
+                sites.push(SpawnSite {
+                    file: rel.to_string(),
+                    function,
+                    line,
+                    source: format!("{source} {}", trimmed.trim()),
+                });
+                continue;
+            }
+            if remaining > 0 && !trimmed.ends_with(';') {
+                pending_shell_command = Some((line, source, function, remaining - 1));
+            }
+        }
         if let Some(alias) = parse_git_command_alias(trimmed) {
             git_command_aliases.insert(alias.to_ascii_lowercase());
         }
@@ -254,6 +332,8 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
             });
         } else if starts_multiline_command_new(trimmed) {
             pending_command_new = Some((idx + 1, trimmed.to_string(), function.clone(), 4));
+        } else if is_shell_command_spawn(trimmed) {
+            pending_shell_command = Some((idx + 1, trimmed.to_string(), function.clone(), 8));
         }
     }
 }
@@ -275,6 +355,34 @@ fn collect_manifest_files(dir: &Path, manifests: &mut Vec<PathBuf>) {
             manifests.push(path);
         }
     }
+}
+
+fn workspace_crate_source_dirs(workspace: &Path) -> Vec<PathBuf> {
+    let crates_dir = workspace.join("crates");
+    let entries = fs::read_dir(&crates_dir)
+        .unwrap_or_else(|err| panic!("read_dir {}: {err}", crates_dir.display()));
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.expect("read dir entry");
+        let path = entry.path();
+        let file_type = entry.file_type().expect("file type");
+        if !file_type.is_dir() || !path.join("Cargo.toml").exists() {
+            continue;
+        }
+        let source = path.join("src");
+        if source.exists() {
+            dirs.push(source);
+        }
+    }
+    dirs.sort();
+    dirs
+}
+
+fn relative_workspace_path(workspace: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn is_git_spawn(line: &str) -> bool {
@@ -328,6 +436,31 @@ fn line_mentions_git_command_arg(line: &str, aliases: &BTreeSet<String>) -> bool
         })
 }
 
+fn is_shell_command_spawn(line: &str) -> bool {
+    let compact = line
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "command::new(\"sh\")",
+        "command::new(\"bash\")",
+        "command::new(\"cmd\")",
+        "command::new(\"powershell\")",
+        "command::new(\"pwsh\")",
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
+}
+
+fn line_mentions_git_shell_arg(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "\"git\"", "\"git ", " git ", " git;", " git&&", " git||", " git|", "exec git",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn parse_git_command_alias(line: &str) -> Option<&str> {
     let line = line.trim_start();
     let rest = line.strip_prefix("let ")?;
@@ -350,12 +483,7 @@ fn is_rust_identifier(value: &str) -> bool {
 }
 
 fn shell_wrapper_mentions_git(line: &str) -> bool {
-    let shell_spawn = line.contains("command::new(\"sh\")")
-        || line.contains("command::new(\"bash\")")
-        || line.contains("command::new(\"cmd\")")
-        || line.contains("command::new(\"powershell\")")
-        || line.contains("command::new(\"pwsh\")");
-    shell_spawn && line.contains("git")
+    is_shell_command_spawn(line) && line.contains("git")
 }
 
 fn parse_function_name(line: &str) -> Option<&str> {
@@ -407,8 +535,10 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/cli/src",
         "crates/cli-shared/src",
         "crates/client/src",
+        "crates/core/src",
         "crates/crypto/src",
         "crates/daemon/src",
+        "crates/format/src",
         "crates/grpc/src",
         "crates/ingest/src",
         "crates/merge/src",
@@ -420,6 +550,7 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/repo/src",
         "crates/review/src",
         "crates/runtime-bridge/src",
+        "crates/schema/src",
         "crates/semantic/src",
         "crates/state_review/src",
         "crates/weft-client-shim/src",
@@ -482,4 +613,32 @@ fn git_spawn_detector_catches_multiline_and_local_aliases() {
         Some("git_cmd")
     );
     assert_eq!(parse_git_command_alias("let git = gix::open(path)?;"), None);
+}
+
+#[test]
+fn git_spawn_detector_catches_multiline_shell_wrappers() {
+    let mut sites = Vec::new();
+    scan_source(
+        "crates/cli/src/fake.rs",
+        r#"fn sneaky() -> std::io::Result<()> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("git status")
+        .status()?;
+    Ok(())
+}
+"#,
+        &mut sites,
+    );
+
+    assert_eq!(sites.len(), 1, "expected one multiline shell git spawn");
+    assert_eq!(sites[0].file, "crates/cli/src/fake.rs");
+    assert_eq!(sites[0].function, "sneaky");
+    assert_eq!(sites[0].line, 2);
+    assert!(
+        sites[0].source.contains("Command::new(\"sh\")")
+            && sites[0].source.contains(".arg(\"git status\")"),
+        "site should include the shell spawn and git-bearing arg: {:?}",
+        sites[0]
+    );
 }
