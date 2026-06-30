@@ -99,8 +99,8 @@ impl RecoveryDetails {
     pub fn state_not_found(state_id: impl fmt::Display) -> Self {
         Self::safety_refusal(
             "state_not_found",
-            format!("state not found: {state_id}"),
-            "List recent states, then choose an existing state id.",
+            format!("State not found: {state_id}"),
+            "List recent states with `heddle log`, then choose an existing state id.",
             "the requested state id does not exist in this repository",
             "continuing with a guessed state could target the wrong history point",
             "repository state, refs, metadata, and worktree files were left unchanged",

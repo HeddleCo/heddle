@@ -62,7 +62,7 @@ impl GitOverlayFixture {
         let thread_path = self
             .temp
             .path()
-            .join(thread.replace('/', "-").replace('\\', "-"));
+            .join(thread.replace(['/', '\\'], "-"));
         let _started = self.json(&[
             "--output",
             "json",

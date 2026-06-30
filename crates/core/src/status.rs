@@ -1035,7 +1035,7 @@ fn apply_status_advice(
             &trust.recommended_action,
         );
         if contextual != trust.recommended_action {
-            trust.recommended_action = contextual;
+            override_trust_recommended_action(&mut trust, contextual, &opts.adapters);
         }
     }
     let thread_health = advice.as_ref().map(|advice| advice.thread_health.as_str());
@@ -1065,7 +1065,11 @@ fn apply_status_advice(
         && trust.recommended_action != recommended_action
         && thread_recovery_action_is_primary(thread_health, &recommended_action)
     {
-        trust.recommended_action = recommended_action.clone();
+        override_trust_recommended_action(
+            &mut trust,
+            recommended_action.clone(),
+            &opts.adapters,
+        );
     }
     let recommended_action = if git_backed_mapping {
         if has_changes {
@@ -1150,6 +1154,24 @@ fn apply_status_advice(
         thread_changed_path_count,
         trust,
         ..output
+    }
+}
+
+fn override_trust_recommended_action(
+    trust: &mut RepositoryVerificationState,
+    action: String,
+    adapters: &StatusAdapters,
+) {
+    let template = (adapters.action_template)(&action);
+    trust.recommended_action = action.clone();
+    trust.recommended_action_template = template.clone();
+    if let Some(check) = trust
+        .checks
+        .iter_mut()
+        .find(|check| check.name == "Workflow")
+    {
+        check.recommended_action = Some(action);
+        check.recommended_action_template = template;
     }
 }
 

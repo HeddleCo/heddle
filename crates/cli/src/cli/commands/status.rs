@@ -2456,7 +2456,7 @@ mod tests {
                 // worktree (trust_verified == false) drives the override.
                 let blocked_by_trust = !trust_verified;
                 let (coordination, blocked_by_trust_only) =
-                    resolve_coordination_with_trust(pre_override.clone(), blocked_by_trust, false);
+                    resolve_coordination_with_trust(pre_override, blocked_by_trust, false);
                 let health = if trust_verified {
                     "clean"
                 } else {

@@ -204,8 +204,8 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
     if !schema_verbs().contains(&verb) {
         return None;
     }
-    let mut schema = schema_for_report_contract_verb(verb)
-        .or_else(|| schema_for_registered_verb(verb))
+    let mut schema = schema_for_registered_verb(verb)
+        .or_else(|| schema_for_report_contract_verb(verb))
         .or_else(|| {
             opaque_schema_verbs()
                 .contains(&verb)

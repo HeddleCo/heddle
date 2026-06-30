@@ -327,11 +327,13 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             cli,
             &repo,
             &user_config,
-            &message,
-            args.confidence,
-            index_intent,
-            pending_capture,
-            &git_overlay_facts,
+            StagedIndexCommit {
+                message: &message,
+                confidence: args.confidence,
+                intent: index_intent,
+                pending_capture,
+                git_overlay_facts: &git_overlay_facts,
+            },
         )?;
         return Ok(());
     }
@@ -450,16 +452,27 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     Ok(())
 }
 
+struct StagedIndexCommit<'a> {
+    message: &'a str,
+    confidence: Option<f32>,
+    intent: GitIndexIntent,
+    pending_capture: Option<ChangeId>,
+    git_overlay_facts: &'a git_overlay_txn::GitOverlayMutationFacts,
+}
+
 fn commit_staged_index(
     cli: &Cli,
     repo: &Repository,
     user_config: &UserConfig,
-    message: &str,
-    confidence: Option<f32>,
-    intent: GitIndexIntent,
-    pending_capture: Option<ChangeId>,
-    git_overlay_facts: &git_overlay_txn::GitOverlayMutationFacts,
+    staged: StagedIndexCommit<'_>,
 ) -> Result<()> {
+    let StagedIndexCommit {
+        message,
+        confidence,
+        intent,
+        pending_capture,
+        git_overlay_facts,
+    } = staged;
     let index_tree = git_index_tree(repo)?;
     let snapshot = create_snapshot_from_tree(
         repo,
