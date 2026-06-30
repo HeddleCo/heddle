@@ -7,15 +7,16 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[cfg(test)]
 use objects::object::FileMode;
 
-use super::{
-    diff_compute::trim_added_decorations_for_display,
-    diff_types::{
-        DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
-    },
-};
 use crate::cli::style;
+#[cfg(test)]
+use heddle_core::FileChange;
+use heddle_core::{
+    DiffOutput, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+    trim_added_decorations_for_display,
+};
 
 const PAGER_LINE_THRESHOLD: usize = 200;
 const SIGNATURE_CHANGE_SEPARATOR: &str = "\u{1f}";
@@ -127,6 +128,7 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// synthesized tail hunk (see `unified_hunks`) and is rendered, and a
 /// mode-only modify (chmod) emits a header-only `diff --git` +
 /// `old mode`/`new mode` block so the permission change round-trips.
+#[cfg(test)]
 pub(crate) fn write_diff_patch<W: Write>(output: &DiffOutput, writer: &mut W) -> io::Result<()> {
     for change in &output.changes {
         // A symlink change carries its raw target bytes in `change.symlink`,
@@ -142,6 +144,7 @@ pub(crate) fn write_diff_patch<W: Write>(output: &DiffOutput, writer: &mut W) ->
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn render_diff_patch_bytes(output: &DiffOutput) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
     write_diff_patch(output, &mut buf).expect("writing diff patch to Vec cannot fail");
@@ -155,6 +158,7 @@ pub(crate) fn render_diff_patch_bytes(output: &DiffOutput) -> Vec<u8> {
 /// surface can do. The round-trip surface (`heddle diff --patch`) writes the
 /// bytes directly via `render_diff_patch_bytes`, so its byte fidelity is
 /// never reduced here.
+#[cfg(test)]
 pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
     String::from_utf8_lossy(&render_diff_patch_bytes(output)).into_owned()
 }
@@ -164,6 +168,7 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
 /// `write_symlink_change`, which preserves a non-UTF-8 target — so a symlink
 /// target is never forced through `change.lines` (which a non-UTF-8 target
 /// cannot populate) or `write_binary_change`.
+#[cfg(test)]
 fn write_text_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Result<()> {
     let lines_ref = change.lines.as_deref();
     let has_hunk_body = lines_ref.is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
@@ -348,6 +353,7 @@ fn write_text_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Resul
 /// `write_text_change`'s (add/delete/rename), and the mode is always
 /// `120000` so a rename never needs an `old mode`/`new mode` pair unless the
 /// two sides genuinely differ.
+#[cfg(test)]
 fn write_symlink_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Result<()> {
     let Some(sym) = change.symlink.as_ref() else {
         return Ok(());
@@ -436,6 +442,7 @@ fn write_symlink_change<W: Write>(change: &FileChange, writer: &mut W) -> io::Re
 /// embeds a `\n` (pathological but representable) splits into multiple lines.
 /// The `@@` header mirrors `unified_hunks`'s `@@ -s,c +s,c @@` shape (counts
 /// always written, even `,1`), which `git apply` accepts.
+#[cfg(test)]
 fn write_symlink_hunk<W: Write>(
     old: Option<&[u8]>,
     new: Option<&[u8]>,
@@ -476,6 +483,7 @@ fn write_symlink_hunk<W: Write>(
 /// (`None`) or an empty blob yields no lines; a trailing `\n` is the line
 /// terminator (dropped here, surfaced via `target_has_trailing_newline`)
 /// rather than an extra empty line, matching how text blobs are line-counted.
+#[cfg(test)]
 fn split_target_lines(target: Option<&[u8]>) -> Vec<&[u8]> {
     let Some(bytes) = target else {
         return Vec::new();
@@ -490,6 +498,7 @@ fn split_target_lines(target: Option<&[u8]>) -> Vec<&[u8]> {
     lines
 }
 
+#[cfg(test)]
 fn target_has_trailing_newline(target: Option<&[u8]>) -> bool {
     target.is_some_and(|bytes| bytes.ends_with(b"\n"))
 }
@@ -508,6 +517,7 @@ fn target_has_trailing_newline(target: Option<&[u8]>) -> bool {
 /// index line") rather than ignoring it. That refusal is the correct
 /// outcome: heddle has no delta to apply, so the honest result is a hard
 /// failure, never a false round-trip.
+#[cfg(test)]
 fn write_binary_change<W: Write>(
     change: &FileChange,
     is_added: bool,
@@ -553,6 +563,7 @@ fn write_binary_change<W: Write>(
 
 /// Map a tracked file mode to the git unified-diff mode string. `None`
 /// (mode not resolved) and the regular-file case both render `100644`.
+#[cfg(test)]
 fn mode_str(mode: Option<FileMode>) -> &'static str {
     match mode {
         Some(FileMode::Executable) => "100755",
@@ -573,6 +584,7 @@ fn mode_str(mode: Option<FileMode>) -> &'static str {
 ///
 /// Verified byte-for-byte against `git diff` for tab, newline, quote,
 /// backslash, and non-ASCII (UTF-8 → per-byte octal) paths.
+#[cfg(test)]
 fn quote_path_for_patch(prefix: &str, path: &str) -> String {
     if !needs_c_quoting(prefix) && !needs_c_quoting(path) {
         return format!("{prefix}{path}");
@@ -585,6 +597,7 @@ fn quote_path_for_patch(prefix: &str, path: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn needs_c_quoting(s: &str) -> bool {
     s.bytes().any(byte_needs_escape)
 }
@@ -592,10 +605,12 @@ fn needs_c_quoting(s: &str) -> bool {
 /// git escapes any byte below 0x20, the DEL byte and everything above it
 /// (0x7f..=0xff — `core.quotePath` octal-escapes non-ASCII), plus the two
 /// in-quote metacharacters `"` and `\`.
+#[cfg(test)]
 fn byte_needs_escape(byte: u8) -> bool {
     matches!(byte, b'"' | b'\\') || !(0x20..0x7f).contains(&byte)
 }
 
+#[cfg(test)]
 fn push_c_quoted(out: &mut String, s: &str) {
     for byte in s.bytes() {
         match byte {
@@ -614,6 +629,7 @@ fn push_c_quoted(out: &mut String, s: &str) {
     }
 }
 
+#[cfg(test)]
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 
 /// Walk the rendered hunks once and emit each line, splicing in the
@@ -627,6 +643,7 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 /// a `-` + `+` pair, with the marker attached to the side that lacks
 /// the terminator. The 4-case matrix is in `write_patch_hunks`'s
 /// context-line branch.
+#[cfg(test)]
 fn write_patch_hunks<W: Write>(
     change: &FileChange,
     lines: &[LineDiff],
@@ -691,11 +708,13 @@ fn write_patch_hunks<W: Write>(
 }
 
 #[derive(Clone, Copy)]
+#[cfg(test)]
 enum Side {
     Old,
     New,
 }
 
+#[cfg(test)]
 fn find_side_tail_idx(lines: &[LineDiff], side: Side, target: usize) -> Option<usize> {
     lines.iter().enumerate().rev().find_map(|(idx, line)| {
         let (on_side, line_number) = match side {
@@ -710,6 +729,7 @@ fn find_side_tail_idx(lines: &[LineDiff], side: Side, target: usize) -> Option<u
     })
 }
 
+#[cfg(test)]
 fn write_patch_line<W: Write>(writer: &mut W, line: &LineDiff) -> io::Result<()> {
     writer.write_all(line.prefix.as_bytes())?;
     writer.write_all(line.content.as_bytes())?;
@@ -725,7 +745,7 @@ pub(crate) fn print_diff_patch(output: &DiffOutput) {
     let stdout = io::stdout();
     let lock = stdout.lock();
     let mut writer = BufWriter::new(lock);
-    let _ = write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
+    let _ = heddle_core::write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
 }
 
 pub(crate) fn print_diff(output: &DiffOutput) {
@@ -1469,7 +1489,7 @@ mod tests {
         paint_signature_change_item_lines, quote_path_for_patch, render_diff_patch,
         render_diff_patch_bytes, signature_change_display_segments,
     };
-    use crate::cli::commands::diff::diff_types::{
+    use heddle_core::{
         DiffOutput, FileChange, FileEolState, LineDiff, SemanticChangeEntry, change_line_counts,
         should_render_modified_pair,
     };
@@ -1532,7 +1552,7 @@ mod tests {
     fn render_diff_patch_bytes_applies_non_utf8_symlink_target_byte_exactly() {
         use std::os::unix::ffi::OsStrExt;
 
-        use crate::cli::commands::diff::diff_types::SymlinkChange;
+        use heddle_core::SymlinkChange;
 
         let target = b"target-\xff\xfe";
         let change = FileChange {

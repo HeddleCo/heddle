@@ -1632,6 +1632,7 @@ dependencies = [
 name = "heddle-core"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "heddle-cli-shared",
  "heddle-crypto",
@@ -1639,6 +1640,7 @@ dependencies = [
  "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
+ "heddle-semantic",
  "rmp-serde",
  "schemars",
  "serde",

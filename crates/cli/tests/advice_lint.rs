@@ -347,6 +347,76 @@ fn git_overlay_mutation_preflight_stays_shared() {
     );
 }
 
+#[test]
+fn git_overlay_checkpoint_mutations_use_transaction_seam() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+
+    for (file, required) in [
+        (
+            "cli/commands/checkpoint.rs",
+            &[
+                "git_overlay_txn::preflight_plain_git_mutation(",
+                "git_overlay_txn::preflight_checkpoint",
+            ][..],
+        ),
+        (
+            "cli/commands/git_compat.rs",
+            &[
+                "git_overlay_txn::preflight_plain_git_mutation(",
+                "git_overlay_txn::preflight_commit(",
+                "git_overlay_txn::preflight_commit_checkpoint_ref_update(",
+            ][..],
+        ),
+        (
+            "cli/commands/workflow.rs",
+            &["git_overlay_txn::preflight_land_checkpoint("][..],
+        ),
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for fragment in required {
+            if !source.contains(fragment) {
+                violations.push(format!("{file} does not call `{fragment}`"));
+            }
+        }
+    }
+
+    for file in [
+        "cli/commands/checkpoint.rs",
+        "cli/commands/git_compat.rs",
+        "cli/commands/workflow.rs",
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for (line_index, line) in source.lines().enumerate() {
+            for fragment in [
+                "git_overlay_mutation_preflight_advice(",
+                "git_overlay_mutation_preflight_advice_with_worktree_status(",
+                "plain_git_mutation_preflight_advice(",
+                "preflight_checkpoint_ref_update(",
+                "land_checkpoint_preflight_advice(",
+                ".git/index.lock",
+            ] {
+                if line.contains(fragment) {
+                    violations.push(format!(
+                        "{file}:{} bypasses git_overlay_txn with `{fragment}`",
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "checkpoint/commit/land Git-overlay mutation gates should stay behind cli::commands::git_overlay_txn:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
     rel == Path::new(ALLOWED_ADVICE_FILE)
         || rel == Path::new(ALLOWED_ENVELOPE_FILE)

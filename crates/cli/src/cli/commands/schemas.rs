@@ -17,7 +17,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
-use heddle_core::{FsckReport, QueryReport, VerifyReport};
+use heddle_core::{DiffReport, FsckReport, QueryReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -60,7 +60,9 @@ macro_rules! schema_registry {
 fn report_contract_schema_verbs() -> &'static [&'static str] {
     &[
         QueryReport::CONTRACT.schema_name,
+        DiffReport::CONTRACT.schema_name,
         FsckReport::CONTRACT.schema_name,
+        StatusReport::CONTRACT.schema_name,
         VerifyReport::CONTRACT.schema_name,
     ]
 }
@@ -75,7 +77,6 @@ schema_registry! {
     (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
-    (&["diff"], DiffSchema),
     (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
@@ -218,7 +219,11 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
 fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
     match verb {
         verb if verb == QueryReport::CONTRACT.schema_name => Some((QueryReport::CONTRACT.schema)()),
+        verb if verb == DiffReport::CONTRACT.schema_name => Some((DiffReport::CONTRACT.schema)()),
         verb if verb == FsckReport::CONTRACT.schema_name => Some((FsckReport::CONTRACT.schema)()),
+        verb if verb == StatusReport::CONTRACT.schema_name => {
+            Some((StatusReport::CONTRACT.schema)())
+        }
         verb if verb == VerifyReport::CONTRACT.schema_name => {
             Some((VerifyReport::CONTRACT.schema)())
         }
@@ -894,6 +899,8 @@ pub struct RetroSchema {
     pub duration_secs: Option<i64>,
     pub states_captured: Vec<RetroStateEntrySchema>,
     pub agents_active: Vec<RetroAgentEntrySchema>,
+    pub agent_tasks: Vec<RetroAgentTaskEntrySchema>,
+    pub timeline_steps: Vec<RetroTimelineStepEntrySchema>,
     pub markers_created: Vec<RetroMarkerEntrySchema>,
     pub context_annotations: Vec<RetroContextAnnotationEntrySchema>,
     pub verify_signals: Vec<RetroVerifySignalSchema>,
@@ -928,6 +935,35 @@ pub struct RetroAgentTokensSchema {
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
     pub tool_calls: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RetroAgentTaskEntrySchema {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub target_thread: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RetroTimelineStepEntrySchema {
+    pub thread: String,
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
+    pub changed: Option<bool>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub capture_state: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1057,6 +1093,7 @@ pub struct CaptureSchema {
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
+    pub task_assignment_id: Option<String>,
     pub principal: CommitPrincipalSchema,
     pub agent: Option<CommitAgentSchema>,
     pub promotion_suggested: bool,
@@ -1176,64 +1213,6 @@ pub struct CleanSchema {
     pub output_kind: String,
     pub removed: Vec<String>,
     pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub from_state: Option<String>,
-    pub to_state: Option<String>,
-    pub changed_path_count: usize,
-    pub stats: DiffStatsSchema,
-    /// Worktree-mode diff (`heddle diff` with no revision args) groups the
-    /// per-file changes into `{modified, added, deleted}` category arrays,
-    /// mirroring the `status` command's `changes` shape so a UI can derive
-    /// add/modify/delete badges from `diff` alone. A state-to-state diff
-    /// (`heddle diff <a> <b>`) instead emits a flat `array<object>` here.
-    pub changes: DiffChangesSchema,
-    pub semantic_changes: Option<Vec<Value>>,
-    pub context: Option<Vec<Value>>,
-    pub broader_guidance: Option<Vec<Value>>,
-    /// Rendered unified-diff text, suitable for `patch(1)` / `git apply`.
-    /// Present whenever line-level hunks exist, regardless of the
-    /// `--patch` CLI flag — JSON consumers always get a parseable diff.
-    pub patch: Option<String>,
-}
-
-/// `changes` admits the two documented shapes the `diff` command emits:
-/// worktree mode (`heddle diff` with no revision args) groups entries into
-/// `{modified, added, deleted}` category arrays; a state-to-state diff
-/// (`heddle diff <a> <b>`) emits a flat `array<object>`. The schema is a
-/// union of both so either documented output validates.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum DiffChangesSchema {
-    /// Worktree-mode: per-file diff entries bucketed by category, mirroring
-    /// the `status` command's `{modified, added, deleted}` field names. Each
-    /// entry carries its path plus the per-file diff fields (`kind`,
-    /// `old_path`, `lines`, …). A `renamed` entry buckets under `modified`
-    /// (its `kind`/`old_path` identify the rename).
-    Grouped(DiffChangesGroupedSchema),
-    /// State-to-state: a flat array of per-file diff entries.
-    Flat(Vec<Value>),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffChangesGroupedSchema {
-    pub modified: Vec<Value>,
-    pub added: Vec<Value>,
-    pub deleted: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffStatsSchema {
-    pub files_changed: usize,
-    pub additions: usize,
-    pub modifications: usize,
-    pub deletions: usize,
-    pub renames: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1613,6 +1592,8 @@ pub struct ThreadSummarySchema {
     pub stack_depth: usize,
     pub stale_from_parent: bool,
     pub task: Option<String>,
+    pub task_assignment_id: Option<String>,
+    pub task_summary: Option<ThreadTaskSummarySchema>,
     pub changed_paths: Vec<String>,
     pub promotion_suggested: bool,
     pub impact_categories: Vec<ThreadImpactCategorySchema>,
@@ -1634,6 +1615,17 @@ pub struct ThreadSummarySchema {
     pub history_imported: bool,
     pub auto: bool,
     pub shared_target_dir: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadTaskSummarySchema {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub target_thread: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub coordination_discussion_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

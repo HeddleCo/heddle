@@ -327,9 +327,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         None
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
-    if let Some(advice) = git_overlay_txn::land_checkpoint_preflight_advice(&repo, &thread.id) {
-        return Err(anyhow!(advice));
-    }
+    git_overlay_txn::preflight_land_checkpoint(&repo, &thread.id)?;
 
     let mut captured = false;
     if let Some(thread_repo) = thread_repo.as_ref() {

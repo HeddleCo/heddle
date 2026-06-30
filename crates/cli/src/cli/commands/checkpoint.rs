@@ -116,7 +116,7 @@ pub(crate) fn create_git_checkpoint_with_worktree_status(
     repo: &Repository,
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
-    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
+    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
 ) -> Result<GitCheckpointRecord> {
     create_git_checkpoint_inner(
         repo,
@@ -136,13 +136,29 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     create_git_checkpoint_inner(repo, message, status_options, false, None, None)
 }
 
+pub(crate) fn create_git_checkpoint_from_index_snapshot_with_worktree_status(
+    repo: &Repository,
+    message: Option<&str>,
+    status_options: repo::WorktreeStatusOptions,
+    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
+) -> Result<GitCheckpointRecord> {
+    create_git_checkpoint_inner(
+        repo,
+        message,
+        status_options,
+        false,
+        None,
+        Some(worktree_status),
+    )
+}
+
 fn create_git_checkpoint_inner(
     repo: &Repository,
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
     git_parent_override: Option<Vec<ObjectId>>,
-    precomputed_worktree_status: Option<&repo::Result<Option<objects::worktree::WorktreeStatus>>>,
+    precomputed_worktree_status: Option<&git_overlay_txn::GitOverlayWorktreeStatus>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(
@@ -160,19 +176,15 @@ fn create_git_checkpoint_inner(
     // consumers observe the SAME pre-mutation git state, so reuse is sound.
     // A caller that has already computed this pre-mutation status (e.g. `commit`)
     // passes it in so checkpoint does not re-walk the worktree.
-    let computed_worktree_status;
-    let worktree_status = match precomputed_worktree_status {
-        Some(status) => status,
+    match precomputed_worktree_status {
+        Some(status) => {
+            git_overlay_txn::preflight_checkpoint_with_worktree_status(repo, "checkpoint", status)?
+        }
         None => {
-            computed_worktree_status = git_overlay_txn::worktree_status(repo);
-            &computed_worktree_status
+            let facts = git_overlay_txn::gather_mutation_facts(repo);
+            git_overlay_txn::preflight_checkpoint(repo, "checkpoint", &facts)?;
         }
     };
-    git_overlay_txn::preflight_checkpoint_like_with_worktree_status(
-        repo,
-        "checkpoint",
-        worktree_status,
-    )?;
     let state_id = ensure_current_state(
         repo,
         &UserConfig::load_default()?,

@@ -26,7 +26,8 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{
-        create_git_checkpoint_from_index_snapshot, create_git_checkpoint_with_worktree_status,
+        create_git_checkpoint_from_index_snapshot_with_worktree_status,
+        create_git_checkpoint_with_worktree_status,
     },
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::RepositoryVerificationState,
@@ -141,9 +142,9 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // tracked file — before this, the clean fast-path paid that walk 3× before
     // the ref ever moved.
     let preflight_worktree_status_start = Instant::now();
-    let worktree_status = repo.git_overlay_worktree_status();
+    let git_overlay_facts = git_overlay_txn::gather_mutation_facts(&repo);
     let preflight_worktree_status_ms = preflight_worktree_status_start.elapsed().as_millis();
-    git_overlay_txn::preflight_commit_like_with_worktree_status(&repo, &worktree_status)?;
+    git_overlay_txn::preflight_commit(&repo, &git_overlay_facts)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let placeholder_principal_warning =
         placeholder_principal_first_commit_warning(&repo, &user_config)?;
@@ -177,8 +178,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             // Reuse the pre-mutation git-overlay worktree status computed at the
             // top: no Git ref has moved on this fast-path, so the verification
             // state is byte-identical to a fresh walk here.
-            let trust =
-                git_overlay_txn::preflight_verify_with_worktree_status(&repo, &worktree_status);
+            let trust = git_overlay_txn::preflight_verify_with_worktree_status(
+                &repo,
+                git_overlay_facts.worktree_status(),
+            );
             // `--no-all` forces an index-only commit and must never auto-commit
             // the captured worktree state. On this fast-path the worktree is
             // clean and the index has no staged intent, so an index-only commit
@@ -203,7 +206,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     &repo,
                     Some(message.as_str()),
                     worktree_status_options(Some(repo.config())),
-                    &worktree_status,
+                    git_overlay_facts.worktree_status(),
                 )?;
                 let trust = git_overlay_txn::post_verify_commit(&repo);
                 let output = CommitCompatOutput {
@@ -313,7 +316,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         "commit",
         "heddle commit -m \"...\"",
     )?;
-    git_overlay_txn::preflight_checkpoint_ref_update(&repo, "commit")?;
+    git_overlay_txn::preflight_commit_checkpoint_ref_update(&repo, &git_overlay_facts)?;
     let git_previous_commit = git_head_oid(repo.root());
     let pending_capture = pending_capture_before_commit(&repo)?;
     if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
@@ -328,6 +331,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             args.confidence,
             index_intent,
             pending_capture,
+            &git_overlay_facts,
         )?;
         return Ok(());
     }
@@ -346,7 +350,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // below) is left FRESH: the checkpoint advances the Git ref, which flips the
     // git-overlay health classification.
     let large_capture_start = Instant::now();
-    preflight_large_capture_for_compat_commit_with_worktree_status(args.force, &worktree_status)?;
+    preflight_large_capture_for_compat_commit_with_worktree_status(
+        args.force,
+        git_overlay_facts.worktree_status(),
+    )?;
     let large_capture_preflight_ms = large_capture_start.elapsed().as_millis();
     let snapshot_start = Instant::now();
     let (snapshot, _snapshot_profile) = create_snapshot_profiled_with_worktree_status(
@@ -363,7 +370,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             no_policy: false,
             no_agent: false,
         },
-        &worktree_status,
+        git_overlay_facts.worktree_status(),
     )?;
     let snapshot_ms = snapshot_start.elapsed().as_millis();
     let captured_state = repo
@@ -375,7 +382,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         &repo,
         Some(message.as_str()),
         worktree_status_options(Some(repo.config())),
-        &worktree_status,
+        git_overlay_facts.worktree_status(),
     )
     .map_err(|err| {
         anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
@@ -451,6 +458,7 @@ fn commit_staged_index(
     confidence: Option<f32>,
     intent: GitIndexIntent,
     pending_capture: Option<ChangeId>,
+    git_overlay_facts: &git_overlay_txn::GitOverlayMutationFacts,
 ) -> Result<()> {
     let index_tree = git_index_tree(repo)?;
     let snapshot = create_snapshot_from_tree(
@@ -474,10 +482,11 @@ fn commit_staged_index(
         .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
     let snapshot_batch = find_recent_snapshot_batch(repo, &captured_state.change_id)?;
     let git_previous_commit = git_head_oid(repo.root());
-    let record = create_git_checkpoint_from_index_snapshot(
+    let record = create_git_checkpoint_from_index_snapshot_with_worktree_status(
         repo,
         Some(message),
         worktree_status_options(Some(repo.config())),
+        git_overlay_facts.worktree_status(),
     )
     .map_err(|err| {
         anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(

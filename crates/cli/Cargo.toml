@@ -153,8 +153,8 @@ client = ["dep:heddle-client", "dep:tokio-tungstenite"]
 # but the dependency is always present so no legacy bridge importer is
 # compiled as a fallback.
 ingest = []
-semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
-semantic-extended = ["semantic", "semantic?/extended-languages"]
+semantic = ["dep:semantic", "heddle-core/semantic", "repo/tree-sitter-symbols"]
+semantic-extended = ["semantic", "heddle-core/semantic-extended", "semantic?/extended-languages"]
 observability = [
     "cli-shared/observability",
     "dep:opentelemetry",

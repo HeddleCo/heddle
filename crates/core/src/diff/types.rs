@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Types used by diff command output.
 
-use objects::object::{FileMode, SemanticChange};
-use serde::Serialize;
+use std::borrow::Cow;
 
-use crate::cli::commands::semantic_change_output::{
-    SemanticChangeEntryFields, semantic_change_entry_fields,
+use objects::object::{FileMode, SemanticChange};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Serialize, Serializer};
+
+use crate::{
+    HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
 };
 
-#[derive(Clone, Debug, Serialize)]
+pub type DiffReport = DiffOutput;
+
+#[derive(Clone, Debug)]
 pub struct DiffOutput {
     pub output_kind: &'static str,
     pub status: &'static str,
@@ -17,21 +22,103 @@ pub struct DiffOutput {
     pub changed_path_count: usize,
     pub stats: DiffStats,
     pub changes: Vec<FileChange>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_changes: Option<Vec<SemanticChangeEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Vec<FileContextEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub broader_guidance: Option<Vec<ContextSnippet>>,
     /// Rendered unified-diff text, targeting a clean `git apply`
     /// round-trip (`patch(1)` compatibility is best-effort). Populated
     /// whenever line-level hunks exist regardless of the `--patch` flag,
     /// so JSON consumers always see a parseable diff.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+    pub worktree_mode: bool,
+}
+
+impl Serialize for DiffOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct DiffOutputView<'a> {
+            output_kind: &'static str,
+            status: &'static str,
+            from_state: &'a Option<String>,
+            to_state: &'a Option<String>,
+            changed_path_count: usize,
+            stats: &'a DiffStats,
+            changes: DiffChangesValue<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            semantic_changes: Option<&'a Vec<SemanticChangeEntry>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            context: Option<&'a Vec<FileContextEntry>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            broader_guidance: Option<&'a Vec<ContextSnippet>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            patch: Option<&'a String>,
+        }
+
+        DiffOutputView {
+            output_kind: self.output_kind,
+            status: self.status,
+            from_state: &self.from_state,
+            to_state: &self.to_state,
+            changed_path_count: self.changed_path_count,
+            stats: &self.stats,
+            changes: diff_changes_value(self),
+            semantic_changes: self.semantic_changes.as_ref(),
+            context: self.context.as_ref(),
+            broader_guidance: self.broader_guidance.as_ref(),
+            patch: self.patch.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DiffChangesValue<'a> {
+    Grouped(DiffChangesGroupedRefs<'a>),
+    Flat(&'a [FileChange]),
+}
+
+#[derive(Serialize)]
+struct DiffChangesGroupedRefs<'a> {
+    modified: Vec<&'a FileChange>,
+    added: Vec<&'a FileChange>,
+    deleted: Vec<&'a FileChange>,
+}
+
+fn diff_changes_value(output: &DiffOutput) -> DiffChangesValue<'_> {
+    if !output.worktree_mode {
+        return DiffChangesValue::Flat(&output.changes);
+    }
+
+    let mut grouped = DiffChangesGroupedRefs {
+        modified: Vec::new(),
+        added: Vec::new(),
+        deleted: Vec::new(),
+    };
+    for change in &output.changes {
+        match change.kind.as_str() {
+            "added" => grouped.added.push(change),
+            "deleted" => grouped.deleted.push(change),
+            _ => grouped.modified.push(change),
+        }
+    }
+    DiffChangesValue::Grouped(grouped)
 }
 
 impl DiffOutput {
+    pub const CONTRACT: ReportContract = ReportContract {
+        schema_name: "diff",
+        machine_output_kind: MachineOutputKind::Json,
+        output_discriminator: Some(OutputDiscriminator {
+            field: "output_kind",
+            value: "diff",
+        }),
+        schema: schema_for_report::<DiffOutput>,
+    };
+
     pub fn new(
         from_state: Option<String>,
         to_state: Option<String>,
@@ -73,11 +160,58 @@ impl DiffOutput {
             context,
             broader_guidance,
             patch: None,
+            worktree_mode: false,
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+impl JsonSchema for DiffOutput {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("DiffOutput")
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        DiffOutputSchema::json_schema(generator)
+    }
+}
+
+impl HeddleReport for DiffOutput {
+    const CONTRACT: ReportContract = DiffOutput::CONTRACT;
+}
+
+#[derive(Debug, JsonSchema)]
+#[allow(dead_code)]
+struct DiffOutputSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub from_state: Option<String>,
+    pub to_state: Option<String>,
+    pub changed_path_count: usize,
+    pub stats: DiffStats,
+    pub changes: DiffChangesSchema,
+    pub semantic_changes: Option<Vec<SemanticChangeEntry>>,
+    pub context: Option<Vec<FileContextEntry>>,
+    pub broader_guidance: Option<Vec<ContextSnippet>>,
+    pub patch: Option<String>,
+}
+
+#[derive(Debug, JsonSchema)]
+#[allow(dead_code)]
+#[serde(untagged)]
+enum DiffChangesSchema {
+    Grouped(DiffChangesGroupedSchema),
+    Flat(Vec<FileChange>),
+}
+
+#[derive(Debug, JsonSchema)]
+#[allow(dead_code)]
+struct DiffChangesGroupedSchema {
+    pub modified: Vec<FileChange>,
+    pub added: Vec<FileChange>,
+    pub deleted: Vec<FileChange>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 pub struct DiffStats {
     pub files_changed: usize,
     pub additions: usize,
@@ -87,7 +221,7 @@ pub struct DiffStats {
 }
 
 impl DiffStats {
-    pub(crate) fn from_changes(
+    pub fn from_changes(
         changes: &[FileChange],
         semantic_changes: Option<&[SemanticChangeEntry]>,
     ) -> Self {
@@ -127,7 +261,7 @@ impl DiffStats {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 pub struct FileChange {
     pub path: String,
     pub kind: String,
@@ -148,14 +282,17 @@ pub struct FileChange {
     /// representation of a symlink). For a `modified` change it is the
     /// new (post-change) mode, paired with `old_mode`.
     #[serde(skip)]
+    #[schemars(skip)]
     pub mode: Option<FileMode>,
     /// Old (pre-change) git file mode for a `modified` change. When it
     /// differs from `mode` the renderer emits `old mode`/`new mode`
     /// extended headers so a chmod (e.g. exec-bit flip) round-trips
     /// through `git apply` even when the file's content is unchanged.
     #[serde(skip)]
+    #[schemars(skip)]
     pub old_mode: Option<FileMode>,
     #[serde(skip)]
+    #[schemars(skip)]
     pub binary: bool,
     /// Raw symlink target bytes for each side of a change that touches a
     /// symlink. Git stores a symlink's blob as the raw bytes of its target,
@@ -167,6 +304,7 @@ pub struct FileChange {
     /// surface (add/delete/edit/rename) and both backends. `None` means the
     /// change does not involve a symlink and renders as ordinary text.
     #[serde(skip)]
+    #[schemars(skip)]
     pub symlink: Option<SymlinkChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineDiff>>,
@@ -175,6 +313,7 @@ pub struct FileChange {
     /// `DiffStats` reads it instead of walking `lines`, so the
     /// summary remains accurate without us retaining the hunks.
     #[serde(skip)]
+    #[schemars(skip)]
     pub line_counts: Option<LineCounts>,
     /// Trailing-newline state and total line counts per side. The
     /// patch renderer uses these to emit the unified-diff
@@ -184,6 +323,7 @@ pub struct FileChange {
     /// (`true` / `0`) mean "no marker needed", which is what
     /// status-only fast paths fall back to.
     #[serde(skip)]
+    #[schemars(skip)]
     pub eol: FileEolState,
 }
 
@@ -222,7 +362,7 @@ impl Default for FileEolState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct LineDiff {
     pub prefix: String,
     pub content: String,
@@ -257,13 +397,13 @@ impl LineDiff {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct FileContextEntry {
     pub path: String,
     pub annotations: Vec<ContextSnippet>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ContextSnippet {
     pub annotation_id: String,
     pub kind: String,
@@ -278,7 +418,7 @@ pub struct LineCounts {
     pub deleted: usize,
 }
 
-pub(crate) fn change_line_counts(lines: Option<&[LineDiff]>) -> LineCounts {
+pub fn change_line_counts(lines: Option<&[LineDiff]>) -> LineCounts {
     let mut counts = LineCounts::default();
     let mut index = 0usize;
     let lines = lines.unwrap_or_default();
@@ -303,7 +443,7 @@ pub(crate) fn change_line_counts(lines: Option<&[LineDiff]>) -> LineCounts {
     counts
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct SemanticChangeEntry {
     pub change_type: String,
     pub description: String,
@@ -342,7 +482,7 @@ impl From<SemanticChangeEntryFields> for SemanticChangeEntry {
     }
 }
 
-pub(crate) fn should_render_modified_pair(removed: &str, added: &str) -> bool {
+pub fn should_render_modified_pair(removed: &str, added: &str) -> bool {
     let prefix_len = common_prefix_boundary(removed, added);
     let suffix_len = common_suffix_boundary(&removed[prefix_len..], &added[prefix_len..]);
     let shared_len = prefix_len + suffix_len;
@@ -380,6 +520,231 @@ fn common_suffix_boundary(left_tail: &str, right_tail: &str) -> usize {
         boundary = left_tail.len() - left_index;
     }
     boundary
+}
+
+struct SemanticChangeEntryFields {
+    pub change_type: String,
+    pub description: String,
+    pub path: Option<String>,
+    pub from_path: Option<String>,
+    pub to_path: Option<String>,
+    pub old_name: Option<String>,
+    pub new_name: Option<String>,
+    pub importance: Option<String>,
+}
+
+fn semantic_change_entry_fields(change: SemanticChange) -> SemanticChangeEntryFields {
+    match change {
+        SemanticChange::FileAdded { path } => SemanticChangeEntryFields {
+            change_type: "file_added".to_string(),
+            description: format!("File added: {}", path.display()),
+            path: Some(path.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: None,
+            importance: None,
+        },
+        SemanticChange::FileDeleted { path } => SemanticChangeEntryFields {
+            change_type: "file_deleted".to_string(),
+            description: format!("File deleted: {}", path.display()),
+            path: Some(path.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: None,
+            importance: None,
+        },
+        SemanticChange::FileModified {
+            path,
+            classification,
+            importance,
+            ..
+        } => SemanticChangeEntryFields {
+            change_type: if let Some(cls) = classification {
+                format!("file_modified:{:?}", cls).to_lowercase()
+            } else {
+                "file_modified".to_string()
+            },
+            description: if let Some(cls) = classification {
+                format!("File modified ({:?}): {}", cls, path.display())
+            } else {
+                format!("File modified: {}", path.display())
+            },
+            path: Some(path.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: None,
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FunctionDeleted {
+            file,
+            name,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_deleted".to_string(),
+            description: format!("Function deleted: {} in {}", name, file.display()),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: Some(name),
+            new_name: None,
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::SignatureChanged {
+            file,
+            name,
+            old_signature,
+            new_signature,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "signature_changed".to_string(),
+            description: format!("Signature changed: {} in {}", name, file.display()),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: Some(old_signature),
+            new_name: Some(new_signature),
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FileRenamed { from, to } => SemanticChangeEntryFields {
+            change_type: "file_renamed".to_string(),
+            description: format!("File renamed: {} -> {}", from.display(), to.display()),
+            path: None,
+            from_path: Some(from.display().to_string()),
+            to_path: Some(to.display().to_string()),
+            old_name: None,
+            new_name: None,
+            importance: None,
+        },
+        SemanticChange::FunctionAdded {
+            file,
+            name,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_added".to_string(),
+            description: format!("Function added: {} in {}", name, file.display()),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: Some(name),
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FunctionExtracted {
+            file,
+            name,
+            source_file,
+            source_name,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_extracted".to_string(),
+            description: if let Some(source_name) = &source_name {
+                let source_file = source_file.as_ref().unwrap_or(&file);
+                format!(
+                    "Function extracted: {} from {} in {}",
+                    name,
+                    source_name,
+                    source_file.display()
+                )
+            } else {
+                format!("Function extracted: {} in {}", name, file.display())
+            },
+            path: Some(file.display().to_string()),
+            from_path: source_file.map(|path| path.display().to_string()),
+            to_path: None,
+            old_name: source_name,
+            new_name: Some(name),
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FunctionRenamed {
+            file,
+            old_name,
+            new_name,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_renamed".to_string(),
+            description: format!(
+                "Function renamed: {} -> {} in {}",
+                old_name,
+                new_name,
+                file.display()
+            ),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: Some(old_name),
+            new_name: Some(new_name),
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FunctionModified {
+            file,
+            name,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_modified".to_string(),
+            description: format!("Function modified: {} in {}", name, file.display()),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: Some(name),
+            new_name: None,
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::FunctionMoved {
+            file,
+            name,
+            old_start_line,
+            new_start_line,
+            importance,
+        } => SemanticChangeEntryFields {
+            change_type: "function_moved".to_string(),
+            description: format!(
+                "Function moved: {} in {} ({} -> {})",
+                name,
+                file.display(),
+                old_start_line + 1,
+                new_start_line + 1
+            ),
+            path: Some(file.display().to_string()),
+            from_path: None,
+            to_path: None,
+            old_name: Some(name),
+            new_name: None,
+            importance: importance.map(|i| format!("{i:?}").to_lowercase()),
+        },
+        SemanticChange::DependencyAdded { name, version } => SemanticChangeEntryFields {
+            change_type: "dependency_added".to_string(),
+            description: format!("Dependency added: {}@{}", name, version),
+            path: None,
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: Some(name),
+            importance: None,
+        },
+        SemanticChange::DependencyRemoved { name } => SemanticChangeEntryFields {
+            change_type: "dependency_removed".to_string(),
+            description: format!("Dependency removed: {}", name),
+            path: None,
+            from_path: None,
+            to_path: None,
+            old_name: Some(name),
+            new_name: None,
+            importance: None,
+        },
+        SemanticChange::Custom { change_type, .. } => SemanticChangeEntryFields {
+            change_type: format!("custom:{}", change_type),
+            description: format!("Custom change: {}", change_type),
+            path: None,
+            from_path: None,
+            to_path: None,
+            old_name: None,
+            new_name: None,
+            importance: None,
+        },
+    }
 }
 
 #[cfg(test)]

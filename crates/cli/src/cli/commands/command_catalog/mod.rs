@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
 use heddle_core::{
-    FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract, VerifyReport,
+    DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
+    StatusReport, VerifyReport,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -1033,6 +1034,16 @@ const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[
     ),
 ];
 const FSCK_COMMAND_SCHEMA_VERBS: &[&str] = &[FsckReport::CONTRACT.schema_name];
+const STATUS_COMMAND_SCHEMA_VERBS: &[&str] = &[StatusReport::CONTRACT.schema_name];
+const STATUS_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
+    Some(StatusReport::CONTRACT.schema_name),
+    StatusReport::CONTRACT,
+)];
+const DIFF_COMMAND_SCHEMA_VERBS: &[&str] = &[DiffReport::CONTRACT.schema_name];
+const DIFF_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
+    Some(DiffReport::CONTRACT.schema_name),
+    DiffReport::CONTRACT,
+)];
 const VERIFY_COMMAND_SCHEMA_VERBS: &[&str] = &[VerifyReport::CONTRACT.schema_name];
 const VERIFY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[report_json_discriminator(
     Some(VerifyReport::CONTRACT.schema_name),
@@ -1836,8 +1847,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["diff"],
         front_door(
             json_discriminators(
-                documented_schemas(READ_JSON, &["diff"]),
-                &[json_discriminator(Some("diff"), "output_kind", "diff")],
+                documented_report_schema(
+                    READ_JSON,
+                    DiffReport::CONTRACT,
+                    DIFF_COMMAND_SCHEMA_VERBS,
+                ),
+                DIFF_JSON_DISCRIMINATORS,
             ),
             20,
         ),
@@ -2681,8 +2696,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(compact_json(READ_JSON_OR_JSONL), &["status"]),
-                    &[json_discriminator(Some("status"), "output_kind", "status")],
+                    documented_schemas(
+                        compact_json(READ_JSON_OR_JSONL),
+                        STATUS_COMMAND_SCHEMA_VERBS,
+                    ),
+                    STATUS_JSON_DISCRIMINATORS,
                 ),
                 10,
             ),

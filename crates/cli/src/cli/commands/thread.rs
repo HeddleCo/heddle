@@ -12,7 +12,10 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
+    store::{
+        AgentEntry, AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore,
+        current_boot_id,
+    },
 };
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -126,6 +129,8 @@ pub struct ThreadSummary {
     pub stack_depth: usize,
     pub stale_from_parent: bool,
     pub task: Option<String>,
+    pub task_assignment_id: Option<String>,
+    pub task_summary: Option<ThreadTaskSummary>,
     pub changed_paths: Vec<String>,
     pub promotion_suggested: bool,
     pub impact_categories: Vec<ThreadImpactCategory>,
@@ -171,6 +176,31 @@ pub struct ThreadActorInfo {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadTaskSummary {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub target_thread: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+}
+
+impl From<&AgentTaskRecord> for ThreadTaskSummary {
+    fn from(task: &AgentTaskRecord) -> Self {
+        Self {
+            task_id: task.task_id.clone(),
+            title: task.title.clone(),
+            status: task.status.to_string(),
+            target_thread: task.target_thread.clone(),
+            updated_at: task.updated_at.to_rfc3339(),
+            completed_at: task.completed_at.map(|time| time.to_rfc3339()),
+            coordination_discussion_id: task.coordination_discussion_id.clone(),
+        }
+    }
 }
 
 impl ThreadSummary {
@@ -226,6 +256,8 @@ impl ThreadSummary {
             stack_depth: 0,
             stale_from_parent: false,
             task: view.record.task,
+            task_assignment_id: None,
+            task_summary: None,
             changed_paths: view.record.changed_paths,
             promotion_suggested: view.record.promotion_suggested,
             impact_categories: view.record.impact_categories,
@@ -531,6 +563,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         .map(|tip| (tip.branch.clone(), tip))
         .collect::<HashMap<_, _>>();
     let registry = AgentRegistry::new(repo.heddle_dir());
+    let task_store = AgentTaskStore::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let mut entries_by_thread: HashMap<String, Vec<AgentEntry>> = HashMap::new();
     let mut threads_by_name: HashMap<String, Thread> = HashMap::new();
@@ -561,15 +594,20 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
 
     let mut summaries = Vec::new();
     for name in names {
+        let entries = entries_by_thread.remove(&name).unwrap_or_default();
+        let task_assignment_id = task_assignment_id_from_entries(&entries);
+        let task_summary = task_summary_for_assignment(&task_store, task_assignment_id.as_deref())?;
         let (view, coordination_status) = build_thread_view(
             repo,
             current.as_ref() == Some(&name),
             name.clone(),
-            entries_by_thread.remove(&name).unwrap_or_default(),
+            entries,
             threads_by_name.remove(&name),
             branch_tips.get(&name).cloned(),
         )?;
         let mut summary = ThreadSummary::from_view(view, coordination_status);
+        summary.task_assignment_id = task_assignment_id;
+        summary.task_summary = task_summary;
         if let Some(branch_tip) = branch_tips.get(&summary.name) {
             summary.git_branch_tip = Some(branch_tip.git_commit.clone());
             summary.history_imported = branch_tip.history_imported;
@@ -798,6 +836,31 @@ fn stack_depth(summaries_by_name: &HashMap<String, ThreadSummary>, thread: &str)
     depth
 }
 
+fn primary_agent_entry(entries: &[AgentEntry]) -> Option<&AgentEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.status == AgentStatus::Active)
+        .max_by_key(|entry| entry.started_at)
+        .or_else(|| entries.iter().max_by_key(|entry| entry.started_at))
+}
+
+fn task_assignment_id_from_entries(entries: &[AgentEntry]) -> Option<String> {
+    primary_agent_entry(entries).and_then(|entry| entry.task_assignment_id.clone())
+}
+
+fn task_summary_for_assignment(
+    store: &AgentTaskStore,
+    task_assignment_id: Option<&str>,
+) -> Result<Option<ThreadTaskSummary>> {
+    let Some(task_assignment_id) = task_assignment_id else {
+        return Ok(None);
+    };
+    Ok(store
+        .load(task_assignment_id)?
+        .as_ref()
+        .map(ThreadTaskSummary::from))
+}
+
 fn build_thread_view(
     repo: &Repository,
     is_current: bool,
@@ -996,6 +1059,9 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         .into_iter()
         .filter(|entry| entry.thread == name)
         .collect();
+    let task_store = AgentTaskStore::new(repo.heddle_dir());
+    let task_assignment_id = task_assignment_id_from_entries(&entries);
+    let task_summary = task_summary_for_assignment(&task_store, task_assignment_id.as_deref())?;
 
     let (view, coordination_status) = build_thread_view(
         repo,
@@ -1006,6 +1072,8 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         None, // skip branch_tip lookup (would require full Sley-backed walk)
     )?;
     let mut summary = ThreadSummary::from_view(view, coordination_status);
+    summary.task_assignment_id = task_assignment_id;
+    summary.task_summary = task_summary;
 
     // Re-run the per-thread fixups that `collect_thread_summaries` applies.
     let thread_for_advice = Thread {
@@ -1117,23 +1185,6 @@ pub(crate) fn contextual_thread_action(
     super::thread_landing::contextual_thread_action(repo, thread_id, target_thread, action)
 }
 
-pub(crate) fn current_thread_next_action_with_verification(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-    trust: &RepositoryVerificationState,
-) -> String {
-    let fallback = non_empty_action_ref(thread_action)
-        .or_else(|| non_empty_action_ref(Some(trust.recommended_action.as_str())));
-    effective_next_action(
-        NextActionInput::default(operation, remote_tracking, import_hint, fallback)
-            .current_thread(thread_health)
-            .with_verification(trust),
-    )
-}
-
 pub(crate) fn current_thread_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
@@ -1152,10 +1203,6 @@ pub(crate) fn thread_recovery_action_is_primary(
     thread_action: &str,
 ) -> bool {
     shared_thread_recovery_action_is_primary(thread_health, thread_action)
-}
-
-fn non_empty_action_ref(action: Option<&str>) -> Option<&str> {
-    action.filter(|action| !action.trim().is_empty())
 }
 
 fn apply_terminal_thread_advice(summary: &mut ThreadSummary) {
@@ -3173,6 +3220,16 @@ pub(crate) fn show_thread_summary(
         }
         if let Some(task) = &summary.task {
             println!("Task: {}", task);
+        }
+        if cli.verbose > 0 {
+            if let Some(task) = &summary.task_summary {
+                println!(
+                    "Task assignment: {} [{}] {}",
+                    task.task_id, task.status, task.title
+                );
+            } else if let Some(task_id) = &summary.task_assignment_id {
+                println!("Task assignment: {}", task_id);
+            }
         }
         let captures = if cli.verbose > 0 {
             collect_thread_captures(repo, &summary.name, 5).unwrap_or_default()

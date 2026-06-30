@@ -443,10 +443,14 @@ impl AgentRegistry {
         for dir_entry in std::fs::read_dir(&self.agents_dir)? {
             let dir_entry = dir_entry?;
             let path = dir_entry.path();
-            if path.extension().map(|e| e == "toml").unwrap_or(false)
-                && let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(entry) = toml::from_str::<AgentEntry>(&content)
-            {
+            if path.extension().map(|e| e == "toml").unwrap_or(false) {
+                let content = std::fs::read_to_string(&path)?;
+                let entry = toml::from_str::<AgentEntry>(&content).map_err(|err| {
+                    HeddleError::Config(format!(
+                        "failed to parse agent registry entry '{}': {err}",
+                        path.display()
+                    ))
+                })?;
                 if self.is_stale_terminal_entry(&entry) {
                     stale_paths.push(path);
                 } else {

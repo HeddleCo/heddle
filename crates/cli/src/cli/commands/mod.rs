@@ -67,7 +67,6 @@ mod revert;
 mod review;
 mod run_cmd;
 mod schemas;
-mod semantic_change_output;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 mod session;

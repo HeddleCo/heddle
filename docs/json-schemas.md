@@ -469,6 +469,7 @@ surface; the native first-run loop should prefer `commit`.
   "content_hash": "deadbeef",
   "intent": "tighten parser validation",
   "confidence": 0.86,
+  "task_assignment_id": "task-parser-validation",
   "principal": {"name": "Ada Agent", "email": "ada-agent@example.com"},
   "agent": {
     "provider": "codex",
@@ -1060,6 +1061,16 @@ verification.
   "stack_depth": 1,
   "stale_from_parent": false,
   "task": null,
+  "task_assignment_id": "task-parser-fast",
+  "task_summary": {
+    "task_id": "task-parser-fast",
+    "title": "Tighten parser validation",
+    "status": "in_progress",
+    "target_thread": "parser-fast",
+    "updated_at": "2026-01-01T00:00:00Z",
+    "completed_at": null,
+    "coordination_discussion_id": null
+  },
   "changed_paths": [],
   "promotion_suggested": false,
   "impact_categories": [],
@@ -1117,6 +1128,7 @@ verification.
 | `actor`, `harness`, `thinking_level` | object/string \| null | required | Attribution and execution context. |
 | `thread_mode`, `thread_state`, `freshness` | enum \| null | required | Thread lifecycle and freshness. |
 | `visibility`, `target_thread`, `parent_thread` | string \| null | required | Thread relationship metadata. |
+| `task_assignment_id`, `task_summary` | string/object \| null | required | Local agent task provenance for the active reservation, when present. `task_summary` carries title/status/thread metadata only. |
 | `child_threads`, `sibling_threads`, `changed_paths`, `blockers` | array<string> | required | Empty arrays when none. |
 | `stack_depth`, `stale_from_parent`, `is_current`, `is_isolated`, `history_imported`, `auto` | number/bool | required | Coordination metadata. |
 | `verification_summary`, `confidence_summary`, `integration_policy_result` | object | required | Structured readiness/coordination summaries. |
@@ -2408,6 +2420,16 @@ State detail view, pretty-printed.
       "freshness": "current",
       "blockers": [],
       "child_threads": [],
+      "task_assignment_id": "task-parser-fast",
+      "task_summary": {
+        "task_id": "task-parser-fast",
+        "title": "Tighten parser validation",
+        "status": "in_progress",
+        "target_thread": "feature/parser-fast",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "completed_at": null,
+        "coordination_discussion_id": null
+      },
       "shared_target_dir": null
     }
   ],
@@ -3468,10 +3490,12 @@ no record exists — public-by-absence):
 {"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth --no-push", "recommended_action": "heddle land --thread feature/auth --no-push"}
 ```
 
-`heddle retro --output json` emits:
+`heddle retro --output json` emits the same shape with bounded session data;
+`timeline_steps` is `[]` unless expanded with `--full`. `heddle retro
+--full --output json` emits expanded timeline summaries:
 
 ```json
-{"since": "hd-base123", "until": "hd-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hd-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "markers_created": [{"name": "verified-parser", "state": "hd-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
+{"since": "hd-base123", "until": "hd-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hd-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hd-base123", "after_state": "hd-head456", "capture_state": "hd-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hd-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
 ```
 
 `heddle semantic hot --output json` emits:

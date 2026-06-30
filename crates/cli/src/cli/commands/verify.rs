@@ -109,7 +109,7 @@ fn core_repository_trust(repo: &Repository) -> objects::error::Result<Repository
     ))
 }
 
-fn core_repository_verification_state(
+pub(crate) fn core_repository_verification_state(
     state: cli_verify::RepositoryVerificationState,
 ) -> RepositoryVerificationState {
     RepositoryVerificationState {
@@ -148,7 +148,7 @@ fn core_repository_verification_state(
     }
 }
 
-fn core_verification_check(check: cli_verify::VerificationCheck) -> VerificationCheck {
+pub(crate) fn core_verification_check(check: cli_verify::VerificationCheck) -> VerificationCheck {
     VerificationCheck {
         name: check.name,
         status: check.status,
@@ -166,7 +166,7 @@ fn core_verification_check(check: cli_verify::VerificationCheck) -> Verification
     }
 }
 
-fn core_action_template(template: ActionTemplate) -> CoreActionTemplate {
+pub(crate) fn core_action_template(template: ActionTemplate) -> CoreActionTemplate {
     CoreActionTemplate {
         action: template.action,
         argv_template: template.argv_template,
@@ -175,7 +175,7 @@ fn core_action_template(template: ActionTemplate) -> CoreActionTemplate {
     }
 }
 
-fn core_machine_contract_coverage(
+pub(crate) fn core_machine_contract_coverage(
     coverage: cli_verify::MachineContractCoverage,
 ) -> CoreMachineContractCoverage {
     CoreMachineContractCoverage {

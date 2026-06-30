@@ -23,10 +23,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use objects::{
     object::{ChangeId, State},
-    store::{AgentRegistry, ObjectStore},
+    store::{AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
 };
 use oplog::OpRecord;
-use repo::Repository;
+use repo::{Repository, TimelineStore, TimelineView};
 use serde::Serialize;
 
 use super::history_target::resolve_state_id;
@@ -41,7 +41,7 @@ const MAX_OPLOG_BATCHES: usize = 4096;
 /// `Claude Code turn` capture is found.
 const DEFAULT_FALLBACK_WINDOW_HOURS: i64 = 1;
 
-/// Length of an excerpted annotation/intent string in non-verbose mode.
+/// Length of excerpted free-text fields in non-verbose mode.
 const EXCERPT_LEN: usize = 160;
 
 #[derive(Clone, Debug)]
@@ -66,6 +66,8 @@ struct RetroOutput {
     duration_secs: Option<i64>,
     states_captured: Vec<StateEntry>,
     agents_active: Vec<AgentEntry>,
+    agent_tasks: Vec<AgentTaskEntry>,
+    timeline_steps: Vec<TimelineStepEntry>,
     markers_created: Vec<MarkerEntry>,
     context_annotations: Vec<ContextAnnotationEntry>,
     verify_signals: Vec<VerifySignal>,
@@ -102,6 +104,35 @@ struct AgentTokens {
     output: Option<u64>,
     reasoning: Option<u64>,
     tool_calls: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct AgentTaskEntry {
+    task_id: String,
+    title: String,
+    status: String,
+    target_thread: String,
+    updated_at: String,
+    completed_at: Option<String>,
+    coordination_discussion_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TimelineStepEntry {
+    thread: String,
+    step_id: String,
+    branch_id: String,
+    parent_step_id: Option<String>,
+    tool_name: Option<String>,
+    tool_status: Option<String>,
+    changed: Option<bool>,
+    payload_summary: Option<String>,
+    payload_hash: Option<String>,
+    before_state: Option<String>,
+    after_state: Option<String>,
+    capture_state: Option<String>,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -280,6 +311,12 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
     merges.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     let agents_active = collect_agents(&repo, since_ts)?;
+    let agent_tasks = collect_agent_tasks(&repo, since_ts, options.verbose)?;
+    let timeline_steps = if options.verbose {
+        collect_timeline_steps(&repo, since_ts, options.verbose)?
+    } else {
+        Vec::new()
+    };
     let context_annotations =
         collect_context_annotations(&repo, head_state.as_ref(), since_ts, options.verbose)?;
 
@@ -289,6 +326,8 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
         duration_secs,
         states_captured,
         agents_active,
+        agent_tasks,
+        timeline_steps,
         markers_created,
         context_annotations,
         verify_signals,
@@ -424,6 +463,98 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
     Ok(out)
 }
 
+fn collect_agent_tasks(
+    repo: &Repository,
+    since_ts: Option<DateTime<Utc>>,
+    verbose: bool,
+) -> Result<Vec<AgentTaskEntry>> {
+    let active_task_ids = AgentRegistry::new(repo.heddle_dir())
+        .list()
+        .context("failed to list agent registry for retro task correlation")?
+        .into_iter()
+        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter_map(|entry| entry.task_assignment_id)
+        .collect::<HashSet<_>>();
+    let tasks = AgentTaskStore::new(repo.heddle_dir())
+        .list()
+        .context("failed to list agent tasks for retro task correlation")?;
+    let mut out = Vec::new();
+    for task in tasks {
+        let window_overlaps = match since_ts {
+            Some(lo) => {
+                active_task_ids.contains(&task.task_id)
+                    || task.updated_at >= lo
+                    || task.completed_at.is_some_and(|completed| completed >= lo)
+            }
+            None => true,
+        };
+        if window_overlaps {
+            out.push(agent_task_entry(&task, verbose));
+        }
+    }
+    Ok(out)
+}
+
+fn agent_task_entry(task: &AgentTaskRecord, verbose: bool) -> AgentTaskEntry {
+    AgentTaskEntry {
+        task_id: task.task_id.clone(),
+        title: display_free_text(&task.title, verbose),
+        status: task.status.to_string(),
+        target_thread: task.target_thread.clone(),
+        updated_at: format_ts(task.updated_at),
+        completed_at: task.completed_at.map(format_ts),
+        coordination_discussion_id: task.coordination_discussion_id.clone(),
+    }
+}
+
+fn collect_timeline_steps(
+    repo: &Repository,
+    since_ts: Option<DateTime<Utc>>,
+    verbose: bool,
+) -> Result<Vec<TimelineStepEntry>> {
+    if !repo.heddle_dir().join("timeline").exists() {
+        return Ok(Vec::new());
+    }
+    let store = TimelineStore::open(repo.heddle_dir())?;
+    let view = TimelineView::rebuild(&store)?;
+    let lo_ms = since_ts.map(|ts| ts.timestamp_millis());
+    let mut out = Vec::new();
+    for step in view.steps() {
+        let step_ms = step.finished_at_ms.or(step.started_at_ms);
+        if let Some(lo) = lo_ms
+            && step_ms.is_none_or(|ms| ms < lo)
+        {
+            continue;
+        }
+        out.push(TimelineStepEntry {
+            thread: step.thread.clone(),
+            step_id: step.step_id.to_string(),
+            branch_id: step.branch_id.to_string(),
+            parent_step_id: step.parent_step_id.as_ref().map(ToString::to_string),
+            tool_name: step.tool_name.clone(),
+            tool_status: step.status.as_ref().map(timeline_status_label),
+            changed: step.changed,
+            payload_summary: step
+                .payload_summary
+                .as_ref()
+                .map(|summary| display_free_text(summary, verbose)),
+            payload_hash: step.payload_hash.as_ref().map(|hash| hash.to_hex()),
+            before_state: step.before_state.map(|state| state.short()),
+            after_state: step.after_state.map(|state| state.short()),
+            capture_state: step.capture_state.map(|state| state.short()),
+            started_at_ms: step.started_at_ms,
+            finished_at_ms: step.finished_at_ms,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.finished_at_ms
+            .or(b.started_at_ms)
+            .cmp(&a.finished_at_ms.or(a.started_at_ms))
+            .then_with(|| b.step_id.cmp(&a.step_id))
+    });
+    Ok(out)
+}
+
 fn collect_context_annotations(
     repo: &Repository,
     head_state: Option<&State>,
@@ -534,6 +665,62 @@ fn excerpt(s: &str) -> String {
     format!("{take}…")
 }
 
+fn display_free_text(s: &str, verbose: bool) -> String {
+    if verbose {
+        s.trim().to_string()
+    } else {
+        scrub_path_like_tokens(&excerpt(s))
+    }
+}
+
+fn scrub_path_like_tokens(s: &str) -> String {
+    s.split_whitespace()
+        .map(|token| {
+            if is_path_like_token(token) {
+                "[redacted-path]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_path_like_token(token: &str) -> bool {
+    let trimmed = token.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\''
+                | '`'
+                | ','
+                | ';'
+                | ':'
+                | '.'
+                | '!'
+                | '?'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+        )
+    });
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return true;
+    }
+    let Some((stem, extension)) = trimmed.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 10
+        && extension.chars().all(|c| c.is_ascii_alphanumeric())
+        && stem
+            .chars()
+            .any(|c| c.is_ascii_alphabetic() || matches!(c, '-' | '_'))
+}
+
 fn format_ts(ts: DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -542,6 +729,15 @@ fn format_unix_ts(secs: i64) -> String {
     DateTime::<Utc>::from_timestamp(secs, 0)
         .map(format_ts)
         .unwrap_or_else(|| secs.to_string())
+}
+
+fn timeline_status_label(status: &objects::object::TimelineToolCallStatus) -> String {
+    match status {
+        objects::object::TimelineToolCallStatus::Succeeded => "succeeded",
+        objects::object::TimelineToolCallStatus::Failed => "failed",
+        objects::object::TimelineToolCallStatus::Cancelled => "cancelled",
+    }
+    .to_string()
 }
 
 fn print_human(output: &RetroOutput, _verbose: bool) {
@@ -579,6 +775,28 @@ fn print_human(output: &RetroOutput, _verbose: bool) {
         println!(
             "  {} {} status={}",
             agent.session_id, actor_text, agent.status,
+        );
+    }
+    println!();
+    println!("Agent tasks ({}):", output.agent_tasks.len());
+    for task in &output.agent_tasks {
+        println!(
+            "  {} [{}] thread={} {}",
+            task.task_id, task.status, task.target_thread, task.title,
+        );
+    }
+    println!();
+    println!("Timeline steps ({}):", output.timeline_steps.len());
+    for step in &output.timeline_steps {
+        let status = step.tool_status.as_deref().unwrap_or("unknown");
+        let summary = step.payload_summary.as_deref().unwrap_or("(no summary)");
+        println!(
+            "  {} {} tool={} status={} {}",
+            step.thread,
+            step.step_id,
+            step.tool_name.as_deref().unwrap_or("<unknown>"),
+            status,
+            summary,
         );
     }
     println!();
@@ -671,6 +889,19 @@ mod tests {
     fn excerpt_preserves_short_content() {
         let s = "short content";
         assert_eq!(excerpt(s), s);
+    }
+
+    #[test]
+    fn display_free_text_scrubs_path_like_tokens_unless_verbose() {
+        let s =
+            "Review src/lib.rs and private-secret-name.txt. Check secret.env! Maybe docs/plan.md?";
+        let scrubbed = display_free_text(s, false);
+        assert!(!scrubbed.contains("src/lib.rs"));
+        assert!(!scrubbed.contains("private-secret-name.txt"));
+        assert!(!scrubbed.contains("secret.env"));
+        assert!(!scrubbed.contains("docs/plan.md"));
+        assert!(scrubbed.contains("[redacted-path]"));
+        assert_eq!(display_free_text(s, true), s);
     }
 
     #[test]
@@ -820,6 +1051,8 @@ mod tests {
             duration_secs: None,
             states_captured: Vec::new(),
             agents_active: Vec::new(),
+            agent_tasks: Vec::new(),
+            timeline_steps: Vec::new(),
             markers_created: Vec::new(),
             context_annotations: Vec::new(),
             verify_signals: Vec::new(),
@@ -834,6 +1067,8 @@ mod tests {
             "duration_secs",
             "states_captured",
             "agents_active",
+            "agent_tasks",
+            "timeline_steps",
             "markers_created",
             "context_annotations",
             "verify_signals",

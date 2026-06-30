@@ -35,6 +35,16 @@ use crate::{
 
 pub(crate) type GitOverlayWorktreeStatus = repo::Result<Option<WorktreeStatus>>;
 
+pub(crate) struct GitOverlayMutationFacts {
+    worktree_status: GitOverlayWorktreeStatus,
+}
+
+impl GitOverlayMutationFacts {
+    pub(crate) fn worktree_status(&self) -> &GitOverlayWorktreeStatus {
+        &self.worktree_status
+    }
+}
+
 pub(crate) fn preflight_plain_git_mutation(start: &Path, action: &str) -> Result<()> {
     if let Some(advice) = plain_git_mutation_preflight_advice(start, action)? {
         return Err(anyhow!(advice));
@@ -42,11 +52,47 @@ pub(crate) fn preflight_plain_git_mutation(start: &Path, action: &str) -> Result
     Ok(())
 }
 
-pub(crate) fn worktree_status(repo: &Repository) -> GitOverlayWorktreeStatus {
-    repo.git_overlay_worktree_status()
+pub(crate) fn gather_mutation_facts(repo: &Repository) -> GitOverlayMutationFacts {
+    GitOverlayMutationFacts {
+        worktree_status: repo.git_overlay_worktree_status(),
+    }
 }
 
-pub(crate) fn preflight_checkpoint_like_with_worktree_status(
+pub(crate) fn preflight_checkpoint(
+    repo: &Repository,
+    action: &str,
+    facts: &GitOverlayMutationFacts,
+) -> Result<()> {
+    preflight_checkpoint_with_worktree_status(repo, action, facts.worktree_status())
+}
+
+pub(crate) fn preflight_checkpoint_with_worktree_status(
+    repo: &Repository,
+    action: &str,
+    worktree_status: &GitOverlayWorktreeStatus,
+) -> Result<()> {
+    preflight_checkpoint_like_with_worktree_status(repo, action, worktree_status)
+}
+
+pub(crate) fn preflight_commit(repo: &Repository, facts: &GitOverlayMutationFacts) -> Result<()> {
+    preflight_commit_like_with_worktree_status(repo, facts.worktree_status())
+}
+
+pub(crate) fn preflight_commit_checkpoint_ref_update(
+    repo: &Repository,
+    facts: &GitOverlayMutationFacts,
+) -> Result<()> {
+    preflight_checkpoint_ref_update_with_worktree_status(repo, "commit", facts.worktree_status())
+}
+
+pub(crate) fn preflight_land_checkpoint(repo: &Repository, thread_id: &str) -> Result<()> {
+    if let Some(advice) = land_checkpoint_preflight_advice(repo, thread_id) {
+        return Err(anyhow!(advice));
+    }
+    Ok(())
+}
+
+fn preflight_checkpoint_like_with_worktree_status(
     repo: &Repository,
     action: &str,
     worktree_status: &GitOverlayWorktreeStatus,
@@ -63,7 +109,7 @@ pub(crate) fn preflight_checkpoint_like_with_worktree_status(
     Ok(())
 }
 
-pub(crate) fn preflight_commit_like_with_worktree_status(
+fn preflight_commit_like_with_worktree_status(
     repo: &Repository,
     worktree_status: &GitOverlayWorktreeStatus,
 ) -> Result<()> {
@@ -78,15 +124,7 @@ pub(crate) fn preflight_commit_like_with_worktree_status(
     Ok(())
 }
 
-pub(crate) fn preflight_checkpoint_ref_update(repo: &Repository, action: &str) -> Result<()> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
-    let trust = preflight_verify(repo);
-    preflight_checkpoint_ref_update_with_trust(repo, action, trust)
-}
-
-pub(crate) fn preflight_checkpoint_ref_update_with_worktree_status(
+fn preflight_checkpoint_ref_update_with_worktree_status(
     repo: &Repository,
     action: &str,
     worktree_status: &GitOverlayWorktreeStatus,
@@ -145,10 +183,7 @@ pub(crate) fn post_verify_commit(repo: &Repository) -> RepositoryVerificationSta
     commit_safe_trust(post_verify(repo))
 }
 
-pub(crate) fn land_checkpoint_preflight_advice(
-    repo: &Repository,
-    thread_id: &str,
-) -> Option<RecoveryAdvice> {
+fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return None;
     }
