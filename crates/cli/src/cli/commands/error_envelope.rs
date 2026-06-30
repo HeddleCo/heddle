@@ -199,9 +199,51 @@ struct ErrorClassification {
 
 impl ErrorClassification {
     fn from_advice(advice: &RecoveryAdvice) -> Self {
-        let validation =
-            AdviceActionValidation::new(&advice.primary_command, &advice.recovery_commands);
-        let mut extra_json_fields = advice.extra_json_fields.clone();
+        Self::from_recovery_fields(
+            advice.kind,
+            Some(advice.error.clone()),
+            advice.primary_hint().to_string(),
+            advice.unsafe_condition.clone(),
+            advice.would_change.clone(),
+            advice.preserved.clone(),
+            advice.primary_command.clone(),
+            advice.recovery_commands.clone(),
+            advice.extra_json_fields.clone(),
+        )
+    }
+
+    fn from_recovery_details(details: &objects::RecoveryDetails) -> Self {
+        let recovery_commands = typed_recovery_commands(details.kind);
+        let primary_command = recovery_commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "heddle help --output json".to_string());
+        Self::from_recovery_fields(
+            details.kind,
+            Some(details.error.clone()),
+            details.hint.clone(),
+            details.unsafe_condition.clone(),
+            details.would_change.clone(),
+            details.preserved.clone(),
+            primary_command,
+            recovery_commands,
+            serde_json::Map::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_recovery_fields(
+        kind: &str,
+        human_error: Option<String>,
+        hint: String,
+        unsafe_condition: String,
+        would_change: String,
+        preserved: String,
+        primary_command: String,
+        recovery_commands: Vec<String>,
+        mut extra_json_fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        let validation = AdviceActionValidation::new(&primary_command, &recovery_commands);
         if !validation.violations.is_empty() {
             extra_json_fields.insert(
                 "advice_contract_valid".to_string(),
@@ -220,16 +262,16 @@ impl ErrorClassification {
             );
             extra_json_fields.insert(
                 "original_primary_command".to_string(),
-                serde_json::Value::String(advice.primary_command.clone()),
+                serde_json::Value::String(primary_command),
             );
         }
         Self {
-            kind: advice.kind.to_string(),
-            human_error: Some(advice.error.clone()),
-            hint: advice.primary_hint().to_string(),
-            unsafe_condition: advice.unsafe_condition.clone(),
-            would_change: advice.would_change.clone(),
-            preserved: advice.preserved.clone(),
+            kind: kind.to_string(),
+            human_error,
+            hint,
+            unsafe_condition,
+            would_change,
+            preserved,
             primary_command: validation.primary_command,
             recovery_commands: validation.recovery_commands,
             extra_json_fields,
@@ -268,6 +310,24 @@ impl ErrorClassification {
             "heddle status",
         )
     }
+}
+
+fn typed_recovery_commands(kind: &str) -> Vec<String> {
+    let commands: &[&str] = match kind {
+        "state_corrupted" => &[
+            "heddle verify",
+            "heddle fsck --full",
+            "heddle fsck --repair",
+        ],
+        "repository_integrity_error" => &["heddle fsck --full"],
+        "repository_not_found" => &["heddle init"],
+        "state_not_found" => &["heddle log"],
+        _ => &["heddle help --output json"],
+    };
+    commands
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect()
 }
 
 struct AdviceActionValidation {
@@ -387,6 +447,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             return ErrorClassification::from_advice(&advice);
         }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
+            if let HeddleError::Recovery(details) = heddle_err {
+                return ErrorClassification::from_recovery_details(details);
+            }
             // `output.format = "auto"` is rejected at config-parse time by
             // the hand-rolled `OutputFormat` deserializer (see
             // `crates/repo/src/repo_config.rs`). The error string carries
@@ -663,6 +726,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use objects::{HeddleError, RecoveryDetails};
 
     use super::{RecoveryAdvice, classify_error};
 
@@ -697,5 +761,50 @@ mod tests {
                 .and_then(|value| value.as_array())
                 .is_some_and(|violations| violations.len() == 2)
         );
+    }
+
+    #[test]
+    fn typed_recovery_error_classifies_like_recovery_advice() {
+        let err = anyhow!(HeddleError::recovery(RecoveryDetails::serialization_error(
+            "bad marker"
+        )));
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "state_corrupted");
+        assert_eq!(
+            classified.human_error.as_deref(),
+            Some("Repository state is corrupted or unreadable")
+        );
+        assert_eq!(classified.primary_command, "heddle verify");
+        assert_eq!(
+            classified.recovery_commands,
+            vec![
+                "heddle verify",
+                "heddle fsck --full",
+                "heddle fsck --repair"
+            ]
+        );
+        assert!(classified.extra_json_fields.is_empty());
+    }
+
+    #[test]
+    fn typed_recovery_error_with_unknown_kind_uses_help_fallback() {
+        let err = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "bad_typed_recovery_fixture",
+            "bad advice",
+            "bad hint",
+            "unsafe",
+            "would change",
+            "nothing changed",
+        )));
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "bad_typed_recovery_fixture");
+        assert_eq!(classified.primary_command, "heddle help --output json");
+        assert_eq!(
+            classified.recovery_commands,
+            vec!["heddle help --output json"]
+        );
+        assert!(classified.extra_json_fields.is_empty());
     }
 }

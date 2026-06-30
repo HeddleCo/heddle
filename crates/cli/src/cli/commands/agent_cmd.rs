@@ -6,8 +6,8 @@ use chrono::Utc;
 use objects::{
     object::ThreadName,
     store::{
-        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore, ReserveOutcome,
-        current_boot_id,
+        AgentEntry, AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+        AgentUsageSummary, ObjectStore, ReserveOutcome, current_boot_id, validate_task_id,
     },
 };
 use oplog::OpLogRecorder;
@@ -28,7 +28,8 @@ use crate::cli::{
     Cli,
     cli_args::{
         AgentApiListArgs, AgentHeartbeatArgs, AgentReleaseArgs, AgentReleaseStatusArg,
-        AgentReserveArgs,
+        AgentReserveArgs, AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs,
+        AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs,
     },
     should_output_json,
 };
@@ -40,6 +41,7 @@ pub struct AgentReservationOutput {
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
+    pub task_assignment_id: Option<String>,
     /// Lifecycle status as a stable kebab-case string
     /// (`active|abandoned|complete|merged`). Mirrors
     /// `objects::store::AgentStatus` but kept as a `String` here so
@@ -73,6 +75,43 @@ pub(crate) struct AgentReservationListOutput {
     pub trust: RepositoryVerificationState,
 }
 
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentTaskEnvelope {
+    pub output_kind: &'static str,
+    pub task: AgentTaskOutput,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentTaskListOutput {
+    pub output_kind: &'static str,
+    pub tasks: Vec<AgentTaskOutput>,
+    pub thread: Option<String>,
+    pub status: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentTaskOutput {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub target_thread: String,
+    pub base_state: Option<String>,
+    pub base_root: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+    pub allow_offline: bool,
+    pub delegated_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
 impl From<&AgentEntry> for AgentReservationOutput {
     fn from(entry: &AgentEntry) -> Self {
         Self {
@@ -81,6 +120,7 @@ impl From<&AgentEntry> for AgentReservationOutput {
             thread: entry.thread.clone(),
             anchor_state: entry.anchor_state.clone(),
             anchor_root: entry.anchor_root.clone(),
+            task_assignment_id: entry.task_assignment_id.clone(),
             status: entry.status.to_string(),
             path: entry.path.as_ref().map(|path| path.display().to_string()),
             task: entry.attach_reason.clone(),
@@ -90,6 +130,28 @@ impl From<&AgentEntry> for AgentReservationOutput {
             thinking_level: entry.thinking_level.clone(),
             probe_source: entry.probe_source.clone(),
             probe_confidence: entry.probe_confidence,
+        }
+    }
+}
+
+impl From<&AgentTaskRecord> for AgentTaskOutput {
+    fn from(task: &AgentTaskRecord) -> Self {
+        Self {
+            schema_version: task.schema_version,
+            task_id: task.task_id.clone(),
+            title: task.title.clone(),
+            body: task.body.clone(),
+            status: task.status.to_string(),
+            target_thread: task.target_thread.clone(),
+            base_state: task.base_state.clone(),
+            base_root: task.base_root.clone(),
+            parent_task_id: task.parent_task_id.clone(),
+            coordination_discussion_id: task.coordination_discussion_id.clone(),
+            allow_offline: task.allow_offline,
+            delegated_by: task.delegated_by.clone(),
+            created_at: task.created_at.to_rfc3339(),
+            updated_at: task.updated_at.to_rfc3339(),
+            completed_at: task.completed_at.map(|time| time.to_rfc3339()),
         }
     }
 }
@@ -163,6 +225,78 @@ fn anchor_drift_no_owner_advice(
     )
 }
 
+fn agent_task_not_found_advice(task_id: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "agent_task_not_found",
+        format!("agent task '{task_id}' not found"),
+        "Create the task locally, or reserve without --task-id if no task assignment exists.",
+        format!("no task record exists for {task_id}"),
+        "continuing would attach an unverifiable task provenance id to the reservation",
+        "no thread refs or reservation records were changed",
+        format!("heddle agent task show {task_id}"),
+        vec![format!("heddle agent task show {task_id}")],
+    )
+}
+
+fn agent_task_mismatch_advice(task_id: &str, message: String) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "agent_task_mismatch",
+        message.clone(),
+        "Reserve the task on its target thread and base, or update the local task record first.",
+        message,
+        "continuing would attach task provenance to work outside the delegated target",
+        "no thread refs or reservation records were changed",
+        format!("heddle agent task show {task_id}"),
+        vec![format!("heddle agent task show {task_id}")],
+    )
+}
+
+fn load_task_for_reservation(
+    repo: &Repository,
+    task_id: &str,
+    thread_name: &str,
+    anchor_full: &str,
+    anchor_short: &str,
+    anchor_root: &str,
+) -> Result<AgentTaskRecord> {
+    validate_task_id(task_id).map_err(|err| anyhow!(err))?;
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    let task = store
+        .load(task_id)?
+        .ok_or_else(|| anyhow!(agent_task_not_found_advice(task_id)))?;
+    if task.target_thread != thread_name {
+        return Err(anyhow!(agent_task_mismatch_advice(
+            task_id,
+            format!(
+                "agent task '{task_id}' targets thread '{}', but reservation requested '{}'",
+                task.target_thread, thread_name
+            ),
+        )));
+    }
+    if let Some(base_state) = task.base_state.as_deref()
+        && base_state != anchor_full
+        && base_state != anchor_short
+    {
+        return Err(anyhow!(agent_task_mismatch_advice(
+            task_id,
+            format!(
+                "agent task '{task_id}' base_state is {base_state}, but reservation anchor is {anchor_full}"
+            ),
+        )));
+    }
+    if let Some(base_root) = task.base_root.as_deref()
+        && base_root != anchor_root
+    {
+        return Err(anyhow!(agent_task_mismatch_advice(
+            task_id,
+            format!(
+                "agent task '{task_id}' base_root is {base_root}, but reservation anchor root is {anchor_root}"
+            ),
+        )));
+    }
+    Ok(task)
+}
+
 pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // User/external creation boundary: `agent reserve` persists a thread
     // record, so reject an unsafe thread name here too (same early-reject
@@ -183,7 +317,19 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         .map(|state| state.tree.short())
         .unwrap_or_default();
     let anchor_full = anchor.to_string_full();
+    let anchor_short = anchor.short();
     let thread_name = args.thread.clone();
+    let task_record = match args.task_id.as_deref() {
+        Some(task_id) => Some(load_task_for_reservation(
+            &repo,
+            task_id,
+            &thread_name,
+            &anchor_full,
+            &anchor_short,
+            &anchor_root,
+        )?),
+        None => None,
+    };
 
     // Hard pre-check: a thread ref already pointing at a different
     // state without any live owner is an anchor-drift case the caller
@@ -219,6 +365,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let task = args.task.clone();
+    let task_assignment_id = task_record.as_ref().map(|task| task.task_id.clone());
     let anchor_full_for_entry = anchor_full.clone();
     let anchor_short = anchor.short();
     let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
@@ -278,6 +425,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             last_progress_at: None,
             report_flush_state: None,
             attach_reason: task.clone(),
+            task_assignment_id: task_assignment_id.clone(),
             attach_precedence: vec!["agent-reserve".to_string()],
             winning_attach_rule: Some("agent-reserve".to_string()),
             probe_source: probe
@@ -501,6 +649,151 @@ pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
     )
 }
 
+pub fn cmd_agent_task(cli: &Cli, command: AgentTaskCommands) -> Result<()> {
+    match command {
+        AgentTaskCommands::Create(args) => cmd_agent_task_create(cli, args),
+        AgentTaskCommands::List(args) => cmd_agent_task_list(cli, args),
+        AgentTaskCommands::Show(args) => cmd_agent_task_show(cli, args),
+        AgentTaskCommands::Update(args) => cmd_agent_task_update(cli, args),
+    }
+}
+
+fn cmd_agent_task_create(cli: &Cli, args: AgentTaskCreateArgs) -> Result<()> {
+    ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    if let Some(task_id) = args.task_id.as_deref() {
+        validate_task_id(task_id).map_err(|err| anyhow!(err))?;
+    }
+    let repo = cli.open_repo()?;
+    let mut record = AgentTaskRecord::new(
+        args.task_id.unwrap_or_default(),
+        args.title,
+        args.thread.clone(),
+    );
+    record.body = args.body.unwrap_or_default();
+    record.base_state = args.base_state;
+    record.base_root = args.base_root;
+    record.parent_task_id = args.parent_task_id;
+    record.coordination_discussion_id = args.coordination_discussion_id;
+    record.allow_offline = args.allow_offline;
+    record.delegated_by = args.delegated_by;
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    let created = store.create(record)?;
+    render_agent_task_envelope(
+        &repo,
+        &created,
+        "agent_task_create",
+        should_output_json(cli, Some(repo.config())),
+    )
+}
+
+fn cmd_agent_task_list(cli: &Cli, args: AgentTaskListArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    let status_filter = args.status.as_ref().map(agent_task_status_from_arg);
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    let tasks: Vec<_> = store
+        .list()?
+        .into_iter()
+        .filter(|task| {
+            args.thread
+                .as_ref()
+                .is_none_or(|thread| &task.target_thread == thread)
+        })
+        .filter(|task| {
+            status_filter
+                .as_ref()
+                .is_none_or(|status| &task.status == status)
+        })
+        .map(|task| AgentTaskOutput::from(&task))
+        .collect();
+    render_agent_task_list(
+        AgentTaskListOutput {
+            output_kind: "agent_task_list",
+            tasks,
+            thread: args.thread,
+            status: status_filter.map(|status| status.to_string()),
+            trust: build_repository_verification_state(&repo),
+        },
+        should_output_json(cli, Some(repo.config())),
+    )
+}
+
+fn cmd_agent_task_show(cli: &Cli, args: AgentTaskShowArgs) -> Result<()> {
+    validate_task_id(&args.task_id).map_err(|err| anyhow!(err))?;
+    let repo = cli.open_repo()?;
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    let task = store
+        .load(&args.task_id)?
+        .ok_or_else(|| anyhow!(agent_task_not_found_advice(&args.task_id)))?;
+    render_agent_task_envelope(
+        &repo,
+        &task,
+        "agent_task_show",
+        should_output_json(cli, Some(repo.config())),
+    )
+}
+
+fn cmd_agent_task_update(cli: &Cli, args: AgentTaskUpdateArgs) -> Result<()> {
+    validate_task_id(&args.task_id).map_err(|err| anyhow!(err))?;
+    if let Some(thread) = args.thread.as_deref() {
+        ThreadId::new(thread).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    }
+    let repo = cli.open_repo()?;
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    let updated = store
+        .update(&args.task_id, |task| {
+            if let Some(title) = args.title.clone() {
+                task.title = title;
+            }
+            if let Some(body) = args.body.clone() {
+                task.body = body;
+            }
+            if let Some(status) = args.status.as_ref() {
+                task.status = agent_task_status_from_arg(status);
+            }
+            if let Some(thread) = args.thread.clone() {
+                task.target_thread = thread;
+            }
+            if let Some(base_state) = args.base_state.clone() {
+                task.base_state = Some(base_state);
+            }
+            if let Some(base_root) = args.base_root.clone() {
+                task.base_root = Some(base_root);
+            }
+            if let Some(parent_task_id) = args.parent_task_id.clone() {
+                task.parent_task_id = Some(parent_task_id);
+            }
+            if let Some(discussion_id) = args.coordination_discussion_id.clone() {
+                task.coordination_discussion_id = Some(discussion_id);
+            }
+            if args.allow_offline {
+                task.allow_offline = true;
+            }
+            if args.no_allow_offline {
+                task.allow_offline = false;
+            }
+            if let Some(delegated_by) = args.delegated_by.clone() {
+                task.delegated_by = Some(delegated_by);
+            }
+        })?
+        .ok_or_else(|| anyhow!(agent_task_not_found_advice(&args.task_id)))?;
+    render_agent_task_envelope(
+        &repo,
+        &updated,
+        "agent_task_update",
+        should_output_json(cli, Some(repo.config())),
+    )
+}
+
+fn agent_task_status_from_arg(status: &AgentTaskStatusArg) -> AgentTaskStatus {
+    match status {
+        AgentTaskStatusArg::Open => AgentTaskStatus::Open,
+        AgentTaskStatusArg::InProgress => AgentTaskStatus::InProgress,
+        AgentTaskStatusArg::Blocked => AgentTaskStatus::Blocked,
+        AgentTaskStatusArg::Complete => AgentTaskStatus::Complete,
+        AgentTaskStatusArg::Abandoned => AgentTaskStatus::Abandoned,
+    }
+}
+
 fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&output)?);
@@ -527,6 +820,62 @@ fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<(
         {
             println!("    path: {}", crate::cli::style::dim(path));
         }
+    }
+    Ok(())
+}
+
+fn render_agent_task_envelope(
+    repo: &Repository,
+    task: &AgentTaskRecord,
+    output_kind: &'static str,
+    json: bool,
+) -> Result<()> {
+    let output = AgentTaskEnvelope {
+        output_kind,
+        task: AgentTaskOutput::from(task),
+        trust: build_repository_verification_state(repo),
+    };
+    if json {
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+    println!(
+        "Agent task {} [{}]",
+        crate::cli::style::accent(&output.task.task_id),
+        output.task.status
+    );
+    println!("  title: {}", output.task.title);
+    println!("  thread: {}", output.task.target_thread);
+    if !output.task.body.is_empty() {
+        println!("  body: {}", output.task.body);
+    }
+    if let Some(base_state) = &output.task.base_state {
+        println!("  base_state: {}", crate::cli::style::dim(base_state));
+    }
+    if let Some(base_root) = &output.task.base_root {
+        println!("  base_root: {}", crate::cli::style::dim(base_root));
+    }
+    Ok(())
+}
+
+fn render_agent_task_list(output: AgentTaskListOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+    if output.tasks.is_empty() {
+        println!("No agent tasks.");
+        return Ok(());
+    }
+    println!("Agent tasks ({}):", output.tasks.len());
+    for task in output.tasks {
+        println!(
+            "  {} [{}] thread={} title={}",
+            crate::cli::style::accent(&task.task_id),
+            task.status,
+            task.target_thread,
+            task.title,
+        );
     }
     Ok(())
 }
@@ -682,5 +1031,8 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentReservationEnvelope": schemars::schema_for!(AgentReservationEnvelope),
         "AgentReservationListOutput": schemars::schema_for!(AgentReservationListOutput),
         "AgentReservationOutput": schemars::schema_for!(AgentReservationOutput),
+        "AgentTaskEnvelope": schemars::schema_for!(AgentTaskEnvelope),
+        "AgentTaskListOutput": schemars::schema_for!(AgentTaskListOutput),
+        "AgentTaskOutput": schemars::schema_for!(AgentTaskOutput),
     })
 }

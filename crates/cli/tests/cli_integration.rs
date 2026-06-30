@@ -286,6 +286,8 @@ mod error_envelope_lint;
 mod exit_codes;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
+#[path = "cli_integration/git_overlay_fixtures.rs"]
+mod git_overlay_fixtures;
 #[path = "cli_integration/git_overlay_interop_matrix.rs"]
 mod git_overlay_interop_matrix;
 #[path = "cli_integration/git_overlay_matrix.rs"]
@@ -318,6 +320,8 @@ mod output_kind_runtime;
 mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
+#[path = "cli_integration/perf_trace.rs"]
+mod perf_trace;
 #[path = "cli_integration/placeholder_identity.rs"]
 mod placeholder_identity;
 #[path = "cli_integration/realworld_git.rs"]

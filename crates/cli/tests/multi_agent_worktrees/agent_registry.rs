@@ -236,6 +236,231 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
 }
 
 #[test]
+fn agent_task_create_list_show_update_round_trip() {
+    let main = setup_repo("base.txt", "base");
+
+    let created: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "task",
+                "create",
+                "--task-id",
+                "task-cli-roundtrip",
+                "--title",
+                "Implement local task store",
+                "--body",
+                "Persist task provenance locally.",
+                "--thread",
+                "feature/task-roundtrip",
+                "--allow-offline",
+                "--delegated-by",
+                "coordinator",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created["output_kind"].as_str(), Some("agent_task_create"));
+    assert_eq!(created["task"]["schema_version"].as_u64(), Some(1));
+    assert_eq!(
+        created["task"]["task_id"].as_str(),
+        Some("task-cli-roundtrip")
+    );
+    assert_eq!(created["task"]["status"].as_str(), Some("open"));
+    assert_eq!(created["task"]["allow_offline"].as_bool(), Some(true));
+
+    let listed: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "task",
+                "list",
+                "--thread",
+                "feature/task-roundtrip",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed["output_kind"].as_str(), Some("agent_task_list"));
+    let tasks = listed["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["task_id"].as_str(), Some("task-cli-roundtrip"));
+
+    let updated: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "task",
+                "update",
+                "task-cli-roundtrip",
+                "--status",
+                "complete",
+                "--title",
+                "Local task store complete",
+                "--no-allow-offline",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(updated["output_kind"].as_str(), Some("agent_task_update"));
+    assert_eq!(updated["task"]["status"].as_str(), Some("complete"));
+    assert_eq!(
+        updated["task"]["title"].as_str(),
+        Some("Local task store complete")
+    );
+    assert_eq!(updated["task"]["allow_offline"].as_bool(), Some(false));
+    assert!(updated["task"]["completed_at"].as_str().is_some());
+
+    let shown: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "task",
+                "show",
+                "task-cli-roundtrip",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shown["output_kind"].as_str(), Some("agent_task_show"));
+    assert_eq!(shown["task"]["status"].as_str(), Some("complete"));
+    assert_eq!(
+        shown["task"]["body"].as_str(),
+        Some("Persist task provenance locally.")
+    );
+}
+
+#[test]
+fn agent_reserve_records_task_assignment_id() {
+    let main = setup_repo("base.txt", "base");
+    heddle(
+        &[
+            "agent",
+            "task",
+            "create",
+            "--task-id",
+            "task-reserve-success",
+            "--title",
+            "Reserve task",
+            "--thread",
+            "feature/task-reserve-success",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    let reserved: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "reserve",
+                "--thread",
+                "feature/task-reserve-success",
+                "--task-id",
+                "task-reserve-success",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        reserved["reservation"]["task_assignment_id"].as_str(),
+        Some("task-reserve-success")
+    );
+    assert_eq!(
+        reserved["reservation"]["thread"].as_str(),
+        Some("feature/task-reserve-success")
+    );
+}
+
+#[test]
+fn agent_reserve_rejects_unknown_task_id() {
+    let main = setup_repo("base.txt", "base");
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/missing-task",
+            "--task-id",
+            "task-does-not-exist",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent_task_not_found") || stderr.contains("task-does-not-exist"),
+        "stderr should identify missing task: {stderr}"
+    );
+}
+
+#[test]
+fn agent_reserve_rejects_task_target_thread_mismatch() {
+    let main = setup_repo("base.txt", "base");
+    heddle(
+        &[
+            "agent",
+            "task",
+            "create",
+            "--task-id",
+            "task-thread-mismatch",
+            "--title",
+            "Wrong thread",
+            "--thread",
+            "feature/expected-thread",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/actual-thread",
+            "--task-id",
+            "task-thread-mismatch",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent_task_mismatch") || stderr.contains("feature/expected-thread"),
+        "stderr should identify task/thread mismatch: {stderr}"
+    );
+}
+
+#[test]
 fn start_without_name_is_rejected() {
     let main = setup_repo("base.txt", "base");
     let result = heddle(&["start"], Some(main.path()));

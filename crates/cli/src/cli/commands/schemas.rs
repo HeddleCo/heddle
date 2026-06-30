@@ -17,6 +17,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
+use heddle_core::QueryReport;
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -42,7 +43,7 @@ macro_rules! schema_registry {
 
         #[cfg(test)]
         fn schema_implementation_verbs() -> Vec<&'static str> {
-            let mut verbs = Vec::new();
+            let mut verbs = report_contract_schema_verbs().to_vec();
             $(
                 for verb in $verbs {
                     if !verbs.contains(verb) {
@@ -53,6 +54,11 @@ macro_rules! schema_registry {
             verbs
         }
     };
+}
+
+#[cfg(test)]
+fn report_contract_schema_verbs() -> &'static [&'static str] {
+    &[QueryReport::CONTRACT.schema_name]
 }
 
 schema_registry! {
@@ -113,7 +119,6 @@ schema_registry! {
     (&["retro"], RetroSchema),
     (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
-    (&["query"], QuerySchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
     (&["bridge git init"], BridgeInitSchema),
@@ -141,6 +146,8 @@ schema_registry! {
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
     (&["agent list"], AgentReservationListSchema),
+    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
+    (&["agent task list"], AgentTaskListSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
@@ -191,15 +198,24 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
     if !schema_verbs().contains(&verb) {
         return None;
     }
-    let mut schema = schema_for_registered_verb(verb).or_else(|| {
-        opaque_schema_verbs()
-            .contains(&verb)
-            .then(|| serde_json::to_value(schema_for!(GenericJsonObjectSchema)).ok())
-            .flatten()
-    })?;
+    let mut schema = schema_for_report_contract_verb(verb)
+        .or_else(|| schema_for_registered_verb(verb))
+        .or_else(|| {
+            opaque_schema_verbs()
+                .contains(&verb)
+                .then(|| serde_json::to_value(schema_for!(GenericJsonObjectSchema)).ok())
+                .flatten()
+        })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
     add_json_discriminator_if_advertised(verb, &mut schema);
     Some(schema)
+}
+
+fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
+    match verb {
+        verb if verb == QueryReport::CONTRACT.schema_name => Some((QueryReport::CONTRACT.schema)()),
+        _ => None,
+    }
 }
 
 fn resolve_schema_verb(verb: &str) -> Option<&'static str> {
@@ -1001,25 +1017,6 @@ pub struct DiscussionTurnSchema {
 pub struct DiscussionListSchema {
     pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct QuerySchema {
-    pub output_kind: String,
-    pub hits: Vec<QueryHitSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct QueryHitSchema {
-    pub seq: u64,
-    pub timestamp_secs: i64,
-    pub verb: String,
-    pub actor_email: String,
-    pub operation_id: Option<String>,
-    pub thread: Option<String>,
-    pub symbols: Vec<String>,
-    pub signal_kinds: Vec<String>,
-    pub change_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1904,6 +1901,7 @@ pub struct AgentReservationSchema {
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
+    pub task_assignment_id: Option<String>,
     pub status: String,
     pub path: Option<String>,
     pub task: Option<String>,
@@ -1913,6 +1911,43 @@ pub struct AgentReservationSchema {
     pub thinking_level: Option<String>,
     pub probe_source: Option<String>,
     pub probe_confidence: Option<f32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskEnvelopeSchema {
+    pub output_kind: String,
+    pub task: AgentTaskSchema,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskListSchema {
+    pub output_kind: String,
+    pub tasks: Vec<AgentTaskSchema>,
+    pub thread: Option<String>,
+    pub status: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskSchema {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub target_thread: String,
+    pub base_state: Option<String>,
+    pub base_root: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+    pub allow_offline: bool,
+    pub delegated_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

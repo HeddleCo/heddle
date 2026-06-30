@@ -1640,6 +1640,7 @@ dependencies = [
  "heddle-refs",
  "heddle-repo",
  "rmp-serde",
+ "schemars",
  "serde",
  "serde_json",
  "sley",

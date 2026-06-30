@@ -96,6 +96,11 @@ impl HeddleExitCode {
             }
             if let Some(heddle_err) = cause.downcast_ref::<objects::error::HeddleError>() {
                 match heddle_err {
+                    objects::error::HeddleError::Recovery(details) => {
+                        if let Some(code) = Self::for_advice_kind(details.kind) {
+                            return code;
+                        }
+                    }
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
@@ -301,6 +306,15 @@ mod tests {
         // are data corruption, not the IoErr catch-all.
         let err: anyhow::Error = objects::error::HeddleError::Serialization(
             "wrong msgpack marker FixArray(0)".to_string(),
+        )
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn recovery_details_kind_uses_advice_exit_code_mapping() {
+        let err: anyhow::Error = objects::error::HeddleError::recovery(
+            objects::RecoveryDetails::serialization_error("wrong msgpack marker FixArray(0)"),
         )
         .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);

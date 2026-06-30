@@ -258,7 +258,7 @@ in-progress operation.
       "undocumented_schema_examples": []
     },
     "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   },
@@ -1096,7 +1096,7 @@ verification.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   },
@@ -1292,7 +1292,7 @@ array.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   }
@@ -1354,7 +1354,7 @@ array.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   }
@@ -1507,6 +1507,198 @@ the same ready envelope.
   "reservations": [],
   "alive_only": false,
   "thread": null,
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task create --output json`
+
+```json
+{
+  "output_kind": "agent_task_create",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind",
+    "body": "Persist task provenance locally.",
+    "status": "open",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task list --output json`
+
+```json
+{
+  "output_kind": "agent_task_list",
+  "tasks": [
+    {
+      "schema_version": 1,
+      "task_id": "task-output-kind",
+      "title": "Output kind",
+      "body": "Persist task provenance locally.",
+      "status": "open",
+      "target_thread": "feature/task",
+      "base_state": null,
+      "base_root": null,
+      "parent_task_id": null,
+      "coordination_discussion_id": null,
+      "allow_offline": true,
+      "delegated_by": "coordinator",
+      "created_at": "2026-06-30T12:00:00Z",
+      "updated_at": "2026-06-30T12:00:00Z",
+      "completed_at": null
+    }
+  ],
+  "thread": "feature/task",
+  "status": null,
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task show --output json`
+
+```json
+{
+  "output_kind": "agent_task_show",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind",
+    "body": "Persist task provenance locally.",
+    "status": "open",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task update --output json`
+
+```json
+{
+  "output_kind": "agent_task_update",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind complete",
+    "body": "Persist task provenance locally.",
+    "status": "complete",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:05:00Z",
+    "completed_at": "2026-06-30T12:05:00Z"
+  },
   "verification": {
     "verified": true,
     "status": "clean",

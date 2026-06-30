@@ -1446,6 +1446,10 @@ pub struct AgentReserveArgs {
     #[arg(long)]
     pub task: Option<String>,
 
+    /// Local agent task assignment id to attach to this reservation.
+    #[arg(long)]
+    pub task_id: Option<String>,
+
     /// Bind the reservation's liveness to an external process pid
     /// instead of this one-shot CLI invocation's pid.
     ///
@@ -1498,6 +1502,129 @@ pub struct AgentApiListArgs {
     /// Show only active reservations.
     #[arg(long)]
     pub alive_only: bool,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum AgentTaskStatusArg {
+    Open,
+    InProgress,
+    Blocked,
+    Complete,
+    Abandoned,
+}
+
+/// Arguments for `agent task create`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentTaskCreateArgs {
+    /// Optional caller-provided task id (default: generated task UUIDv7 id).
+    #[arg(long)]
+    pub task_id: Option<String>,
+
+    /// Human-readable task title.
+    #[arg(long)]
+    pub title: String,
+
+    /// Detailed task body.
+    #[arg(long)]
+    pub body: Option<String>,
+
+    /// Thread this task targets.
+    #[arg(long)]
+    pub thread: String,
+
+    /// Optional base state id this task was delegated from.
+    #[arg(long)]
+    pub base_state: Option<String>,
+
+    /// Optional base root id this task was delegated from.
+    #[arg(long)]
+    pub base_root: Option<String>,
+
+    /// Optional parent task id.
+    #[arg(long)]
+    pub parent_task_id: Option<String>,
+
+    /// Optional coordination discussion id.
+    #[arg(long)]
+    pub coordination_discussion_id: Option<String>,
+
+    /// Allow this task to continue without hosted connectivity.
+    #[arg(long)]
+    pub allow_offline: bool,
+
+    /// Principal or agent that delegated this task.
+    #[arg(long)]
+    pub delegated_by: Option<String>,
+}
+
+/// Arguments for `agent task list`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentTaskListArgs {
+    /// Filter by target thread.
+    #[arg(long)]
+    pub thread: Option<String>,
+
+    /// Filter by task status.
+    #[arg(long)]
+    pub status: Option<AgentTaskStatusArg>,
+}
+
+/// Arguments for `agent task show`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentTaskShowArgs {
+    /// Task id to show.
+    pub task_id: String,
+}
+
+/// Arguments for `agent task update`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AgentTaskUpdateArgs {
+    /// Task id to update.
+    pub task_id: String,
+
+    /// Replace the task title.
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Replace the task body.
+    #[arg(long)]
+    pub body: Option<String>,
+
+    /// Replace the task status.
+    #[arg(long)]
+    pub status: Option<AgentTaskStatusArg>,
+
+    /// Replace the target thread.
+    #[arg(long)]
+    pub thread: Option<String>,
+
+    /// Replace the base state id.
+    #[arg(long)]
+    pub base_state: Option<String>,
+
+    /// Replace the base root id.
+    #[arg(long)]
+    pub base_root: Option<String>,
+
+    /// Replace the parent task id.
+    #[arg(long)]
+    pub parent_task_id: Option<String>,
+
+    /// Replace the coordination discussion id.
+    #[arg(long)]
+    pub coordination_discussion_id: Option<String>,
+
+    /// Allow this task to continue without hosted connectivity.
+    #[arg(long, conflicts_with = "no_allow_offline")]
+    pub allow_offline: bool,
+
+    /// Disallow offline continuation for this task.
+    #[arg(long, conflicts_with = "allow_offline")]
+    pub no_allow_offline: bool,
+
+    /// Replace the delegating principal or agent label.
+    #[arg(long)]
+    pub delegated_by: Option<String>,
 }
 
 /// Arguments for `agent capture`. Mirrors `heddle capture` with an

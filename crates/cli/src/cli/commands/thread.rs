@@ -2153,6 +2153,7 @@ fn finalize_thread_start(
                 "actor {session_id} was created when thread {} started",
                 thread_name
             )),
+            task_assignment_id: None,
             attach_precedence: vec!["thread-start".to_string()],
             winning_attach_rule: Some("thread-start".to_string()),
             probe_source: actor_identity.probe_source.clone(),

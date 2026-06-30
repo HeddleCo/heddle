@@ -1303,6 +1303,7 @@ mod tests {
             last_progress_at: None,
             report_flush_state: Some("pending-local".to_string()),
             attach_reason: Some("test detected harness actor".to_string()),
+            task_assignment_id: None,
             attach_precedence: Vec::new(),
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),

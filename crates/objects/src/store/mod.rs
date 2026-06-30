@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
 pub mod agent_registry;
+pub mod agent_task;
 pub mod atomic;
 pub mod codec;
 pub mod compression;
@@ -21,6 +22,10 @@ pub mod store_compliance;
 pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
     ReserveOutcome, generate_agent_id,
+};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
 };
 pub use compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use fs::FsStore;

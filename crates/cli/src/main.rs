@@ -44,7 +44,7 @@ use cli::{
     exit::HeddleExitCode,
     logging::{LoggingConfig, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, emit_command_profile, profile_enabled},
 };
 use tracing::debug;
 
@@ -129,8 +129,9 @@ async fn async_main() -> Result<()> {
                 cli::cli::help::print_help(&Cli::command(), &[])?;
             }
             if profile {
-                emit_profile(
+                emit_command_profile(
                     "help",
+                    0,
                     &[
                         ProfileField::duration("command_body_ms", command_start.elapsed()),
                         ProfileField::duration("total_ms", total_start.elapsed()),
@@ -142,8 +143,9 @@ async fn async_main() -> Result<()> {
         if let Some(result) = cli::cli::help::print_direct_help_for_raw(&Cli::command(), &raw) {
             result?;
             if profile {
-                emit_profile(
+                emit_command_profile(
                     "help",
+                    0,
                     &[ProfileField::duration("total_ms", total_start.elapsed())],
                 );
             }
@@ -183,8 +185,9 @@ async fn async_main() -> Result<()> {
     {
         cli::cli::help::print_capture_agent_help(&Cli::command())?;
         if profile {
-            emit_profile(
+            emit_command_profile(
                 "help",
+                0,
                 &[ProfileField::duration("total_ms", total_start.elapsed())],
             );
         }
@@ -840,8 +843,14 @@ async fn async_main() -> Result<()> {
     );
 
     if profile {
-        emit_profile(
+        let exit_status = match &result {
+            Ok(()) => 0,
+            Err(err) if is_broken_pipe_error(err) => 0,
+            Err(err) => HeddleExitCode::from_error(err).into(),
+        };
+        emit_command_profile(
             &command_name,
+            exit_status,
             &[
                 ProfileField::millis("config_load_ms", config_load_ms),
                 ProfileField::millis("logging_init_ms", logging_init_ms),

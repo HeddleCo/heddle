@@ -10,9 +10,13 @@ use objects::{
 };
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use refs::refs::{IndexedOperation, OperationLogIndex, OperationLogQuery};
+use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::ExecutionContext;
+use crate::{
+    ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract,
+    schema_for_report,
+};
 
 /// Query filters for the operation log facade.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,13 +32,29 @@ pub struct QueryRequest {
     pub include_checkpoints: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct QueryReport {
     pub output_kind: &'static str,
     pub hits: Vec<QueryHit>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+impl QueryReport {
+    pub const CONTRACT: ReportContract = ReportContract {
+        schema_name: "query",
+        machine_output_kind: MachineOutputKind::Json,
+        output_discriminator: OutputDiscriminator {
+            field: "output_kind",
+            value: "query",
+        },
+        schema: schema_for_report::<QueryReport>,
+    };
+}
+
+impl HeddleReport for QueryReport {
+    const CONTRACT: ReportContract = QueryReport::CONTRACT;
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct QueryHit {
     pub seq: u64,
     pub timestamp_secs: i64,

@@ -16,7 +16,7 @@ pub mod sync;
 pub mod util;
 pub mod worktree;
 
-pub use error::HeddleError;
+pub use error::{HeddleError, RecoveryDetails};
 pub use observe::{
     CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,
     WarningSink,

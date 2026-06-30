@@ -4,6 +4,7 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
+use heddle_core::{MachineOutputKind, QueryReport, ReportContract as CoreReportContract};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -14,7 +15,7 @@ use crate::cli::{
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
     StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
-    cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
+    cli_args::{AgentTaskCommands, DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
 #[cfg(feature = "client")]
@@ -885,6 +886,20 @@ const fn documented_schemas(
     }
 }
 
+const fn documented_report_schema(
+    contract: CommandContract,
+    report_contract: CoreReportContract,
+    schema_verbs: &'static [&'static str],
+) -> CommandContract {
+    CommandContract {
+        supports_json: true,
+        json_kind: machine_output_kind_json_kind(report_contract.machine_output_kind),
+        schema_verbs,
+        documented_schema_verbs: schema_verbs,
+        ..contract
+    }
+}
+
 const fn opaque_schemas(
     contract: CommandContract,
     schema_verbs: &'static [&'static str],
@@ -917,6 +932,26 @@ const fn json_discriminator(
         field,
         value,
         no_schema_reason: None,
+    }
+}
+
+const fn report_json_discriminator(
+    schema_verb: Option<&'static str>,
+    report_contract: CoreReportContract,
+) -> CommandJsonDiscriminatorSpec {
+    CommandJsonDiscriminatorSpec {
+        schema_verb,
+        field: report_contract.output_discriminator.field,
+        value: report_contract.output_discriminator.value,
+        no_schema_reason: None,
+    }
+}
+
+const fn machine_output_kind_json_kind(kind: MachineOutputKind) -> &'static str {
+    match kind {
+        MachineOutputKind::Json => "json",
+        MachineOutputKind::JsonLines => "jsonl",
+        MachineOutputKind::JsonOrJsonLines => "json_or_jsonl",
     }
 }
 
@@ -978,6 +1013,20 @@ const fn feature_gated(contract: CommandContract, feature_gate: &'static str) ->
         ..contract
     }
 }
+
+const QUERY_COMMAND_SCHEMA_VERBS: &[&str] =
+    &[QueryReport::CONTRACT.schema_name, "query --attribution"];
+const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[
+    report_json_discriminator(
+        Some(QueryReport::CONTRACT.schema_name),
+        QueryReport::CONTRACT,
+    ),
+    json_discriminator(
+        Some("query --attribution"),
+        "output_kind",
+        "query_attribution",
+    ),
+];
 
 const fn exits(
     contract: CommandContract,
@@ -1231,6 +1280,63 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
+    ),
+    entry(&["agent", "task"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "task", "create"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["agent task create"]),
+                &[json_discriminator(
+                    Some("agent task create"),
+                    "output_kind",
+                    "agent_task_create",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "list"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent task list"]),
+                &[json_discriminator(
+                    Some("agent task list"),
+                    "output_kind",
+                    "agent_task_list",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "show"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent task show"]),
+                &[json_discriminator(
+                    Some("agent task show"),
+                    "output_kind",
+                    "agent_task_show",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "update"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["agent task update"]),
+                &[json_discriminator(
+                    Some("agent task update"),
+                    "output_kind",
+                    "agent_task_update",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
     entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
@@ -2107,15 +2213,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["query"],
         category(
             json_discriminators(
-                documented_schemas(READ_JSON, &["query", "query --attribution"]),
-                &[
-                    json_discriminator(Some("query"), "output_kind", "query"),
-                    json_discriminator(
-                        Some("query --attribution"),
-                        "output_kind",
-                        "query_attribution",
-                    ),
-                ],
+                documented_report_schema(
+                    READ_JSON,
+                    QueryReport::CONTRACT,
+                    QUERY_COMMAND_SCHEMA_VERBS,
+                ),
+                QUERY_JSON_DISCRIMINATORS,
             ),
             "states",
         ),
@@ -4746,6 +4849,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AgentCommands::Ready(_) => vec!["agent", "ready"],
             AgentCommands::Release(_) => vec!["agent", "release"],
             AgentCommands::List(_) => vec!["agent", "list"],
+            AgentCommands::Task(command) => match command {
+                AgentTaskCommands::Create(_) => vec!["agent", "task", "create"],
+                AgentTaskCommands::List(_) => vec!["agent", "task", "list"],
+                AgentTaskCommands::Show(_) => vec!["agent", "task", "show"],
+                AgentTaskCommands::Update(_) => vec!["agent", "task", "update"],
+            },
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
