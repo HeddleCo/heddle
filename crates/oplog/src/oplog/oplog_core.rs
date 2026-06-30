@@ -98,13 +98,30 @@ impl OpLog {
             .collect()
     }
 
+    /// Ensure the on-disk oplog is in the current format, migrating an older one
+    /// in place. **Hot-path discipline (perf/adopt residual O(N²)):** every
+    /// logical ref read funnels through here via `head_id`/`load_cached`/
+    /// `refresh_cached`, so this MUST stay header-cheap when the format is already
+    /// current. The format check ([`is_latest`](PackedOpLog::is_latest)) reads
+    /// only the fixed header; it does NOT fully read + parse the whole index.
+    ///
+    /// A prior version did `let _ = PackedOpLogIndex::open(&path)?` in the
+    /// already-latest branch — a full file read + record-validation pass whose
+    /// result was discarded. That turned a header read into an O(entries) parse
+    /// on EVERY `head_id` call, so a read path that touches the oplog generation
+    /// once per ref (e.g. the post-`adopt` verification/`status` walk's per-branch
+    /// `get_thread`) reparsed the entire growing oplog N times ⇒ O(N²)
+    /// (`adopt`/`status` of 800 refs reparsed a 142 KB oplog ~3.4k times and sat
+    /// ~14 s). The entry-validating open already happens where entries are
+    /// actually consumed (`load_cached`/`refresh_cached`/`open_index_for_write`
+    /// each open the index themselves), so dropping the discarded open here loses
+    /// no validation — it only removes the redundant per-read full parse.
     fn ensure_current_format(&self) -> Result<()> {
         let path = self.oplog_path();
         if !path.exists() {
             return Ok(());
         }
         if PackedOpLog::is_latest(&path)? {
-            let _ = PackedOpLogIndex::open(&path)?;
             return Ok(());
         }
         let _lock = self.write_lock()?;
