@@ -14,7 +14,9 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::Repository as HeddleRepository;
+use repo::{GitRefName, Repository as HeddleRepository};
+pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
+pub(crate) use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
     IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
@@ -116,36 +118,11 @@ pub enum GitBridgeError {
 /// Type alias for Git bridge results.
 pub type GitResult<T> = std::result::Result<T, GitBridgeError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefNamespace {
-    Branch,
-    Tag,
-    /// `refs/notes/<name>` — heddle uses `refs/notes/heddle` to carry
-    /// per-commit metadata (change_id) without disturbing commit SHAs.
-    Note,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefUpdate {
     pub name: String,
     pub target: ObjectId,
     pub namespace: RefNamespace,
-}
-
-/// Sentinel remote name for refs owned by the local repository
-/// (`refs/heads/*` and `refs/tags/*`). Ported from jj's
-/// `REMOTE_NAME_FOR_LOCAL_GIT_REPO` (`lib/src/git.rs`). Because a remote
-/// literally named `git` would collide with this sentinel, such a name must
-/// be rejected when remotes are configured.
-pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
-
-/// Whether `remote` collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`], the
-/// sentinel reserved for refs owned by the local repository. A user remote
-/// with this name cannot be represented unambiguously against local refs, so
-/// it must be rejected at every site that parses or accepts a remote name.
-/// Single source of truth for the reserved-namespace check.
-pub(crate) fn is_reserved_git_remote_name(remote: &str) -> bool {
-    remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
 }
 
 /// Reject a remote name that collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
@@ -166,11 +143,7 @@ fn reject_reserved_git_remote_name(remote: &str) -> GitResult<()> {
 }
 
 fn remote_name_from_remote_ref(ref_name: &str) -> Option<&str> {
-    let remote_and_name = ref_name.strip_prefix("refs/remotes/")?;
-    let remote = remote_and_name
-        .split_once('/')
-        .map_or(remote_and_name, |(remote, _)| remote);
-    (!remote.is_empty()).then_some(remote)
+    GitRefName::new(ref_name).remote_name()
 }
 
 fn validate_refspec_ref(ref_name: &str) -> GitResult<()> {
@@ -180,71 +153,16 @@ fn validate_refspec_ref(ref_name: &str) -> GitResult<()> {
     Ok(())
 }
 
-/// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
-/// `GitRefKind` (`lib/src/git.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitRefKind {
-    /// `refs/heads/<name>` or `refs/remotes/<remote>/<name>`.
-    Branch,
-    /// `refs/tags/<name>`.
-    Tag,
-}
-
-/// A parsed Git ref name: its kind, short name, and owning remote. Borrows
-/// from the input ref name. Ported from jj's `RemoteRefSymbol` shape
-/// (`lib/src/git.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParsedGitRef<'a> {
-    pub kind: GitRefKind,
-    /// Short name beneath the namespace, e.g. `main` for `refs/heads/main`
-    /// or `feature/x` for `refs/remotes/origin/feature/x`.
-    pub name: &'a str,
-    /// Owning remote. Local refs (`refs/heads/*`, `refs/tags/*`) report
-    /// [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
-    pub remote: &'a str,
-}
-
 /// Parse a fully-qualified Git ref name into its [`GitRefKind`], short name,
 /// and owning remote. Returns `None` for refs outside the
-/// branch/remote-branch/tag namespaces (e.g. `refs/notes/*`, `HEAD`).
+/// branch/remote-branch/tag/notes namespaces (e.g. `HEAD`).
 ///
-/// Ported from jj's `parse_git_ref` (`lib/src/git.rs`); like jj, the symbolic
-/// `HEAD` and `refs/remotes/<remote>/HEAD` entries are not treated as refs.
+/// Ported from jj's `parse_git_ref` (`lib/src/git.rs`) and extended for
+/// Heddle's notes content namespace; the symbolic `HEAD` and
+/// `refs/remotes/<remote>/HEAD` entries are not treated as refs.
 pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
     RefSpec::new(None, ref_name, false).ok()?;
-
-    if let Some(name) = ref_name.strip_prefix("refs/heads/") {
-        // Git rejects `HEAD` as a branch name.
-        (name != "HEAD").then_some(ParsedGitRef {
-            kind: GitRefKind::Branch,
-            name,
-            remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
-        })
-    } else if let Some(remote_and_name) = ref_name.strip_prefix("refs/remotes/") {
-        let (remote, name) = remote_and_name.split_once('/')?;
-        // `refs/remotes/<remote>/HEAD` is the remote's symbolic default, not a
-        // real remote-tracking branch. A remote literally named `git` collides
-        // with the local sentinel ([`REMOTE_NAME_FOR_LOCAL_GIT_REPO`]); aliasing
-        // it onto local refs would make remote-tracking branches
-        // indistinguishable from `refs/heads/*`. Such a remote is already
-        // rejected by the `RefSpec::new` validation at the top of this function
-        // (`validate_refspec_ref` → `reject_reserved_git_remote_name`), so by the
-        // time we reach this branch `remote` is guaranteed not to collide —
-        // matching jj's parser and the sentinel ownership contract.
-        (name != "HEAD").then_some(ParsedGitRef {
-            kind: GitRefKind::Branch,
-            name,
-            remote,
-        })
-    } else {
-        ref_name
-            .strip_prefix("refs/tags/")
-            .map(|name| ParsedGitRef {
-                kind: GitRefKind::Tag,
-                name,
-                remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
-            })
-    }
+    GitRefName::new(ref_name).bridge_ref()
 }
 
 /// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
@@ -2791,23 +2709,14 @@ fn collect_ref_updates(repo: &SleyRepository) -> GitResult<Vec<RefUpdate>> {
         let ReferenceTarget::Direct(target) = reference.target else {
             continue;
         };
-        if let Some(name) = reference.name.strip_prefix("refs/heads/") {
+        let ref_name = GitRefName::new(&reference.name);
+        if let Some(namespace) = ref_name.content_namespace()
+            && let Some(name) = ref_name.short_name()
+        {
             updates.push(RefUpdate {
                 name: name.to_string(),
                 target,
-                namespace: RefNamespace::Branch,
-            });
-        } else if let Some(name) = reference.name.strip_prefix("refs/tags/") {
-            updates.push(RefUpdate {
-                name: name.to_string(),
-                target,
-                namespace: RefNamespace::Tag,
-            });
-        } else if let Some(name) = reference.name.strip_prefix("refs/notes/") {
-            updates.push(RefUpdate {
-                name: name.to_string(),
-                target,
-                namespace: RefNamespace::Note,
+                namespace,
             });
         }
     }
@@ -2920,11 +2829,7 @@ fn matches_import_ref(update: &RefUpdate, wanted: &HashSet<&str>) -> bool {
 }
 
 fn full_ref_name(update: &RefUpdate) -> String {
-    match update.namespace {
-        RefNamespace::Branch => format!("refs/heads/{}", update.name),
-        RefNamespace::Tag => format!("refs/tags/{}", update.name),
-        RefNamespace::Note => format!("refs/notes/{}", update.name),
-    }
+    GitRefName::content_full_name(update.namespace, &update.name)
 }
 
 #[cfg(test)]
@@ -4127,11 +4032,7 @@ fn push_network_remote(
         .map_err(|err| GitBridgeError::Git(format!("failed to list refs from {url}: {err}")))?;
     let remote_refs = records
         .into_iter()
-        .filter(|record| {
-            record.name.starts_with("refs/heads/")
-                || record.name.starts_with("refs/tags/")
-                || record.name.starts_with("refs/notes/")
-        })
+        .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
         .map(|record| (record.name, record.oid))
         .collect::<HashMap<_, _>>();
 
@@ -4229,6 +4130,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_git_ref_note() {
+        let parsed = parse_git_ref("refs/notes/heddle").expect("note parses");
+        assert_eq!(parsed.kind, GitRefKind::Note);
+        assert_eq!(parsed.name, "heddle");
+        assert_eq!(parsed.remote, REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    }
+
+    #[test]
     fn parse_git_ref_skips_head_symrefs() {
         assert_eq!(parse_git_ref("refs/heads/HEAD"), None);
         assert_eq!(parse_git_ref("refs/remotes/origin/HEAD"), None);
@@ -4236,7 +4145,6 @@ mod tests {
 
     #[test]
     fn parse_git_ref_rejects_unknown_or_malformed() {
-        assert_eq!(parse_git_ref("refs/notes/heddle"), None);
         assert_eq!(parse_git_ref("HEAD"), None);
         // A remote ref with no branch component beneath the remote name.
         assert_eq!(parse_git_ref("refs/remotes/origin"), None);

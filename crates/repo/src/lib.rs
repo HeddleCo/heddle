@@ -15,6 +15,7 @@ mod discussion_anchor_travel;
 mod discussion_snapshot_travel;
 mod ephemeral_thread;
 mod fsmonitor;
+mod git_ref_name;
 pub mod git_worktree_status;
 mod hooks;
 pub mod identity;
@@ -69,6 +70,10 @@ pub mod worktree_walk;
 // Re-export commonly used types from underlying crates.
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
+pub use git_ref_name::{
+    GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
+    REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
+};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
 pub use objects::{
