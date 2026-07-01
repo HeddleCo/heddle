@@ -72,7 +72,7 @@ release-plz → push-to-main flow documented in
      artifacts, signatures, certificates, and an aggregated
      `SHA256SUMS`
    - for stable releases only, render `Casks/heddle.rb` and open a PR
-     against `HeddleCo/homebrew-heddle`
+     against `HeddleCo/homebrew-tap`
 
 4. Verify the Release page lists the expected asset set (see
    [Artifact contract](#artifact-contract) below). If anything is
@@ -164,8 +164,8 @@ The primary macOS install path is:
 brew install --cask heddleco/heddle/heddle
 ```
 
-The tap repository is `HeddleCo/homebrew-heddle`, which maps to
-`heddleco/heddle` by Homebrew's tap naming convention. Stable releases
+The tap repository is `HeddleCo/homebrew-tap`, which maps to
+`heddleco/tap` by Homebrew's tap naming convention. Stable releases
 render `Casks/heddle.rb` with:
 
 - `app "Heddle.app"` so Homebrew installs the host app into
@@ -204,7 +204,7 @@ Set these GitHub Actions variables as well:
 | `HEDDLE_DEVELOPER_ID_APPLICATION` | Codesigning identity, e.g. `Developer ID Application: HeddleCo, LLC (33V6242M8S)` |
 
 The release-publisher GitHub App should be installed only on
-`homebrew-heddle`, `scoop-heddle`, and `apt-heddle` and granted only
+`homebrew-tap`, `scoop-heddle`, and `apt-heddle` and granted only
 `Contents: write` and `Pull requests: write`. The token minted in the
 `publish-manifests` job lists all three in its `repositories:` scope.
 

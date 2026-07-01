@@ -715,12 +715,12 @@ jobs:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}
           owner: HeddleCo
-          repositories: homebrew-heddle,scoop-heddle,apt-heddle
+          repositories: homebrew-tap,scoop-heddle,apt-heddle
 
       - name: Publish Homebrew cask PR
         uses: ./.github/actions/publish-manifest
         with:
-          target-repo: HeddleCo/homebrew-heddle
+          target-repo: HeddleCo/homebrew-tap
           manifest-path: Casks/heddle.rb
           rendered-file: rendered/heddle.rb
           token: ${{ steps.app-token.outputs.token }}
