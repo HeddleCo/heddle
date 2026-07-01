@@ -1937,11 +1937,11 @@ fn build_git_mirror_plan_from_sley(
 /// any future content ref — are pushed by default; only these four purely-local
 /// git-machinery prefixes are dropped.
 ///
-///   - `refs/stash`     : the local stash reflog stack (exact match — the ref
-///                        is `refs/stash`, individual entries live in reflog).
-///   - `refs/remotes/`  : this clone's remote-tracking refs.
-///   - `refs/original/` : filter-branch/-repo backups.
-///   - `refs/replace/`  : local object replacements (grafts).
+///   - `refs/stash`: the local stash reflog stack (exact match — the ref is
+///     `refs/stash`; individual entries live in the reflog).
+///   - `refs/remotes/`: this clone's remote-tracking refs.
+///   - `refs/original/`: filter-branch/-repo backups.
+///   - `refs/replace/`: local object replacements (grafts).
 fn is_local_only_ref(name: &str) -> bool {
     name == "refs/stash"
         || name.starts_with("refs/remotes/")
