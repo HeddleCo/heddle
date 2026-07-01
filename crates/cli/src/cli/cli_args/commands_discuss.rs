@@ -91,4 +91,9 @@ pub struct DiscussListArgs {
 #[derive(Clone, Debug, Args)]
 pub struct DiscussShowArgs {
     pub discussion_id: String,
+    /// Resolve the discussion against this state instead of HEAD. Use when a
+    /// discussion lives on a prior state (found via `discuss list --state <s>`)
+    /// and is no longer on HEAD.
+    #[arg(long)]
+    pub state: Option<String>,
 }

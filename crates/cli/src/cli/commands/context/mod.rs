@@ -334,6 +334,19 @@ pub(crate) fn build_context_state(
     if let Some(provenance) = head_state.provenance {
         new_state = new_state.with_provenance(provenance);
     }
+    // #836: carry discussions forward on a non-capture (annotation/context)
+    // state advance. `context set` does NOT change the tree, so the parent's
+    // discussion anchors are still valid verbatim — no re-anchoring / symbol
+    // analysis needed (that's the capture path's job via
+    // compute_and_persist_discussion_anchor_travel). Without this, HEAD
+    // advances to a discussion-less state and `discuss show <id>` (HEAD-only)
+    // can no longer resolve the discussion. `discussions` is a side-band
+    // pointer NOT part of the state hash (see state_core.rs
+    // `w1_tail_fields_are_not_part_of_state_hash`), so this does NOT change
+    // `change_id`.
+    if let Some(discussions) = head_state.discussions {
+        new_state = new_state.with_discussions(discussions);
+    }
     Ok(new_state)
 }
 
@@ -568,5 +581,71 @@ mod tests {
             } => {}
             other => panic!("expected unchanged scope, got {other:?}"),
         }
+    }
+
+    /// #836 root cause: a non-capture state advance (`context set`) built by
+    /// `build_context_state` MUST carry the parent's `discussions` side-band
+    /// pointer forward. `context set` does not change the tree, so the anchors
+    /// stay valid verbatim — no re-anchoring. Before the fix, `State::new`
+    /// initialised `discussions: None` and nothing copied it, so HEAD advanced
+    /// to a discussion-less state and `discuss show` (HEAD-only) could no
+    /// longer resolve the discussion.
+    #[test]
+    fn build_context_state_carries_discussions_forward() {
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+        let discussions_hash = ContentHash::compute(b"discussions-blob-836");
+        let head_state = State::new(tree_hash, vec![], attribution)
+            .with_change_id(ChangeId::generate())
+            .with_discussions(discussions_hash);
+
+        let advanced =
+            build_context_state(&repo, &head_state, None, "advance".to_string()).expect("build");
+
+        assert_eq!(
+            advanced.discussions,
+            Some(discussions_hash),
+            "discussions side-band pointer must ride forward on a context advance"
+        );
+        assert_eq!(
+            advanced.tree, head_state.tree,
+            "context set does not change the tree, so anchors stay valid verbatim"
+        );
+    }
+
+    /// The change_id-unchanged guarantee that de-risks the carry-forward:
+    /// `discussions` is a side-band pointer NOT part of the state hash
+    /// (state_core.rs `w1_tail_fields_are_not_part_of_state_hash`). Carrying it
+    /// forward must NOT perturb the advanced state's `change_id` — otherwise it
+    /// would diverge the oplog / break "same state?" checks. Proven here by
+    /// clearing the discussions on the built state and confirming the hash is
+    /// byte-identical.
+    #[test]
+    fn carried_discussions_do_not_change_the_state_hash() {
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+        let head_state = State::new(tree_hash, vec![], attribution)
+            .with_change_id(ChangeId::generate())
+            .with_discussions(ContentHash::compute(b"discussions-blob-836"));
+
+        let with_discussions =
+            build_context_state(&repo, &head_state, None, "advance".to_string()).expect("build");
+        assert!(with_discussions.discussions.is_some());
+
+        // The same built state with discussions stripped must hash identically:
+        // the side-band pointer is not part of state identity.
+        let mut without_discussions = with_discussions.clone();
+        without_discussions.discussions = None;
+        assert_eq!(
+            with_discussions.compute_hash(),
+            without_discussions.compute_hash(),
+            "discussions carry-forward must not perturb the state hash / change_id"
+        );
     }
 }

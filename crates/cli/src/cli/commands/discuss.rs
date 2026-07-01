@@ -251,9 +251,17 @@ async fn run_list(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussListArg
 }
 
 async fn run_show(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussShowArgs) -> Result<()> {
+    // Empty state_id = HEAD (the default). An explicit `--state` resolves the
+    // discussion against a prior state (#836) via the canonical resolver, so
+    // short/full ids and marker names all work.
+    let state_id = match args.state.as_deref() {
+        Some(s) => resolve_state(cli, Some(s))?,
+        None => Vec::new(),
+    };
     let req = GetDiscussionRequest {
         repo_path: String::new(),
         discussion_id: args.discussion_id.clone(),
+        state_id,
     };
     let resp = svc
         .get_discussion(tonic::Request::new(req))
