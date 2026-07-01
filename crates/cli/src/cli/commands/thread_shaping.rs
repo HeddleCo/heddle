@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle-native thread shaping helpers.
 
-use std::{fs, path::Path};
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use objects::{
-    fs_ops::remove_path_recursively,
-    object::{ChangeId, ThreadName},
-    store::ObjectStore,
+use heddle_core::{
+    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
 };
+use objects::object::ThreadName;
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
@@ -35,16 +34,6 @@ use crate::{
     },
     config::UserConfig,
 };
-
-#[derive(Debug, Serialize)]
-pub struct ThreadMoveOutput {
-    pub from_thread: String,
-    pub to_thread: String,
-    pub moved_paths: Vec<String>,
-    pub source_change_id: Option<String>,
-    pub target_change_id: String,
-    pub message: String,
-}
 
 #[derive(Debug, Serialize)]
 pub struct ThreadResolveOutput {
@@ -76,54 +65,35 @@ pub fn cmd_capture_split(
     intent: Option<String>,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    let current = super::thread_cmd::current_thread(&repo)?.ok_or_else(|| {
-        anyhow!(RecoveryAdvice::no_current_thread(
-            "capture --split",
-            None,
-            "heddle thread switch <name>",
-        ))
-    })?;
-    let target = load_thread(&repo, &into)?;
-    let moved_paths = collect_worktree_split_paths(&repo, &prefixes)?;
-    if moved_paths.is_empty() {
-        return Err(anyhow!(no_paths_matched_advice(
-            "capture split",
-            "No dirty paths matched the requested split prefixes",
-            "the worktree has no dirty paths under the requested prefixes",
-            "capture --split would not move any work into the target thread",
-            "heddle status",
-        )));
-    }
-
-    let target_repo = Repository::open(&target.execution_path)?;
-    apply_selected_worktree_paths(&repo, &target_repo, &moved_paths)?;
     let user_config = UserConfig::load_default()?;
-    let target_snapshot = create_snapshot(
-        &target_repo,
-        &user_config,
-        Some(intent.unwrap_or_else(|| format!("Split paths from {}", current.id))),
-        None,
-        SnapshotAgentOverrides {
-            provider: None,
-            model: None,
-            session: None,
-            segment: None,
-            policy: None,
-            no_policy: false,
-            no_agent: false,
+    let output = capture_split(
+        &repo,
+        CaptureSplitOptions {
+            into,
+            prefixes,
+            intent,
+            worktree_status_options: worktree_status_options(Some(repo.config())),
         },
-    )?;
-
-    restore_paths_from_state(&repo, repo.head()?, &moved_paths)?;
-
-    let output = ThreadMoveOutput {
-        from_thread: current.id,
-        to_thread: target.id,
-        moved_paths,
-        source_change_id: None,
-        target_change_id: target_snapshot.change_id,
-        message: "Split selected paths into target thread".to_string(),
-    };
+        |target_repo, snapshot_intent| {
+            Ok(create_snapshot(
+                target_repo,
+                &user_config,
+                snapshot_intent,
+                None,
+                SnapshotAgentOverrides {
+                    provider: None,
+                    model: None,
+                    session: None,
+                    segment: None,
+                    policy: None,
+                    no_policy: false,
+                    no_agent: false,
+                },
+            )?
+            .change_id)
+        },
+    )
+    .map_err(map_thread_shaping_anyhow_error)?;
     emit(cli, &output)
 }
 
@@ -135,80 +105,35 @@ pub fn cmd_thread_move(
     message: Option<String>,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    let source = load_thread(&repo, &from)?;
-    let target = load_thread(&repo, &to)?;
-    let source_repo = Repository::open(&source.execution_path)?;
-    let target_repo = Repository::open(&target.execution_path)?;
-
-    let source_current = resolve_required_state(
-        &source_repo,
-        source.current_state.as_deref(),
-        "source thread has no current state",
-    )?;
-    let source_base = resolve_required_state(
-        &source_repo,
-        Some(&source.base_state),
-        "source thread has no base state",
-    )?;
-    let moved_paths =
-        collect_state_move_paths(&source_repo, &source_base, &source_current, &prefixes)?;
-    if moved_paths.is_empty() {
-        return Err(anyhow!(no_paths_matched_advice(
-            "thread move",
-            "No captured paths matched the requested prefixes",
-            "the source thread has no captured paths under the requested prefixes",
-            "thread move would not move any captured files into the target thread",
-            "heddle thread show",
-        )));
-    }
-
-    apply_selected_state_paths(&source_repo, &source_current, &target_repo, &moved_paths)?;
     let user_config = UserConfig::load_default()?;
-    let target_snapshot = create_snapshot(
-        &target_repo,
-        &user_config,
-        Some(
-            message
-                .clone()
-                .unwrap_or_else(|| format!("Move paths from {}", source.id)),
-        ),
-        None,
-        SnapshotAgentOverrides {
-            provider: None,
-            model: None,
-            session: None,
-            segment: None,
-            policy: None,
-            no_policy: false,
-            no_agent: false,
+    let output = thread_move(
+        &repo,
+        ThreadMoveOptions {
+            from,
+            to,
+            prefixes,
+            message,
         },
-    )?;
-
-    restore_paths_from_state(&source_repo, Some(source_base), &moved_paths)?;
-    let source_snapshot = create_snapshot(
-        &source_repo,
-        &user_config,
-        Some(message.unwrap_or_else(|| format!("Move paths to {}", target.id))),
-        None,
-        SnapshotAgentOverrides {
-            provider: None,
-            model: None,
-            session: None,
-            segment: None,
-            policy: None,
-            no_policy: false,
-            no_agent: false,
+        |target_repo, snapshot_intent| {
+            Ok(create_snapshot(
+                target_repo,
+                &user_config,
+                snapshot_intent,
+                None,
+                SnapshotAgentOverrides {
+                    provider: None,
+                    model: None,
+                    session: None,
+                    segment: None,
+                    policy: None,
+                    no_policy: false,
+                    no_agent: false,
+                },
+            )?
+            .change_id)
         },
-    )?;
-
-    let output = ThreadMoveOutput {
-        from_thread: source.id,
-        to_thread: target.id,
-        moved_paths,
-        source_change_id: Some(source_snapshot.change_id),
-        target_change_id: target_snapshot.change_id,
-        message: "Moved selected paths between threads".to_string(),
-    };
+    )
+    .map_err(map_thread_shaping_anyhow_error)?;
     emit(cli, &output)
 }
 
@@ -605,188 +530,56 @@ fn thread_resolve_refresh_operator(
     )
 }
 
-fn no_paths_matched_advice(
-    action: &'static str,
-    error: &'static str,
-    unsafe_condition: &'static str,
-    would_change: &'static str,
-    primary_command: &'static str,
-) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "no_paths_matched",
-        error,
-        format!(
-            "Inspect available paths with `{primary_command}`, then retry `{action}` with a matching prefix."
-        ),
-        unsafe_condition,
-        would_change,
-        "repository state was left unchanged",
-        primary_command,
-        vec![primary_command.to_string()],
-    )
+fn map_thread_shaping_anyhow_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<ThreadShapingError>() {
+        Ok(shaping_err) => map_thread_shaping_error(shaping_err),
+        Err(err) => err,
+    }
 }
 
-fn resolve_required_state(
-    repo: &Repository,
-    spec: Option<&str>,
-    message: &str,
-) -> Result<ChangeId> {
-    let spec = spec.ok_or_else(|| anyhow!(message.to_string()))?;
-    repo.resolve_state(spec)?
-        .ok_or_else(|| anyhow!(message.to_string()))
-}
-
-fn collect_worktree_split_paths(repo: &Repository, prefixes: &[String]) -> Result<Vec<String>> {
-    let baseline = match repo.current_state()? {
-        Some(state) => repo.require_tree(&state.tree)?,
-        None => objects::object::Tree::new(),
-    };
-    let status = repo.compare_worktree_cached_with_options(
-        &baseline,
-        &worktree_status_options(Some(repo.config())),
-    )?;
-    let mut paths = status
-        .modified
-        .iter()
-        .chain(status.added.iter())
-        .chain(status.deleted.iter())
-        .map(|path| path.to_string_lossy().to_string())
-        .filter(|path| matches_prefix(path, prefixes))
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn collect_state_move_paths(
-    repo: &Repository,
-    base: &ChangeId,
-    current: &ChangeId,
-    prefixes: &[String],
-) -> Result<Vec<String>> {
-    let base_tree = repo
-        .store()
-        .get_state(base)?
-        .ok_or_else(|| anyhow!("Base state not found"))?
-        .tree;
-    let current_tree = repo
-        .store()
-        .get_state(current)?
-        .ok_or_else(|| anyhow!("Current state not found"))?
-        .tree;
-    let mut paths = repo
-        .diff_trees(&base_tree, &current_tree)?
-        .into_iter()
-        .map(|change| change.path)
-        .filter(|path| matches_prefix(path, prefixes))
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn apply_selected_worktree_paths(
-    source_repo: &Repository,
-    target_repo: &Repository,
-    paths: &[String],
-) -> Result<()> {
-    for path in paths {
-        let source_path = source_repo.root().join(path);
-        let target_path = target_repo.root().join(path);
-        if source_path.exists() {
-            copy_path(&source_path, &target_path)?;
-        } else if target_path.exists() {
-            remove_path_recursively(&target_path)?;
+fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
+    match err {
+        ThreadShapingError::NoCurrentThread => anyhow!(RecoveryAdvice::no_current_thread(
+            "capture --split",
+            None,
+            "heddle thread switch <name>",
+        )),
+        ThreadShapingError::NoPathsMatched(details) => anyhow!(RecoveryAdvice::safety_refusal(
+            "no_paths_matched",
+            details.error,
+            format!(
+                "Inspect available paths with `{}`, then retry `{}` with a matching prefix.",
+                details.primary_command, details.action
+            ),
+            details.unsafe_condition,
+            details.would_change,
+            "repository state was left unchanged",
+            details.primary_command,
+            vec![details.primary_command.to_string()],
+        )),
+        ThreadShapingError::ThreadNotFound { thread_id, action } => {
+            anyhow!(super::thread_cmd::thread_not_found_advice(&thread_id, action))
+        }
+        ThreadShapingError::ImportedGitRefNotManaged { thread_id } => {
+            let reconcile_preview =
+                super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(
+                    None,
+                    &thread_id,
+                );
+            anyhow!(RecoveryAdvice::safety_refusal(
+                "imported_git_ref_not_managed_thread",
+                format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
+                format!(
+                    "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
+                ),
+                format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
+                "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
+                "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
+                reconcile_preview.clone(),
+                vec![reconcile_preview, "heddle thread list".to_string()],
+            ))
         }
     }
-    Ok(())
-}
-
-fn apply_selected_state_paths(
-    source_repo: &Repository,
-    state_id: &ChangeId,
-    target_repo: &Repository,
-    paths: &[String],
-) -> Result<()> {
-    let state = source_repo
-        .store()
-        .get_state(state_id)?
-        .ok_or_else(|| anyhow!("State '{}' not found", state_id.short()))?;
-    let tree = source_repo.require_tree(&state.tree)?;
-    for path in paths {
-        restore_one_path(target_repo, Some(&tree), path)?;
-    }
-    Ok(())
-}
-
-fn restore_paths_from_state(
-    repo: &Repository,
-    baseline: Option<ChangeId>,
-    paths: &[String],
-) -> Result<()> {
-    let tree = if let Some(state_id) = baseline {
-        let state = repo
-            .store()
-            .get_state(&state_id)?
-            .ok_or_else(|| anyhow!("Baseline state '{}' not found", state_id.short()))?;
-        Some(repo.require_tree(&state.tree)?)
-    } else {
-        None
-    };
-    for path in paths {
-        restore_one_path(repo, tree.as_ref(), path)?;
-    }
-    Ok(())
-}
-
-fn restore_one_path(
-    repo: &Repository,
-    baseline_tree: Option<&objects::object::Tree>,
-    path: &str,
-) -> Result<()> {
-    let target_path = repo.root().join(path);
-    if let Some(tree) = baseline_tree
-        && let Some(entry) = tree.get(path)
-    {
-        let Some(hash) = entry.leaf_content_hash() else {
-            return Ok(());
-        };
-        let blob = repo.require_blob(&hash)?;
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&target_path, blob.content())?;
-        return Ok(());
-    }
-
-    if target_path.exists() {
-        remove_path_recursively(&target_path)?;
-    }
-    Ok(())
-}
-
-fn copy_path(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
-        fs::create_dir_all(to)?;
-        for entry in fs::read_dir(from)? {
-            let entry = entry?;
-            copy_path(&entry.path(), &to.join(entry.file_name()))?;
-        }
-        return Ok(());
-    }
-
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(from, to)?;
-    Ok(())
-}
-
-fn matches_prefix(path: &str, prefixes: &[String]) -> bool {
-    prefixes.iter().any(|prefix| {
-        let prefix = prefix.trim_matches('/');
-        path == prefix || path.starts_with(&format!("{prefix}/"))
-    })
 }
 
 fn emit<T: Serialize>(cli: &Cli, output: &T) -> Result<()> {
@@ -970,36 +763,48 @@ mod tests {
     }
 
     #[test]
-    fn empty_path_movement_refusals_use_typed_advice() {
-        let split = no_paths_matched_advice(
-            "capture split",
-            "No dirty paths matched the requested split prefixes",
-            "the worktree has no dirty paths under the requested prefixes",
-            "capture --split would not move any work into the target thread",
-            "heddle status",
-        );
-        assert_eq!(split.kind, "no_paths_matched");
-        assert_eq!(split.primary_command, "heddle status");
+    fn empty_path_movement_refusals_map_to_typed_advice() {
+        let split = map_thread_shaping_error(ThreadShapingError::NoPathsMatched(
+            heddle_core::NoPathsMatchedDetails {
+                action: "capture split",
+                error: "No dirty paths matched the requested split prefixes",
+                unsafe_condition: "the worktree has no dirty paths under the requested prefixes",
+                would_change: "capture --split would not move any work into the target thread",
+                primary_command: "heddle status",
+            },
+        ));
+        let advice = split
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("mapped error should carry RecoveryAdvice");
+        assert_eq!(advice.kind, "no_paths_matched");
+        assert_eq!(advice.primary_command, "heddle status");
         assert!(
-            split
+            advice
                 .to_string()
                 .contains("Preserved: repository state was left unchanged"),
-            "display should keep the uniform advice surface: {split}"
+            "display should keep the uniform advice surface: {advice}"
         );
 
-        let move_paths = no_paths_matched_advice(
-            "thread move",
-            "No captured paths matched the requested prefixes",
-            "the source thread has no captured paths under the requested prefixes",
-            "thread move would not move any captured files into the target thread",
-            "heddle thread show",
-        );
-        assert_eq!(move_paths.kind, "no_paths_matched");
-        assert_eq!(move_paths.primary_command, "heddle thread show");
+        let move_paths = map_thread_shaping_error(ThreadShapingError::NoPathsMatched(
+            heddle_core::NoPathsMatchedDetails {
+                action: "thread move",
+                error: "No captured paths matched the requested prefixes",
+                unsafe_condition:
+                    "the source thread has no captured paths under the requested prefixes",
+                would_change:
+                    "thread move would not move any captured files into the target thread",
+                primary_command: "heddle thread show",
+            },
+        ));
+        let advice = move_paths
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("mapped error should carry RecoveryAdvice");
+        assert_eq!(advice.kind, "no_paths_matched");
+        assert_eq!(advice.primary_command, "heddle thread show");
         assert!(
-            move_paths.primary_hint().contains("heddle thread show"),
+            advice.primary_hint().contains("heddle thread show"),
             "hint should name the inspection command: {}",
-            move_paths.primary_hint()
+            advice.primary_hint()
         );
     }
 }
