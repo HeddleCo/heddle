@@ -7,9 +7,11 @@
 //! existing blob, mutate, encode back to a new [`Blob`], persist a new
 //! `State` with the updated `discussions` content hash.
 //!
-//! Discovery RPCs (lookup by id, lookup by symbol) currently scan the HEAD
-//! state's blob only. A cross-state index is W2 follow-up work and is
-//! flagged with `// TODO(W2-followup):` comments.
+//! State-scoped discovery reads the requested state's blob. `GetDiscussion`
+//! keeps its documented HEAD default unless callers provide an explicit
+//! `state_id`. Repository-wide symbol lookup is not wired yet; the local
+//! scaffold returns `unimplemented` rather than pretending a HEAD scan is a
+//! complete index.
 
 use grpc::heddle::v1::{
     AppendTurnRequest, Discussion as ProtoDiscussion,
@@ -49,23 +51,61 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Wire vocabulary mirrors `VisibilityTier::as_str`. Empty / unknown
-/// strings collapse to `Public` (the proto convention is "empty means
-/// default"). `team_scoped` and `restricted` round-trip through this path
-/// without an associated label — they're admitted for forward-compat with
-/// the namespace policy override path; callers wanting a labelled value
-/// must go through a richer surface that doesn't yet exist on this RPC.
-fn parse_visibility(s: &str) -> VisibilityTier {
-    match s {
-        "internal" => VisibilityTier::Internal,
-        "team_scoped" => VisibilityTier::TeamScoped {
-            team_id: String::new(),
-        },
-        "restricted" => VisibilityTier::Restricted {
-            scope_label: String::new(),
-        },
-        // "public", "", or anything else.
-        _ => VisibilityTier::Public,
+/// Flat discussion RPC visibility vocabulary. Labelled tiers carry their label
+/// in the token itself (`team:<id>`, `restricted:<label>`,
+/// `private:<label>`) so the service never has to manufacture an empty label.
+fn parse_visibility(s: &str) -> Result<VisibilityTier, Status> {
+    let trimmed = s.trim();
+    match trimmed {
+        "" | "public" => return Ok(VisibilityTier::Public),
+        "internal" => return Ok(VisibilityTier::Internal),
+        _ => {}
+    }
+
+    if let Some(team_id) = trimmed.strip_prefix("team:") {
+        let team_id = team_id.trim();
+        if team_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "discussion visibility team:<id> requires a non-empty id",
+            ));
+        }
+        return Ok(VisibilityTier::TeamScoped {
+            team_id: team_id.to_string(),
+        });
+    }
+    if let Some(scope_label) = trimmed.strip_prefix("restricted:") {
+        let scope_label = scope_label.trim();
+        if scope_label.is_empty() {
+            return Err(Status::invalid_argument(
+                "discussion visibility restricted:<label> requires a non-empty label",
+            ));
+        }
+        return Ok(VisibilityTier::Restricted {
+            scope_label: scope_label.to_string(),
+        });
+    }
+    if let Some(scope_label) = trimmed.strip_prefix("private:") {
+        let scope_label = scope_label.trim();
+        if scope_label.is_empty() {
+            return Err(Status::invalid_argument(
+                "discussion visibility private:<label> requires a non-empty label",
+            ));
+        }
+        return Ok(VisibilityTier::Private {
+            scope_label: scope_label.to_string(),
+        });
+    }
+    Err(Status::invalid_argument(format!(
+        "unsupported discussion visibility {trimmed:?}; expected public, internal, team:<id>, restricted:<label>, or private:<label>"
+    )))
+}
+
+fn visibility_to_wire(visibility: &VisibilityTier) -> String {
+    match visibility {
+        VisibilityTier::Public | VisibilityTier::Internal => visibility.as_str().to_string(),
+        VisibilityTier::TeamScoped { team_id } => format!("team:{team_id}"),
+        VisibilityTier::Restricted { scope_label } => format!("restricted:{scope_label}"),
+        VisibilityTier::Private { scope_label } => format!("private:{scope_label}"),
     }
 }
 
@@ -119,7 +159,7 @@ fn discussion_to_proto(d: &Discussion) -> ProtoDiscussion {
         resolution: Some(resolution_to_proto(&d.resolution)),
         body_changed_since_open: d.body_changed_since_open,
         orphaned: d.orphaned,
-        visibility: d.visibility.as_str().to_string(),
+        visibility: visibility_to_wire(&d.visibility),
         resolved_annotation_id: d.resolved_annotation_id.clone().unwrap_or_default(),
     }
 }
@@ -270,6 +310,11 @@ impl DiscussionService for LocalDiscussionService {
                     let (state, mut blob) = load_discussions_blob(repo, &opened_against)?;
                     let now = now_secs();
                     let principal = principal_for(repo);
+                    let visibility = if req.visibility.trim().is_empty() {
+                        repo.resolve_capture_default_visibility()
+                    } else {
+                        parse_visibility(&req.visibility)?
+                    };
                     let discussion = Discussion {
                         id: ChangeId::generate().to_string_full(),
                         anchor: SymbolAnchor::new(anchor_proto.file, anchor_proto.symbol),
@@ -284,7 +329,7 @@ impl DiscussionService for LocalDiscussionService {
                         resolution: DiscussionResolution::Open,
                         body_changed_since_open: false,
                         orphaned: false,
-                        visibility: parse_visibility(&req.visibility),
+                        visibility,
                         resolved_annotation_id: None,
                     };
                     discussion
@@ -326,7 +371,9 @@ impl DiscussionService for LocalDiscussionService {
                     if req.body.trim().is_empty() {
                         return Err(Status::invalid_argument("body must be non-empty"));
                     }
-                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
+                    // This local mutation API is HEAD-scoped because the
+                    // request carries no state_id. It must not pretend to find
+                    // and mutate discussions across the whole repository.
                     let head = head_state(repo)?;
                     let mut blob = decode_blob_for_state(repo, &head)?;
                     let idx = blob
@@ -378,7 +425,9 @@ impl DiscussionService for LocalDiscussionService {
                     if req.discussion_id.is_empty() {
                         return Err(Status::invalid_argument("discussion_id is required"));
                     }
-                    // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
+                    // This local mutation API is HEAD-scoped because the
+                    // request carries no state_id. It must not pretend to find
+                    // and mutate discussions across the whole repository.
                     let head = head_state(repo)?;
                     let mut blob = decode_blob_for_state(repo, &head)?;
                     let idx = blob
@@ -396,18 +445,9 @@ impl DiscussionService for LocalDiscussionService {
                         .ok_or_else(|| Status::invalid_argument("resolution mode is required"))?;
                     match resolution {
                         Resolution::IntoAnnotation(_payload) => {
-                            // TODO(W2-followup): R5 wiring will create a real
-                            // `Annotation` from the discussion's content,
-                            // attribute it, and back-link it. For the first
-                            // ship we mint a placeholder id and record the
-                            // bidirectional link so the resolution shape is
-                            // honest about its terminal state.
-                            let annotation_id = ChangeId::generate().to_string_full();
-                            blob.discussions[idx].resolution =
-                                DiscussionResolution::ResolvedIntoAnnotation {
-                                    annotation_id: annotation_id.clone(),
-                                };
-                            blob.discussions[idx].resolved_annotation_id = Some(annotation_id);
+                            return Err(Status::unimplemented(
+                                "resolving discussions into annotations is not implemented",
+                            ));
                         }
                         Resolution::ByEdit(payload) => {
                             let state_id =
@@ -473,19 +513,9 @@ impl DiscussionService for LocalDiscussionService {
                 "anchor.file and anchor.symbol are required",
             ));
         }
-        // TODO(W2-followup): cross-state symbol index. For now we only
-        // surface discussions attached to the HEAD state.
-        let repo = self.inner.repo();
-        let head = head_state(repo)?;
-        let blob = decode_blob_for_state(repo, &head)?;
-        let discussions = blob
-            .discussions
-            .iter()
-            .filter(|d| d.anchor.file == anchor.file && d.anchor.symbol == anchor.symbol)
-            .filter(|d| status_matches(d, &req.status))
-            .map(discussion_to_proto)
-            .collect();
-        Ok(Response::new(ListDiscussionsResponse { discussions }))
+        Err(Status::unimplemented(
+            "repository-wide discussion lookup by symbol is not implemented; use list_by_state with an explicit state_id",
+        ))
     }
 
     async fn get_discussion(
@@ -622,6 +652,80 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
+    async fn open_rejects_labelled_visibility_tiers_without_labels() {
+        let (_t, state_id, svc) = fresh_service();
+
+        for visibility in [
+            "team",
+            "team:",
+            "team_scoped",
+            "restricted",
+            "restricted:",
+            "private",
+            "private:",
+            "unknown",
+        ] {
+            let mut req = open_request(&state_id, "hello", "");
+            req.visibility = visibility.into();
+            let err = svc.open_discussion(Request::new(req)).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn open_round_trips_supported_visibility_tiers() {
+        let (_t, state_id, svc) = fresh_service();
+
+        for (visibility, expected) in [
+            ("", "public"),
+            ("public", "public"),
+            ("internal", "internal"),
+            ("team:platform", "team:platform"),
+            ("restricted:legal", "restricted:legal"),
+            ("private:embargo-x", "private:embargo-x"),
+        ] {
+            let mut req = open_request(&state_id, "hello", "");
+            req.visibility = visibility.into();
+            let opened = svc
+                .open_discussion(Request::new(req))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(opened.visibility, expected);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn open_empty_visibility_uses_repo_discussion_default() {
+        let temp = TempDir::new().unwrap();
+        Repository::init_default(temp.path()).unwrap();
+        std::fs::write(
+            temp.path().join(".heddle/config.toml"),
+            "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = \"Internal\"\n",
+        )
+        .unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
+        let attribution = Attribution::human(Principal::new("Tester", "tester@example.com"));
+        let state = repo
+            .snapshot_with_attribution(Some("seed".into()), None, attribution)
+            .unwrap();
+        let dedup = OperationDedupStore::open(repo.heddle_dir()).unwrap();
+        let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
+        let svc = LocalDiscussionService::new(inner);
+
+        let opened = svc
+            .open_discussion(Request::new(open_request(&state.change_id, "hello", "")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(opened.visibility, "internal");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn resolve_dismissed_with_empty_reason_is_invalid_argument() {
         let (_t, state_id, svc) = fresh_service();
         let opened = svc
@@ -643,6 +747,52 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn resolve_into_annotation_is_unimplemented() {
+        let (_t, state_id, svc) = fresh_service();
+        let opened = svc
+            .open_discussion(Request::new(open_request(&state_id, "why?", "")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        use grpc::heddle::v1::resolve_discussion_request::{Resolution, ResolveIntoAnnotation};
+        let err = svc
+            .resolve_discussion(Request::new(ResolveDiscussionRequest {
+                repo_path: String::new(),
+                discussion_id: opened.id,
+                resolution: Some(Resolution::IntoAnnotation(ResolveIntoAnnotation {
+                    kind: 0,
+                    content: "capture this".into(),
+                    tags: vec!["todo".into()],
+                })),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn list_by_symbol_is_unimplemented_without_a_real_index() {
+        let (_t, _state_id, svc) = fresh_service();
+
+        let err = svc
+            .list_by_symbol(Request::new(ListDiscussionsBySymbolRequest {
+                repo_path: String::new(),
+                anchor: Some(PathSymbolRef {
+                    file: "src/lib.rs".into(),
+                    symbol: "foo".into(),
+                }),
+                status: "all".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
     }
 
     #[tokio::test]

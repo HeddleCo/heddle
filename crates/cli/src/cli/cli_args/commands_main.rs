@@ -254,14 +254,14 @@ Examples:
     /// Open or resolve discussions anchored to symbols.
     ///
     /// Open a discussion against a symbol; append turns;
-    /// resolve into an annotation, by edit, or dismissed. Anchors
+    /// resolve by edit or dismiss. Anchors
     /// travel across renames and cross-file moves on subsequent
     /// state mutations.
     #[command(after_help = "\
 Examples:
   heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
   heddle discuss append <id> 'switched to argon2'          # add a turn
-  heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content 'Kept for compatibility'
+  heddle discuss resolve <id> --mode by-edit --state HEAD
 ")]
     Discuss {
         #[command(subcommand)]

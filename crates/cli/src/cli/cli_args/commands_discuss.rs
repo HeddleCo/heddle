@@ -9,7 +9,7 @@ pub enum DiscussCommands {
     Open(DiscussOpenArgs),
     /// Append a turn to an existing discussion.
     Append(DiscussAppendArgs),
-    /// Resolve a discussion (into-annotation, by-edit, or dismissed).
+    /// Resolve a discussion (by-edit or dismissed; into-annotation is not wired yet).
     Resolve(DiscussResolveArgs),
     /// List discussions on a state, symbol, or by status.
     List(DiscussListArgs),
@@ -28,7 +28,7 @@ pub struct DiscussOpenArgs {
     /// State the discussion anchors against. Defaults to HEAD.
     #[arg(long)]
     pub state: Option<String>,
-    /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL`.
+    /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL` | `private:LABEL`.
     #[arg(long)]
     pub visibility: Option<String>,
     /// Optional thread reference for grouping.
@@ -45,16 +45,16 @@ pub struct DiscussAppendArgs {
 #[derive(Clone, Debug, Args)]
 pub struct DiscussResolveArgs {
     pub discussion_id: String,
-    /// Resolution kind: `into-annotation` | `by-edit` | `dismiss`.
+    /// Resolution kind: `by-edit` | `dismiss`. `into-annotation` is reserved but unavailable.
     #[arg(long, value_enum)]
     pub mode: ResolveModeArg,
-    /// For `into-annotation`: annotation kind (`constraint`|`invariant`|`rationale`).
+    /// Reserved for future `into-annotation`: annotation kind.
     #[arg(long)]
     pub annotation_kind: Option<String>,
-    /// For `into-annotation`: annotation content.
+    /// Reserved for future `into-annotation`: annotation content.
     #[arg(long)]
     pub annotation_content: Option<String>,
-    /// For `into-annotation`: optional comma-separated tags.
+    /// Reserved for future `into-annotation`: optional comma-separated tags.
     #[arg(long)]
     pub annotation_tags: Option<String>,
     /// For `by-edit`: state the edit lives on (defaults to HEAD).
@@ -80,7 +80,7 @@ pub struct DiscussListArgs {
     /// Filter by file path.
     #[arg(long)]
     pub file: Option<String>,
-    /// Filter by symbol name.
+    /// Filter by symbol name. Requires `--file`; repository-wide symbol lookup is not wired yet.
     #[arg(long)]
     pub symbol: Option<String>,
     /// Status filter: `open`|`resolved`|`all`|`orphaned`. Default `all`.

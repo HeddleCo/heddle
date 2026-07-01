@@ -143,32 +143,13 @@ async fn run_resolve(
     args: &DiscussResolveArgs,
 ) -> Result<()> {
     use grpc::heddle::v1::resolve_discussion_request::{
-        Resolution, ResolveByEdit, ResolveDismissed, ResolveIntoAnnotation,
+        Resolution, ResolveByEdit, ResolveDismissed,
     };
     let resolution = match args.mode {
         ResolveModeArg::IntoAnnotation => {
-            let kind_str = args.annotation_kind.as_deref().ok_or_else(|| {
-                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_kind())
-            })?;
-            let kind = parse_annotation_kind(kind_str)?;
-            let content = args.annotation_content.clone().ok_or_else(|| {
-                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_content())
-            })?;
-            let tags = args
-                .annotation_tags
-                .as_deref()
-                .map(|raw| {
-                    raw.split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            Resolution::IntoAnnotation(ResolveIntoAnnotation {
-                kind: kind as i32,
-                content,
-                tags,
-            })
+            return Err(anyhow!(
+                "discuss resolve --mode into-annotation is not implemented yet; use --mode by-edit or --mode dismiss"
+            ));
         }
         ResolveModeArg::ByEdit => Resolution::ByEdit(ResolveByEdit {
             state_id: resolve_state(cli, args.state.as_deref())?,
@@ -194,7 +175,12 @@ async fn run_resolve(
 }
 
 async fn run_list(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussListArgs) -> Result<()> {
-    let discussions = if let (Some(file), Some(symbol)) = (&args.file, &args.symbol) {
+    let discussions = if args.file.is_some() || args.symbol.is_some() {
+        let (Some(file), Some(symbol)) = (&args.file, &args.symbol) else {
+            return Err(anyhow!(
+                "discuss list --file and --symbol must be provided together"
+            ));
+        };
         let req = ListDiscussionsBySymbolRequest {
             repo_path: String::new(),
             anchor: Some(PathSymbolRef {
@@ -414,16 +400,4 @@ fn resolve_open_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
 
 fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {
     anyhow!("{}: {}", status.code(), status.message())
-}
-
-fn parse_annotation_kind(value: &str) -> Result<grpc::heddle::v1::ContextAnnotationKind> {
-    use grpc::heddle::v1::ContextAnnotationKind;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "constraint" => Ok(ContextAnnotationKind::Constraint),
-        "invariant" => Ok(ContextAnnotationKind::Invariant),
-        "rationale" => Ok(ContextAnnotationKind::Rationale),
-        other => Err(anyhow!(
-            "invalid --annotation-kind '{other}': expected constraint|invariant|rationale"
-        )),
-    }
 }

@@ -108,18 +108,13 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         let mut stats = OplogEmitStats::default();
         let scope = self.scope.as_deref();
 
-        // Accumulate one `(records, scope)` group per real event across ALL
+        // Accumulate one `(records, scope)` group per real event across all
         // reflog entries, then append the whole sequence in a single call.
         //
-        // The old code called a per-entry `record_*` for every event, and
-        // each call rewrote the entire growing oplog (copy + re-encode +
-        // fsync + rename — `packed_oplog::append_entries`, TODO #423), so N
-        // events cost O(N²). `record_batches_scoped` performs one full-log
-        // rewrite for the whole batch: O(N). Crucially it is NOT a single
-        // mega-batch — each group keeps its own `batch_id` and scope, so the
-        // resulting oplog is byte-for-byte equivalent (ids, batches, scopes,
-        // undo granularity) to what the per-append path produced. Only the
-        // number of disk writes changes.
+        // `record_batches_scoped` performs one full-log rewrite for the whole
+        // batch, while each group still keeps its own `batch_id` and scope.
+        // That preserves undo granularity and replay semantics while avoiding
+        // a rewrite per imported event.
         let mut groups: Vec<(Vec<OpRecord>, Option<&str>)> = Vec::new();
 
         for entry in entries {
@@ -155,9 +150,8 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         groups: &mut Vec<(Vec<OpRecord>, Option<&'g str>)>,
         stats: &mut OplogEmitStats,
     ) {
-        // Only `checkout:` is a pure navigation event — everything else
-        // (commit, reset, merge, pull, rebase, amend) is mirrored in the
-        // per-branch reflog, which already yields the richer thread op.
+        // Only `checkout:` is a pure navigation event; other HEAD movements
+        // are handled from the corresponding branch reflog.
         if !entry.message.starts_with("checkout:") {
             stats.skipped_noop += 1;
             return;
@@ -213,8 +207,8 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 // Git-history ingest does not write a ThreadManager
                 // record — those exist for native heddle threads. Pass
                 // `None` for the snapshot; the recorded
-                // `ThreadCreate` carries no record body to restore
-                // on redo. heddle#23 r2. Mirrors `record_thread_create`.
+                // `ThreadCreate` carries no record body to restore on redo.
+                // Mirrors `record_thread_create`.
                 groups.push((
                     vec![OpRecord::ThreadCreate {
                         name: ThreadName::from(short_name).to_string(),

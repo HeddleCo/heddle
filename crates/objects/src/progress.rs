@@ -11,11 +11,11 @@
 //!
 //! The overwhelmingly common case is "no one is watching" (piped output,
 //! `--output json`, embedded library use). For that case a handle is built
-//! with [`Progress::null`], whose `active` flag is `false`. Every hot-path
-//! call ([`Progress::inc`]) then costs exactly one relaxed atomic add plus a
-//! single predicted-not-taken branch on `active` — no allocation, no syscall,
-//! and no virtual `Sink::render` dispatch. The vtable is only touched when a
-//! sink is actually installed via [`Progress::with_sink`].
+//! with [`Progress::null`], whose sink slot is `None`. Every hot-path call
+//! ([`Progress::inc`]) then costs exactly one relaxed atomic add plus a single
+//! predicted-not-taken branch on the sink slot — no snapshot allocation, no
+//! syscall, and no virtual `Sink::render` dispatch. The vtable is only touched
+//! when a sink is actually installed via [`Progress::with_sink`].
 //!
 //! Throttling (redraw at most every N ticks) is deliberately *not* done here:
 //! [`Progress::inc`] always calls `render` when active, and the [`Sink`]
@@ -51,15 +51,6 @@ pub trait Sink: Send + Sync {
     fn render(&self, snap: ProgressSnapshot);
 }
 
-/// A no-op sink. Never installed as active; exists so [`ProgressInner`] always
-/// holds a concrete `Box<dyn Sink>` and the `active` flag is the sole gate.
-struct NullSink;
-
-impl Sink for NullSink {
-    #[inline]
-    fn render(&self, _snap: ProgressSnapshot) {}
-}
-
 struct ProgressInner {
     done: AtomicUsize,
     total: AtomicUsize,
@@ -67,9 +58,8 @@ struct ProgressInner {
     /// keeps the hot [`Progress::inc`] path lock-free while still letting
     /// [`Progress::set_phase`] mutate the label.
     phase: Mutex<String>,
-    sink: Box<dyn Sink>,
-    /// Master gate for the entire render path. `false` for null handles.
-    active: bool,
+    /// `None` is the null path: no boxed sink, no snapshot, no vtable dispatch.
+    sink: Option<Box<dyn Sink>>,
 }
 
 /// A cheap-to-clone progress handle.
@@ -88,8 +78,7 @@ impl Progress {
             done: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
             phase: Mutex::new(String::new()),
-            sink: Box::new(NullSink),
-            active: false,
+            sink: None,
         }))
     }
 
@@ -100,15 +89,14 @@ impl Progress {
             done: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
             phase: Mutex::new(String::new()),
-            sink,
-            active: true,
+            sink: Some(sink),
         }))
     }
 
     /// Whether this handle renders. `false` for [`Progress::null`].
     #[inline]
     pub fn is_active(&self) -> bool {
-        self.0.active
+        self.0.sink.is_some()
     }
 
     /// Set the total unit count. Cheap; does not trigger a render on its own.
@@ -137,7 +125,7 @@ impl Progress {
             let mut guard = self.lock_phase();
             *guard = label;
         }
-        if self.0.active {
+        if self.0.sink.is_some() {
             self.render_current();
         }
     }
@@ -149,12 +137,12 @@ impl Progress {
 
     /// Advance the completed count by `n` and, if active, render.
     ///
-    /// Hot path: `done.fetch_add(n, Relaxed)` then one branch on `active`. When
-    /// inactive nothing else happens — no snapshot, no vtable call.
+    /// Hot path: `done.fetch_add(n, Relaxed)` then one branch on the optional
+    /// sink. When inactive nothing else happens — no snapshot, no vtable call.
     #[inline]
     pub fn inc(&self, n: usize) {
         self.0.done.fetch_add(n, Ordering::Relaxed);
-        if self.0.active {
+        if self.0.sink.is_some() {
             self.render_current();
         }
     }
@@ -162,12 +150,14 @@ impl Progress {
     /// Snapshot the current state and hand it to the sink. Cold relative to the
     /// `active` check in `inc`, so it stays out-of-line.
     fn render_current(&self) {
-        let snap = ProgressSnapshot {
-            done: self.0.done.load(Ordering::Relaxed),
-            total: self.0.total.load(Ordering::Relaxed),
-            phase: self.lock_phase().clone(),
-        };
-        self.0.sink.render(snap);
+        if let Some(sink) = &self.0.sink {
+            let snap = ProgressSnapshot {
+                done: self.0.done.load(Ordering::Relaxed),
+                total: self.0.total.load(Ordering::Relaxed),
+                phase: self.lock_phase().clone(),
+            };
+            sink.render(snap);
+        }
     }
 
     /// Take a current snapshot without rendering. Useful for a sink that wants
@@ -190,7 +180,7 @@ impl std::fmt::Debug for Progress {
         f.debug_struct("Progress")
             .field("done", &self.done())
             .field("total", &self.total())
-            .field("active", &self.0.active)
+            .field("active", &self.is_active())
             .finish_non_exhaustive()
     }
 }
@@ -242,10 +232,10 @@ mod tests {
 
     #[test]
     fn null_path_renders_nothing_under_a_tight_loop() {
-        // `null()` installs an inactive NullSink. A tight `inc` loop must only
-        // advance the counter and hit the predicted-not-taken `active` branch —
-        // no render, no panic. This is the smoke test for the null hot path;
-        // the real guarantee is the single `if self.0.active` gate in `inc`.
+        // `null()` installs no sink. A tight `inc` loop must only advance the
+        // counter and hit the predicted-not-taken sink branch — no render, no
+        // panic. This is the smoke test for the null hot path; the real
+        // guarantee is the single `self.0.sink.is_some()` gate in `inc`.
         let p = Progress::null();
         assert!(!p.is_active());
         for _ in 0..1_000_000 {
@@ -258,8 +248,7 @@ mod tests {
     #[test]
     fn inactive_handle_never_dispatches_render() {
         // A null handle stays silent even through set_phase/set_total, which on
-        // an active handle would render. The `active` flag — not sink identity —
-        // is the sole gate.
+        // an active handle would render. The absence of a sink is the sole gate.
         let p = Progress::null();
         p.set_total(50);
         p.set_phase("noise");

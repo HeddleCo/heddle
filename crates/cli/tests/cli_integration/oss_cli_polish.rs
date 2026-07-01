@@ -9687,78 +9687,88 @@ fn context_invalid_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn discuss_resolve_conditional_options_use_typed_advice_json() {
+fn discuss_resolve_into_annotation_reports_unimplemented_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    for (args, expected_kind, expected_error, expected_hint) in [
-        (
-            vec![
-                "--output",
-                "json",
-                "discuss",
-                "resolve",
-                "d1",
-                "--mode",
-                "into-annotation",
-            ],
-            "discuss_resolve_missing_annotation_kind",
-            "--annotation-kind is required for into-annotation",
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "discuss",
+            "resolve",
+            "d1",
+            "--mode",
+            "into-annotation",
             "--annotation-kind",
-        ),
-        (
-            vec![
-                "--output",
-                "json",
-                "discuss",
-                "resolve",
-                "d1",
-                "--mode",
-                "into-annotation",
-                "--annotation-kind",
-                "rationale",
-            ],
-            "discuss_resolve_missing_annotation_content",
-            "--annotation-content is required for into-annotation",
+            "rationale",
             "--annotation-content",
-        ),
-        (
-            vec![
-                "--output", "json", "discuss", "resolve", "d1", "--mode", "dismiss",
-            ],
-            "discuss_resolve_missing_dismiss_reason",
-            "--reason is required for dismiss",
-            "--reason",
-        ),
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke discuss resolve");
-        assert!(
-            !output.status.success(),
-            "conditional discuss resolve option should fail"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "JSON-mode discuss refusal must keep stdout quiet: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
-        assert_eq!(envelope["kind"], expected_kind);
-        assert_json_recovery_advice_fields(&envelope, stderr);
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains(expected_error)),
-            "discuss refusal should keep the centralized error: {stderr}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains(expected_hint)),
-            "discuss refusal hint should name the missing flag: {stderr}"
-        );
-    }
+            "Future annotation body",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke discuss resolve");
+    assert!(
+        !output.status.success(),
+        "reserved discuss resolve mode should fail"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode discuss refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "runtime_error");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error
+                .contains("discuss resolve --mode into-annotation is not implemented yet")),
+        "reserved discuss mode should report that it is not wired yet: {stderr}"
+    );
+}
+
+#[test]
+fn discuss_resolve_dismiss_requires_reason_with_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output", "json", "discuss", "resolve", "d1", "--mode", "dismiss",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke discuss resolve");
+    assert!(
+        !output.status.success(),
+        "conditional discuss resolve option should fail"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode discuss refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "discuss_resolve_missing_dismiss_reason");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("--reason is required for dismiss")),
+        "discuss refusal should keep the centralized error: {stderr}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--reason")),
+        "discuss refusal hint should name the missing flag: {stderr}"
+    );
 }
 
 #[test]

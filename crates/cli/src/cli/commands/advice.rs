@@ -570,24 +570,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn discuss_resolve_missing_annotation_kind() -> Self {
-        Self::missing_option(
-            "discuss_resolve_missing_annotation_kind",
-            "--annotation-kind",
-            "into-annotation",
-            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
-        )
-    }
-
-    pub(crate) fn discuss_resolve_missing_annotation_content() -> Self {
-        Self::missing_option(
-            "discuss_resolve_missing_annotation_content",
-            "--annotation-content",
-            "into-annotation",
-            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
-        )
-    }
-
     pub(crate) fn discuss_resolve_missing_dismiss_reason() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_dismiss_reason",

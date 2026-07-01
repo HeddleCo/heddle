@@ -17,10 +17,12 @@
 //! | `Internal`               | yes                 | no       | yes                     | no           |
 //! | `TeamScoped { team }`    | yes                 | no       | only if `team == X`     | no           |
 //! | `Restricted { ... }`     | yes                 | no       | no                      | only equal label |
+//! | `Private { ... }`        | no                  | no       | no                      | only equal label |
 //!
-//! `Internal` is the most permissive tier (used by the workspace-internal
-//! reader); `Public` is the most restrictive (used by anonymous web
-//! viewers and by `bridge git export` by default).
+//! `Internal` is the broadest ordinary audience (used by the
+//! workspace-internal reader); `Public` is the anonymous/public audience.
+//! `Private` is stricter than both: only the matching restricted-scope holder
+//! can read it.
 
 use std::str::FromStr;
 
