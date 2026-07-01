@@ -74,9 +74,12 @@ impl LocalSync {
         state_id: &ChangeId,
         depth: u32,
     ) -> Result<usize> {
+        let state_already_present = target.store().get_state(state_id)?.is_some();
         let transfer_plan = self.plan_state_transfer(*state_id, Some(depth))?;
         let copied = self.copy_transfer_plan(target, &transfer_plan)?;
-        self.mark_shallow_boundaries(target, *state_id, depth)?;
+        if !state_already_present {
+            self.mark_shallow_boundaries(target, *state_id, depth)?;
+        }
         Ok(copied)
     }
 
@@ -276,4 +279,54 @@ fn state_metadata_roots_changed(
         || target_state.review_signatures != source_state.review_signatures
         || target_state.discussions != source_state.discussions
         || target_state.structured_conflicts != source_state.structured_conflicts
+}
+
+#[cfg(test)]
+mod tests {
+    use objects::object::{Attribution, Principal};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn attribution() -> Attribution {
+        Attribution::human(Principal::new("Test User", "test@example.com"))
+    }
+
+    fn capture(repo: &Repository, file_content: &str, message: &str) -> ChangeId {
+        std::fs::write(repo.root().join("file.txt"), file_content).unwrap();
+        repo.snapshot_with_attribution(Some(message.to_string()), None, attribution())
+            .unwrap()
+            .change_id
+    }
+
+    #[test]
+    fn shallow_refetch_does_not_graft_already_present_history() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        let target = Repository::init_default(target_dir.path()).unwrap();
+
+        let _first = capture(&source, "one\n", "one");
+        let second = capture(&source, "two\n", "two");
+        let third = capture(&source, "three\n", "three");
+
+        let sync = LocalSync::open(source_dir.path()).unwrap();
+        sync.fetch_state(&target, &third).unwrap();
+
+        assert!(
+            target.store().get_state(&second).unwrap().is_some(),
+            "full fetch should copy the parent state before the shallow re-fetch"
+        );
+        assert!(
+            !target.is_shallow(&second),
+            "parent starts as normal visible history"
+        );
+
+        sync.fetch_state_with_depth(&target, &third, 1).unwrap();
+
+        assert!(
+            !target.is_shallow(&second),
+            "incremental shallow re-fetch of an already-present tip must not graft its parent"
+        );
+    }
 }
