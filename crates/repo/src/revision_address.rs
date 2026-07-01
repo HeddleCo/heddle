@@ -64,7 +64,7 @@ impl FromStr for RevisionAddress {
                 return Err(RevisionAddressParseError::EmptyGitCommit);
             }
             validate_git_commit_oid(oid)?;
-            return Ok(Self::GitCommit(oid.to_string()));
+            return Ok(Self::GitCommit(oid.to_ascii_lowercase()));
         }
         Err(RevisionAddressParseError::UnknownPrefix)
     }
@@ -123,6 +123,33 @@ mod tests {
             address
         );
         assert_eq!(address.storage_prefix(), "git");
+    }
+
+    #[cfg(feature = "git-overlay")]
+    #[test]
+    fn git_revision_address_normalizes_oid_case_on_parse() {
+        let lowercase_sha1 = "0123456789abcdef0123456789abcdef01234567";
+        let uppercase_sha1 = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let lowercase_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let uppercase_sha256 = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+
+        let from_lower_sha1 = format!("git:{lowercase_sha1}")
+            .parse::<RevisionAddress>()
+            .expect("parse lowercase sha1");
+        let from_upper_sha1 = format!("git:{uppercase_sha1}")
+            .parse::<RevisionAddress>()
+            .expect("parse uppercase sha1");
+        let from_lower_sha256 = format!("git:{lowercase_sha256}")
+            .parse::<RevisionAddress>()
+            .expect("parse lowercase sha256");
+        let from_upper_sha256 = format!("git:{uppercase_sha256}")
+            .parse::<RevisionAddress>()
+            .expect("parse uppercase sha256");
+
+        assert_eq!(from_upper_sha1, from_lower_sha1);
+        assert_eq!(from_upper_sha256, from_lower_sha256);
+        assert_eq!(from_upper_sha1.to_string(), format!("git:{lowercase_sha1}"));
+        assert_eq!(from_upper_sha256.to_string(), format!("git:{lowercase_sha256}"));
     }
 
     #[cfg(feature = "git-overlay")]
