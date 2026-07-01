@@ -6,6 +6,7 @@ use std::{io::IsTerminal, sync::OnceLock};
 pub mod cli_args;
 pub mod commands;
 pub mod help;
+pub mod progress_render;
 pub mod render;
 pub mod style;
 pub mod tips;
