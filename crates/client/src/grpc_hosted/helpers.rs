@@ -91,17 +91,7 @@ pub(super) fn parse_object_id(
 }
 
 pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError> {
-    match value {
-        "blob" => Ok(ObjectType::Blob),
-        "tree" => Ok(ObjectType::Tree),
-        "state" => Ok(ObjectType::State),
-        "action" => Ok(ObjectType::Action),
-        "redaction" => Ok(ObjectType::Redaction),
-        "state_visibility" => Ok(ObjectType::StateVisibility),
-        _ => Err(ProtocolError::InvalidState(format!(
-            "unknown object type: {value}"
-        ))),
-    }
+    ObjectType::from_wire(value)
 }
 
 pub(super) fn to_proto_object_info(info: &ObjectInfo) -> ObjectDescriptor {
@@ -132,14 +122,7 @@ pub(super) fn transport_mode_name(mode: i32) -> &'static str {
 }
 
 pub(super) fn object_type_name(obj_type: ObjectType) -> &'static str {
-    match obj_type {
-        ObjectType::Blob => "blob",
-        ObjectType::Tree => "tree",
-        ObjectType::State => "state",
-        ObjectType::Action => "action",
-        ObjectType::Redaction => "redaction",
-        ObjectType::StateVisibility => "state_visibility",
-    }
+    obj_type.wire_name()
 }
 
 pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, String) {

@@ -3,7 +3,7 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{ChangeId, ContentHash, State, TreeEntryTarget},
-    store::ObjectStore,
+    store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,75 @@ pub enum ObjectType {
     /// is a sidecar record that lives outside the content-addressed pack
     /// and ships via the per-object transfer path, not the pack.
     StateVisibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObjectTypeBucket {
+    Blob,
+    Tree,
+    State,
+    Action,
+    Redaction,
+    StateVisibility,
+}
+
+impl ObjectType {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            ObjectType::Blob => "blob",
+            ObjectType::Tree => "tree",
+            ObjectType::State => "state",
+            ObjectType::Action => "action",
+            ObjectType::Redaction => "redaction",
+            ObjectType::StateVisibility => "state_visibility",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Result<Self> {
+        match value {
+            "blob" => Ok(ObjectType::Blob),
+            "tree" => Ok(ObjectType::Tree),
+            "state" => Ok(ObjectType::State),
+            "action" => Ok(ObjectType::Action),
+            "redaction" => Ok(ObjectType::Redaction),
+            "state_visibility" => Ok(ObjectType::StateVisibility),
+            _ => Err(ProtocolError::InvalidState(format!(
+                "unknown object type: {value}"
+            ))),
+        }
+    }
+
+    pub fn packable(self) -> bool {
+        !matches!(self, ObjectType::Redaction | ObjectType::StateVisibility)
+    }
+
+    pub fn pack_object_type(self) -> Result<PackObjectType> {
+        match self {
+            ObjectType::Blob => Ok(PackObjectType::Blob),
+            ObjectType::Tree => Ok(PackObjectType::Tree),
+            ObjectType::State => Ok(PackObjectType::State),
+            ObjectType::Action => Ok(PackObjectType::Action),
+            ObjectType::Redaction => Err(ProtocolError::InvalidState(
+                "Redaction sidecar records cannot be packed into the content-addressed object pack"
+                    .to_string(),
+            )),
+            ObjectType::StateVisibility => Err(ProtocolError::InvalidState(
+                "StateVisibility sidecar records cannot be packed into the content-addressed object pack"
+                    .to_string(),
+            )),
+        }
+    }
+
+    pub fn bucket(self) -> ObjectTypeBucket {
+        match self {
+            ObjectType::Blob => ObjectTypeBucket::Blob,
+            ObjectType::Tree => ObjectTypeBucket::Tree,
+            ObjectType::State => ObjectTypeBucket::State,
+            ObjectType::Action => ObjectTypeBucket::Action,
+            ObjectType::Redaction => ObjectTypeBucket::Redaction,
+            ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

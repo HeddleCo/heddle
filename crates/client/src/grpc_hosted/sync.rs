@@ -36,8 +36,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use wire::{
-    GitLaneTransferIntent, ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete,
-    PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
+    GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, ProtocolError,
+    PullComplete, PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
 };
 
 use super::{
@@ -119,13 +119,13 @@ pub struct HostedRefEntry {
 
 impl PullObjectMix {
     fn record(&mut self, obj_type: ObjectType) {
-        match obj_type {
-            ObjectType::Blob => self.blobs += 1,
-            ObjectType::Tree => self.trees += 1,
-            ObjectType::State => self.states += 1,
-            ObjectType::Action => self.actions += 1,
-            ObjectType::Redaction => self.redactions += 1,
-            ObjectType::StateVisibility => self.state_visibilities += 1,
+        match obj_type.bucket() {
+            ObjectTypeBucket::Blob => self.blobs += 1,
+            ObjectTypeBucket::Tree => self.trees += 1,
+            ObjectTypeBucket::State => self.states += 1,
+            ObjectTypeBucket::Action => self.actions += 1,
+            ObjectTypeBucket::Redaction => self.redactions += 1,
+            ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
         }
     }
 
@@ -1284,7 +1284,7 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
         types
             .iter()
             .copied()
-            .find(|obj_type| wire::is_native_packable_object_type(*obj_type))
+            .find(|obj_type| obj_type.packable())
     })
 }
 
