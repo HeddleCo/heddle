@@ -3,14 +3,14 @@ use std::path::Path;
 
 use objects::{
     object::{
-        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin, OriginSet,
-        Principal, State, Tree, TreeEntry,
+        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin,
+        OriginSet, Principal, State, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
 use tempfile::TempDir;
 
-use super::helpers::{build_single_origin_provenance, lcs_line_matches};
+use super::helpers::{build_single_origin_provenance, lcs_line_matches, lookup_tree_entry};
 use crate::Repository;
 
 #[test]
@@ -418,4 +418,56 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
     let line_sets = provenance.line_origin_set_indexes().unwrap();
     let first_line_origins = &provenance.origin_sets[line_sets[0] as usize].origin_indexes;
     assert_eq!(first_line_origins, &[0]);
+}
+
+#[test]
+fn lookup_tree_entry_characterizes_entry_policy_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let store = repo.store();
+
+    let blob_hash = store.put_blob(&Blob::from_slice(b"blob content")).unwrap();
+    let symlink_hash = store.put_blob(&Blob::from_slice(b"target.txt")).unwrap();
+    let nested_blob_hash = store
+        .put_blob(&Blob::from_slice(b"nested content"))
+        .unwrap();
+    let missing_subtree_hash = ContentHash::compute(b"not-in-store");
+
+    let nested_tree = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("inner.txt", nested_blob_hash, false).unwrap(),
+        ]))
+        .unwrap();
+    let missing_parent = store
+        .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
+            "ghost".to_string(),
+            missing_subtree_hash,
+        )
+        .unwrap()]))
+        .unwrap();
+    let root_hash = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt", blob_hash, false).unwrap(),
+            TreeEntry::symlink("link".to_string(), symlink_hash).unwrap(),
+            TreeEntry::directory("dir".to_string(), nested_tree).unwrap(),
+            TreeEntry::directory("missing".to_string(), missing_parent).unwrap(),
+        ]))
+        .unwrap();
+    let tree = store.get_tree(&root_hash).unwrap().unwrap();
+
+    let file = lookup_tree_entry(&repo, &tree, Path::new("file.txt")).unwrap();
+    assert_eq!(file.blob_hash(), Some(blob_hash));
+
+    let link = lookup_tree_entry(&repo, &tree, Path::new("link")).unwrap();
+    assert!(link.is_symlink());
+
+    let dir = lookup_tree_entry(&repo, &tree, Path::new("dir")).unwrap();
+    assert!(dir.is_tree());
+
+    let nested = lookup_tree_entry(&repo, &tree, Path::new("dir/inner.txt")).unwrap();
+    assert_eq!(nested.blob_hash(), Some(nested_blob_hash));
+
+    assert!(lookup_tree_entry(&repo, &tree, Path::new("nope.txt")).is_none());
+    assert!(lookup_tree_entry(&repo, &tree, Path::new("dir/missing.txt")).is_none());
+    assert!(lookup_tree_entry(&repo, &tree, Path::new("missing/ghost/inner.txt")).is_none());
 }
