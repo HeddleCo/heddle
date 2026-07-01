@@ -365,6 +365,136 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
     }
 }
 
+/// Regression (#839): `heddle fetch` on a git-overlay repo whose remote is a
+/// hosted `heddle://` endpoint (with an EMPTY `[hosted]` config block, so
+/// `hosted_enabled() == false`) must route through the native hosted-sync path
+/// (`fetch_network`), NOT the git-overlay exporter. The bug: the entry-gate
+/// guard in `cmd_fetch` lacked pull's `!fetch_uses_hosted_network` term, so a
+/// hosted remote entered the overlay branch and hit `local_path_from_url`,
+/// which HARD-ERRORS on any `heddle://` URL with "...cannot be pushed via the
+/// git-overlay exporter" — a push-flavoured error during a *fetch*.
+///
+/// No live server runs in CI, so we assert on the ROUTING DECISION: a correctly
+/// routed hosted fetch fails on the CONNECTION to the (absent) server, while the
+/// bug fails on the exporter's scheme rejection. We reject that specific
+/// scheme-rejection signature and accept any connection-flavoured failure.
+#[test]
+fn git_overlay_fetch_heddle_scheme_routes_to_hosted_not_git_exporter() {
+    let source = TempDir::new().unwrap();
+
+    // Real git-overlay repo (git init + heddle adopt): capability() is
+    // GitOverlay and `[hosted]` is empty — exactly the buggy predicate's input.
+    git_ok(&["init", "-b", "main"], source.path());
+    git_ok(&["config", "user.name", "Heddle Test"], source.path());
+    git_ok(
+        &["config", "user.email", "heddle@example.com"],
+        source.path(),
+    );
+    std::fs::write(source.path().join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], source.path());
+    git_ok(&["commit", "-m", "seed"], source.path());
+    heddle(&["adopt", "--ref", "main"], Some(source.path())).expect("adopt source Git repo");
+
+    // A hosted heddle:// remote pointing at a port nothing is listening on,
+    // exercised through both invocation forms that resolve to it (inline URL
+    // and named remote), each of which must route identically.
+    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    heddle(
+        &["remote", "add", "origin", hosted_url],
+        Some(source.path()),
+    )
+    .expect("add hosted origin remote");
+
+    for fetch_arg in [hosted_url, "origin"] {
+        let output = heddle_output(&["fetch", fetch_arg], Some(source.path()))
+            .expect("spawn heddle fetch");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}{stderr}");
+
+        // The exact bug signature: the git-overlay exporter rejecting the
+        // heddle:// scheme. That message must never appear for a fetch — a
+        // fetch that reaches the git-overlay exporter is mis-routed.
+        assert!(
+            !combined.contains("cannot be pushed via the git-overlay exporter"),
+            "`heddle fetch {fetch_arg}` was mis-routed to the git-overlay exporter \
+             (scheme-rejection error) instead of the hosted-sync path.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+
+        // A hosted fetch that cannot reach a server must fail loudly (the dead
+        // port yields a connection error, or a `client`-feature-less build's
+        // `network_feature_unavailable`) — proving it reached the hosted
+        // transport rather than the overlay exporter's local reconcile.
+        assert!(
+            !output.status.success(),
+            "`heddle fetch {fetch_arg}` to an unreachable hosted remote must fail \
+             loudly (connection error), not succeed.\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+}
+
+/// Regression (#839, `--all` mixed set): `heddle fetch --all` on a git-overlay
+/// repo that has BOTH a local-git remote and a hosted `heddle://` remote must
+/// route each remote by its own scheme — overlay-fetch the git remote, hosted
+/// `fetch_network` the heddle:// remote — not gate the whole batch on a single
+/// classification. The git remote is reachable (a real bare repo) so the batch
+/// gets as far as the hosted remote, which then fails on its dead-port
+/// connection — NOT on the overlay exporter's scheme rejection.
+#[test]
+fn git_overlay_fetch_all_routes_mixed_remotes_per_scheme() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+    let src = SleyRepository::init_bare(&source).expect("init bare source");
+
+    let tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    git_commit_with_tree(&src, Some("refs/heads/main"), tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let source_arg = source.to_str().expect("source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    // Clone from the local git remote — `origin` now points at the bare repo.
+    heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
+
+    // Add a SECOND, hosted heddle:// remote alongside the git `origin`.
+    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    heddle(&["remote", "add", "hosted", hosted_url], Some(&work))
+        .expect("add hosted remote");
+
+    let output = heddle_output(&["fetch", "--all"], Some(&work)).expect("spawn heddle fetch --all");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // The hosted remote in the batch must never be routed to the git-overlay
+    // exporter — that scheme-rejection error is the mis-route signature.
+    assert!(
+        !combined.contains("cannot be pushed via the git-overlay exporter"),
+        "`heddle fetch --all` mis-routed the hosted remote to the git-overlay \
+         exporter instead of the hosted-sync path.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The git remote is reachable but the hosted one is not, so the overall
+    // command must fail loudly on the hosted connection rather than silently
+    // succeed or reject the whole batch on the exporter scheme error.
+    assert!(
+        !output.status.success(),
+        "`heddle fetch --all` with an unreachable hosted remote in the set must \
+         fail loudly (hosted connection error).\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Regression guard: the reachable git remote was still fetched — its
+    // remote-tracking ref exists — proving the hosted failure did not skip the
+    // git remote's overlay fetch.
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], &source),
+        "the git remote in a mixed --all set must still be overlay-fetched"
+    );
+}
+
 #[test]
 fn test_cli_remote_show_missing_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
