@@ -1093,11 +1093,31 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         // full `daemon_stop` payload, so a bare init fixture suffices.
         "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
         "oplog_recover" => {
-            // Seed three captures, then truncate the packed oplog mid-record so
-            // the footer is destroyed and the salvage takes the forward-greedy
-            // path. The CLI's repo open auto-recovers before the handler runs,
-            // so `oplog recover` reports the prior recovery from the sidecar —
-            // the realistic operator key set (no `quarantine_path`).
+            // Seed three captures, then truncate the packed oplog so the index
+            // trailer is destroyed and any read takes the forward-greedy salvage
+            // path.
+            //
+            // DETERMINISM (heddle#272 flake fix): the `oplog recover` payload has
+            // TWO shapes depending on WHO performs the salvage:
+            //   * the everyday read path's silent auto-fallback salvaged first →
+            //     handler reports `prior_recovery: true` from the durable
+            //     `.oplog.recovery` sidecar, `quarantine_path` OMITTED; or
+            //   * the `recover` handler itself is the first to touch the damaged
+            //     body → `prior_recovery: false`, `quarantine_path` PRESENT.
+            // Which one fires is a race between the recover command's own
+            // repo-open reads (reconciler / status hooks call
+            // `PackedOpLogIndex::open`, which auto-salvages) and the handler's
+            // explicit `recover()`. That race resolved differently across
+            // environments — green locally (auto-fallback won) but red on CI
+            // (handler won, emitting the extra `quarantine_path` key), so the
+            // documented sample's key set drifted from runtime non-deterministically.
+            //
+            // Pin the auto-fallback variant by running a benign read FIRST: it
+            // forces the silent salvage to complete (heals `oplog.bin`, quarantines
+            // the damaged original, writes the sidecar) BEFORE `oplog recover`
+            // opens the repo. From that point the handler ALWAYS sees a healthy
+            // oplog plus the sidecar and reports `prior_recovery: true` with no
+            // `quarantine_path` — the stable operator key set the doc documents.
             let t = init_fixture();
             for i in 1..=3 {
                 std::fs::write(t.path().join("f.txt"), format!("v{i}")).unwrap();
@@ -1108,6 +1128,9 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             let bytes = std::fs::read(&oplog).expect("read fixture oplog");
             let cut = bytes.len() * 6 / 10;
             std::fs::write(&oplog, &bytes[..cut]).expect("truncate fixture oplog");
+            // Benign read: deterministically drive the silent auto-fallback to
+            // salvage the oplog before the recover handler ever opens the repo.
+            heddle(&["status"], Some(t.path())).expect("status triggers oplog auto-recovery");
             (t, sv(&["oplog", "recover"]))
         }
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
