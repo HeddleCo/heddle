@@ -1,27 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared human progress rendering for Git history import flows.
-
-use std::io::{self, IsTerminal, Write};
+//!
+//! This is a thin *consumer* of the generic [`Progress`](objects::Progress)
+//! substrate: it owns the import-specific phrasing (the `[n/3]` phased steps and
+//! the per-commit inspected/percent body) and drives a `Progress` handle. All
+//! TTY concerns — `\r`-redraw, dim styling, the completion line, and JSON
+//! suppression — live in the shared `TerminalSink` (`progress_render`), not
+//! here. The per-commit throttle stays here because the body carries fields
+//! (`states_created`) the generic snapshot does not model.
 
 use ingest::ImportProgressEvent;
+use objects::Progress;
 use repo::Repository;
 
-use crate::cli::{Cli, should_output_json, style};
-
-/// Redraw the live commit counter at most once per this many commits, so a
-/// large import doesn't spend its time flushing the terminal.
-const COMMIT_TICK_INTERVAL: usize = 64;
+use crate::cli::progress_render::{COMMIT_TICK_INTERVAL, finish_line, progress_for};
+use crate::cli::{Cli, style};
 
 pub(crate) struct ImportProgress {
-    enabled: bool,
+    /// The generic handle. A null handle (under `--json`) makes every method a
+    /// no-op that renders nothing.
+    progress: Progress,
     current: usize,
     total: usize,
 }
 
 impl ImportProgress {
     pub(crate) fn start(cli: &Cli, repo: &Repository, scope: &str, source_label: &str) -> Self {
-        let enabled = !should_output_json(cli, Some(repo.config()));
-        if enabled {
+        let progress = progress_for(cli, repo);
+        if progress.is_active() {
             println!(
                 "{} {} from {}",
                 style::dim("Importing Git history:"),
@@ -29,13 +35,14 @@ impl ImportProgress {
                 style::dim(source_label)
             );
         }
-        let progress = Self {
-            enabled,
+        let this = Self {
+            progress,
             current: 0,
             total: 3,
         };
-        progress.step("scanning refs");
-        progress
+        this.progress.set_total(this.total);
+        this.step("scanning refs");
+        this
     }
 
     pub(crate) fn advance(&mut self, label: &str) {
@@ -59,12 +66,13 @@ impl ImportProgress {
         self.advance("writing refs");
     }
 
-    /// Live per-commit counter for the import phase. Renders only to a TTY
-    /// with redraw control codes. Piped human output gets throttled plain
-    /// lines; under `--json`/agent output it is a no-op so progress never
-    /// leaks into machine-readable stdout (#550).
+    /// Live per-commit counter for the import phase. Under `--json` the handle
+    /// is null so this is a no-op (progress never leaks into machine-readable
+    /// stdout, #550). Throttling on the commit count happens here — a throttled
+    /// tick becomes a `set_phase` on the substrate, which the `TerminalSink`
+    /// paints (it always repaints on a phase-string change).
     pub(crate) fn commit_tick(&mut self, event: ImportProgressEvent) {
-        if !self.enabled {
+        if !self.progress.is_active() {
             return;
         }
         if !should_render_commit_progress(event) {
@@ -81,44 +89,26 @@ impl ImportProgress {
             self.total,
             format_commit_progress(event),
         );
-        if io::stdout().is_terminal() {
-            print!("\r{}\x1b[K", style::dim(&line));
-            io::stdout().flush().ok();
-        } else {
-            println!("{}", style::dim(&line));
-        }
+        self.progress.set_phase(line);
     }
 
     pub(crate) fn finish(&mut self) {
-        if !self.enabled {
+        if !self.progress.is_active() {
             return;
         }
         self.current = self.total;
-        if io::stdout().is_terminal() {
-            print!("\r\x1b[K{}\n", style::accent("[done] imported Git history"));
-            io::stdout().flush().ok();
-        } else {
-            println!("{}", style::accent("[done] imported Git history"));
-        }
+        finish_line(&self.progress, "[done] imported Git history");
     }
 
+    /// Paint a phased `[n/total] label...` step. `set_phase` forces a repaint on
+    /// the phase-string change, matching the historic always-render step.
     fn step(&self, label: &str) {
-        if !self.enabled {
+        if !self.progress.is_active() {
             return;
         }
         let next = self.current + 1;
-        if io::stdout().is_terminal() {
-            print!(
-                "\r\x1b[K{}",
-                style::dim(&format!("[{next}/{}] {label}...", self.total))
-            );
-            io::stdout().flush().ok();
-        } else {
-            println!(
-                "{}",
-                style::dim(&format!("[{next}/{}] {label}", self.total))
-            );
-        }
+        self.progress
+            .set_phase(format!("[{next}/{}] {label}...", self.total));
     }
 }
 
