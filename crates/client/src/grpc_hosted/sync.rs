@@ -221,8 +221,10 @@ impl HostedGrpcClient {
                 .unwrap_or_default(),
             new_value: new_value.to_string_full(),
             thread_metadata: thread_metadata.map(to_proto_thread_metadata),
-            old_revision_address: old_value.map(native_revision_address).unwrap_or_default(),
-            new_revision_address: native_revision_address(new_value),
+            old_revision_address: old_value
+                .map(|value| RevisionAddress::heddle(value).to_string())
+                .unwrap_or_default(),
+            new_revision_address: RevisionAddress::heddle(new_value).to_string(),
             client_operation_id: String::new(),
         });
         self.apply_auth(&mut request)?;
@@ -260,7 +262,7 @@ impl HostedGrpcClient {
             local_state,
             target_thread,
             force,
-            native_revision_address(local_state),
+            RevisionAddress::heddle(local_state).to_string(),
             None,
             &Progress::null(),
         )
@@ -834,7 +836,7 @@ impl HostedGrpcClient {
                 fresh_full_pull,
                 target_revision_address: options
                     .target_state
-                    .map(native_revision_address)
+                    .map(|state| RevisionAddress::heddle(state).to_string())
                     .unwrap_or_default(),
                 client_operation_id: String::new(),
             })),
@@ -1743,14 +1745,6 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
     )
 }
 
-fn native_revision_address(change_id: ChangeId) -> String {
-    RevisionAddress::heddle(change_id).to_string()
-}
-
-fn git_revision_address(commit_oid: &GitObjectId) -> String {
-    RevisionAddress::git_commit(commit_oid.to_hex()).to_string()
-}
-
 /// Build the git-mirror push plan: read ALL refs from the git ODB, resolve
 /// each to its object oid, build ONE multi-root pack over the resolved
 /// targets, and emit N checkpoint-less `GitRefUpdateTransfer` messages.
@@ -1878,7 +1872,7 @@ fn build_git_mirror_plan_from_sley(
     // `local_revision_address` is advisory in mirror mode (per-ref
     // expectations are already applied); use the first resolved target.
     let local_revision_address = newest_root
-        .map(|oid| git_revision_address(&oid))
+        .map(|oid| RevisionAddress::git_commit(oid.to_hex()).to_string())
         .unwrap_or_default();
 
     Ok(GitLanePushPlan {
@@ -2208,23 +2202,21 @@ enum GitRefRemoteExpectation {
 fn parse_git_ref_expectation(
     remote_revision_address: &str,
 ) -> Result<GitRefRemoteExpectation, ProtocolError> {
-    if remote_revision_address.is_empty() || remote_revision_address.starts_with("heddle:") {
+    if remote_revision_address.is_empty() {
         return Ok(GitRefRemoteExpectation::Missing);
     }
-    let Some(hex_oid) = remote_revision_address.strip_prefix("git:") else {
-        return Err(ProtocolError::InvalidState(format!(
-            "server returned unsupported remote_revision_address {remote_revision_address:?}"
-        )));
-    };
-    let oid = hex::decode(hex_oid).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "server returned invalid Git remote_revision_address: {err}"
-        ))
-    })?;
-    match oid.len() {
-        20 | 32 => Ok(GitRefRemoteExpectation::Value(oid)),
-        len => Err(ProtocolError::InvalidState(format!(
-            "server returned Git remote_revision_address with {len} bytes; expected SHA-1 or SHA-256"
+
+    match remote_revision_address.parse::<RevisionAddress>() {
+        Ok(RevisionAddress::Heddle(_)) => Ok(GitRefRemoteExpectation::Missing),
+        Ok(RevisionAddress::GitCommit(oid)) => hex::decode(&oid)
+            .map(GitRefRemoteExpectation::Value)
+            .map_err(|err| {
+                ProtocolError::InvalidState(format!(
+                    "server returned invalid Git remote_revision_address: {err}"
+                ))
+            }),
+        Err(err) => Err(ProtocolError::InvalidState(format!(
+            "server returned invalid remote_revision_address {remote_revision_address:?}: {err}"
         ))),
     }
 }
@@ -3757,7 +3749,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 1,
-                        remote_revision_address: native_revision_address(state),
+                        remote_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -3805,7 +3797,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(state),
+                        new_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -4137,7 +4129,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 2,
-                        remote_revision_address: native_revision_address(state),
+                        remote_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -4200,7 +4192,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(state),
+                        new_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -4859,7 +4851,8 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: objects.len() as u32,
-                        remote_revision_address: native_revision_address(svc.remote_state),
+                        remote_revision_address: RevisionAddress::heddle(svc.remote_state)
+                            .to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -4904,7 +4897,8 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(svc.remote_state),
+                        new_revision_address: RevisionAddress::heddle(svc.remote_state)
+                            .to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
