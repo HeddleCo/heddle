@@ -3301,6 +3301,92 @@ mod tests {
         assert!(pull.peeled_oid.is_empty(), "a commit ref is not peeled");
     }
 
+    /// The default mirror push must ship CONTENT refs (heads, tags, and
+    /// heddle's `refs/notes/heddle` state metadata) but EXCLUDE local-only
+    /// bookkeeping namespaces (#846): `refs/stash`, `refs/remotes/*`,
+    /// `refs/original/*`, `refs/replace/*`.
+    #[test]
+    fn git_mirror_plan_excludes_local_only_refs_and_keeps_content() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut git = sley::Repository::init(dir.path()).expect("init git");
+
+        let main_commit = write_commit(&git, "main");
+        let notes_commit = write_commit(&git, "notes");
+        let stash_commit = write_commit(&git, "stash");
+        let remote_commit = write_commit(&git, "remote");
+        let original_commit = write_commit(&git, "original");
+        let replace_commit = write_commit(&git, "replace");
+
+        // Content refs — these MUST be mirrored.
+        set_ref(&mut git, "refs/heads/main", main_commit);
+        set_ref(&mut git, "refs/notes/heddle", notes_commit);
+
+        // Local-only bookkeeping — these MUST be excluded.
+        set_ref(&mut git, "refs/stash", stash_commit);
+        set_ref(&mut git, "refs/remotes/origin/main", remote_commit);
+        set_ref(&mut git, "refs/original/refs/heads/main", original_commit);
+        set_ref(&mut git, "refs/replace/deadbeef", replace_commit);
+
+        let plan = build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new())
+            .expect("build mirror plan");
+        let names: Vec<&str> = plan
+            .ref_updates
+            .iter()
+            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .collect();
+
+        assert!(
+            names.contains(&"refs/heads/main"),
+            "content branch is mirrored: {names:?}",
+        );
+        assert!(
+            names.contains(&"refs/notes/heddle"),
+            "heddle state-note ref is mirrored: {names:?}",
+        );
+        for excluded in [
+            "refs/stash",
+            "refs/remotes/origin/main",
+            "refs/original/refs/heads/main",
+            "refs/replace/deadbeef",
+        ] {
+            assert!(
+                !names.contains(&excluded),
+                "local-only ref {excluded} must NOT be mirrored: {names:?}",
+            );
+        }
+        assert_eq!(names.len(), 2, "exactly the two content refs ship: {names:?}");
+    }
+
+    /// A dangling ref in an EXCLUDED namespace (e.g. a stale
+    /// `refs/original/*` filter-branch backup whose target object is gone)
+    /// must not fail the whole push — it is filtered before the readability
+    /// check. Content refs still ship.
+    #[test]
+    fn git_mirror_plan_ignores_dangling_local_only_ref() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut git = sley::Repository::init(dir.path()).expect("init git");
+
+        let main_commit = write_commit(&git, "main");
+        set_ref(&mut git, "refs/heads/main", main_commit);
+
+        // Point a local-only ref at a non-existent object oid.
+        let missing = GitObjectId::from_hex(
+            sley::ObjectFormat::Sha1,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .expect("oid");
+        set_ref(&mut git, "refs/original/refs/heads/main", missing);
+
+        let plan = build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new())
+            .expect("dangling local-only ref must not fail the mirror plan");
+        let names: Vec<&str> = plan
+            .ref_updates
+            .iter()
+            .map(|m| git_ref_update_from_message(m).name.as_str())
+            .collect();
+        assert_eq!(names, vec!["refs/heads/main"], "only content ships: {names:?}");
+    }
+
     #[test]
     fn git_ref_expectation_marks_missing_when_remote_has_no_git_revision() {
         let commit_oid = GitObjectId::from_hex(

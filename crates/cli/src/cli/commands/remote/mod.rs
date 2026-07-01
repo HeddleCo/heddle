@@ -1292,6 +1292,16 @@ async fn push_local_all_threads(
     Ok(())
 }
 
+/// Whether a hosted `--all-threads` push collapses to a SINGLE mirror push
+/// instead of the per-thread native fan-out. True for git-overlay repos: the
+/// default mirror push (#846) already ships every ref (= every thread) in one
+/// transfer, so looping per thread would re-upload the identical pack T times.
+/// Native (non-overlay) repos keep the #838 per-thread fan-out.
+#[cfg(feature = "client")]
+fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool {
+    capability == RepositoryCapability::GitOverlay
+}
+
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let mut client = options.session.connect(options.addr).await?;
@@ -1316,7 +1326,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // and re-upload the identical full pack once per thread and print a
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
     // single mirror push below; only the non-git-overlay path loops.
-    if options.all_threads && repo.capability() != RepositoryCapability::GitOverlay {
+    if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
@@ -1785,6 +1795,23 @@ mod git_overlay_config_atomic_tests {
         assert_eq!(spool_slug_from_local_name("My Cool Repo"), "my-cool-repo");
         assert_eq!(spool_slug_from_local_name("Heddle_CLI.v2"), "heddle-cli-v2");
         assert_eq!(spool_slug_from_local_name("---"), "");
+    }
+
+    /// A git-overlay `--all-threads` hosted push collapses to a SINGLE mirror
+    /// push (mirror ships every ref = every thread), while a native repo keeps
+    /// the #838 per-thread fan-out. This drives the branch condition in
+    /// `push_network`.
+    #[cfg(feature = "client")]
+    #[test]
+    fn git_overlay_all_threads_hosted_push_is_single_mirror() {
+        assert!(
+            all_threads_uses_single_mirror_push(RepositoryCapability::GitOverlay),
+            "git-overlay --all-threads must collapse to one mirror push",
+        );
+        assert!(
+            !all_threads_uses_single_mirror_push(RepositoryCapability::NativeHeddle),
+            "native --all-threads must keep the per-thread fan-out (#838)",
+        );
     }
 
     #[cfg(feature = "client")]
