@@ -119,12 +119,13 @@ struct PushOutput {
     ref_scope: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_notes_ref: Option<&'static str>,
-    /// The full ref names this push actually wrote at the destination —
-    /// `refs/heads/<thread>`, `refs/notes/heddle`, `refs/tags/<tag>` —
-    /// sorted, empty for a no-op push. Present on the Git-overlay refs
-    /// path (`transport: "git"`); omitted on the native Heddle transport,
-    /// which writes Heddle thread refs, not Git refs. Verifiable with
-    /// `git ls-remote <remote>`.
+    /// The refs this push actually wrote at the destination. On the
+    /// Git-overlay refs path (`transport: "git"`) these are full Git ref
+    /// names — `refs/heads/<thread>`, `refs/notes/heddle`, `refs/tags/<tag>`
+    /// — sorted, empty for a no-op push, verifiable with `git ls-remote`.
+    /// On the native Heddle transport it is omitted for a single-thread push
+    /// but, for `--all-threads` (heddle#838), lists the Heddle thread names
+    /// that were pushed so the caller can see exactly which threads landed.
     #[serde(skip_serializing_if = "Option::is_none")]
     refs_written: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,24 +234,14 @@ pub async fn cmd_push(
         };
         let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
         if let Some(target_path) = native_heddle_local_push_target(&repo, remote_arg)? {
-            let state_id = if let Some(state_str) = state {
-                if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
-                    ensure_current_state(
-                        &repo,
-                        &user_config,
-                        Some("Bootstrap git-overlay before push".to_string()),
-                    )?;
-                }
-                repo.resolve_state(&state_str)?.context("State not found")?
+            if all_threads {
+                push_local_all_threads(&repo, &target_path, force, cli).await?;
             } else {
-                ensure_current_state(
-                    &repo,
-                    &user_config,
-                    Some("Bootstrap git-overlay before push".to_string()),
-                )?
-            };
-            let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
-            push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
+                let state_id =
+                    resolve_push_state_id(&repo, &user_config, state, thread.as_deref(), force)?;
+                let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
+                push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
+            }
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
             if let Some(mirror_remote) = mirror.as_deref() {
@@ -392,28 +383,35 @@ pub async fn cmd_push(
         user_config.heddle_client_config(token.clone())?;
     }
 
-    let state_id = if let Some(state_str) = state {
-        if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
-            ensure_current_state(
-                &repo,
-                &user_config,
-                Some("Bootstrap git-overlay before push".to_string()),
-            )?;
-        }
-        repo.resolve_state(&state_str)?.context("State not found")?
+    // `--all-threads` fans out over every pushable thread (heddle#838);
+    // otherwise push the current checkout state, guarding against overwriting
+    // a mismatched existing named thread (heddle#837). `--all-threads`
+    // supersedes an explicit single-thread `--state`/`[THREAD]` — it pushes
+    // everything.
+    let single_state_id = if all_threads {
+        None
     } else {
-        ensure_current_state(
+        Some(resolve_push_state_id(
             &repo,
             &user_config,
-            Some("Bootstrap git-overlay before push".to_string()),
-        )?
+            state,
+            thread.as_deref(),
+            force,
+        )?)
     };
 
     let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
 
     match target {
         RemoteTarget::Local(path) => {
-            push_local(&repo, &path, &state_id, &track_name, force, cli).await?;
+            if all_threads {
+                push_local_all_threads(&repo, &path, force, cli).await?;
+            } else {
+                let state_id = single_state_id
+                    .as_ref()
+                    .expect("single-thread push resolves a state");
+                push_local(&repo, &path, state_id, &track_name, force, cli).await?;
+            }
         }
         RemoteTarget::Network { addr, repo_path } => {
             #[cfg(feature = "client")]
@@ -426,16 +424,17 @@ pub async fn cmd_push(
                     session: network_session
                         .as_ref()
                         .context("network client config was not prevalidated")?,
-                    state_id: &state_id,
+                    state_id: single_state_id.as_ref(),
                     track_name: &track_name,
                     force,
+                    all_threads,
                     git_mirror,
                     cli,
                 },
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, git_mirror);
+            let _ = (addr, repo_path, token, single_state_id, git_mirror);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -627,6 +626,50 @@ fn heddle_push_output(
         thread: None,
         state,
         objects,
+        next_action: action.action.clone(),
+        next_action_template: action.template.clone(),
+        recommended_action: action.action,
+        recommended_action_template: action.template,
+        trust,
+    }
+}
+
+/// JSON output for a native `--all-threads` push (heddle#838). `refs_written`
+/// lists exactly the thread names that were pushed (the issue's explicit ask),
+/// sorted; `success`/`pushed` are false if any thread failed. `push_scope`
+/// mirrors the git-overlay path's `"all_threads"`.
+fn heddle_all_threads_push_output(
+    mut pushed: Vec<String>,
+    failures: &[(String, String)],
+    objects: usize,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let action = ActionFields::from_action(&trust.recommended_action);
+    let ok = failures.is_empty();
+    pushed.sort();
+    PushOutput {
+        output_kind: "push",
+        action: "push",
+        status: if ok { "pushed" } else { "partial" },
+        success: ok,
+        pushed: ok,
+        changed: true,
+        transport: "heddle",
+        remote: None,
+        push_scope: Some("all_threads"),
+        ref_scope: None,
+        git_notes_ref: None,
+        refs_written: Some(pushed),
+        git_notes_visibility_warning: None,
+        git_tracking_remote: None,
+        git_remote_configured: None,
+        git_upstream_configured: None,
+        tags_included: None,
+        force: None,
+        force_discard_warning: None,
+        thread: None,
+        state: None,
+        objects: Some(objects),
         next_action: action.action.clone(),
         next_action_template: action.template.clone(),
         recommended_action: action.action,
@@ -1036,6 +1079,74 @@ fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Re
     }
 }
 
+/// Resolve the state a `push` should upload for a single-thread push
+/// (heddle#837).
+///
+/// A push always ships the CURRENT checkout state — it never resolves the
+/// named thread's own tip. The heddle#837 fix is a data-integrity *guard*
+/// against silently overwriting a mismatched existing thread, not a change to
+/// which state gets pushed.
+///
+/// Precedence:
+/// 1. `--state <spec>` explicit → resolve that spec (unchanged behavior); no
+///    thread guard applies (the user asked for a specific state).
+/// 2. No `--state` → the current checkout state, bootstrapping git-overlay if
+///    needed ([`ensure_current_state`]). When a thread was named explicitly
+///    (positional `[THREAD]` or `--thread`):
+///    - the thread does not exist locally → allow (this is `push` creating the
+///      thread on the remote from the current state);
+///    - the thread exists and its tip == the current state → allow (they match);
+///    - the thread exists and its tip != the current state → REFUSE unless
+///      `--force`, so we never push the current checkout's state under a
+///      DIFFERENT existing thread's ref by accident.
+///
+/// Used by every native/hosted/local single-thread push arm so they share the
+/// same guard. The git-overlay refs path keeps its own refuse-guard (it pushes
+/// Git branches, not resolved states); `--all-threads` bypasses this entirely
+/// (each thread is pushed at its own tip).
+fn resolve_push_state_id(
+    repo: &Repository,
+    user_config: &UserConfig,
+    state: Option<String>,
+    thread: Option<&str>,
+    force: bool,
+) -> Result<objects::object::ChangeId> {
+    if let Some(state_str) = state {
+        if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
+            ensure_current_state(
+                repo,
+                user_config,
+                Some("Bootstrap git-overlay before push".to_string()),
+            )?;
+        }
+        return repo.resolve_state(&state_str)?.context("State not found");
+    }
+
+    let current = ensure_current_state(
+        repo,
+        user_config,
+        Some("Bootstrap git-overlay before push".to_string()),
+    )?;
+
+    // heddle#837 guard: if the user named an EXISTING thread whose tip differs
+    // from what we're about to push, refuse unless forced — otherwise we'd
+    // overwrite an unrelated thread's ref with the current checkout's state.
+    // A non-existent named thread falls through (push creates it on the remote).
+    if let Some(thread_name) = thread
+        && !force
+        && let Some(tip) = repo.refs().get_thread(&ThreadName::new(thread_name))?
+        && tip != current
+    {
+        return Err(anyhow!(
+            "thread '{thread_name}' already exists at {} but the current checkout is {}; refusing to overwrite it.\nNext: switch to that thread's checkout (heddle thread switch {thread_name}), or pass --force to push the current state under '{thread_name}'.",
+            tip.short(),
+            current.short(),
+        ));
+    }
+
+    Ok(current)
+}
+
 async fn push_local(
     repo: &Repository,
     target_path: &std::path::Path,
@@ -1078,6 +1189,111 @@ async fn push_local(
     Ok(())
 }
 
+/// A pushable Heddle thread paired with its tip state (heddle#838).
+struct PushableThread {
+    name: String,
+    state: objects::object::ChangeId,
+}
+
+/// Enumerate the threads `--all-threads` should push on the native/hosted
+/// path (heddle#838): every heddle-managed thread, with remote-tracking
+/// names filtered out exactly as the Git exporter does
+/// ([`git_export::is_remote_tracking_thread_name`]). Each thread's state is
+/// resolved from its own tip (composes with the heddle#837 fix). Sorted by
+/// name for deterministic output. Threads whose ref cannot be resolved to a
+/// state are skipped (they carry no pushable state).
+fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
+    let remote_names = crate::bridge::git_export::git_remote_names(repo);
+    let mut threads: Vec<PushableThread> = Vec::new();
+    for thread in repo.refs().list_threads()? {
+        let name = thread.to_string();
+        if crate::bridge::git_export::is_remote_tracking_thread_name(&name, &remote_names) {
+            continue;
+        }
+        if let Some(state) = repo.refs().get_thread(&thread)? {
+            threads.push(PushableThread { name, state });
+        }
+    }
+    threads.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(threads)
+}
+
+/// `--all-threads` fan-out for a native Heddle local target (heddle#838):
+/// push every pushable thread's tip under its own ref. Not atomic — a
+/// mid-loop failure leaves earlier threads pushed; every thread is attempted
+/// and any failure makes the whole command exit non-zero, with per-thread
+/// results reported.
+async fn push_local_all_threads(
+    repo: &Repository,
+    target_path: &std::path::Path,
+    _force: bool,
+    cli: &Cli,
+) -> Result<()> {
+    let json = should_output_json(cli, Some(repo.config()));
+    if !json {
+        println!(
+            "{} pushing all threads to {}",
+            style::working_marker(),
+            style::dim(&format!("file://{}", target_path.display()))
+        );
+    }
+
+    let target_repo = Repository::open(target_path)?;
+    let sync = LocalSync::open(repo.root())?;
+    let threads = pushable_threads_for_all(repo)?;
+
+    let mut pushed: Vec<String> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    let mut total_objects: usize = 0;
+
+    for thread in &threads {
+        let push_one = || -> Result<usize> {
+            let copied = sync.fetch_state(&target_repo, &thread.state)?;
+            target_repo
+                .refs()
+                .set_thread(&ThreadName::new(&thread.name), &thread.state)?;
+            Ok(copied)
+        };
+        match push_one() {
+            Ok(copied) => {
+                total_objects += copied;
+                pushed.push(thread.name.clone());
+                if !json {
+                    println!(
+                        "{} pushed {} to {} ({})",
+                        style::ok_marker(),
+                        style::change_id(&thread.state.short().to_string()),
+                        style::bold(&thread.name),
+                        style::count(copied, "object")
+                    );
+                }
+            }
+            Err(err) => {
+                failures.push((thread.name.clone(), err.to_string()));
+                if !json {
+                    eprintln!(
+                        "{} failed to push {}: {}",
+                        style::warn_marker(),
+                        style::bold(&thread.name),
+                        err
+                    );
+                }
+            }
+        }
+    }
+
+    if json {
+        let trust = build_repository_verification_state(repo);
+        let output = heddle_all_threads_push_output(pushed, &failures, total_objects, trust);
+        crate::cli::render::write_json_stdout(&output)?;
+    }
+
+    if let Some((name, err)) = failures.first() {
+        return Err(anyhow!("failed to push thread '{name}': {err}"));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let mut client = options.session.connect(options.addr).await?;
@@ -1095,48 +1311,33 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
+    // --git-mirror applies only to git-overlay repos (heddle#25); check it up
+    // front so both the single-thread and --all-threads paths reject early.
     if options.git_mirror && repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(
             "--git-mirror applies only to git-overlay repositories"
         ));
     }
 
-    let result = if repo.capability() == RepositoryCapability::GitOverlay {
-        if options.git_mirror {
-            // Explicit opt-in: push ALL git-overlay refs in one multi-ref
-            // git-mirror transfer. Not the default yet (weft server change +
-            // end-to-end verify pending).
-            client
-                .push_git_overlay_mirror(
-                    repo,
-                    &repo_path,
-                    *options.state_id,
-                    options.track_name,
-                    options.force,
-                )
-                .await?
-        } else {
-            client
-                .push_git_overlay_checkpoint(
-                    repo,
-                    &repo_path,
-                    *options.state_id,
-                    options.track_name,
-                    options.force,
-                )
-                .await?
-        }
-    } else {
-        client
-            .push(
-                repo,
-                &repo_path,
-                *options.state_id,
-                options.track_name,
-                options.force,
-            )
-            .await?
-    };
+    // --all-threads (heddle#838): fan out over every pushable thread, each at
+    // its own tip. Composes with --git-mirror (per-thread mirror transfer).
+    if options.all_threads {
+        return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
+    }
+
+    let state_id = *options
+        .state_id
+        .expect("single-thread push resolves a state");
+    let result = push_network_one_thread(
+        repo,
+        &mut client,
+        &repo_path,
+        &state_id,
+        options.track_name,
+        options.force,
+        options.git_mirror,
+    )
+    .await?;
 
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
@@ -1164,6 +1365,125 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         )));
     }
 
+    Ok(())
+}
+
+/// Push a single thread's state over the hosted transport, routing through the
+/// git-overlay checkpoint RPC or the plain push RPC per repo capability.
+#[cfg(feature = "client")]
+async fn push_network_one_thread(
+    repo: &Repository,
+    client: &mut HostedGrpcClient,
+    repo_path: &str,
+    state_id: &objects::object::ChangeId,
+    track_name: &str,
+    force: bool,
+    git_mirror: bool,
+) -> Result<wire::PushComplete> {
+    let result = if repo.capability() == RepositoryCapability::GitOverlay {
+        if git_mirror {
+            // Explicit opt-in (heddle#25): push ALL git-overlay refs in one
+            // multi-ref git-mirror transfer. Not the default yet (weft server
+            // change + end-to-end verify pending).
+            client
+                .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force)
+                .await?
+        } else {
+            client
+                .push_git_overlay_checkpoint(repo, repo_path, *state_id, track_name, force)
+                .await?
+        }
+    } else {
+        client
+            .push(repo, repo_path, *state_id, track_name, force)
+            .await?
+    };
+    Ok(result)
+}
+
+/// `--all-threads` fan-out over the hosted transport (heddle#838): the RPC is
+/// single-thread, so loop once per pushable thread (each at its own tip —
+/// composes with the heddle#837 fix). Not atomic; every thread is attempted,
+/// per-thread results reported, and any failure exits non-zero.
+#[cfg(feature = "client")]
+async fn push_network_all_threads(
+    repo: &Repository,
+    client: &mut HostedGrpcClient,
+    repo_path: &str,
+    options: &PushNetworkOptions<'_>,
+) -> Result<()> {
+    let json = should_output_json(options.cli, Some(repo.config()));
+    let threads = pushable_threads_for_all(repo)?;
+
+    let mut pushed: Vec<String> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    for thread in &threads {
+        let outcome = push_network_one_thread(
+            repo,
+            client,
+            repo_path,
+            &thread.state,
+            &thread.name,
+            options.force,
+            options.git_mirror,
+        )
+        .await;
+        match outcome {
+            Ok(result) if result.success => {
+                pushed.push(thread.name.clone());
+                if !json {
+                    println!(
+                        "{} pushed to {}",
+                        style::ok_marker(),
+                        style::bold(&thread.name)
+                    );
+                    if let Some(new_state) = result.new_state {
+                        println!(
+                            "{}",
+                            style::field(
+                                "remote state",
+                                &style::change_id(&new_state.to_string())
+                            )
+                        );
+                    }
+                }
+            }
+            Ok(result) => {
+                let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
+                failures.push((thread.name.clone(), err.clone()));
+                if !json {
+                    eprintln!(
+                        "{} failed to push {}: {}",
+                        style::warn_marker(),
+                        style::bold(&thread.name),
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                failures.push((thread.name.clone(), err.to_string()));
+                if !json {
+                    eprintln!(
+                        "{} failed to push {}: {}",
+                        style::warn_marker(),
+                        style::bold(&thread.name),
+                        err
+                    );
+                }
+            }
+        }
+    }
+
+    if json {
+        let trust = build_repository_verification_state(repo);
+        let output = heddle_all_threads_push_output(pushed, &failures, 0, trust);
+        crate::cli::render::write_json_stdout(&output)?;
+    }
+
+    if let Some((name, err)) = failures.first() {
+        return Err(anyhow!(RecoveryAdvice::remote_push_failed(name, err)));
+    }
     Ok(())
 }
 
@@ -1406,9 +1726,15 @@ struct PushNetworkOptions<'a> {
     repo_path: Option<&'a str>,
     remote_arg: Option<&'a str>,
     session: &'a HostedSession,
-    state_id: &'a objects::object::ChangeId,
+    /// The single resolved state for a one-thread push (heddle#837). `None`
+    /// when `all_threads` is set — the fan-out resolves each thread's tip
+    /// itself (heddle#838).
+    state_id: Option<&'a objects::object::ChangeId>,
     track_name: &'a str,
     force: bool,
+    /// heddle#838: fan out over every pushable thread instead of the single
+    /// `track_name`/`state_id`.
+    all_threads: bool,
     /// Explicit `--git-mirror`: push ALL git-overlay refs via the multi-ref
     /// git-mirror path instead of the native single-ref checkpoint path.
     git_mirror: bool,

@@ -3538,3 +3538,287 @@ fn push_network_validates_valid_config_before_bootstrapping_state() {
         "valid network config should allow push bootstrap before transport failure"
     );
 }
+
+/// heddle#837: `push <remote> <thread>` names an EXISTING thread whose tip
+/// differs from the current checkout. Push always ships the CURRENT state, so
+/// this must REFUSE without `--force` (guard against overwriting a mismatched
+/// thread's ref), and with `--force` publish the current checkout's state under
+/// the named thread.
+#[test]
+fn native_push_named_mismatched_thread_refuses_without_force() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+
+    // A sibling thread `feat-x` with its own isolated checkout + work, so its
+    // tip differs from main's.
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    let main_state = current_thread_state(source.path(), "main");
+    assert_ne!(
+        feat_state, main_state,
+        "fixture invalid: feat-x tip must differ from main tip"
+    );
+
+    // Push `feat-x` BY NAME from the MAIN checkout (HEAD is on main). feat-x
+    // exists with a DIFFERENT tip → must refuse without --force.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle_output(
+        &["push", &remote_path, "feat-x"],
+        Some(source.path()),
+    )
+    .expect("invoke push");
+    assert!(
+        !output.status.success(),
+        "push under a mismatched existing thread must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("feat-x") && stderr.contains("--force"),
+        "refusal should name the thread and guide to --force: {stderr}"
+    );
+
+    // The remote must NOT have been given feat-x's ref by the refused push.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    assert!(
+        remote_repo
+            .refs()
+            .get_thread(&ThreadName::new("feat-x"))
+            .unwrap()
+            .is_none(),
+        "refused push must not write any ref for the mismatched thread"
+    );
+
+    // With --force, push the CURRENT (main) checkout state under feat-x.
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "feat-x", "--force"],
+        Some(source.path()),
+    )
+    .expect("forced push under named thread succeeds");
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "forced push should succeed: {parsed}");
+
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref should be written on the remote after --force");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        main_state,
+        "forced named-thread push must publish the CURRENT checkout state (heddle#837)"
+    );
+    assert_ne!(
+        remote_feat.short().to_string(),
+        feat_state,
+        "push never resolves the named thread's own tip (heddle#837)"
+    );
+}
+
+/// heddle#837: `push <remote> <thread>` naming a thread that does NOT exist
+/// locally must CREATE it on the remote from the current checkout state (this
+/// is the create-thread path — no guard applies, no `--force` needed).
+#[test]
+fn native_push_new_named_thread_creates_from_current_state() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+    let main_state = current_thread_state(source.path(), "main");
+
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "brand-new"],
+        Some(source.path()),
+    )
+    .expect("push creating a new named thread succeeds");
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "create-thread push should succeed: {parsed}");
+
+    // The remote brand-new ref must hold the current checkout state.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_new = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("brand-new"))
+        .unwrap()
+        .expect("brand-new ref should be created on the remote");
+    assert_eq!(
+        remote_new.short().to_string(),
+        main_state,
+        "creating a named thread must publish the current checkout state (heddle#837)"
+    );
+}
+
+/// heddle#837: an explicit `--state` pushes that exact state under the named
+/// thread, bypassing the current-checkout default and the mismatch guard.
+#[test]
+fn native_push_explicit_state_overrides_named_thread_tip() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+    let base_state = current_thread_state(source.path(), "main");
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    assert_ne!(base_state, feat_state);
+
+    // Name feat-x but pin the state to the base state — the explicit state wins.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    heddle(
+        &[
+            "push",
+            &remote_path,
+            "feat-x",
+            "--state",
+            &base_state,
+        ],
+        Some(source.path()),
+    )
+    .expect("push with explicit --state succeeds");
+
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref written");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        base_state,
+        "explicit --state must win over the named thread's tip (heddle#837)"
+    );
+}
+
+/// heddle#838: `push <remote> --all-threads` to a native-local target must push
+/// EVERY thread (including a sibling with its own isolated checkout), and
+/// `refs_written` must list exactly what was pushed.
+#[test]
+fn native_push_all_threads_fans_out_every_thread() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    let main_state = current_thread_state(source.path(), "main");
+
+    // Push --all-threads from the MAIN checkout.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "--all-threads"],
+        Some(source.path()),
+    )
+    .expect("all-threads push succeeds");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1,
+        "push --output json must emit exactly one JSON value: {output}"
+    );
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "push should succeed: {parsed}");
+    assert_eq!(parsed["push_scope"], "all_threads");
+    let refs_written: Vec<String> = parsed["refs_written"]
+        .as_array()
+        .expect("refs_written present")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        refs_written.contains(&"main".to_string())
+            && refs_written.contains(&"feat-x".to_string()),
+        "refs_written must list every pushed thread (heddle#838): {refs_written:?}"
+    );
+
+    // Both refs must land on the remote at their own tips.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref should be written by --all-threads (heddle#838)");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        feat_state,
+        "--all-threads must push feat-x at its own tip"
+    );
+    let remote_main = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("main ref should be written by --all-threads");
+    assert_eq!(remote_main.short().to_string(), main_state);
+}

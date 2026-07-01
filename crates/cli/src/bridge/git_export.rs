@@ -947,7 +947,7 @@ fn reconcile_ref(
     }
 }
 
-fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
+pub(crate) fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
     let Ok(repo) = SleyRepository::discover(heddle_repo.root()) else {
         return HashSet::new();
     };
@@ -958,7 +958,7 @@ fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
         .collect()
 }
 
-fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
+pub(crate) fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
     let Some((remote, branch)) = thread.split_once('/') else {
         return false;
     };
