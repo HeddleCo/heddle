@@ -98,12 +98,15 @@ impl OpLog {
             .collect()
     }
 
-    /// Ensure the on-disk oplog is in the current format, migrating an older one
-    /// in place. **Hot-path discipline (perf/adopt residual O(N²)):** every
-    /// logical ref read funnels through here via `head_id`/`load_cached`/
-    /// `refresh_cached`, so this MUST stay header-cheap when the format is already
-    /// current. The format check ([`is_latest`](PackedOpLog::is_latest)) reads
-    /// only the fixed header; it does NOT fully read + parse the whole index.
+    /// Ensure the on-disk oplog is in the current format AND structurally intact,
+    /// migrating an older one / salvaging a truncated one in place.
+    ///
+    /// **Hot-path discipline (perf/adopt residual O(N²)):** every logical ref
+    /// read funnels through here via `head_id`/`load_cached`/`refresh_cached`, so
+    /// this MUST stay cheap when the oplog is already healthy. The healthy path
+    /// does two O(1) reads only — [`is_latest`](PackedOpLog::is_latest) reads the
+    /// fixed header, and [`trailer_ok`](PackedOpLog::trailer_ok) seeks to EOF and
+    /// reads the fixed footer prefix. Neither reads + parses the whole index.
     ///
     /// A prior version did `let _ = PackedOpLogIndex::open(&path)?` in the
     /// already-latest branch — a full file read + record-validation pass whose
@@ -112,16 +115,31 @@ impl OpLog {
     /// once per ref (e.g. the post-`adopt` verification/`status` walk's per-branch
     /// `get_thread`) reparsed the entire growing oplog N times ⇒ O(N²)
     /// (`adopt`/`status` of 800 refs reparsed a 142 KB oplog ~3.4k times and sat
-    /// ~14 s). The entry-validating open already happens where entries are
-    /// actually consumed (`load_cached`/`refresh_cached`/`open_index_for_write`
-    /// each open the index themselves), so dropping the discarded open here loses
-    /// no validation — it only removes the redundant per-read full parse.
+    /// ~14 s). Dropping the discarded open removed that per-read full parse.
+    ///
+    /// But the discarded open had a load-bearing SIDE EFFECT: opening the index
+    /// runs `PackedOpLogIndex::open`'s auto-salvage, which HEALS (and persists to
+    /// disk) a truncated-but-header-valid oplog on a plain read. `is_latest`
+    /// reads ONLY the header, which a truncation leaves intact, so gating solely
+    /// on `is_latest` early-returned on a damaged oplog and the on-disk file
+    /// stayed corrupt until the next mutation — the read path silently stopped
+    /// self-healing (the regression that reddened the `oplog_recover` doc-sample
+    /// invariant). We restore self-heal-on-read WITHOUT reintroducing the O(N²)
+    /// parse by ALSO checking the trailer: a truncated oplog's footer is missing
+    /// or mis-framed, so `trailer_ok` returns `false` and we fall through to the
+    /// locked salvage branch. `ensure_latest` opens the index under the write
+    /// lock, whose `open_v4` runs the same truncation salvage the discarded open
+    /// used to, so a plain read once again repairs `oplog.bin` in place.
     fn ensure_current_format(&self) -> Result<()> {
         let path = self.oplog_path();
         if !path.exists() {
             return Ok(());
         }
-        if PackedOpLog::is_latest(&path)? {
+        // Early-return ONLY when the oplog is both current-format AND its index
+        // trailer is intact. A truncated oplog keeps a valid header (so
+        // `is_latest` is true) but a destroyed footer (`trailer_ok` false); it
+        // must fall through to the salvage branch, not be treated as healthy.
+        if PackedOpLog::is_latest(&path)? && PackedOpLog::trailer_ok(&path)? {
             return Ok(());
         }
         let _lock = self.write_lock()?;
@@ -736,5 +754,117 @@ impl OpLogBackend for OpLog {
             id: primary_batch_id,
             entries,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::ChangeId;
+    use tempfile::TempDir;
+
+    fn snapshot_record() -> OpRecord {
+        let state = ChangeId::generate();
+        OpRecord::Snapshot {
+            new_state: state,
+            prev_head: None,
+            head: Some(state),
+            thread: None,
+        }
+    }
+
+    /// Regression test for the perf/adopt residual-O(N²) change (PR #830):
+    /// dropping the discarded `PackedOpLogIndex::open` from
+    /// `ensure_current_format`'s already-latest branch removed a load-bearing
+    /// side effect — the open's auto-salvage that heals a truncated-but-header-
+    /// valid oplog on a plain READ. `is_latest` only reads the header (intact
+    /// after truncation), so the healthy hot path stayed fast but damaged oplogs
+    /// silently stopped self-healing on read.
+    ///
+    /// The fix pairs `is_latest` with the O(1) `trailer_ok` footer check so the
+    /// gate falls through to salvage for a truncated oplog. This test locks that
+    /// behavior at the unit level: a plain `head_id()` read must repair
+    /// `oplog.bin` on disk (footer restored, damaged original quarantined).
+    #[test]
+    fn truncated_oplog_self_heals_on_plain_read() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        // Seed several real batches so there is an entry stream to salvage.
+        for _ in 0..3 {
+            oplog.record_batch(vec![snapshot_record()]).unwrap();
+        }
+
+        let path = oplog.oplog_path();
+        let bytes = std::fs::read(&path).unwrap();
+
+        // Truncation that destroys the trailing index/footer but keeps the
+        // fixed header intact — the exact damage the CLI `oplog_recover` fixture
+        // reproduces. Cut at 60% so entries remain but the footer is gone.
+        let cut = bytes.len() * 6 / 10;
+        std::fs::write(&path, &bytes[..cut]).unwrap();
+
+        // The header survives truncation, so `is_latest` still reports current
+        // format — this is precisely why gating on it alone missed the damage.
+        assert!(
+            PackedOpLog::is_latest(&path).unwrap(),
+            "truncated oplog keeps a valid header, so is_latest is true"
+        );
+        // ...but the footer/trailer is destroyed, so the cheap O(1) integrity
+        // predicate correctly reports damage.
+        assert!(
+            !PackedOpLog::trailer_ok(&path).unwrap(),
+            "truncated oplog has a destroyed trailer"
+        );
+
+        // A plain READ (no mutation) must self-heal the on-disk oplog: this is
+        // the side effect the perf change dropped and this fix restores. A fresh
+        // handle avoids any in-memory cache masking the on-disk state.
+        let reader = OpLog::new_unattributed(tmp.path());
+        reader.head_id().expect("read salvages the truncated oplog");
+
+        // On-disk file is repaired: the footer is back and the trailer check
+        // passes again.
+        assert!(
+            PackedOpLog::trailer_ok(&path).unwrap(),
+            "on-disk oplog trailer must be restored after a plain read"
+        );
+        assert!(
+            PackedOpLogIndex::open(&path).is_ok(),
+            "repaired oplog must open + validate cleanly"
+        );
+        // The damaged original was quarantined to `.corrupt`, proving the
+        // salvage path (not just an in-memory patch) ran and persisted.
+        assert!(
+            path.with_file_name("oplog.bin.corrupt").exists(),
+            "salvage must quarantine the damaged original to .corrupt"
+        );
+    }
+
+    /// A healthy current-format oplog passes both currency and trailer checks,
+    /// so `ensure_current_format`'s hot path stays O(1) (no salvage, no rewrite).
+    #[test]
+    fn healthy_oplog_passes_trailer_check() {
+        let tmp = TempDir::new().unwrap();
+        let oplog = OpLog::new_unattributed(tmp.path());
+        oplog.init().unwrap();
+        oplog.record_batch(vec![snapshot_record()]).unwrap();
+
+        let path = oplog.oplog_path();
+        assert!(PackedOpLog::is_latest(&path).unwrap());
+        assert!(
+            PackedOpLog::trailer_ok(&path).unwrap(),
+            "a healthy oplog's trailer must be intact"
+        );
+
+        let before = std::fs::read(&path).unwrap();
+        // A plain read must NOT rewrite a healthy oplog.
+        oplog.head_id().unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "healthy oplog must not be rewritten on read");
+        assert!(
+            !path.with_file_name("oplog.bin.corrupt").exists(),
+            "healthy oplog must not be quarantined"
+        );
     }
 }

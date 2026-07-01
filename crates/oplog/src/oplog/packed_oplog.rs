@@ -320,6 +320,45 @@ impl PackedOpLog {
             && header.record_schema_version == Some(OpRecordSchemaVersion::Current))
     }
 
+    /// Cheap O(1) integrity check that the EOF index footer/trailer is present
+    /// and well-framed, WITHOUT parsing the entry stream or index tables.
+    ///
+    /// Reads only the fixed-size footer prefix by seeking to `file_len -
+    /// FOOTER_LEN` and validating the footer magic, index version, and self-
+    /// declared footer length. A truncated-but-header-valid oplog (the fixed
+    /// header survives, but the trailing index/footer was cut off) fails one of
+    /// these three checks — either the file is now shorter than
+    /// `header_len + FOOTER_LEN`, or the bytes now sitting at the (new) EOF are
+    /// mid-entry-stream garbage rather than the footer magic.
+    ///
+    /// This is the load-bearing complement to [`is_latest`](Self::is_latest):
+    /// `is_latest` reads only the header, so it returns `true` for a truncated
+    /// oplog; pairing it with `trailer_ok` lets the format-currency gate keep the
+    /// healthy hot path O(1) (header read + footer read, no entry parse) while
+    /// still routing damaged oplogs into the salvage path.
+    ///
+    /// Returns `Ok(false)` for any damaged/short/mis-framed trailer (so the
+    /// caller can fall through to salvage); only genuine I/O errors propagate.
+    pub(crate) fn trailer_ok(path: &Path) -> Result<bool> {
+        let mut file = File::open(path)?;
+        let file_len = file.seek(SeekFrom::End(0))?;
+        // Must be able to hold at least the largest fixed header plus a footer.
+        if file_len < LEGACY_HEADER_LEN + FOOTER_LEN {
+            return Ok(false);
+        }
+        file.seek(SeekFrom::Start(file_len - FOOTER_LEN))?;
+        let magic = read_array_from_file::<8>(&mut file)?;
+        if &magic != INDEX_MAGIC {
+            return Ok(false);
+        }
+        let index_version = read_u32_from_file(&mut file)?;
+        if index_version != INDEX_VERSION {
+            return Ok(false);
+        }
+        let footer_len = read_u32_from_file(&mut file)?;
+        Ok(footer_len == FOOTER_LEN as u32)
+    }
+
     pub(crate) fn save(&self) -> Result<()> {
         let data = OplogData {
             entries: self.entries.clone(),
