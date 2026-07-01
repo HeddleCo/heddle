@@ -85,6 +85,24 @@ impl TerminalSink {
             || snap.done.is_multiple_of(COMMIT_TICK_INTERVAL)
     }
 
+    /// Format the line to paint: the phase label, plus a live `(done/total,
+    /// pct%)` suffix when the snapshot carries a real count.
+    ///
+    /// A consumer that pre-formats its own counts into the phase string (the
+    /// import flow) never advances `done`, so `done == 0` and no suffix is
+    /// appended — its lines paint verbatim. A count-driven seam (tree
+    /// materialization) leaves the phase a bare label and increments `done`, so
+    /// the suffix supplies the live count. This is the single rule that lets one
+    /// renderer serve both styles without double-counting.
+    fn format_line(snap: &ProgressSnapshot) -> String {
+        if snap.done > 0 && snap.total > 0 {
+            let pct = snap.done.saturating_mul(100) / snap.total;
+            format!("{} ({}/{}, {}%)", snap.phase, snap.done, snap.total, pct)
+        } else {
+            snap.phase.clone()
+        }
+    }
+
     fn paint(line: &str) {
         if io::stdout().is_terminal() {
             // `\r` to column 0, `\x1b[K` clears to end of line so a shorter line
@@ -99,8 +117,9 @@ impl TerminalSink {
 
 impl Sink for TerminalSink {
     fn render(&self, snap: ProgressSnapshot) {
-        // The phase label carries the fully-formatted line the caller wants
-        // painted; the counters drive throttling. An empty phase is a no-op.
+        // The phase label is the human line; the counters drive throttling and
+        // (for count-driven seams) the live `(done/total)` suffix. An empty
+        // phase is a no-op.
         if snap.phase.is_empty() {
             return;
         }
@@ -108,9 +127,24 @@ impl Sink for TerminalSink {
         if !Self::should_repaint(&state, &snap) {
             return;
         }
-        Self::paint(&snap.phase);
+        Self::paint(&Self::format_line(&snap));
         state.last_phase = Some(snap.phase);
         state.painted = true;
+    }
+}
+
+/// Clear the live progress line without printing a completion message. No-op
+/// for a null (inactive) handle or off a TTY (where each tick was already a
+/// standalone line, not a `\r`-overwritten one). Used by consumers that print
+/// their own final output right after the operation (e.g. `switch` printing
+/// `Now at: …`) and just need the transient line erased first.
+pub(crate) fn clear_line(progress: &Progress) {
+    if !progress.is_active() {
+        return;
+    }
+    if io::stdout().is_terminal() {
+        print!("\r\x1b[K");
+        io::stdout().flush().ok();
     }
 }
 
@@ -148,6 +182,44 @@ mod tests {
         // Same phase, off-boundary count -> no repaint.
         state.last_phase = Some("new".into());
         assert!(!TerminalSink::should_repaint(&state, &snap));
+    }
+
+    #[test]
+    fn count_driven_snapshot_gets_a_live_suffix() {
+        // A materialize-style seam leaves the phase a bare label and advances
+        // `done`; the renderer supplies the live `(done/total, pct%)` suffix.
+        let snap = ProgressSnapshot {
+            done: 32,
+            total: 128,
+            phase: "checking out files".into(),
+        };
+        assert_eq!(
+            TerminalSink::format_line(&snap),
+            "checking out files (32/128, 25%)"
+        );
+    }
+
+    #[test]
+    fn preformatted_line_without_a_count_paints_verbatim() {
+        // The import flow pre-formats its own counts into the phase and never
+        // advances `done` (stays 0), so no suffix is appended and the line is
+        // painted exactly as given — no double-counting.
+        let snap = ProgressSnapshot {
+            done: 0,
+            total: 3,
+            phase: "[2/3] importing commits... 64/128 inspected (50%)".into(),
+        };
+        assert_eq!(
+            TerminalSink::format_line(&snap),
+            "[2/3] importing commits... 64/128 inspected (50%)"
+        );
+        // A count with an unknown total (total == 0) also gets no suffix.
+        let counting = ProgressSnapshot {
+            done: 500,
+            total: 0,
+            phase: "scanning".into(),
+        };
+        assert_eq!(TerminalSink::format_line(&counting), "scanning");
     }
 
     #[test]
