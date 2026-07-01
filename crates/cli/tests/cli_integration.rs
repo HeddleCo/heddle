@@ -276,6 +276,8 @@ mod context_recovery_advice;
 mod current_context_advice;
 #[path = "cli_integration/diff_patch_conformance.rs"]
 mod diff_patch_conformance;
+#[path = "cli_integration/discuss_carry_forward.rs"]
+mod discuss_carry_forward;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
 #[path = "cli_integration/error_envelope_lint.rs"]

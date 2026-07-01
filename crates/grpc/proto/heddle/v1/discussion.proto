@@ -96,4 +96,8 @@ message ListDiscussionsResponse {
 message GetDiscussionRequest {
   string repo_path = 1;
   string discussion_id = 2;
+  // Optional: resolve the discussion against this specific state instead of
+  // HEAD. Empty = HEAD (the default). Lets a discussion living on a prior
+  // state be recovered by id + state (#836) without a full cross-state scan.
+  bytes state_id = 3;
 }

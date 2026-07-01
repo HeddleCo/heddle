@@ -496,10 +496,18 @@ impl DiscussionService for LocalDiscussionService {
         if req.discussion_id.is_empty() {
             return Err(Status::invalid_argument("discussion_id is required"));
         }
-        // TODO(W2-followup): scan all states / oplog instead of HEAD-only.
+        // Default: HEAD. Optional `state_id` (#836) resolves the discussion
+        // against a specific prior state — the bounded, cheap recoverability
+        // safety net when a discussion no longer lives on HEAD.
+        // TODO(W2-followup): scan all states / oplog instead of HEAD-only when
+        // no explicit state is given.
         let repo = self.inner.repo();
-        let head = head_state(repo)?;
-        let blob = decode_blob_for_state(repo, &head)?;
+        let state = if req.state_id.is_empty() {
+            head_state(repo)?
+        } else {
+            load_state(repo, &req.state_id)?.1
+        };
+        let blob = decode_blob_for_state(repo, &state)?;
         let discussion = blob
             .discussions
             .iter()
