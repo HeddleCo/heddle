@@ -90,7 +90,7 @@ pub use objects::{
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
 pub use repository_resolve_for_command::{
-    ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
+    EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
     resolve_state_for_command,
 };
 pub use repository::{

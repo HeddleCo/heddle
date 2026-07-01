@@ -8,6 +8,10 @@ use objects::{
 
 use super::Repository;
 
+/// Bootstrap hook invoked when [`ResolvePolicy::bootstrap_on_empty_head`] is
+/// set and `HEAD` / `@` resolves against an empty current state.
+pub type EmptyHeadBootstrap<'a> = dyn Fn(&Repository) -> HeddleResult<()> + 'a;
+
 /// Policy knobs derived from the six pre-consolidation call sites.
 ///
 /// * `git_overlay_import_hints` — history_target + context (via the rich
@@ -19,7 +23,7 @@ use super::Repository;
 #[derive(Clone, Copy, Default)]
 pub struct ResolvePolicy<'a> {
     pub git_overlay_import_hints: bool,
-    pub bootstrap_on_empty_head: Option<&'a dyn Fn(&Repository) -> HeddleResult<()>>,
+    pub bootstrap_on_empty_head: Option<&'a EmptyHeadBootstrap<'a>>,
 }
 
 impl<'a> ResolvePolicy<'a> {
@@ -156,7 +160,6 @@ fn resolve_missing_state(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use objects::store::ObjectStore;
     use tempfile::TempDir;
 
     use super::*;
@@ -215,7 +218,8 @@ mod tests {
     #[test]
     fn bootstrap_runs_for_empty_head_before_resolving_head() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        assert!(repo.current_state().unwrap().is_none());
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
 
         let bootstrapped = AtomicBool::new(false);

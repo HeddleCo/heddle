@@ -2642,11 +2642,7 @@ mod tests {
     /// [`RecoveryDetails::state_not_found`], not plain strings.
     #[test]
     fn minimal_resolve_failure_maps_to_recovery_state_not_found() {
-        use objects::{
-            RecoveryDetails,
-            error::HeddleError,
-            store::ObjectStore,
-        };
+        use objects::{RecoveryDetails, error::HeddleError};
         use repo::{
             ResolvePolicy, StateResolveError, StateResolveFailure, resolve_state_for_command,
         };
