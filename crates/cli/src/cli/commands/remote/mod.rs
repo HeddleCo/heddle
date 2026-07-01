@@ -238,7 +238,7 @@ pub async fn cmd_push(
                 push_local_all_threads(&repo, &target_path, force, cli).await?;
             } else {
                 let state_id =
-                    resolve_push_state_id(&repo, &user_config, state, thread.as_deref())?;
+                    resolve_push_state_id(&repo, &user_config, state, thread.as_deref(), force)?;
                 let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
                 push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
             }
@@ -384,9 +384,10 @@ pub async fn cmd_push(
     }
 
     // `--all-threads` fans out over every pushable thread (heddle#838);
-    // otherwise resolve the single state honoring the named thread's tip
-    // (heddle#837). `--all-threads` supersedes an explicit single-thread
-    // `--state`/`[THREAD]` — it pushes everything.
+    // otherwise push the current checkout state, guarding against overwriting
+    // a mismatched existing named thread (heddle#837). `--all-threads`
+    // supersedes an explicit single-thread `--state`/`[THREAD]` — it pushes
+    // everything.
     let single_state_id = if all_threads {
         None
     } else {
@@ -395,6 +396,7 @@ pub async fn cmd_push(
             &user_config,
             state,
             thread.as_deref(),
+            force,
         )?)
     };
 
@@ -1077,27 +1079,37 @@ fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Re
     }
 }
 
-/// Resolve the state a `push` should upload, honoring the thread the user
-/// named on the command line (heddle#837).
+/// Resolve the state a `push` should upload for a single-thread push
+/// (heddle#837).
+///
+/// A push always ships the CURRENT checkout state — it never resolves the
+/// named thread's own tip. The heddle#837 fix is a data-integrity *guard*
+/// against silently overwriting a mismatched existing thread, not a change to
+/// which state gets pushed.
 ///
 /// Precedence:
-/// 1. `--state <spec>` explicit → resolve that spec (unchanged behavior).
-/// 2. An explicitly named thread (positional `[THREAD]` or `--thread`) and
-///    no `--state` → resolve from THAT THREAD'S tip via [`Repository::resolve_state`].
-///    If the named thread cannot be resolved, REFUSE — never fall through to
-///    the current checkout's HEAD (that is the #837 foot-gun: pushing an
-///    unrelated state under the named thread's ref).
-/// 3. No thread named, no `--state` → the attached HEAD's state,
-///    bootstrapping git-overlay if needed ([`ensure_current_state`]).
+/// 1. `--state <spec>` explicit → resolve that spec (unchanged behavior); no
+///    thread guard applies (the user asked for a specific state).
+/// 2. No `--state` → the current checkout state, bootstrapping git-overlay if
+///    needed ([`ensure_current_state`]). When a thread was named explicitly
+///    (positional `[THREAD]` or `--thread`):
+///    - the thread does not exist locally → allow (this is `push` creating the
+///      thread on the remote from the current state);
+///    - the thread exists and its tip == the current state → allow (they match);
+///    - the thread exists and its tip != the current state → REFUSE unless
+///      `--force`, so we never push the current checkout's state under a
+///      DIFFERENT existing thread's ref by accident.
 ///
-/// Used by every native/hosted/local push arm so they share the same
-/// decoupling fix. The git-overlay refs path keeps its own refuse-guard
-/// (it pushes Git branches, not resolved states).
+/// Used by every native/hosted/local single-thread push arm so they share the
+/// same guard. The git-overlay refs path keeps its own refuse-guard (it pushes
+/// Git branches, not resolved states); `--all-threads` bypasses this entirely
+/// (each thread is pushed at its own tip).
 fn resolve_push_state_id(
     repo: &Repository,
     user_config: &UserConfig,
     state: Option<String>,
     thread: Option<&str>,
+    force: bool,
 ) -> Result<objects::object::ChangeId> {
     if let Some(state_str) = state {
         if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
@@ -1110,19 +1122,29 @@ fn resolve_push_state_id(
         return repo.resolve_state(&state_str)?.context("State not found");
     }
 
-    if let Some(thread_name) = thread {
-        return repo.resolve_state(thread_name)?.ok_or_else(|| {
-            anyhow!(
-                "cannot resolve thread '{thread_name}' to a state; refusing to push the current checkout's state under that ref.\nNext: heddle thread list to confirm the name, or push from that thread's checkout"
-            )
-        });
-    }
-
-    ensure_current_state(
+    let current = ensure_current_state(
         repo,
         user_config,
         Some("Bootstrap git-overlay before push".to_string()),
-    )
+    )?;
+
+    // heddle#837 guard: if the user named an EXISTING thread whose tip differs
+    // from what we're about to push, refuse unless forced — otherwise we'd
+    // overwrite an unrelated thread's ref with the current checkout's state.
+    // A non-existent named thread falls through (push creates it on the remote).
+    if let Some(thread_name) = thread
+        && !force
+        && let Some(tip) = repo.refs().get_thread(&ThreadName::new(thread_name))?
+        && tip != current
+    {
+        return Err(anyhow!(
+            "thread '{thread_name}' already exists at {} but the current checkout is {}; refusing to overwrite it.\nNext: switch to that thread's checkout (heddle thread switch {thread_name}), or pass --force to push the current state under '{thread_name}'.",
+            tip.short(),
+            current.short(),
+        ));
+    }
+
+    Ok(current)
 }
 
 async fn push_local(
