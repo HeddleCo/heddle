@@ -685,7 +685,7 @@ fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()>
         return Ok(());
     }
     if RemoteConfig::open(repo)
-        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::new)?
         .get(remote_arg)
         .is_ok()
     {
@@ -1013,7 +1013,7 @@ fn git_remote_push_url(git: &SleyRepository, remote: &str) -> Result<Option<Stri
 }
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
     let plan = ConfigEditPlan::new(git.common_dir().join("config"))
         .with_operation(ConfigEdit::replace_section(
             "branch",
@@ -1025,12 +1025,12 @@ fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) ->
         ))
         .with_fsync(true);
     git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 
 fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
     let remote = RemoteConfigSet::new(name)
         .with_url(url)
         .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
@@ -1042,7 +1042,7 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
         ))
         .with_fsync(true);
     git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 
@@ -1642,14 +1642,14 @@ fn persist_auto_provisioned_remote(
     let Some(remote_name) = auto_provision_remote_name(repo, remote_arg)? else {
         return Ok(None);
     };
-    let mut cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    let mut cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
     cfg.add(
         &remote_name,
         Remote {
             url: format!("heddle://{addr}/{full_path}"),
         },
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::new)?;
     Ok(Some(remote_name))
 }
 
@@ -1658,7 +1658,7 @@ fn auto_provision_remote_name(
     repo: &Repository,
     remote_arg: Option<&str>,
 ) -> Result<Option<String>> {
-    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
     match remote_arg {
         Some(arg) if cfg.get(arg).is_ok() => Ok(Some(arg.to_string())),
         Some(arg) => {

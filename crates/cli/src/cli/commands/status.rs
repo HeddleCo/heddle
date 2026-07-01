@@ -11,9 +11,9 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
-    ActionTemplate as CoreActionTemplate, ActorInfo, ChangesInfo, CoordinationStatus,
-    FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth,
-    GitOverlayHealthCheck, MaterializedThreadInfo, StatusAdapters, StatusDetail, StatusOptions,
+    ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusReport,
+    GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
+    MaterializedThreadInfo, StatusAdapters, StatusDetail, StatusOptions,
     StatusReport as StatusOutput, StatusThreadSummary, changes_from_worktree_status, changes_paths,
     fast_short_status_report, status as core_status,
 };
@@ -40,12 +40,12 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, build_git_overlay_health_with_worktree_status,
         build_plain_git_verification_probe, repository_setup_guidance,
+        repository_verification_state_from_health_with_worktree_status,
         serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     snapshot::resolve_principal,
     thread::{collect_thread_summaries, contextual_thread_action, find_thread_summary_single},
-    verify::{core_action_template, core_repository_verification_state},
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
@@ -391,10 +391,7 @@ fn core_git_overlay_health(
     repo: &Repository,
     worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
 ) -> GitOverlayHealth {
-    cli_git_overlay_health_to_core(build_git_overlay_health_with_worktree_status(
-        repo,
-        worktree_status,
-    ))
+    build_git_overlay_health_with_worktree_status(repo, worktree_status)
 }
 
 fn core_repository_trust_with_worktree(
@@ -402,14 +399,7 @@ fn core_repository_trust_with_worktree(
     health: GitOverlayHealth,
     worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
 ) -> heddle_core::RepositoryVerificationState {
-    let cli_health = cli_git_overlay_health_from_core(health);
-    core_repository_verification_state(
-        RepositoryVerificationState::from_health_with_worktree_status(
-            repo,
-            cli_health,
-            worktree_status,
-        ),
-    )
+    repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
 }
 
 fn core_git_index_plan_for_repo(
@@ -445,10 +435,10 @@ fn core_find_thread_summary_single(
         .map_err(|err| objects::HeddleError::Config(err.to_string()))
 }
 
-fn core_recommended_action_template(action: &str) -> Option<CoreActionTemplate> {
-    ActionFields::from_action(action)
-        .template
-        .map(core_action_template)
+fn core_recommended_action_template(
+    action: &str,
+) -> Option<super::command_catalog::ActionTemplate> {
+    ActionFields::from_action(action).template
 }
 
 fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
@@ -460,48 +450,6 @@ fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
         untracked_paths: plan.untracked_paths,
         will_commit: plan.will_commit,
         preserved_after_commit: plan.preserved_after_commit,
-    }
-}
-
-fn cli_git_overlay_health_to_core(
-    health: super::git_overlay_health::GitOverlayHealth,
-) -> GitOverlayHealth {
-    GitOverlayHealth {
-        status: health.status,
-        clean: health.clean,
-        summary: health.summary,
-        recovery_commands: health.recovery_commands,
-        checks: health
-            .checks
-            .into_iter()
-            .map(|check| GitOverlayHealthCheck {
-                name: check.name,
-                status: check.status,
-                summary: check.summary,
-                details: check.details,
-            })
-            .collect(),
-    }
-}
-
-fn cli_git_overlay_health_from_core(
-    health: GitOverlayHealth,
-) -> super::git_overlay_health::GitOverlayHealth {
-    super::git_overlay_health::GitOverlayHealth {
-        status: health.status,
-        clean: health.clean,
-        summary: health.summary,
-        recovery_commands: health.recovery_commands,
-        checks: health
-            .checks
-            .into_iter()
-            .map(|check| super::git_overlay_health::GitOverlayHealthCheck {
-                name: check.name,
-                status: check.status,
-                summary: check.summary,
-                details: check.details,
-            })
-            .collect(),
     }
 }
 
@@ -562,17 +510,6 @@ fn cli_coordination_status(status: CoordinationStatus) -> super::thread::Coordin
         CoordinationStatus::Diverged => super::thread::CoordinationStatus::Diverged,
         CoordinationStatus::Blocked => super::thread::CoordinationStatus::Blocked,
         CoordinationStatus::MergeReady => super::thread::CoordinationStatus::MergeReady,
-    }
-}
-
-fn cli_action_template_from_core(
-    template: CoreActionTemplate,
-) -> super::command_catalog::ActionTemplate {
-    super::command_catalog::ActionTemplate {
-        action: template.action,
-        argv_template: template.argv_template,
-        required_inputs: template.required_inputs,
-        agent_may_fill: template.agent_may_fill,
     }
 }
 
@@ -744,27 +681,10 @@ fn compact_next_action(
     }
 }
 
-fn compact_next_action_core(
-    recommended_action: &str,
-    template: &Option<CoreActionTemplate>,
-) -> (
-    Option<String>,
-    Option<super::command_catalog::ActionTemplate>,
-) {
-    if recommended_action.trim().is_empty() {
-        (None, None)
-    } else {
-        (
-            Some(recommended_action.to_string()),
-            template.clone().map(cli_action_template_from_core),
-        )
-    }
-}
-
 impl super::compact::CompactProjection for StatusOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         let (next_action, next_action_template) =
-            compact_next_action_core(&self.recommended_action, &self.recommended_action_template);
+            compact_next_action(&self.recommended_action, &self.recommended_action_template);
         let mut compact = super::compact::CompactOutput::new(self.output_kind);
         compact.coordination_status = Some(cli_coordination_status(self.coordination_status));
         compact.blockers = self.blockers.clone();

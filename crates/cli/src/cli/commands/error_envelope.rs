@@ -111,21 +111,6 @@ fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&C
     }
 }
 
-/// Pull the `invalid output.format: '<value>' — ...` sentence out of a
-/// multi-line toml-parser error so the user-facing envelope stays
-/// focused on the field name, the bad value, and the valid set. The
-/// surrounding `TOML parse error at line ...` framing is dropped because
-/// the `Next:` line names the recovery step and the JSON envelope
-/// carries the structured fields.
-fn extract_invalid_output_format_message(raw: &str) -> String {
-    raw.lines()
-        .rev()
-        .map(|line| line.trim())
-        .find(|line| line.starts_with("invalid output.format"))
-        .map(|line| line.to_string())
-        .unwrap_or_else(|| raw.to_string())
-}
-
 fn compact_dirty_worktree_condition(condition: &str) -> String {
     const PREFIX: &str = "unsaved worktree path(s): ";
     let Some(paths) = condition.strip_prefix(PREFIX) else {
@@ -179,7 +164,7 @@ fn idempotency_status_for_error(kind: &str) -> &'static str {
 
 fn display_error_message(err: &anyhow::Error, kind: &str) -> String {
     match kind {
-        "operation_not_in_progress" => "No merge in progress".to_string(),
+        "operation_not_in_progress" | "no_merge_in_progress" => "No merge in progress".to_string(),
         _ => format!("{err:#}"),
     }
 }
@@ -314,11 +299,7 @@ impl ErrorClassification {
 
 fn typed_recovery_commands(kind: &str) -> Vec<String> {
     let commands: &[&str] = match kind {
-        "state_corrupted" => &[
-            "heddle verify",
-            "heddle fsck --full",
-            "heddle fsck --repair",
-        ],
+        "state_corrupted" => &["heddle verify", "heddle fsck --full"],
         "repository_integrity_error" => &["heddle fsck --full"],
         "repository_not_found" => &["heddle init"],
         "state_not_found" => &["heddle log"],
@@ -450,33 +431,26 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             if let HeddleError::Recovery(details) = heddle_err {
                 return ErrorClassification::from_recovery_details(details);
             }
-            // `output.format = "auto"` is rejected at config-parse time by
-            // the hand-rolled `OutputFormat` deserializer (see
-            // `crates/repo/src/repo_config.rs`). The error string carries
-            // the field-and-value contract; we match on it here so the
-            // user gets a typed `Next:` envelope instead of a generic
-            // runtime fallback. The path comes from `ConfigParse` so the
-            // hint cites the *actual* file (`HEDDLE_CONFIG`, the resolved
-            // `$HOME/.config/heddle/config.toml`, or the repo's
-            // `.heddle/config.toml`) — not a hard-coded path that may
-            // not be the one that produced the failure (Codex R3 on #271).
-            if let HeddleError::ConfigParse { path, source } = heddle_err
-                && source.to_string().contains("invalid output.format")
+            if let HeddleError::ConfigInvalidValue {
+                path,
+                key,
+                value,
+                valid_values,
+            } = heddle_err
             {
-                let message = source.to_string();
                 let path_display = path.display().to_string();
+                let valid = valid_values.join(" or ");
                 return ErrorClassification {
                     kind: "invalid_repo_config_output_format".to_string(),
                     human_error: Some(format!(
-                        "{} (in {})",
-                        extract_invalid_output_format_message(&message),
-                        path_display
+                        "invalid {key}: '{value}' — valid values are {valid} (in {path_display})"
                     )),
                     hint: format!(
-                        "Edit {path_display} and set output.format to 'text' or 'json'."
+                        "Edit {path_display} and set {key} to {}.",
+                        valid_values.join(" or ")
                     ),
                     unsafe_condition: format!(
-                        "configuration at {path_display} declares an unknown output.format value"
+                        "configuration at {path_display} declares an unknown {key} value"
                     ),
                     would_change:
                         "the requested command did not run because Heddle could not load the configuration"
@@ -495,9 +469,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 // internals — `heddle status` is the natural recovery probe
                 // and would otherwise dead-end on the same opaque error.
                 HeddleError::Serialization(detail) => {
-                    return ErrorClassification::from_advice(&RecoveryAdvice::serialization_error(
-                        detail,
-                    ));
+                    return ErrorClassification::from_recovery_details(
+                        &objects::RecoveryDetails::serialization_error(detail),
+                    );
                 }
                 HeddleError::RepositoryNotFound(path) => {
                     let command =
@@ -544,14 +518,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         "heddle status",
                     );
                 }
-                HeddleError::StateNotFound(_) => {
-                    return ErrorClassification::known(
-                        "state_not_found",
-                        "List recent states with `heddle log`.",
-                        "the requested state id does not exist in this repository",
-                        "continuing with a guessed state could target the wrong history point",
-                        "repository state, refs, metadata, and worktree files were left unchanged",
-                        "heddle log",
+                HeddleError::StateNotFound(state_id) => {
+                    return ErrorClassification::from_recovery_details(
+                        &objects::RecoveryDetails::state_not_found(state_id),
                     );
                 }
                 HeddleError::InvalidObject(_)
@@ -567,9 +536,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         "heddle fsck --full",
                     );
                 }
-                HeddleError::NotFound(message) if message == "No merge in progress" => {
+                HeddleError::NoMergeInProgress => {
                     return ErrorClassification::known(
-                        "operation_not_in_progress",
+                        "no_merge_in_progress",
                         "Run `heddle status` to see the current operation state.",
                         "there is no active merge operation to continue, abort, or inspect",
                         "continuing an absent operation could target unrelated work",
@@ -660,16 +629,6 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
     // purpose (anchored to the top of the displayed message), so they only
     // fire for the exact phrasings the CLI itself produces.
     let top = format!("{err:#}");
-    if top.starts_with("State not found:") {
-        return ErrorClassification::known(
-            "state_not_found",
-            "List recent states with `heddle log`.",
-            "the requested state id does not exist in this repository",
-            "continuing with a guessed state could target the wrong history point",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            "heddle log",
-        );
-    }
     if top.starts_with("Thread not found:") {
         return ErrorClassification::known(
             "thread_not_found",
@@ -678,46 +637,6 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             "continuing with a guessed thread could target unrelated work",
             "repository state, refs, metadata, and worktree files were left unchanged",
             "heddle thread list",
-        );
-    }
-    if top == "No merge in progress" || top.starts_with("object not found: No merge in progress") {
-        return ErrorClassification::known(
-            "operation_not_in_progress",
-            "Run `heddle status` to see the current operation state.",
-            "there is no active merge operation to continue, abort, or inspect",
-            "continuing an absent operation could target unrelated work",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            "heddle status",
-        );
-    }
-    if top == "No conflicts to resolve" {
-        return ErrorClassification::known(
-            "no_conflicts_to_resolve",
-            "Run `heddle resolve --list` to inspect unresolved conflicts.",
-            "there are no unresolved merge conflicts in the active operation",
-            "marking nonexistent conflicts resolved would make operation state ambiguous",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            "heddle resolve --list",
-        );
-    }
-    if top.starts_with("op_id_in_flight:") {
-        return ErrorClassification::known(
-            "op_id_in_flight",
-            "Retry the same command after the in-flight operation completes.",
-            "another process owns this operation id reservation",
-            "running a second copy could duplicate a mutating operation",
-            "no command body was executed for this retry",
-            "heddle status",
-        );
-    }
-    if top.starts_with("op_id_conflict:") {
-        return ErrorClassification::known(
-            "op_id_conflict",
-            "Use the original command arguments with this --op-id, or generate a fresh op-id.",
-            "the same operation id maps to a different request body",
-            "reusing it for different arguments would make idempotent replay ambiguous",
-            "no command body was executed for this retry",
-            "heddle help --output json",
         );
     }
     ErrorClassification::runtime()
@@ -778,11 +697,7 @@ mod tests {
         assert_eq!(classified.primary_command, "heddle verify");
         assert_eq!(
             classified.recovery_commands,
-            vec![
-                "heddle verify",
-                "heddle fsck --full",
-                "heddle fsck --repair"
-            ]
+            vec!["heddle verify", "heddle fsck --full"]
         );
         assert!(classified.extra_json_fields.is_empty());
     }
@@ -806,5 +721,46 @@ mod tests {
             vec!["heddle help --output json"]
         );
         assert!(classified.extra_json_fields.is_empty());
+    }
+
+    #[test]
+    fn typed_invalid_output_format_classifies_without_toml_message_matching() {
+        let err = anyhow!(HeddleError::ConfigInvalidValue {
+            path: std::path::PathBuf::from("/tmp/heddle-config.toml"),
+            key: "output.format".to_string(),
+            value: "auto".to_string(),
+            valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+        });
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "invalid_repo_config_output_format");
+        assert_eq!(classified.primary_command, "heddle status");
+        assert!(
+            classified
+                .human_error
+                .as_deref()
+                .is_some_and(|error| error.contains("output.format") && error.contains("'auto'"))
+        );
+    }
+
+    #[test]
+    fn typed_no_merge_in_progress_gets_operation_recovery() {
+        let err = anyhow!(HeddleError::NoMergeInProgress);
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "no_merge_in_progress");
+        assert_eq!(classified.primary_command, "heddle status");
+        assert!(classified.unsafe_condition.contains("no active merge"));
+    }
+
+    #[test]
+    fn typed_state_not_found_routes_through_recovery_details() {
+        let state = objects::object::ChangeId::generate();
+        let err = anyhow!(HeddleError::StateNotFound(state));
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "state_not_found");
+        assert_eq!(classified.primary_command, "heddle log");
+        assert_eq!(classified.recovery_commands, vec!["heddle log"]);
     }
 }

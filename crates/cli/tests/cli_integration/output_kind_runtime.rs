@@ -958,6 +958,14 @@ fn discuss_open_show_append_emit_output_kind() {
     );
     assert_output_kind(&resolve, "discuss_resolve");
     assert_eq!(resolve["id"].as_str(), Some(discussion_id.as_str()));
+    assert!(
+        resolve["resolution"].get("change_id").is_some(),
+        "discussion resolution must expose change_id, even when null: {resolve}"
+    );
+    assert!(
+        resolve["resolution"].get("state_id").is_none(),
+        "discussion resolution must not expose the retired state_id alias: {resolve}"
+    );
 }
 
 #[test]

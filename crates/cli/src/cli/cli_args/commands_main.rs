@@ -377,10 +377,6 @@ Examples:
         #[arg(long)]
         thorough: bool,
 
-        /// Attempt to repair issues.
-        #[arg(long)]
-        repair: bool,
-
         /// Include Git-overlay mirror, mapping, notes, and checkout checks.
         #[arg(long)]
         bridge: bool,

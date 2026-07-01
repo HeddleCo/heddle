@@ -1066,11 +1066,7 @@ fn apply_status_advice(
         && trust.recommended_action != recommended_action
         && thread_recovery_action_is_primary(thread_health, &recommended_action)
     {
-        override_trust_recommended_action(
-            &mut trust,
-            recommended_action.clone(),
-            &opts.adapters,
-        );
+        override_trust_recommended_action(&mut trust, recommended_action.clone(), &opts.adapters);
     }
     let recommended_action = if git_backed_mapping {
         if has_changes {

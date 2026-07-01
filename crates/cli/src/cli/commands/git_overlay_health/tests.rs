@@ -11,9 +11,9 @@ use sley::Repository as SleyRepository;
 use tempfile::TempDir;
 
 use super::{
-    GitOverlayHealth, RepositoryVerificationState, VerificationActionPlan, action_template,
+    RepositoryVerificationState, VerificationActionPlan, action_template,
     canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
-    machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
+    clean_health, machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
     repository_setup_guidance, repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;
@@ -189,7 +189,7 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
 
 #[test]
 fn verification_action_plan_keeps_blockers_above_guidance() {
-    let clean_health = GitOverlayHealth::clean("clean", Vec::new());
+    let clean_health = clean_health("clean", Vec::new());
 
     let machine_gap = VerificationActionPlan::from_parts(
         &clean_health,
@@ -234,13 +234,11 @@ fn verification_action_plan_keeps_blockers_above_guidance() {
 #[test]
 fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
     assert_eq!(
-        remote_tracking_next_action(&remote("main", "origin/main", 0, 1, "heddle pull"))
-            .as_deref(),
+        remote_tracking_next_action(&remote("main", "origin/main", 0, 1, "heddle pull")).as_deref(),
         Some("heddle pull")
     );
     assert_eq!(
-        remote_tracking_next_action(&remote("main", "origin/main", 1, 0, "heddle push"))
-            .as_deref(),
+        remote_tracking_next_action(&remote("main", "origin/main", 1, 0, "heddle push")).as_deref(),
         Some("heddle push")
     );
     assert_eq!(
@@ -428,8 +426,7 @@ fn machine_contract_coverage_counts_the_same_rows_as_command_catalog() {
         .filter(|command| {
             command.supports_json
                 && command.schema_verbs.iter().any(|verb| {
-                    !crate::cli::commands::schemas::opaque_schema_verbs()
-                        .contains(&verb.as_str())
+                    !crate::cli::commands::schemas::opaque_schema_verbs().contains(&verb.as_str())
                 })
         })
         .count();

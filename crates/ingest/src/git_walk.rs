@@ -244,12 +244,9 @@ impl GitSource {
     /// memoized. Absence is the common case (most imports have no heddle notes),
     /// and lets [`Self::read_heddle_note_bytes`] skip the per-commit notes walk.
     fn heddle_notes_present(&self) -> bool {
-        *self.heddle_notes_present.get_or_init(|| {
-            matches!(
-                self.repo.find_reference("refs/notes/heddle"),
-                Ok(Some(_))
-            )
-        })
+        *self
+            .heddle_notes_present
+            .get_or_init(|| matches!(self.repo.find_reference("refs/notes/heddle"), Ok(Some(_))))
     }
 
     fn resolve_ref_commit(&self, name: &str, target: &SleyRefTarget) -> RefResolution {
@@ -1079,7 +1076,9 @@ mod tests {
         // And the head commit's walked entry carries the note bytes.
         let commit = src.read_commit(&head).unwrap();
         assert_eq!(
-            commit.heddle_note.map(|b| String::from_utf8_lossy(&b).trim_end().to_string()),
+            commit
+                .heddle_note
+                .map(|b| String::from_utf8_lossy(&b).trim_end().to_string()),
             Some(note_body.to_string()),
         );
     }

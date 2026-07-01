@@ -40,11 +40,16 @@ fn assert_profile_trace_is_sanitized(stderr: &str, temp: &TempDir) {
     }
 }
 
-#[test]
-fn perf_trace_jsonl_status_keeps_stdout_json_and_stderr_parseable() {
+fn setup_profile_repo_with_sensitive_input() -> TempDir {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("sensitive-profile-input.txt"), "secret").unwrap();
+    temp
+}
+
+#[test]
+fn perf_trace_jsonl_status_keeps_stdout_json_and_stderr_parseable() {
+    let temp = setup_profile_repo_with_sensitive_input();
 
     let output = heddle_output_with_env(
         &["--output", "json", "status"],
@@ -94,9 +99,7 @@ fn perf_trace_jsonl_status_keeps_stdout_json_and_stderr_parseable() {
 
 #[test]
 fn perf_trace_jsonl_thread_list_uses_named_phase_records() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("sensitive-profile-input.txt"), "secret").unwrap();
+    let temp = setup_profile_repo_with_sensitive_input();
 
     let output = heddle_output_with_env(
         &["--output", "json", "thread", "list"],
@@ -137,9 +140,7 @@ fn perf_trace_jsonl_thread_list_uses_named_phase_records() {
 
 #[test]
 fn perf_trace_jsonl_verify_uses_named_phase_records() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("sensitive-profile-input.txt"), "secret").unwrap();
+    let temp = setup_profile_repo_with_sensitive_input();
     heddle(&["capture", "-m", "profile input"], Some(temp.path())).unwrap();
 
     let output = heddle_output_with_env(

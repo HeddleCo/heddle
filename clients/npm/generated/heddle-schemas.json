@@ -14329,16 +14329,16 @@
                 "null"
               ]
             },
-            "kind": {
-              "type": "string"
-            },
-            "reason": {
+            "change_id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "state_id": {
+            "kind": {
+              "type": "string"
+            },
+            "reason": {
               "type": [
                 "string",
                 "null"
@@ -14499,16 +14499,16 @@
                 "null"
               ]
             },
-            "kind": {
-              "type": "string"
-            },
-            "reason": {
+            "change_id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "state_id": {
+            "kind": {
+              "type": "string"
+            },
+            "reason": {
               "type": [
                 "string",
                 "null"
@@ -14634,16 +14634,16 @@
                 "null"
               ]
             },
-            "kind": {
-              "type": "string"
-            },
-            "reason": {
+            "change_id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "state_id": {
+            "kind": {
+              "type": "string"
+            },
+            "reason": {
               "type": [
                 "string",
                 "null"
@@ -14804,16 +14804,16 @@
                 "null"
               ]
             },
-            "kind": {
-              "type": "string"
-            },
-            "reason": {
+            "change_id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "state_id": {
+            "kind": {
+              "type": "string"
+            },
+            "reason": {
               "type": [
                 "string",
                 "null"
@@ -14974,16 +14974,16 @@
                 "null"
               ]
             },
-            "kind": {
-              "type": "string"
-            },
-            "reason": {
+            "change_id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "state_id": {
+            "kind": {
+              "type": "string"
+            },
+            "reason": {
               "type": [
                 "string",
                 "null"
@@ -16546,58 +16546,10 @@
           },
           "type": "array"
         },
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "objects_checked": {
           "format": "uint",
           "minimum": 0,
           "type": "integer"
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
         },
         "valid": {
           "type": "boolean"

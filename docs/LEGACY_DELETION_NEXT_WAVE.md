@@ -21,11 +21,16 @@ but durable signed data still needs a deletion path that preserves verification.
 - The public diff schema title and generated TypeScript interface were renamed
   from `DiffOutput` to `DiffReport`.
 
-Migration hooks for this wave are reserved, but intentionally not registered, in
-`crates/repo/src/migration.rs` as `NEXT_DELETION_WAVE_MIGRATIONS`. Registering
-one of them means the migration body exists, the safety gate in that hook is
-satisfied, and the tests named below have been inverted or extended to prove the
-runtime fallback is no longer needed.
+Lane 6 registered the first deletion-prep migrations in
+`crates/repo/src/migration.rs`:
+
+- `0002_canonicalize_thread_records`
+- `0003_canonicalize_context_roots`
+- `0004_resecure_pre_fidelity_signatures`
+
+These migrations are durable gates, not fallback deletion by themselves. Runtime
+fallback removal still requires a later pass that proves every supported repo has
+either applied the migration cleanly or has no fallback-dependent data left.
 
 ## Blocked On A Deliberate Contract Decision
 
@@ -36,24 +41,26 @@ clean up a matching legacy direct-path leaf. The read fallback remains because
 `State.context` participates in `State::compute_hash()`, so rewriting historical
 states from direct-path roots to canonical roots changes author-signature input.
 
-Prepared hook: `0003_canonicalize_context_roots`.
+Registered migration: `0003_canonicalize_context_roots`.
 
-Deletion requires an explicit contract:
-- Safe migration path: rewrite unsigned states and locally owned signed states
-  from direct-path context roots to canonical roots. For signed states, compute
-  the old hash candidates before rewriting and call `Repository::resign_if_owned`
-  after the new root is attached.
-- Foreign or corrupted signed states must not be rewritten silently. The
-  migration must either preserve them and report "still needs legacy fallback",
-  or reject the repo with an explicit pre-1.0 break message.
+Current migration behavior:
+- Rewrites unsigned states and locally owned signed states from direct-path
+  context roots to canonical roots. For signed states, it computes the old hash
+  candidates before rewriting and calls `Repository::resign_if_owned` after the
+  new root is attached.
+- Preserves signed states whose key is not owned by this repo and fails the
+  migration gate instead of recording the migration as applied.
 - Only after the migration reports zero fallback-dependent states may
   `lookup_context_leaf_for_target` and `context_target_from_entry_path` drop the
   direct-path fallback.
 
-Prepared tests:
+Deletion-prep tests:
 - `repository_context::tests::legacy_direct_context_cannot_be_canonicalized_without_signature_decision`
   signs a state that points at a legacy direct-path context root and proves a
   naive canonical-root rewrite invalidates the signature.
+- `migration::tests::migration_0003_canonicalizes_owned_signed_context_root_and_resigns`
+  proves the registered migration rewrites and re-signs locally owned signed
+  context roots.
 
 Verification before deletion:
 - Signed-state fixture with a locally owned legacy context root re-signs and
@@ -68,11 +75,11 @@ Verification before deletion:
 Thread metadata still carries serde defaults for fields such as execution mode
 and shared-target metadata. These are durable records, not just CLI aliases.
 
-Prepared hook: `0002_canonicalize_thread_records`.
+Registered migration: `0002_canonicalize_thread_records`.
 
-Deletion requires:
-- A repository migration that loads every thread record while the defaults still
-  exist, then saves it back in the full current shape through `ThreadManager`.
+Current migration behavior:
+- Loads every thread record while the defaults still exist, then saves it back
+  through `ThreadManager`.
 - The migration must be idempotent and should not invent values for genuinely
   unknown optional metadata; it should persist the current semantic defaults
   (`freshness = unknown`, `auto = false`, empty path/impact vectors, empty
@@ -80,11 +87,13 @@ Deletion requires:
 - After migration, add or invert an old-record fixture proving `Repository::open`
   no longer relies on `ThreadRecord`/`Thread` serde defaults.
 
-Prepared tests:
+Deletion-prep tests:
 - `thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable`
-  documents the smallest legacy shape the current reader still accepts. The
-  deletion commit should invert this fixture: first open+migrate the legacy
-  shape, then assert the rewritten file contains the current complete shape.
+  documents the smallest legacy shape the current reader still accepts until the
+  fallback-removal pass deletes serde defaults.
+- `migration::tests::migration_0002_rewrites_minimal_thread_record_with_concrete_defaults`
+  opens and migrates the legacy shape, then asserts the rewritten file contains
+  the current concrete defaults.
 
 Verification:
 - `cargo test -p heddle-repo thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable -- --nocapture`
@@ -97,21 +106,20 @@ Verification:
 `State::compute_hash_pre_fidelity()` is still needed to verify states signed
 before the git-fidelity hash bump.
 
-Prepared hook: `0004_resecure_pre_fidelity_signatures`.
+Registered migration: `0004_resecure_pre_fidelity_signatures`.
 
-Deletion requires:
-- A backfill that scans legacy signed states, verifies the existing signature
-  against both the current hash and `compute_hash_pre_fidelity()`, and re-signs
-  only when `Repository::resign_if_owned` reports `Resigned`.
+Current migration behavior:
+- Scans signed states, verifies the existing signature against both the current
+  hash and `compute_hash_pre_fidelity()`, and re-signs only when
+  `Repository::resign_if_owned` reports `Resigned`.
 - Unsigned states remain unsigned; they do not need compatibility handling.
-- Foreign signed and corrupted signed states must not be laundered into this
-  repo's identity. The migration must either preserve/report them or reject the
-  repo under an explicit pre-1.0 contract.
+- Foreign valid pre-fidelity signatures are preserved and fail the migration
+  gate instead of being laundered into this repo's identity.
 - Only after the backfill proves no state needs the pre-fidelity candidate may
   `State::compute_hash_pre_fidelity()` and the `resign_if_owned` old-hash
   candidate path be removed.
 
-Prepared tests:
+Deletion-prep tests:
 - `repository_signing::tests::resign_if_owned_accepts_legacy_pre_fidelity_signature`
   covers the locally owned re-sign path.
 - `repository_signing::tests::resign_if_owned_refuses_foreign_pre_fidelity_signature`
@@ -121,6 +129,10 @@ Prepared tests:
   covers the no-laundering path for owned-key signatures that do not verify.
 - Existing unsigned-state coverage remains
   `repository_signing::tests::resign_if_owned_reports_unsigned`.
+- `migration::tests::migration_0004_resigns_owned_pre_fidelity_signature`
+  proves the registered migration re-signs owned legacy signatures.
+- `migration::tests::migration_0004_refuses_to_mark_foreign_pre_fidelity_signature_complete`
+  proves foreign valid pre-fidelity signatures block the migration ledger.
 
 Verification:
 - `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`

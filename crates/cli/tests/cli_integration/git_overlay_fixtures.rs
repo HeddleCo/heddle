@@ -59,10 +59,7 @@ impl GitOverlayFixture {
     }
 
     pub(crate) fn with_ready_materialized_thread(mut self, thread: &str) -> Self {
-        let thread_path = self
-            .temp
-            .path()
-            .join(thread.replace(['/', '\\'], "-"));
+        let thread_path = self.temp.path().join(thread.replace(['/', '\\'], "-"));
         let _started = self.json(&[
             "--output",
             "json",
@@ -86,15 +83,6 @@ impl GitOverlayFixture {
             "ready helper should preserve the first-transition land action: {_ready}"
         );
         self.ready_thread = Some((thread.to_string(), thread_path));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_stale_ready_thread(mut self, thread: &str) -> Self {
-        self = self.with_ready_materialized_thread(thread);
-        std::fs::write(self.work.join("main.txt"), "main advanced\n")
-            .expect("advance main worktree");
-        let _commit = self.json(&["--output", "json", "commit", "-m", "advance main"]);
         self
     }
 

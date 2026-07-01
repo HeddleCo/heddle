@@ -11104,17 +11104,32 @@ fn schema_near_miss_recommends_real_match_or_catalog_not_unrelated_schema() {
 }
 
 #[test]
-fn schemas_resolves_unambiguous_base_verbs_to_concrete_runtime_schema() {
-    let output = heddle(&["schemas", "merge"], None).expect("heddle schemas merge");
-    let parsed: serde_json::Value = serde_json::from_str(&output)
-        .unwrap_or_else(|err| panic!("schemas merge should emit JSON: {err}: {output}"));
-    assert_eq!(parsed["title"], "MergePreviewSchema");
-    let properties = parsed["properties"]
-        .as_object()
-        .unwrap_or_else(|| panic!("schema should expose properties: {parsed}"));
+fn schemas_requires_exact_verb_but_suggests_unambiguous_schema() {
+    let output = heddle_output(&["--output", "json", "schemas", "merge"], None)
+        .expect("invoke exact-only schema lookup");
     assert!(
-        properties.contains_key("preview_summary") && properties.contains_key("would_merge"),
-        "`heddle schemas merge` should guide agents to the merge preview schema: {parsed}"
+        !output.status.success(),
+        "base schema lookup should fail exact-only"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failure must not pollute stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "schema_not_registered");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle schemas merge --preview"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("merge --preview")),
+        "exact-only schema lookup should still suggest the precise schema verb: {envelope}"
     );
 }
 

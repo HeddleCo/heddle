@@ -4,6 +4,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{DiffReport, SemanticChangeEntry, compute_state_diff, compute_tree_diff};
 use objects::{
     object::{Attribution, ChangeId, ThreadName, Tree},
     store::ObjectStore,
@@ -22,7 +23,6 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    diff::{DiffReport, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         override_trust_recommended_action, repository_verification_blocked_advice,

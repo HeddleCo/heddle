@@ -401,9 +401,7 @@ impl RefManager {
             Ok(Some(summary)) => summary,
             // Absent or unreadable/corrupt: fall back to a clean full rebuild.
             Ok(None) | Err(_) => {
-                return self
-                    .rebuild_ref_summary_index_with_lock(_lock)
-                    .map(|_| ());
+                return self.rebuild_ref_summary_index_with_lock(_lock).map(|_| ());
             }
         };
 

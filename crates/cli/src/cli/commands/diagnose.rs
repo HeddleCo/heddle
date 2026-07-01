@@ -18,8 +18,9 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
         build_git_overlay_health, build_plain_git_verification_probe,
-        build_repository_verification_state, remote_tracking_with_verification_action,
-        serialize_empty_action_as_null, trust_visible_worktree_status,
+        build_repository_verification_state, primary_recovery_command,
+        remote_tracking_with_verification_action, serialize_empty_action_as_null,
+        trust_visible_worktree_status,
     },
     operator_loop::primary_next_action,
     thread::{
@@ -308,8 +309,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let mut health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
     if !git_overlay_health.clean && operation.is_none() {
         health.status = git_overlay_health.status.clone();
-        health.recommended_action = git_overlay_health
-            .primary_recovery_command()
+        health.recommended_action = primary_recovery_command(&git_overlay_health)
             .unwrap_or("heddle doctor")
             .to_string();
         if health.blockers.is_empty() {

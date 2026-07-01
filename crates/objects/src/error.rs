@@ -128,6 +128,8 @@ pub enum HeddleError {
     Recovery(Box<RecoveryDetails>),
     #[error("object not found: {0}")]
     NotFound(String),
+    #[error("No merge in progress")]
+    NoMergeInProgress,
     #[error("state not found: {0}")]
     StateNotFound(ChangeId),
     #[error("invalid object: {0}")]
@@ -159,6 +161,16 @@ pub enum HeddleError {
         // EX_DATAERR (65) rather than falling through to EX_IOERR (74).
         #[source]
         source: toml::de::Error,
+    },
+    #[error(
+        "invalid {key}: '{value}' — valid values are {} (in {path})",
+        valid_values.join(" or ")
+    )]
+    ConfigInvalidValue {
+        path: std::path::PathBuf,
+        key: String,
+        value: String,
+        valid_values: Vec<String>,
     },
     #[error("conflict: {0}")]
     Conflict(String),

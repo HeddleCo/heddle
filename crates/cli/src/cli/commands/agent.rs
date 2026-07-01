@@ -343,17 +343,13 @@ fn socket_path(_repo: &Repository) -> PathBuf {
     PathBuf::from("/dev/null/heddle-agent-not-supported.sock")
 }
 
-/// Read the daemon pidfile. Accepts both the legacy single-integer
-/// format and the structured `(pid, marker, started_at)` format used by
-/// daemons started after this PR — `status` only needs the PID, but the
-/// `stop` path additionally checks the marker via [`PidFileContents`].
+/// Read the daemon pidfile. Only the structured Heddle-owned
+/// `(pid, marker, started_at)` format is accepted; a bare PID cannot prove
+/// ownership and is treated as absent.
 #[cfg(unix)]
 fn read_pid(path: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(path).ok()?;
-    if let Some(structured) = PidFileContents::parse(&raw) {
-        return u32::try_from(structured.pid).ok();
-    }
-    raw.trim().parse::<u32>().ok()
+    u32::try_from(PidFileContents::parse(&raw)?.pid).ok()
 }
 
 #[cfg(not(unix))]
@@ -370,4 +366,39 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use daemon::local_daemon::PidFileContents;
+    #[cfg(unix)]
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use super::read_pid;
+
+    #[cfg(unix)]
+    #[test]
+    fn read_pid_rejects_bare_pidfile() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("grpc.pid");
+        std::fs::write(&path, "12345\n").expect("write bare pidfile");
+
+        assert_eq!(read_pid(&path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_pid_accepts_structured_heddle_pidfile() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("grpc.pid");
+        let contents = PidFileContents {
+            pid: 12345,
+            started_at_secs: 1_700_000_000,
+        };
+        std::fs::write(&path, contents.render()).expect("write structured pidfile");
+
+        assert_eq!(read_pid(&path), Some(12345));
+    }
 }

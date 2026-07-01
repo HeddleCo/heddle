@@ -81,41 +81,6 @@ fn thread_list_returns_all_started_threads() {
 }
 
 #[test]
-fn inspect_reflects_thread_provider_and_model() {
-    let main = setup_repo("base.txt", "base");
-
-    heddle(
-        &[
-            "start",
-            "feature/attributed",
-            "--workspace",
-            "auto",
-            "--agent-provider",
-            "anthropic",
-            "--agent-model",
-            "claude-sonnet-4-6",
-        ],
-        Some(main.path()),
-    )
-    .unwrap();
-
-    let inspect: Value = serde_json::from_str(
-        &heddle(
-            &["--output", "json", "thread", "show", "feature/attributed"],
-            Some(main.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(inspect["actor"]["provider"].as_str(), Some("anthropic"));
-    assert_eq!(
-        inspect["actor"]["model"].as_str(),
-        Some("claude-sonnet-4-6")
-    );
-}
-
-#[test]
 fn start_path_inherits_codex_probe_identity_into_actor_metadata() {
     let main = setup_repo("base.txt", "base");
     let work = TempDir::new().unwrap();

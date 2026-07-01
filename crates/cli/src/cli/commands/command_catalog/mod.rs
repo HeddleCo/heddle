@@ -4,6 +4,7 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
+pub use heddle_core::ActionTemplate;
 use heddle_core::{
     DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
     StatusReport, VerifyReport,
@@ -138,20 +139,6 @@ pub struct CommandCatalogArgument {
     pub value_names: Vec<String>,
     pub help: Option<String>,
     pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ActionTemplate {
-    pub action: String,
-    pub argv_template: Vec<String>,
-    pub required_inputs: Vec<String>,
-    /// Whether an agent may replace placeholders in `argv_template`.
-    ///
-    /// When `agent_may_fill` is false, treat `action` and `argv_template` as
-    /// display-only: do not substitute `<name>`/`<url>` placeholders. Surface
-    /// the template to a human or discard it. Substituting and running it will
-    /// pass literal `<name>` to Heddle and fail.
-    pub agent_may_fill: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1999,7 +1986,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
-            documented_core_report_schema(MUTATING, FsckReport::CONTRACT),
+            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
             "recovery",
         ),
     ),

@@ -5,7 +5,6 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    ActionTemplate as CoreActionTemplate, MachineContractCoverage as CoreMachineContractCoverage,
     PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck, VerifyOptions,
     VerifyReport, verify as core_verify,
 };
@@ -15,10 +14,7 @@ use repo::Repository;
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    command_catalog::ActionTemplate,
-    git_overlay_health::{
-        self as cli_verify, build_plain_git_verification_probe, build_repository_verification_state,
-    },
+    git_overlay_health::{build_plain_git_verification_probe, build_repository_verification_state},
 };
 use crate::{
     cli::{Cli, should_output_json, style},
@@ -126,145 +122,12 @@ fn verify_execution_context_from_cli(
 
 fn core_plain_git_probe(start: &Path) -> objects::error::Result<Option<PlainGitVerifyProbe>> {
     build_plain_git_verification_probe(start)
-        .map(|probe| {
-            probe.map(|probe| PlainGitVerifyProbe {
-                trust: core_repository_verification_state(probe.trust),
-            })
-        })
+        .map(|probe| probe.map(|probe| PlainGitVerifyProbe { trust: probe.trust }))
         .map_err(|err| HeddleError::Config(err.to_string()))
 }
 
 fn core_repository_trust(repo: &Repository) -> objects::error::Result<RepositoryVerificationState> {
-    Ok(core_repository_verification_state(
-        build_repository_verification_state(repo),
-    ))
-}
-
-pub(crate) fn core_repository_verification_state(
-    state: cli_verify::RepositoryVerificationState,
-) -> RepositoryVerificationState {
-    RepositoryVerificationState {
-        verified: state.verified,
-        status: state.status,
-        repository_mode: state.repository_mode,
-        heddle_initialized: state.heddle_initialized,
-        git_branch: state.git_branch,
-        heddle_thread: state.heddle_thread,
-        worktree_dirty: state.worktree_dirty,
-        worktree_state: state.worktree_state,
-        import_state: state.import_state,
-        mapping_state: state.mapping_state,
-        remote_drift: state.remote_drift,
-        active_operation: state.active_operation,
-        default_remote: state.default_remote,
-        clone_verification: state.clone_verification,
-        machine_contract: state.machine_contract,
-        machine_contract_coverage: core_machine_contract_coverage(state.machine_contract_coverage),
-        workflow_status: state.workflow_status,
-        workflow_summary: state.workflow_summary,
-        summary: state.summary,
-        recommended_action: state.recommended_action,
-        recommended_action_template: state.recommended_action_template.map(core_action_template),
-        recovery_commands: state.recovery_commands,
-        recovery_action_templates: state
-            .recovery_action_templates
-            .into_iter()
-            .map(core_action_template)
-            .collect(),
-        checks: state
-            .checks
-            .into_iter()
-            .map(core_verification_check)
-            .collect(),
-    }
-}
-
-pub(crate) fn core_verification_check(check: cli_verify::VerificationCheck) -> VerificationCheck {
-    VerificationCheck {
-        name: check.name,
-        status: check.status,
-        clean: check.clean,
-        summary: check.summary,
-        recommended_action: check.recommended_action,
-        recommended_action_template: check.recommended_action_template.map(core_action_template),
-        recovery_commands: check.recovery_commands,
-        recovery_action_templates: check
-            .recovery_action_templates
-            .into_iter()
-            .map(core_action_template)
-            .collect(),
-        details: check.details,
-    }
-}
-
-pub(crate) fn core_action_template(template: ActionTemplate) -> CoreActionTemplate {
-    CoreActionTemplate {
-        action: template.action,
-        argv_template: template.argv_template,
-        required_inputs: template.required_inputs,
-        agent_may_fill: template.agent_may_fill,
-    }
-}
-
-pub(crate) fn core_machine_contract_coverage(
-    coverage: cli_verify::MachineContractCoverage,
-) -> CoreMachineContractCoverage {
-    CoreMachineContractCoverage {
-        status: coverage.status,
-        verified_scope: coverage.verified_scope,
-        advanced_scope: coverage.advanced_scope,
-        summary: coverage.summary,
-        catalog_commands_total: coverage.catalog_commands_total,
-        catalog_mutating_commands_total: coverage.catalog_mutating_commands_total,
-        json_commands_total: coverage.json_commands_total,
-        json_mutating_commands_total: coverage.json_mutating_commands_total,
-        json_commands_with_schema: coverage.json_commands_with_schema,
-        json_commands_with_accepted_opaque_schema: coverage
-            .json_commands_with_accepted_opaque_schema,
-        json_commands_without_schema: coverage.json_commands_without_schema,
-        verified_scope_json_commands_total: coverage.verified_scope_json_commands_total,
-        verified_scope_json_commands_with_schema: coverage.verified_scope_json_commands_with_schema,
-        verified_scope_json_commands_with_accepted_opaque_schema: coverage
-            .verified_scope_json_commands_with_accepted_opaque_schema,
-        verified_scope_json_commands_without_schema: coverage
-            .verified_scope_json_commands_without_schema,
-        advanced_scope_json_commands_total: coverage.advanced_scope_json_commands_total,
-        advanced_scope_json_commands_with_accepted_opaque_schema: coverage
-            .advanced_scope_json_commands_with_accepted_opaque_schema,
-        mutating_commands_total: coverage.mutating_commands_total,
-        mutating_commands_with_schema: coverage.mutating_commands_with_schema,
-        mutating_commands_with_accepted_opaque_schema: coverage
-            .mutating_commands_with_accepted_opaque_schema,
-        mutating_commands_without_schema: coverage.mutating_commands_without_schema,
-        verified_scope_mutating_commands_total: coverage.verified_scope_mutating_commands_total,
-        verified_scope_mutating_commands_with_schema: coverage
-            .verified_scope_mutating_commands_with_schema,
-        verified_scope_mutating_commands_with_accepted_opaque_schema: coverage
-            .verified_scope_mutating_commands_with_accepted_opaque_schema,
-        verified_scope_mutating_commands_without_schema: coverage
-            .verified_scope_mutating_commands_without_schema,
-        advanced_scope_mutating_commands_total: coverage.advanced_scope_mutating_commands_total,
-        advanced_scope_mutating_commands_with_accepted_opaque_schema: coverage
-            .advanced_scope_mutating_commands_with_accepted_opaque_schema,
-        schema_verbs_total: coverage.schema_verbs_total,
-        documented_schema_verbs_total: coverage.documented_schema_verbs_total,
-        undocumented_schema_verbs_total: coverage.undocumented_schema_verbs_total,
-        opaque_schema_verbs_total: coverage.opaque_schema_verbs_total,
-        accepted_opaque_schema_verbs_total: coverage.accepted_opaque_schema_verbs_total,
-        unaccepted_opaque_schema_verbs_total: coverage.unaccepted_opaque_schema_verbs_total,
-        supports_op_id_total: coverage.supports_op_id_total,
-        jsonl_commands_total: coverage.jsonl_commands_total,
-        missing_schema_examples: coverage.missing_schema_examples,
-        missing_mutating_schema_examples: coverage.missing_mutating_schema_examples,
-        verified_scope_missing_schema_examples: coverage.verified_scope_missing_schema_examples,
-        verified_scope_accepted_opaque_schema_examples: coverage
-            .verified_scope_accepted_opaque_schema_examples,
-        advanced_scope_accepted_opaque_schema_examples: coverage
-            .advanced_scope_accepted_opaque_schema_examples,
-        accepted_opaque_schema_examples: coverage.accepted_opaque_schema_examples,
-        unaccepted_opaque_schema_examples: coverage.unaccepted_opaque_schema_examples,
-        undocumented_schema_examples: coverage.undocumented_schema_examples,
-    }
+    Ok(build_repository_verification_state(repo))
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {

@@ -4,7 +4,6 @@
 mod bridge;
 mod objects;
 mod refs;
-mod repair;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -19,7 +18,6 @@ use crate::{ExecutionContext, HeddleReport, MachineOutputKind, ReportContract, s
 pub struct FsckOptions {
     pub full: bool,
     pub thorough: bool,
-    pub repair: bool,
     pub bridge: bool,
 }
 
@@ -81,10 +79,6 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
     }
 
     let valid = errors.is_empty();
-
-    if opts.repair && !valid {
-        repair::repair_issues(repo, &errors)?;
-    }
 
     Ok(FsckReport {
         valid,

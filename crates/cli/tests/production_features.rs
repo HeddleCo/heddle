@@ -481,12 +481,20 @@ mod fsck {
     }
 
     #[test]
-    fn test_fsck_repair_mode() {
+    fn test_fsck_rejects_removed_repair_flag() {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
         let result = heddle(&["fsck", "--repair"], Some(temp.path()));
-        assert!(result.is_ok(), "fsck --repair failed: {:?}", result.err());
+        assert!(
+            result.is_err(),
+            "fsck --repair should be rejected after no-op repair removal"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unexpected argument '--repair'") || err.contains("unrecognized"),
+            "removed flag should fail at CLI parsing, got: {err}"
+        );
     }
 
     #[test]

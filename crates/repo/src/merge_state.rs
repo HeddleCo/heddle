@@ -76,7 +76,7 @@ impl MergeStateManager {
         let _lock = self.write_lock()?;
         let mut state = self
             .load_unlocked_for_worktree()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
 
         if state.conflicts.iter().any(|conflict| conflict == path)
             && state.resolved.iter().all(|resolved| resolved != path)
@@ -92,7 +92,7 @@ impl MergeStateManager {
         let _lock = self.write_lock()?;
         let mut state = self
             .load_unlocked_for_worktree()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
 
         let newly_resolved: Vec<String> = state
             .conflicts
@@ -111,7 +111,7 @@ impl MergeStateManager {
         let _lock = self.read_lock()?;
         let state = self
             .load_unlocked_for_worktree()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
 
         Ok(state
             .conflicts
@@ -125,7 +125,7 @@ impl MergeStateManager {
         let _lock = self.write_lock()?;
         let state = self
             .load_unlocked_for_worktree()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
 
         if !self.merge_state_path.exists() {
             return Ok(state);
@@ -139,7 +139,7 @@ impl MergeStateManager {
         let _lock = self.write_lock()?;
         let state = self
             .load_unlocked_for_worktree()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
 
         let unresolved: Vec<_> = state
             .conflicts
@@ -176,7 +176,7 @@ impl MergeStateManager {
         let _lock = self.write_lock()?;
         let mut state = self
             .load_unlocked()?
-            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+            .ok_or(crate::HeddleError::NoMergeInProgress)?;
         state.ours = new_ours;
         self.write_state(&state)?;
         Ok(state)

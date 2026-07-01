@@ -198,11 +198,8 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "214 command(s), 176 JSON command(s), 111 mutating command(s), 108 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
       "catalog_commands_total": 214,
-      "catalog_mutating_commands_total": 111,
       "json_commands_total": 176,
-      "json_mutating_commands_total": 108,
       "json_commands_with_schema": 129,
       "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
@@ -212,15 +209,12 @@ in-progress operation.
       "verified_scope_json_commands_without_schema": 0,
       "advanced_scope_json_commands_total": 133,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-      "mutating_commands_total": 108,
-      "mutating_commands_with_schema": 81,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 26,
       "verified_scope_mutating_commands_with_schema": 26,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 82,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
       "schema_verbs_total": 182,
       "documented_schema_verbs_total": 182,
@@ -228,7 +222,6 @@ in-progress operation.
       "opaque_schema_verbs_total": 47,
       "accepted_opaque_schema_verbs_total": 47,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 99,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -3120,24 +3113,18 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     ],
     "advanced_scope_json_commands_total": 133,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 82,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
     "catalog_commands_total": 214,
-    "catalog_mutating_commands_total": 111,
     "json_commands_total": 176,
     "json_commands_with_accepted_opaque_schema": 47,
     "json_commands_with_schema": 129,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 108,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 108,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 81,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "214 command(s), 176 JSON command(s), 111 mutating command(s), 108 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3487,13 +3474,13 @@ nothing to stop — both exit 0):
 `discuss_append`):
 
 ```json
-{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
 ```
 
 `heddle discuss list --output json` emits:
 
 ```json
-{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
 `heddle fsck --output json` emits:

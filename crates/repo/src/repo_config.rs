@@ -310,9 +310,7 @@ pub enum OutputFormat {
 // "unknown variant" wording. The bug class #271 closes is the silent
 // JSON-when-piped surprise the old `auto` mode produced; rather than
 // keeping an alias that would re-route it to `text`, pre-1.0 we error
-// loudly so the operator updates the config. The error string is the
-// load-bearing contract — the CLI's error envelope (see
-// `print_error_with_hint`) classifies it by substring match.
+// loudly so the operator updates the config.
 impl<'de> Deserialize<'de> for OutputFormat {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -421,17 +419,23 @@ impl RepoConfig {
         let mut file = std::fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(value) = invalid_output_format_value(&contents) {
+            return Err(objects::error::HeddleError::ConfigInvalidValue {
+                path: resolved,
+                key: "output.format".to_string(),
+                value,
+                valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+            });
+        }
         // Wrap parse failures in `HeddleError::ConfigParse` so the CLI
         // error envelope can render the actual config file in the
         // recovery hint (Codex R3 cid 3313132711 on #271). The implicit
         // `From<toml::de::Error>` would lose the path; we attach it
         // here where we still know which file produced the failure.
-        toml::from_str::<Self>(&contents).map_err(|err| {
-            let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            objects::error::HeddleError::ConfigParse {
-                path: resolved,
-                source: err,
-            }
+        toml::from_str::<Self>(&contents).map_err(|err| objects::error::HeddleError::ConfigParse {
+            path: resolved,
+            source: err,
         })
     }
 
@@ -449,6 +453,15 @@ impl RepoConfig {
             email: email.into(),
         });
     }
+}
+
+fn invalid_output_format_value(contents: &str) -> Option<String> {
+    let value = toml::from_str::<toml::Value>(contents).ok()?;
+    let format = value
+        .get("output")
+        .and_then(|output| output.get("format"))
+        .and_then(toml::Value::as_str)?;
+    (!matches!(format, "text" | "json")).then(|| format.to_string())
 }
 
 #[cfg(test)]

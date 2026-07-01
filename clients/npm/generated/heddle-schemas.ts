@@ -1025,9 +1025,9 @@ export interface DiscussionListSchema {
 
 export interface DiscussionResolutionSchema {
   annotation_id?: string | null;
+  change_id?: string | null;
   kind: string;
   reason?: string | null;
-  state_id?: string | null;
 }
 
 export interface DiscussionSchema {
@@ -1186,11 +1186,7 @@ export interface FsckError {
 export interface FsckReport {
   bridge_checked: boolean;
   errors: FsckError[];
-  idempotency_status?: string | null;
   objects_checked: number;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
   valid: boolean;
   warnings: string[];
 }

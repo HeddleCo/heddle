@@ -62,7 +62,7 @@ struct DiscussionOutput {
 struct ResolutionView {
     kind: String,
     annotation_id: Option<String>,
-    state_id: Option<String>,
+    change_id: Option<String>,
     reason: Option<String>,
 }
 
@@ -315,19 +315,19 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
         Some(State::Open(_)) | None => ResolutionView {
             kind: "open".into(),
             annotation_id: None,
-            state_id: None,
+            change_id: None,
             reason: None,
         },
         Some(State::IntoAnnotation(p)) => ResolutionView {
             kind: "resolved_into_annotation".into(),
             annotation_id: opt_string(p.annotation_id.clone()),
-            state_id: None,
+            change_id: None,
             reason: None,
         },
         Some(State::ByEdit(p)) => ResolutionView {
             kind: "resolved_by_edit".into(),
             annotation_id: None,
-            state_id: if p.state_id.is_empty() {
+            change_id: if p.state_id.is_empty() {
                 None
             } else {
                 objects::object::ChangeId::try_from_slice(&p.state_id)
@@ -339,7 +339,7 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
         Some(State::Dismissed(p)) => ResolutionView {
             kind: "dismissed".into(),
             annotation_id: None,
-            state_id: None,
+            change_id: None,
             reason: opt_string(p.reason.clone()),
         },
     };

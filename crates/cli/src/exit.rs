@@ -75,7 +75,10 @@ impl HeddleExitCode {
             | "reconcile_direction_required"
             | "dirty_worktree"
             | "state_corrupted"
+            | "state_not_found"
             | "conflict_not_found"
+            | "no_merge_in_progress"
+            | "operation_not_in_progress"
             | "json_unsupported"
             | "json_compact_unsupported" => Some(Self::DataErr),
             _ => None,
@@ -109,6 +112,11 @@ impl HeddleExitCode {
                     objects::error::HeddleError::RepositoryFormatTooNew { .. } => {
                         return Self::DataErr;
                     }
+                    objects::error::HeddleError::StateNotFound(_)
+                    | objects::error::HeddleError::NoMergeInProgress
+                    | objects::error::HeddleError::ConfigInvalidValue { .. } => {
+                        return Self::DataErr;
+                    }
                     objects::error::HeddleError::Config(_) => return Self::Config,
                     // Stored state that fails msgpack decoding is corrupted
                     // data, not a transient IO problem — same class as the
@@ -118,7 +126,11 @@ impl HeddleExitCode {
                 }
             }
             if let Some(remote_err) = cause.downcast_ref::<crate::remote::RemoteError>()
-                && matches!(remote_err, crate::remote::RemoteError::NotFound(_))
+                && matches!(
+                    remote_err,
+                    crate::remote::RemoteError::NotFound(_)
+                        | crate::remote::RemoteError::NoDefaultRemote
+                )
             {
                 return Self::Config;
             }
@@ -208,10 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_error_not_found_is_config() {
-        let err = anyhow::anyhow!(crate::remote::RemoteError::NotFound(
-            "(no default remote configured)".to_string()
-        ));
+    fn remote_error_no_default_remote_is_config() {
+        let err = anyhow::anyhow!(crate::remote::RemoteError::NoDefaultRemote);
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 
@@ -301,6 +311,32 @@ mod tests {
     }
 
     #[test]
+    fn state_not_found_typed_variant_is_data_err() {
+        let err: anyhow::Error =
+            objects::error::HeddleError::StateNotFound(objects::object::ChangeId::generate())
+                .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn invalid_config_value_typed_variant_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::ConfigInvalidValue {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            key: "output.format".to_string(),
+            value: "auto".to_string(),
+            valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn no_merge_in_progress_typed_variant_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::NoMergeInProgress.into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
     fn recovery_details_kind_uses_advice_exit_code_mapping() {
         let err: anyhow::Error = objects::error::HeddleError::recovery(
             objects::RecoveryDetails::serialization_error("wrong msgpack marker FixArray(0)"),
@@ -337,6 +373,9 @@ mod tests {
             ("reconcile_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
+            ("state_not_found", HeddleExitCode::DataErr),
+            ("no_merge_in_progress", HeddleExitCode::DataErr),
+            ("operation_not_in_progress", HeddleExitCode::DataErr),
             ("conflict_not_found", HeddleExitCode::DataErr),
             ("json_unsupported", HeddleExitCode::DataErr),
             ("json_compact_unsupported", HeddleExitCode::DataErr),
@@ -395,10 +434,11 @@ mod tests {
     }
 
     #[test]
-    fn state_corrupted_advice_is_data_err() {
-        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::serialization_error(
-            "wrong msgpack marker FixArray(0)"
-        ));
+    fn state_corrupted_recovery_details_are_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::recovery(
+            objects::RecoveryDetails::serialization_error("wrong msgpack marker FixArray(0)"),
+        )
+        .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 

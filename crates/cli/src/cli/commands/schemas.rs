@@ -199,7 +199,7 @@ pub(crate) fn opaque_schema_verbs() -> &'static [&'static str] {
 
 /// Generate the schema for `verb`. Returns `None` if no schema is registered.
 pub fn schema_for_verb(verb: &str) -> Option<Value> {
-    let verb = resolve_schema_verb(verb)?;
+    let verb = verb.trim();
     if !schema_verbs().contains(&verb) {
         return None;
     }
@@ -228,24 +228,6 @@ fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
             Some((VerifyReport::CONTRACT.schema)())
         }
         _ => None,
-    }
-}
-
-fn resolve_schema_verb(verb: &str) -> Option<&'static str> {
-    let verb = verb.trim();
-    if let Some(registered) = schema_verbs()
-        .iter()
-        .copied()
-        .find(|registered| *registered == verb)
-    {
-        return Some(registered);
-    }
-
-    let matches = matching_schema_verbs(verb, schema_verbs());
-    if matches.len() == 1 {
-        matches.first().copied()
-    } else {
-        None
     }
 }
 
@@ -1009,7 +991,7 @@ pub struct DiscussionEnvelopeSchema {
 pub struct DiscussionResolutionSchema {
     pub kind: String,
     pub annotation_id: Option<String>,
-    pub state_id: Option<String>,
+    pub change_id: Option<String>,
     pub reason: Option<String>,
 }
 

@@ -412,7 +412,7 @@ async fn fetch_remote_state(
     client
         .fetch_state(repo, repo_path, remote_name, state_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .map_err(anyhow::Error::new)
 }
 
 #[cfg(feature = "client")]

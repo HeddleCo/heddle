@@ -74,6 +74,9 @@ pub enum GitBridgeError {
     #[error("conflict during sync: {0}")]
     Conflict(String),
 
+    #[error("Git-overlay mapping conflict: {message}")]
+    MappingConflict { message: String },
+
     #[error("Git branch '{branch}' cannot be imported as a Heddle thread: {message}")]
     InvalidThreadName { branch: String, message: String },
 
@@ -538,19 +541,23 @@ impl SyncMapping {
         if let Some(existing) = self.heddle_to_git.get(&change_id)
             && *existing != git_oid
         {
-            return Err(GitBridgeError::Conflict(format!(
-                "change id {} mapped to {} (new {})",
-                change_id, existing, git_oid
-            )));
+            return Err(GitBridgeError::MappingConflict {
+                message: format!(
+                    "change id {} mapped to {} (new {})",
+                    change_id, existing, git_oid
+                ),
+            });
         }
 
         if let Some(existing) = self.git_to_heddle.get(&git_oid)
             && *existing != change_id
         {
-            return Err(GitBridgeError::Conflict(format!(
-                "git oid {} mapped to {} (new {})",
-                git_oid, existing, change_id
-            )));
+            return Err(GitBridgeError::MappingConflict {
+                message: format!(
+                    "git oid {} mapped to {} (new {})",
+                    git_oid, existing, change_id
+                ),
+            });
         }
 
         self.insert(change_id, git_oid);

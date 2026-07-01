@@ -30,6 +30,9 @@ pub enum RemoteError {
     #[error("remote not found: {0}")]
     NotFound(String),
 
+    #[error("no default remote configured")]
+    NoDefaultRemote,
+
     #[error("invalid remote url: {0}")]
     InvalidUrl(String),
 }
@@ -156,7 +159,7 @@ pub fn resolve_remote_with_key(
         Some(spec) => spec.to_string(),
         None => cfg
             .default_name()
-            .ok_or_else(|| RemoteError::NotFound("(no default remote configured)".to_string()))?
+            .ok_or(RemoteError::NoDefaultRemote)?
             .to_string(),
     };
 

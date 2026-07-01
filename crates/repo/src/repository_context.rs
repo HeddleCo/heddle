@@ -150,6 +150,47 @@ impl Repository {
         Ok(None)
     }
 
+    pub(crate) fn canonicalize_context_root(
+        &self,
+        context_root: &ContentHash,
+    ) -> Result<(ContentHash, bool)> {
+        let mut root = *context_root;
+        let mut changed = false;
+
+        for entry in self.list_context_entries(context_root, None)? {
+            let Some(legacy_path) = entry.target.legacy_storage_path() else {
+                continue;
+            };
+            if legacy_path == entry.target.storage_path() {
+                continue;
+            }
+            let Some(legacy_hash) = self.lookup_context_leaf(&root, &legacy_path)? else {
+                continue;
+            };
+
+            if self
+                .lookup_context_leaf(&root, &entry.target.storage_path())?
+                .is_some()
+            {
+                if let Some(new_root) = self.remove_leaf_at_path(&root, &legacy_path)? {
+                    root = new_root;
+                }
+                changed = true;
+                continue;
+            }
+
+            let Some(blob) = self.store.get_blob(&legacy_hash)? else {
+                continue;
+            };
+            let context = ContextBlob::decode(blob.content())
+                .map_err(|e| HeddleError::InvalidObject(format!("invalid context blob: {e}")))?;
+            root = self.set_context_blob(Some(&root), &entry.target, &context)?;
+            changed = true;
+        }
+
+        Ok((root, changed))
+    }
+
     // --- private helpers ---
 
     fn lookup_context_leaf_for_target(

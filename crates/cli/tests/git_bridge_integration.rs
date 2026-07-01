@@ -1655,7 +1655,9 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
     let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
     let put_state = |contents: &[u8], name: &str, parents: Vec<ChangeId>| -> State {
         let store = test_support::heddle_repo(&bridge).store();
-        let blob_hash = store.put_blob(&Blob::from_slice(contents)).expect("put blob");
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(contents))
+            .expect("put blob");
         let tree_hash = store
             .put_tree(&Tree::from_entries(vec![
                 TreeEntry::file(name.to_string(), blob_hash, false).expect("tree entry"),

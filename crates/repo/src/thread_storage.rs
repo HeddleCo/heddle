@@ -913,10 +913,10 @@ mod tests {
     }
 
     /// Deletion-wave guard: this is the smallest durable pre-current
-    /// thread-record shape the reader still accepts. The eventual
-    /// `0002_canonicalize_thread_records` migration should invert this test by
-    /// rewriting such records to the full current shape before the serde
-    /// defaults are removed.
+    /// thread-record shape the reader still accepts. The registered
+    /// `0002_canonicalize_thread_records` migration rewrites such records
+    /// through `ThreadManager`; this fixture stays until the serde defaults are
+    /// actually deleted in a later fallback-removal pass.
     #[test]
     fn thread_record_defaults_keep_minimal_legacy_shape_readable() {
         let raw = r#"
