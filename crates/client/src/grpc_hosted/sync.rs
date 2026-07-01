@@ -2552,6 +2552,15 @@ fn accept_git_lane_pack(
     Ok(())
 }
 
+/// Apply a server-originated Git ref update on the pull stream.
+///
+/// Pull-side ref application is unconditional: we commit the local Git ref with
+/// [`RefPrecondition::Any`] and do not compare against a prior target oid. That
+/// is deliberate and **not** symmetric with push-side compare-and-set, where the
+/// client transmits `expected_target_oid` / `expected_missing` from `ListRefs`.
+/// The pull stream is single-threaded and server-trusted — the client applies
+/// ref updates in the order the server sends them after installing the
+/// accompanying pack, so there is no concurrent local writer racing this path.
 fn accept_git_lane_ref_update(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
