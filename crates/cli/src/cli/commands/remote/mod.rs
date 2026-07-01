@@ -26,6 +26,8 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
+use crate::cli::progress_render::{clear_line, progress_for};
+#[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
@@ -185,7 +187,6 @@ pub async fn cmd_push(
     force: bool,
     all_threads: bool,
     mirror: Option<String>,
-    git_mirror: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
@@ -426,13 +427,12 @@ pub async fn cmd_push(
                     track_name: &track_name,
                     force,
                     all_threads,
-                    git_mirror,
                     cli,
                 },
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, single_state_id, git_mirror);
+            let _ = (addr, repo_path, token, single_state_id);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -1292,6 +1292,16 @@ async fn push_local_all_threads(
     Ok(())
 }
 
+/// Whether a hosted `--all-threads` push collapses to a SINGLE mirror push
+/// instead of the per-thread native fan-out. True for git-overlay repos: the
+/// default mirror push (#846) already ships every ref (= every thread) in one
+/// transfer, so looping per thread would re-upload the identical pack T times.
+/// Native (non-overlay) repos keep the #838 per-thread fan-out.
+#[cfg(feature = "client")]
+fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool {
+    capability == RepositoryCapability::GitOverlay
+}
+
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let mut client = options.session.connect(options.addr).await?;
@@ -1309,23 +1319,40 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
-    // --git-mirror applies only to git-overlay repos (heddle#25); check it up
-    // front so both the single-thread and --all-threads paths reject early.
-    if options.git_mirror && repo.capability() != RepositoryCapability::GitOverlay {
-        return Err(anyhow!(
-            "--git-mirror applies only to git-overlay repositories"
-        ));
-    }
-
-    // --all-threads (heddle#838): fan out over every pushable thread, each at
-    // its own tip. Composes with --git-mirror (per-thread mirror transfer).
-    if options.all_threads {
+    // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
+    // per pushable thread. The git-overlay mirror path (the #846 default)
+    // already ships EVERY ref in one transfer, so a mirror push IS an
+    // all-threads push — routing it through the per-thread loop would rebuild
+    // and re-upload the identical full pack once per thread and print a
+    // misleading "pushed to <thread>" line each time. Short-circuit it to a
+    // single mirror push below; only the non-git-overlay path loops.
+    if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
-    let state_id = *options
-        .state_id
-        .expect("single-thread push resolves a state");
+    // Git-overlay repos DEFAULT to the git-backed fast path (#846): ship the
+    // git format (one multi-root pack + all refs) straight through weft's git
+    // lane with no native conversion. Native heddle conversion stays opt-in via
+    // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
+    // plain native push below. `progress` drives the live push line on a TTY.
+    //
+    // In `--all-threads` mode `state_id` is `None` (the fan-out resolves each
+    // thread's tip); the mirror push nominates the current checkout state as
+    // its advisory `local_state` — every ref ships regardless.
+    let progress = progress_for(options.cli, repo);
+    let state_id = match options.state_id {
+        Some(state_id) => *state_id,
+        None => {
+            // --all-threads git-overlay+hosted: mirror ships all refs, so the
+            // nominated state is advisory. Use the current checkout state.
+            let user_config = UserConfig::load_default()?;
+            ensure_current_state(
+                repo,
+                &user_config,
+                Some("Bootstrap git-overlay before push".to_string()),
+            )?
+        }
+    };
     let result = push_network_one_thread(
         repo,
         &mut client,
@@ -1333,9 +1360,11 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         &state_id,
         options.track_name,
         options.force,
-        options.git_mirror,
+        &progress,
     )
     .await?;
+    // Clear the live progress line so the result message starts clean on a TTY.
+    clear_line(&progress);
 
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
@@ -1348,6 +1377,13 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 style::ok_marker(),
                 style::bold(options.track_name)
             );
+            if options.all_threads {
+                // Single git-overlay mirror push covers every ref/thread.
+                println!(
+                    "{}",
+                    style::dim("mirror push covers all threads (every ref shipped in one transfer)")
+                );
+            }
             if let Some(new_state) = result.new_state {
                 println!(
                     "{}",
@@ -1376,21 +1412,15 @@ async fn push_network_one_thread(
     state_id: &objects::object::ChangeId,
     track_name: &str,
     force: bool,
-    git_mirror: bool,
+    progress: &objects::Progress,
 ) -> Result<wire::PushComplete> {
     let result = if repo.capability() == RepositoryCapability::GitOverlay {
-        if git_mirror {
-            // Explicit opt-in (heddle#25): push ALL git-overlay refs in one
-            // multi-ref git-mirror transfer. Not the default yet (weft server
-            // change + end-to-end verify pending).
-            client
-                .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force)
-                .await?
-        } else {
-            client
-                .push_git_overlay_checkpoint(repo, repo_path, *state_id, track_name, force)
-                .await?
-        }
+        // Default (heddle#846): push ALL git-overlay refs in one multi-ref
+        // git-mirror transfer through weft's git lane, with live progress.
+        // Native heddle conversion stays opt-in via `heddle adopt`.
+        client
+            .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force, progress)
+            .await?
     } else {
         client
             .push(repo, repo_path, *state_id, track_name, force)
@@ -1399,10 +1429,17 @@ async fn push_network_one_thread(
     Ok(result)
 }
 
-/// `--all-threads` fan-out over the hosted transport (heddle#838): the RPC is
-/// single-thread, so loop once per pushable thread (each at its own tip —
-/// composes with the heddle#837 fix). Not atomic; every thread is attempted,
-/// per-thread results reported, and any failure exits non-zero.
+/// `--all-threads` fan-out over the NATIVE hosted transport (heddle#838): the
+/// native push RPC is single-thread, so loop once per pushable thread (each at
+/// its own tip — composes with the heddle#837 fix). Not atomic; every thread is
+/// attempted, per-thread results reported, and any failure exits non-zero.
+///
+/// This path is git-overlay-free by construction: `push_network` short-circuits
+/// git-overlay `--all-threads` to a single mirror push (which already ships
+/// every ref) before ever reaching here. The native `push` RPC does not drive
+/// live progress, so there is no transient progress line to clear between the
+/// per-thread `println!`s (a `null` handle is passed to satisfy the shared
+/// helper signature).
 #[cfg(feature = "client")]
 async fn push_network_all_threads(
     repo: &Repository,
@@ -1416,6 +1453,8 @@ async fn push_network_all_threads(
     let mut pushed: Vec<String> = Vec::new();
     let mut failures: Vec<(String, String)> = Vec::new();
 
+    // Native push does not render a live progress line; pass a null handle.
+    let progress = objects::Progress::null();
     for thread in &threads {
         let outcome = push_network_one_thread(
             repo,
@@ -1424,7 +1463,7 @@ async fn push_network_all_threads(
             &thread.state,
             &thread.name,
             options.force,
-            options.git_mirror,
+            &progress,
         )
         .await;
         match outcome {
@@ -1733,9 +1772,6 @@ struct PushNetworkOptions<'a> {
     /// heddle#838: fan out over every pushable thread instead of the single
     /// `track_name`/`state_id`.
     all_threads: bool,
-    /// Explicit `--git-mirror`: push ALL git-overlay refs via the multi-ref
-    /// git-mirror path instead of the native single-ref checkpoint path.
-    git_mirror: bool,
     cli: &'a Cli,
 }
 
@@ -1759,6 +1795,23 @@ mod git_overlay_config_atomic_tests {
         assert_eq!(spool_slug_from_local_name("My Cool Repo"), "my-cool-repo");
         assert_eq!(spool_slug_from_local_name("Heddle_CLI.v2"), "heddle-cli-v2");
         assert_eq!(spool_slug_from_local_name("---"), "");
+    }
+
+    /// A git-overlay `--all-threads` hosted push collapses to a SINGLE mirror
+    /// push (mirror ships every ref = every thread), while a native repo keeps
+    /// the #838 per-thread fan-out. This drives the branch condition in
+    /// `push_network`.
+    #[cfg(feature = "client")]
+    #[test]
+    fn git_overlay_all_threads_hosted_push_is_single_mirror() {
+        assert!(
+            all_threads_uses_single_mirror_push(RepositoryCapability::GitOverlay),
+            "git-overlay --all-threads must collapse to one mirror push",
+        );
+        assert!(
+            !all_threads_uses_single_mirror_push(RepositoryCapability::NativeHeddle),
+            "native --all-threads must keep the per-thread fan-out (#838)",
+        );
     }
 
     #[cfg(feature = "client")]

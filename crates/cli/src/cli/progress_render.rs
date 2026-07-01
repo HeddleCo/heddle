@@ -139,7 +139,7 @@ impl Sink for TerminalSink {
 /// for a null (inactive) handle or off a TTY (where each tick was already a
 /// standalone line, not a `\r`-overwritten one). Used by consumers that print
 /// their own final output right after the operation (e.g. `switch` printing
-/// `Now at: …`) and just need the transient line erased first.
+/// `Now at: …`, or the hosted push path clearing the transient upload line).
 pub(crate) fn clear_line(progress: &Progress) {
     if !progress.is_active() {
         return;
