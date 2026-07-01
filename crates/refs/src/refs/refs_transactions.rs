@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Transactional ref update logic for RefManager.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use objects::{
     error::{HeddleError, Result},
@@ -20,7 +23,7 @@ use super::{
         describe_head, matches_expectation,
     },
 };
-use crate::fs_atomic::sync_directory;
+use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
 
 enum PackedRemove {
     Thread(String),
@@ -412,25 +415,46 @@ impl RefManager {
         mut plans: Vec<RefUpdatePlan>,
         _lock: &RefsLock,
     ) -> Result<()> {
+        // Stage every new-content plan into a temp file, then make them all
+        // durable in ONE overlapped-writeback pass. The previous per-plan
+        // `write → fsync` loop paid one serial fsync barrier per ref, so a batch
+        // publishing N refs (the `heddle adopt` hot path: N branches → one
+        // `update_refs`) sat ~N fsyncs deep (~2.3s for 800 refs). Kicking every
+        // temp file's writeback up front and fsyncing them as a batch keeps the
+        // identical per-file durability guarantee — each temp is fsync'd before
+        // its rename — while overlapping the writeback I/O.
+        let mut temp_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
-                let temp_path = self.write_string_temp(&plan.path, content)?;
-                plan.temp_path = Some(temp_path.clone());
+                let temp_path = self.alloc_temp_path(&plan.path)?;
+                temp_writes.push((temp_path.clone(), content.clone().into_bytes()));
+                plan.temp_path = Some(temp_path);
             }
         }
+        stage_temp_files_durable(&temp_writes)?;
 
         let packed_snapshot = self.read_optional_string(&self.packed_refs_path())?;
         let mut applied = Vec::new();
+        // Directories whose entries changed via rename. Their fsync is hoisted
+        // out of the per-plan loop: a batch that publishes N refs into the same
+        // `refs/threads/` directory (the adopt hot path — N branches → one
+        // `update_refs`) shares one parent, so the old per-rename `sync_directory`
+        // fsync'd that directory N times (2 fsyncs/ref on adopt: the temp file +
+        // its parent dir). We instead fsync each *distinct* parent once, after
+        // every rename lands. The post-batch durability is identical — on success
+        // every rename's directory entry is durable — and the batch was never
+        // crash-atomic across refs in either version (there is no journal spanning
+        // all N renames; `rollback_updates` handles in-process errors, not power
+        // loss mid-loop).
+        let mut dirty_parents: Vec<PathBuf> = Vec::new();
         for (index, plan) in plans.iter().enumerate() {
             let result = if let Some(ref temp_path) = plan.temp_path {
-                std::fs::rename(temp_path, &plan.path).map_err(HeddleError::from)?;
-                let parent = plan
-                    .path
-                    .parent()
-                    .ok_or_else(|| HeddleError::Config("invalid ref path".to_string()))?;
-                sync_directory(parent)?;
-                Ok(())
+                std::fs::rename(temp_path, &plan.path)
+                    .map_err(HeddleError::from)
+                    .and_then(|()| note_dirty_parent(&mut dirty_parents, &plan.path))
             } else if plan.path.exists() {
+                // Matches the pre-hoist behavior: only renames drove a directory
+                // fsync (a loose-ref delete published via `remove_file` did not).
                 std::fs::remove_file(&plan.path).map_err(HeddleError::from)
             } else {
                 Ok(())
@@ -449,6 +473,12 @@ impl RefManager {
             }
 
             applied.push(index);
+        }
+
+        // One directory fsync per distinct parent, making every rename in this
+        // batch durable. On adopt this collapses ~N dir fsyncs into 1.
+        for parent in &dirty_parents {
+            sync_directory(parent)?;
         }
 
         if let Err(err) = self.apply_packed_removals(&plans) {
@@ -530,6 +560,18 @@ impl RefManager {
 
         Ok(())
     }
+}
+
+/// Record `path`'s parent as a directory whose entries changed, so the batch can
+/// fsync each distinct parent exactly once after every rename/remove lands.
+fn note_dirty_parent(dirty_parents: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| HeddleError::Config("invalid ref path".to_string()))?;
+    if !dirty_parents.iter().any(|p| p == parent) {
+        dirty_parents.push(parent.to_path_buf());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

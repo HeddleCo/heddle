@@ -1175,6 +1175,49 @@ pub(crate) fn build_repository_verification_state(
     RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status)
 }
 
+/// Sub-phase timings for [`build_repository_verification_state_profiled`], in
+/// milliseconds. Used by `adopt`'s `HEDDLE_PROFILE=1` instrumentation to attribute
+/// the post-import verification cost across its three phases.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct VerificationProfile {
+    pub worktree_status_ms: u128,
+    pub health_ms: u128,
+    pub from_health_ms: u128,
+}
+
+/// [`build_repository_verification_state`] that additionally reports per-phase
+/// timings. Classification is identical; the only difference is the elapsed
+/// clocks around each phase.
+pub(crate) fn build_repository_verification_state_profiled(
+    repo: &Repository,
+) -> (RepositoryVerificationState, VerificationProfile) {
+    let worktree_status_start = std::time::Instant::now();
+    let worktree_status = if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        repo.git_overlay_worktree_status()
+    } else {
+        Ok(None)
+    };
+    let worktree_status_ms = worktree_status_start.elapsed().as_millis();
+
+    let health_start = std::time::Instant::now();
+    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    let health_ms = health_start.elapsed().as_millis();
+
+    let from_health_start = std::time::Instant::now();
+    let state =
+        RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status);
+    let from_health_ms = from_health_start.elapsed().as_millis();
+
+    (
+        state,
+        VerificationProfile {
+            worktree_status_ms,
+            health_ms,
+            from_health_ms,
+        },
+    )
+}
+
 /// Verification-state build that reuses an already-computed git-overlay worktree
 /// status instead of re-walking + re-SHA-1ing every tracked file. Used by the
 /// `checkpoint` hot path, where the same status would otherwise be recomputed
