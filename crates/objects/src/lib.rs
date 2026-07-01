@@ -10,6 +10,7 @@ pub mod fs_ops;
 pub mod lock;
 pub mod object;
 pub mod observe;
+pub mod progress;
 pub mod store;
 pub mod sync;
 pub mod util;
@@ -20,4 +21,5 @@ pub use observe::{
     CollectingWarnings, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink, TaskId, Warning,
     WarningSink,
 };
+pub use progress::{Progress, ProgressSnapshot, Sink};
 pub use sync::{LockExt, RwLockExt};
