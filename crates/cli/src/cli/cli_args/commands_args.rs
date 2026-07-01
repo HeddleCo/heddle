@@ -1198,6 +1198,16 @@ pub struct PushArgs {
     /// refs/notes/heddle and skips Git tags.
     #[arg(long)]
     pub all_threads: bool,
+
+    /// Push ALL git-overlay refs to a hosted remote in one multi-ref
+    /// git-mirror transfer (one pack + N checkpoint-less ref updates).
+    ///
+    /// Explicit opt-in; the native single-ref checkpoint path stays the
+    /// default. Hosted (network) git-overlay remotes only. Making this the
+    /// default is a follow-on that waits on the weft server change and an
+    /// end-to-end transport verify.
+    #[arg(long, hide = true)]
+    pub git_mirror: bool,
 }
 
 impl PushArgs {
