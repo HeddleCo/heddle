@@ -348,16 +348,15 @@ impl HostedGrpcClient {
         } else {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
-        let object_plan = RepositoryTransferPlan::from_planned_objects(
-            wire::enumerate_state_closure_plan(repo.store(), local_state)?,
-            git_lane_intent,
-        );
-        let full_objects =
-            if object_plan.stats.total_objects <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
-                Some(wire::enumerate_state_closure(repo.store(), local_state)?)
-            } else {
-                None
-            };
+        let closure = wire::enumerate_state_closure_transfer_with_options(
+            repo.store(),
+            local_state,
+            wire::StateClosureOptions::default(),
+            PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD,
+        )?;
+        let object_plan =
+            RepositoryTransferPlan::from_planned_objects(closure.planned_objects, git_lane_intent);
+        let full_objects = closure.full_objects;
         let object_count = full_objects
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
@@ -1677,9 +1676,9 @@ fn mark_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree)?;
+    let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root)?);
+        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
     }
     if let Some(discussions_blob) = state.discussions.as_ref()
         && !repo.store().has_blob(discussions_blob)?
@@ -1699,9 +1698,9 @@ fn clear_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree)?;
+    let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root)?);
+        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
     }
     if let Some(discussions_blob) = state.discussions.as_ref() {
         missing.push(*discussions_blob);
@@ -1709,55 +1708,6 @@ fn clear_missing_blobs_for_state(
     missing
         .into_iter()
         .try_for_each(|hash| repo.clear_missing_blob(&hash).map_err(ProtocolError::from))
-}
-
-fn collect_missing_blobs(
-    repo: &Repository,
-    tree_hash: &ContentHash,
-) -> Result<Vec<ContentHash>, ProtocolError> {
-    let mut missing = Vec::new();
-    collect_missing_blobs_recursive(repo, tree_hash, &mut missing)?;
-    Ok(missing)
-}
-
-fn collect_missing_blobs_recursive(
-    repo: &Repository,
-    tree_hash: &ContentHash,
-    missing: &mut Vec<ContentHash>,
-) -> Result<(), ProtocolError> {
-    let Some(tree) = repo.store().get_tree(tree_hash).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "load tree {} while collecting lazy hydration missing blobs: {err}",
-            tree_hash.to_hex()
-        ))
-    })?
-    else {
-        return Ok(());
-    };
-    for entry in tree.entries() {
-        match entry.entry_type() {
-            objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                let Some(hash) = entry.content_hash() else {
-                    continue;
-                };
-                if !repo.store().has_blob(&hash).map_err(|err| {
-                    ProtocolError::InvalidState(format!(
-                        "check blob {} while collecting lazy hydration missing blobs: {err}",
-                        hash.to_hex()
-                    ))
-                })? {
-                    missing.push(hash);
-                }
-            }
-            objects::object::EntryType::Tree => {
-                if let Some(hash) = entry.tree_hash() {
-                    collect_missing_blobs_recursive(repo, &hash, missing)?;
-                }
-            }
-            objects::object::EntryType::Gitlink => {}
-        }
-    }
-    Ok(())
 }
 
 fn partial_fetch_status_for_repo(repo: &Repository) -> i32 {
@@ -4476,18 +4426,18 @@ mod tests {
     }
 
     #[test]
-    fn collect_missing_blobs_treats_absent_tree_as_empty() {
+    fn missing_blobs_in_tree_treats_absent_tree_as_empty() {
         let (_dir, repo) = temp_repo();
         let absent_tree = ContentHash::from_bytes([99u8; 32]);
 
-        let missing =
-            collect_missing_blobs(&repo, &absent_tree).expect("absent tree is not an error");
+        let missing = wire::missing_blobs_in_tree(repo.store(), absent_tree)
+            .expect("absent tree is not an error");
 
         assert!(missing.is_empty());
     }
 
     #[test]
-    fn collect_missing_blobs_reports_only_genuinely_missing_blobs() {
+    fn missing_blobs_in_tree_reports_only_genuinely_missing_blobs() {
         let (_dir, repo) = temp_repo();
         let present_blob = Blob::from("already local");
         let present_hash = repo.store().put_blob(&present_blob).expect("put blob");
@@ -4498,19 +4448,21 @@ mod tests {
         ]);
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
 
-        let missing = collect_missing_blobs(&repo, &tree_hash).expect("collect missing blobs");
+        let missing =
+            wire::missing_blobs_in_tree(repo.store(), tree_hash).expect("collect missing blobs");
 
         assert_eq!(missing, vec![missing_hash]);
     }
 
     #[test]
-    fn collect_missing_blobs_reports_corrupt_tree_read() {
+    fn missing_blobs_in_tree_reports_corrupt_tree_read() {
         let (_dir, repo) = temp_repo();
         let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
         std::fs::write(loose_tree_path(&repo, &tree_hash), [0xc1]).expect("corrupt tree");
         repo.store().clear_recent_caches();
 
-        let err = collect_missing_blobs(&repo, &tree_hash).expect_err("corrupt tree must fail");
+        let err = wire::missing_blobs_in_tree(repo.store(), tree_hash)
+            .expect_err("corrupt tree must fail");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
