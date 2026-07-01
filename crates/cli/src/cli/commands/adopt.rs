@@ -18,8 +18,10 @@ use super::{
     },
     import_progress::ImportProgress,
 };
-use crate::cli::{AdoptArgs, Cli, should_output_json, style};
-use crate::perf::{ProfileField, emit_profile, profile_enabled};
+use crate::{
+    cli::{AdoptArgs, Cli, should_output_json, style},
+    perf::{ProfileField, emit_profile, profile_enabled},
+};
 
 #[derive(Debug, Serialize)]
 struct AdoptOutput {

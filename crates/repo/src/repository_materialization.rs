@@ -972,8 +972,10 @@ mod tests {
     /// across threads. This is the load-bearing acceptance criterion for #844.
     #[test]
     fn progress_handle_survives_parallel_materialization_seam() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
 
         use objects::{Progress, ProgressSnapshot, Sink};
 

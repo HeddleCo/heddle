@@ -17,10 +17,9 @@ use objects::{
     worktree::{WorktreeStatus, diff_blobs},
 };
 use repo::Repository;
-use sley::{EntryKind, Repository as SleyRepository};
-
 #[cfg(feature = "semantic")]
 use semantic::diff::{SemanticDiffOptions, WorktreeStatus as SemanticWorktreeStatus};
+use sley::{EntryKind, Repository as SleyRepository};
 
 use crate::ExecutionContext;
 

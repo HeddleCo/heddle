@@ -7,11 +7,12 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::cli::style;
 use heddle_core::{
     DiffReport, LineDiff, SemanticChangeEntry, should_render_modified_pair,
     trim_added_decorations_for_display,
 };
+
+use crate::cli::style;
 
 const PAGER_LINE_THRESHOLD: usize = 200;
 const SIGNATURE_CHANGE_SEPARATOR: &str = "\u{1f}";
@@ -813,12 +814,13 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 
 #[cfg(test)]
 mod tests {
+    use heddle_core::{
+        LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
+    };
+
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
         paint_signature_change_item_lines, signature_change_display_segments,
-    };
-    use heddle_core::{
-        LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
     };
 
     #[test]

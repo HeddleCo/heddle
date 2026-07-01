@@ -14,8 +14,11 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::progress_render::{clear_line, progress_for},
-    cli::{Cli, should_output_json},
+    cli::{
+        Cli,
+        progress_render::{clear_line, progress_for},
+        should_output_json,
+    },
     config::UserConfig,
 };
 

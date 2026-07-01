@@ -9,12 +9,14 @@ use heddle_core::{
 use objects::worktree::WorktreeStatus;
 use repo::{Config, Repository};
 
-use super::super::git_overlay_health::{
-    build_plain_git_verification_probe, build_repository_verification_state,
-    plain_git_setup_advice, trust_visible_worktree_status,
-};
-use super::diff_output::{
-    print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
+use super::{
+    super::git_overlay_health::{
+        build_plain_git_verification_probe, build_repository_verification_state,
+        plain_git_setup_advice, trust_visible_worktree_status,
+    },
+    diff_output::{
+        print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
+    },
 };
 use crate::{
     cli::{Cli, should_output_json},

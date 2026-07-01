@@ -6,9 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use tracing::{debug, instrument, trace};
-
 use heddle_format::compression::{header_uncompressed_size, is_compressed};
+use tracing::{debug, instrument, trace};
 
 use super::{
     FsStore,

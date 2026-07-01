@@ -770,9 +770,10 @@ impl OpLogBackend for OpLog {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::ChangeId;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn snapshot_record() -> OpRecord {
         let state = ChangeId::generate();

@@ -6,10 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) use heddle_core::verify::serialize_empty_action_as_null;
 pub(crate) use heddle_core::{
     ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
-    RepositoryVerificationState, VerificationCheck,
+    RepositoryVerificationState, VerificationCheck, verify::serialize_empty_action_as_null,
 };
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;

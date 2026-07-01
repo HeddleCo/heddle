@@ -3,13 +3,13 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use heddle_format::{compression::CompressionConfig, delta::DeltaEncoder};
+
 use super::{
     ObjectType, PackObjectId, PackObjectRecord, PackStats, append_container_checksum,
     compress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, pack_container_spec,
     pack_index::PackIndex, write_container_header,
 };
-use heddle_format::{compression::CompressionConfig, delta::DeltaEncoder};
-
 use crate::{object::ContentHash, store::Result};
 
 const MIN_DELTA_SIZE: usize = 64;

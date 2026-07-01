@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tests for packfile operations.
 
+use heddle_format::{compression::CompressionConfig, delta::MAX_DELTA_OUTPUT_SIZE};
 use tempfile::TempDir;
 
 use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
-use heddle_format::{compression::CompressionConfig, delta::MAX_DELTA_OUTPUT_SIZE};
-
 use crate::{
     object::{ChangeId, ContentHash},
     store::{StoreError, pack::pack_container_spec},

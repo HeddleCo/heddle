@@ -193,8 +193,9 @@ impl Default for Progress {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     /// Adapter so a test can keep an `Arc<T>` to inspect its sink while the
     /// [`Progress`] handle owns the `Box<dyn Sink>`. Renders forward to the

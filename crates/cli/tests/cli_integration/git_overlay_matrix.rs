@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use oplog::{OpLogBackend, OpRecord};
 
-use super::git_overlay_fixtures::GitOverlayFixture;
-use super::*;
+use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
 /// but the operation-status layer still detects a lingering `BISECT_STATE`

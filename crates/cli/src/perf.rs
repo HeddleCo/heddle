@@ -6,9 +6,7 @@
 //! stderr, while `HEDDLE_PROFILE=jsonl` writes one structured trace line to
 //! stderr. stdout remains reserved for normal text/JSON command output.
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{cell::RefCell, collections::BTreeMap, time::Duration};
 
 use serde::Serialize;
 
