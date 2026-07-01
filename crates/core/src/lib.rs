@@ -7,6 +7,7 @@ pub mod diff;
 pub mod fsck;
 pub mod query;
 pub mod status;
+pub mod thread_shaping;
 pub mod verify;
 
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
@@ -33,6 +34,10 @@ pub use status::{
     StatusOptions, StatusProfile, StatusReport, StatusThreadSummary, assess_materialized_threads,
     changes_from_worktree_status, changes_path_count, changes_paths, fast_short_status_report,
     status,
+};
+pub use thread_shaping::{
+    CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
+    ThreadShapingError, capture_split, thread_move,
 };
 pub use verify::{
     ActionTemplate, MachineContractCoverage, PlainGitVerifyProbe, RepositoryContextInfo,
