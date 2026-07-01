@@ -56,7 +56,7 @@ to do with today’s bytes.
 | 21 | **JSON state sidecars**: stash, sessions, merge state, `REBASE_STATE`/`BISECT_*` etc. | serde_json (named) | NONE | additive-tolerant; ⚠️ list paths skip unreadable entries silently (`let Ok(..) else continue`) | `crates/repo/src/stash.rs:67,91`, `session_storage.rs:125,150`, `merge_state.rs:190,213` |
 | 22 | **identity** `identity.toml` / `device-identity.toml`; agents `agents/*.toml`; `fsmonitor.toml`; `lazy-hydrator.toml`; `shallow` (text id list); worktree `objectstore` pointer (text path) | TOML/text | NONE | tolerant / parse-error refuse; agents are ephemeral runtime state | `identity.rs:188-319`, `agent_registry.rs:4`, `shallow.rs:22-25` |
 | 23 | **git-bridge mirror** + `git-bridge/bridge-mapping.json` | real git repo + JSON | NONE on the mapping | additive-tolerant JSON sidecar plus `refs/notes/heddle` rebuild path; the mirror itself is git-format (sley/git-owned). Legacy `.heddle/git/bridge-mapping.json` migration and `Heddle-Change-Id` trailer rebuild paths are removed. Mirror is slated for deletion (#568) | `crates/cli/src/bridge/git_mapping.rs:20-37,70-122`; `crates/cli/src/bridge/git_notes.rs` |
-| 24 | **legacy `heddle-submodule:` gitlink blob convention** | in-band magic prefix inside ordinary blob *content* | NONE | live import/export bridge convention — import paths still synthesize ordinary blobs whose bytes are `heddle-submodule:<oid>`, and export sniffs any `FileMode::Normal` blob with that content and silently emits a gitlink. A user file with exactly that content is silently misinterpreted (low-probability, real class). Deletion needs a first-class gitlink tree entry or metadata representation plus a migration/escape policy for existing magic-prefix blobs. | `importer.rs`, `git_adapter.rs`, `git_export.rs` |
+| 24 | **legacy `heddle-submodule:` gitlink blob convention** | in-band magic prefix inside ordinary blob *content* | NONE | live import/export bridge convention — import paths still synthesize ordinary blobs whose bytes are `heddle-submodule:<oid>`, and export sniffs any `FileMode::Normal` blob with that content and silently emits a gitlink. A user file with exactly that content is silently misinterpreted (low-probability, real class). ADR-0041 replaces this with first-class, format-aware Gitlink tree entries plus a hard `0006_gitlink_tree_entries` migration that converts only Sley-proven legacy gitlink blobs and preserves ambiguous magic blobs as ordinary files. | `importer.rs`, `git_adapter.rs`, `git_export.rs` |
 | 25 | **reftable** `REFT01\0\0` | binary | magic, no version int | **dead spike — no production writer**; if ever revived it enters this policy with a migration from refs-text and a real version int | `crates/refs/src/refs/reftable_model.rs:41` |
 
 ### Empirical rmp-serde ground truth (drives rules R4/R5)
@@ -202,7 +202,8 @@ change follows §3 in full.
   (rows 1–5, 13–16, 18) to it.
 - **F3 (M):** golden-bytes format-lock CI guard per §5.3.
 - **F4 (S):** packed-refs + JSON-list silent-skip → warn/refuse (R6).
-- **F5 (S, ride-along with #575/#566):** import-side guard for the
-  `heddle-submodule:` content collision (refuse or escape ordinary blobs that match
-  the prefix on export).
+- **F5 (M):** implement ADR-0041 first-class Gitlink tree entries and the
+  `0006_gitlink_tree_entries` migration. Runtime export must stop sniffing
+  ordinary blob bytes; only first-class Gitlink targets export as Git `160000`
+  entries.
 - **#618** (already filed) gains a reference to R3/R5 and §4’s row.

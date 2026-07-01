@@ -176,7 +176,9 @@ Verification:
 ### Legacy gitlink blob convention
 
 The `heddle-submodule:` blob convention is a bridge compromise. Deleting it
-needs a replacement import/export story that preserves Git submodule semantics.
+now has a settled target model in
+[`ADR-0041`](adr/0041-first-class-gitlinks.md): Gitlinks are first-class tree
+entry targets whose value is a format-aware Sley Git object id.
 
 Current live writers/readers:
 - `crates/ingest/src/importer.rs` writes synthetic blob content for Git gitlinks.
@@ -186,21 +188,39 @@ Current live writers/readers:
   the magic prefix and emits a Git gitlink.
 
 Deletion direction:
-- Introduce a first-class Heddle representation for Git gitlinks, either as a
-  tree entry kind or as explicit tree-entry metadata. The interface should make
-  the gitlink target object id a typed value, not blob bytes.
-- Move import paths to write that representation instead of
+- Replace the flat `TreeEntry { name, mode, entry_type, hash }` shape with a
+  closed target model: blob, tree, symlink, or gitlink. Keep constructors and
+  accessors as the public interface so invalid mode/type combinations cannot be
+  constructed directly.
+- Add explicit V2 durable tree encoding with stable target tags. Hash entries
+  from semantic target data, not from serde bytes.
+- Move import paths to write first-class Gitlink targets instead of
   `heddle-submodule:` blob content.
 - Move export paths to emit Git gitlinks only from the first-class
   representation.
-- Keep magic-prefix sniffing only inside a migration/legacy reader, or refuse
-  ordinary file blobs whose bytes exactly match the legacy prefix until they are
-  escaped. This closes the collision where a real file is silently exported as a
-  submodule.
+- Register `0006_gitlink_tree_entries` as a hard migration gate. Decode the old
+  unversioned tree shape only inside the migration. Normal runtime should not
+  keep a long-lived dual reader for the magic-prefix convention.
+- Convert legacy magic blobs only when Sley can prove the original mapped Git
+  tree had mode `160000` at the same path with the same target OID. Preserve
+  ambiguous magic blobs as ordinary files and report
+  `ambiguous_legacy_gitlink_blob` from migration/verify/fsck.
+- Bump the repo-level format gate with the migration so older binaries refuse
+  migrated repositories cleanly.
+- Preserve logical `ChangeId` while recomputing affected tree/state hashes.
+  Re-sign locally owned rewritten states with the existing `resign_if_owned`
+  path and refuse foreign signed states that require rewrite.
 
 Verification:
+- Golden V1 and V2 tree fixtures.
+- Proven legacy gitlink migration and ambiguous magic-prefix-file migration
+  tests.
 - Git bridge round-trip tests for submodules.
 - Diff patch conformance against Git worktrees containing gitlinks.
+- Export test proving the Gitlink target object does not need to exist in the
+  superproject object database.
+- Object traversal/pack/wire tests proving Gitlink targets are not treated as
+  Heddle object dependencies.
 
 ### Hidden maintenance commands
 
