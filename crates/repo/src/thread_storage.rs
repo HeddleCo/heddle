@@ -860,55 +860,24 @@ mod tests {
         );
     }
 
-    /// Pre-2.2 thread records have no `auto` field on disk. Reading
-    /// them must succeed and surface `auto = false` so the default
-    /// list view shows them (since we have no positive evidence they
-    /// were harness-created).
-    ///
-    /// We synthesise a "legacy" on-disk record by saving a normal one
-    /// and then stripping the `auto` line from the TOML — that way
-    /// the rest of the schema (including the hex-encoded filename and
-    /// the canonical TOML grammar) tracks the live store.
     #[test]
-    fn thread_manager_defaults_auto_false_for_legacy_record() {
-        let temp = TempDir::new().unwrap();
-        let manager = ThreadManager::new(temp.path());
-        let mut thread = sample_thread();
-        thread.id = "legacy-thread".to_string();
-        thread.thread = "legacy/branch".to_string();
-        thread.auto = true; // make sure stripping has an observable effect
-        manager.save(&thread).unwrap();
+    fn thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate() {
+        let raw = r#"
+id = "legacy-minimal"
+thread = "legacy/minimal"
+mode = "solid"
+state = "active"
+base_state = "abc123"
+base_root = "def456"
+created_at = "2024-01-01T00:00:00Z"
+updated_at = "2024-01-01T00:00:01Z"
+"#;
 
-        // Find the record file and remove the `auto = true` line so
-        // the loader sees a pre-2.2 schema.
-        let records_dir = temp.path().join("thread_records");
-        let entry = std::fs::read_dir(&records_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| x == "toml")
-                    .unwrap_or(false)
-            })
-            .expect("at least one record file");
-        let path = entry.path();
-        let content = std::fs::read_to_string(&path).unwrap();
-        let stripped: String = content
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("auto"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(&path, stripped).unwrap();
-
-        let record = manager
-            .load_record(&thread.id)
-            .unwrap()
-            .expect("record loads");
+        let err = toml::from_str::<ThreadRecord>(raw)
+            .expect_err("legacy records must go through 0002 before live reads");
         assert!(
-            !record.auto,
-            "legacy records (no `auto` key on disk) must deserialize as auto=false"
+            err.to_string().contains("missing field"),
+            "strict reader should reject missing current fields, got: {err}",
         );
     }
 }

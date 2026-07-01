@@ -1,13 +1,135 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared error types across Heddle crates.
 
+use std::{error::Error, fmt, path::Path};
+
 use crate::object::{ChangeId, ContentHash, TreeError};
+
+/// Structured recovery details that can cross the embeddable facade boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryDetails {
+    pub kind: &'static str,
+    pub error: String,
+    pub hint: String,
+    pub unsafe_condition: String,
+    pub would_change: String,
+    pub preserved: String,
+}
+
+impl RecoveryDetails {
+    pub fn safety_refusal(
+        kind: &'static str,
+        error: impl Into<String>,
+        hint: impl Into<String>,
+        unsafe_condition: impl Into<String>,
+        would_change: impl Into<String>,
+        already_preserved: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            error: error.into(),
+            hint: hint.into(),
+            unsafe_condition: unsafe_condition.into(),
+            would_change: would_change.into(),
+            preserved: already_preserved.into(),
+        }
+    }
+
+    pub fn invalid_usage(
+        kind: &'static str,
+        error: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self::safety_refusal(
+            kind,
+            error,
+            hint,
+            "the command arguments do not describe a valid operation",
+            "running with ambiguous or invalid arguments could target the wrong repository state or metadata",
+            "no repository objects, refs, metadata, or worktree files were changed",
+        )
+    }
+
+    pub fn feature_unavailable(command: &str, feature: &str) -> Self {
+        Self::safety_refusal(
+            "feature_unavailable",
+            format!("{command} requires building heddle with --features {feature}"),
+            format!(
+                "Use a binary built with the `{feature}` feature, or rerun without the feature-specific flag."
+            ),
+            format!("this heddle binary was built without the `{feature}` feature"),
+            format!("{command} cannot run because the requested analysis engine is unavailable"),
+            "repository state, refs, and worktree files were left unchanged",
+        )
+    }
+
+    pub fn serialization_error(detail: impl fmt::Display) -> Self {
+        Self::safety_refusal(
+            "state_corrupted",
+            "Repository state is corrupted or unreadable",
+            "Inspect repository integrity before attempting repair.",
+            format!("a stored repository object failed to decode: {detail}"),
+            "continuing would read or write through repository state Heddle cannot decode",
+            "the command stopped before mutating repository state; intact objects were left unchanged",
+        )
+    }
+
+    pub fn repository_integrity_error(error: impl Into<String>) -> Self {
+        Self::safety_refusal(
+            "repository_integrity_error",
+            error,
+            "Inspect repository integrity, then restore or repair the reported object/ref.",
+            "repository object or ref integrity did not pass validation",
+            "continuing could compound corruption or hide the missing object",
+            "the command stopped before applying the requested mutation",
+        )
+    }
+
+    pub fn repository_not_found(path: &Path) -> Self {
+        Self::safety_refusal(
+            "repository_not_found",
+            format!("repository not found at {}", path.display()),
+            "Initialize the requested repository before running repository commands.",
+            format!("no Heddle repository was found at '{}'", path.display()),
+            "the command cannot inspect or change repository state until initialization",
+            "no repository objects, refs, metadata, or worktree files were changed",
+        )
+    }
+
+    pub fn state_not_found(state_id: impl fmt::Display) -> Self {
+        Self::safety_refusal(
+            "state_not_found",
+            format!("State not found: {state_id}"),
+            "List recent states with `heddle log`, then choose an existing state id.",
+            "the requested state id does not exist in this repository",
+            "continuing with a guessed state could target the wrong history point",
+            "repository state, refs, metadata, and worktree files were left unchanged",
+        )
+    }
+}
+
+impl fmt::Display for RecoveryDetails {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}. Unsafe: {}. Would change: {}. Preserved: {}.",
+            self.error, self.unsafe_condition, self.would_change, self.preserved
+        )?;
+        Ok(())
+    }
+}
+
+impl Error for RecoveryDetails {}
 
 /// Error type for repository/storage-adjacent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum HeddleError {
+    #[error("{0}")]
+    Recovery(Box<RecoveryDetails>),
     #[error("object not found: {0}")]
     NotFound(String),
+    #[error("No merge in progress")]
+    NoMergeInProgress,
     #[error("state not found: {0}")]
     StateNotFound(ChangeId),
     #[error("invalid object: {0}")]
@@ -40,6 +162,16 @@ pub enum HeddleError {
         #[source]
         source: toml::de::Error,
     },
+    #[error(
+        "invalid {key}: '{value}' — valid values are {} (in {path})",
+        valid_values.join(" or ")
+    )]
+    ConfigInvalidValue {
+        path: std::path::PathBuf,
+        key: String,
+        value: String,
+        valid_values: Vec<String>,
+    },
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("compression error: {0}")]
@@ -61,6 +193,12 @@ pub enum HeddleError {
     MissingObject { object_type: String, id: String },
     #[error("invalid tree entry: {0}")]
     InvalidTreeEntry(#[from] TreeError),
+}
+
+impl HeddleError {
+    pub fn recovery(details: RecoveryDetails) -> Self {
+        HeddleError::Recovery(Box::new(details))
+    }
 }
 
 impl From<rmp_serde::encode::Error> for HeddleError {
@@ -95,3 +233,33 @@ impl From<serde_json::Error> for HeddleError {
 
 /// Result type for repository/storage-adjacent operations.
 pub type Result<T> = std::result::Result<T, HeddleError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{HeddleError, RecoveryDetails};
+
+    #[test]
+    fn safety_refusal_formats_domain_details() {
+        let details = RecoveryDetails::safety_refusal(
+            "example",
+            "error",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        );
+
+        assert_eq!(
+            details.to_string(),
+            "error. Unsafe: unsafe. Would change: would change. Preserved: preserved."
+        );
+    }
+
+    #[test]
+    fn recovery_error_displays_structured_error_copy() {
+        let err = HeddleError::recovery(RecoveryDetails::serialization_error("bad marker"));
+
+        assert!(err.to_string().contains("Repository state is corrupted"));
+        assert!(!err.to_string().contains("heddle fsck --full"));
+    }
+}

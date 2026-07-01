@@ -10,7 +10,7 @@ mod commit_graph_persistence;
 #[path = "context_suggestions.rs"]
 mod context_suggestions;
 #[path = "repo_config.rs"]
-mod repo_config;
+pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
 mod repository_context;
 #[path = "repository_diff.rs"]
@@ -68,6 +68,7 @@ pub use context_suggestions::{
 };
 pub use objects::object::DiffKind;
 use objects::{
+    Progress,
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
@@ -307,6 +308,14 @@ where
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
     git_overlay_repo: RwLock<Option<SleyRepository>>,
+    /// Live progress handle driven by long-running operations (tree
+    /// materialization, and future streaming seams). Defaults to
+    /// [`Progress::null`] — a no-op that costs one relaxed atomic add per
+    /// update — so the common "no one is watching" path (piped output,
+    /// `--output json`, library use) pays nothing. A CLI command installs a
+    /// real, TTY-rendering handle via [`Repository::set_progress`] before
+    /// driving an operation. Set-after-construction like `blob_hydrator`.
+    progress: RwLock<Progress>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -324,9 +333,9 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
     ///
     /// Callers must ensure all backends point at the same repository root, the
     /// `heddle_dir` exists and is canonical for that root, and `shallow` matches
-    /// the on-disk shallow metadata. Prefer [`Repository::init`],
-    /// [`Repository::open`], or [`Repository::open_with_store`] unless a
-    /// cross-crate integration genuinely needs to assemble the pieces manually.
+    /// the on-disk shallow metadata. Prefer [`Repository::init`] or
+    /// [`Repository::open`] unless a cross-crate integration genuinely needs to
+    /// assemble the pieces manually.
     pub fn from_parts(
         root: PathBuf,
         heddle_dir: PathBuf,
@@ -348,6 +357,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             shallow: RwLock::new(shallow),
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
+            progress: RwLock::new(Progress::null()),
         }
     }
 
@@ -431,30 +441,6 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             root, heddle_dir, store, refs, oplog, config, shallow,
         ))
     }
-
-    /// Open an existing Heddle repository using a custom object store backend.
-    ///
-    /// Expert/test injection point: takes the store by value (any
-    /// [`ObjectStore`]) and skips the local-only open hooks (declarative
-    /// migrations, lazy-clone hydrator reconstruction) that [`Repository::open`]
-    /// runs for the default `AnyStore` flavor.
-    pub fn open_with_store(heddle_dir: impl AsRef<Path>, store: S) -> Result<Self> {
-        let heddle_dir = heddle_dir.as_ref().to_path_buf();
-        let root = heddle_dir
-            .parent()
-            .ok_or_else(|| {
-                HeddleError::Config(format!(
-                    "heddle_dir '{}' has no parent directory",
-                    heddle_dir.display()
-                ))
-            })?
-            .to_path_buf();
-        let config_path = heddle_dir.join("config.toml");
-        let config = RepoConfig::load(&config_path)?;
-        ensure_supported_repo_format(&config_path, &config)?;
-        let refs = RefManager::new(&heddle_dir);
-        Self::open_raw(root, heddle_dir, store, config, refs)
-    }
 }
 
 impl Repository {
@@ -463,14 +449,13 @@ impl Repository {
     /// bound to the default `AnyStore` flavor (`apply_pending` and
     /// `BlobHydrator` operate on the bare `Repository`), so they live here
     /// rather than in the generic `open_raw`.
-    fn run_open_hooks(&self) {
+    fn run_open_hooks(&self) -> Result<()> {
         // Run any pending declarative migrations. Idempotent:
         // re-opening a repo a second time is a no-op for the migration pass.
-        // Failures here are logged but non-fatal; surfacing migration errors
-        // through `open` is worse than letting the repo open and warning later.
-        if let Err(err) = crate::migration::apply_pending(self) {
-            tracing::warn!("declarative migrations failed during repo open: {err}");
-        }
+        // Hard schema migrations are part of the open contract: if they cannot
+        // complete, continuing with a partially-upgraded repo would make later
+        // strict readers fail at arbitrary call sites.
+        crate::migration::apply_pending(self)?;
         // Reconstruct any persisted lazy-clone blob hydrator. When
         // `.heddle/lazy-hydrator.toml` exists, look up the registered
         // factory for its `kind` and install the hydrator on the
@@ -491,6 +476,7 @@ impl Repository {
                 tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
             }
         }
+        Ok(())
     }
 
     /// Build an object store from the repository configuration.
@@ -569,6 +555,7 @@ impl Repository {
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
+            progress: RwLock::new(Progress::null()),
         })
     }
 
@@ -710,7 +697,7 @@ impl Repository {
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
                     let repo =
                         Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
-                    repo.run_open_hooks();
+                    repo.run_open_hooks()?;
                     return Ok(repo);
                 }
 
@@ -722,7 +709,7 @@ impl Repository {
                     let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
-                    repo.run_open_hooks();
+                    repo.run_open_hooks()?;
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
                             Ok(Some(GitHeadState::Attached(thread))) => {
@@ -2398,6 +2385,22 @@ impl Repository {
     /// The currently registered hydrator, if any.
     pub fn blob_hydrator(&self) -> Option<Arc<dyn BlobHydrator>> {
         self.blob_hydrator.read_or_poisoned().clone()
+    }
+
+    /// Install a live [`Progress`] handle. Long-running operations on this
+    /// repository (tree materialization today) drive it; the caller — the CLI —
+    /// installs a TTY-rendering handle here before the operation and reads the
+    /// same handle back to paint a completion line. Passing [`Progress::null`]
+    /// (the default) disables rendering. The handle is a cheap `Arc` clone, so
+    /// it can be shared across the parallel-materialization worker threads.
+    pub fn set_progress(&self, progress: Progress) {
+        *self.progress.write_or_poisoned() = progress;
+    }
+
+    /// The currently installed progress handle (a cheap clone). Defaults to
+    /// [`Progress::null`] until [`Repository::set_progress`] is called.
+    pub fn progress(&self) -> Progress {
+        self.progress.read_or_poisoned().clone()
     }
 
     fn partial_fetch_metadata(&self) -> repository_partial_fetch::PartialFetchMetadataManager {

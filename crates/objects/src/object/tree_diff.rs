@@ -10,7 +10,7 @@ use super::FileChangeSet;
 #[cfg(feature = "async-source")]
 use crate::store::AsyncObjectSource;
 use crate::{
-    object::{DiffKind, EntryType, FileChange, Tree, TreeEntry},
+    object::{DiffKind, FileChange, Tree, TreeEntry},
     store::ObjectSource,
 };
 
@@ -92,7 +92,7 @@ where
     while let (Some(from_entry), Some(to_entry)) =
         (from_entries.get(from_index), to_entries.get(to_index))
     {
-        match from_entry.name.cmp(&to_entry.name) {
+        match from_entry.name().cmp(to_entry.name()) {
             std::cmp::Ordering::Less => {
                 if let ControlFlow::Break(b) =
                     visit_deleted_entry(store, prefix, from_entry, visitor)?
@@ -109,20 +109,20 @@ where
                 to_index += 1;
             }
             std::cmp::Ordering::Equal => {
-                if from_entry.hash != to_entry.hash {
-                    if from_entry.entry_type == EntryType::Tree
-                        && to_entry.entry_type == EntryType::Tree
+                if from_entry.target() != to_entry.target() {
+                    if let (Some(from_hash), Some(to_hash)) =
+                        (from_entry.tree_hash(), to_entry.tree_hash())
                     {
-                        let from_subtree = store.get_tree(&from_entry.hash)?;
-                        let to_subtree = store.get_tree(&to_entry.hash)?;
-                        let path = child_path(prefix, &to_entry.name);
+                        let from_subtree = store.get_tree(&from_hash)?;
+                        let to_subtree = store.get_tree(&to_hash)?;
+                        let path = child_path(prefix, to_entry.name());
                         if let ControlFlow::Break(b) =
                             diff_trees_recursive(store, &from_subtree, &to_subtree, &path, visitor)?
                         {
                             return Ok(ControlFlow::Break(b));
                         }
                     } else {
-                        let path = child_path(prefix, &to_entry.name);
+                        let path = child_path(prefix, to_entry.name());
                         if let ControlFlow::Break(b) =
                             visitor(FileChange::new(path, DiffKind::Modified))
                         {
@@ -163,9 +163,9 @@ where
 {
     // Symmetric with the delete branch below: if the added entry is itself a
     // directory, recurse into it so callers see per-leaf `added` entries.
-    let path = child_path(prefix, &to_entry.name);
-    if to_entry.entry_type == EntryType::Tree {
-        let to_subtree = store.get_tree(&to_entry.hash)?;
+    let path = child_path(prefix, to_entry.name());
+    if let Some(tree_hash) = to_entry.tree_hash() {
+        let to_subtree = store.get_tree(&tree_hash)?;
         diff_trees_recursive(store, &None, &to_subtree, &path, visitor)
     } else {
         Ok(visitor(FileChange::new(path, DiffKind::Added)))
@@ -182,9 +182,9 @@ where
     S: ObjectSource + ?Sized,
     V: FnMut(FileChange) -> ControlFlow<B>,
 {
-    let path = child_path(prefix, &from_entry.name);
-    if from_entry.entry_type == EntryType::Tree {
-        let from_subtree = store.get_tree(&from_entry.hash)?;
+    let path = child_path(prefix, from_entry.name());
+    if let Some(tree_hash) = from_entry.tree_hash() {
+        let from_subtree = store.get_tree(&tree_hash)?;
         diff_trees_recursive(store, &from_subtree, &None, &path, visitor)
     } else {
         Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
@@ -233,7 +233,7 @@ where
     while let (Some(from_entry), Some(to_entry)) =
         (from_entries.get(from_index), to_entries.get(to_index))
     {
-        match from_entry.name.cmp(&to_entry.name) {
+        match from_entry.name().cmp(to_entry.name()) {
             std::cmp::Ordering::Less => {
                 if let ControlFlow::Break(b) =
                     visit_deleted_entry_async(store, prefix, from_entry, visitor).await?
@@ -251,13 +251,13 @@ where
                 to_index += 1;
             }
             std::cmp::Ordering::Equal => {
-                if from_entry.hash != to_entry.hash {
-                    if from_entry.entry_type == EntryType::Tree
-                        && to_entry.entry_type == EntryType::Tree
+                if from_entry.target() != to_entry.target() {
+                    if let (Some(from_hash), Some(to_hash)) =
+                        (from_entry.tree_hash(), to_entry.tree_hash())
                     {
-                        let from_subtree = store.get_tree(&from_entry.hash).await?;
-                        let to_subtree = store.get_tree(&to_entry.hash).await?;
-                        let path = child_path(prefix, &to_entry.name);
+                        let from_subtree = store.get_tree(&from_hash).await?;
+                        let to_subtree = store.get_tree(&to_hash).await?;
+                        let path = child_path(prefix, to_entry.name());
                         if let ControlFlow::Break(b) = Box::pin(diff_trees_recursive_async(
                             store,
                             &from_subtree,
@@ -270,7 +270,7 @@ where
                             return Ok(ControlFlow::Break(b));
                         }
                     } else {
-                        let path = child_path(prefix, &to_entry.name);
+                        let path = child_path(prefix, to_entry.name());
                         if let ControlFlow::Break(b) =
                             visitor(FileChange::new(path, DiffKind::Modified))
                         {
@@ -315,9 +315,9 @@ where
     V: FnMut(FileChange) -> ControlFlow<B> + Send,
     B: Send,
 {
-    let path = child_path(prefix, &to_entry.name);
-    if to_entry.entry_type == EntryType::Tree {
-        let to_subtree = store.get_tree(&to_entry.hash).await?;
+    let path = child_path(prefix, to_entry.name());
+    if let Some(tree_hash) = to_entry.tree_hash() {
+        let to_subtree = store.get_tree(&tree_hash).await?;
         Box::pin(diff_trees_recursive_async(
             store,
             &None,
@@ -343,9 +343,9 @@ where
     V: FnMut(FileChange) -> ControlFlow<B> + Send,
     B: Send,
 {
-    let path = child_path(prefix, &from_entry.name);
-    if from_entry.entry_type == EntryType::Tree {
-        let from_subtree = store.get_tree(&from_entry.hash).await?;
+    let path = child_path(prefix, from_entry.name());
+    if let Some(tree_hash) = from_entry.tree_hash() {
+        let from_subtree = store.get_tree(&tree_hash).await?;
         Box::pin(diff_trees_recursive_async(
             store,
             &from_subtree,
@@ -375,7 +375,7 @@ fn child_path(prefix: &str, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        object::{Blob, ContentHash, FileMode, Tree, TreeEntry},
+        object::{Blob, ContentHash, EntryType, Tree, TreeEntry},
         store::{InMemoryStore, ObjectStore},
     };
 
@@ -390,11 +390,11 @@ mod tests {
     ) -> ContentHash {
         let tree_entries: Vec<TreeEntry> = entries
             .into_iter()
-            .map(|(name, hash, entry_type)| TreeEntry {
-                name: name.to_string(),
-                mode: FileMode::Normal,
-                hash,
-                entry_type,
+            .map(|(name, hash, entry_type)| match entry_type {
+                EntryType::Blob => TreeEntry::file(name, hash, false).unwrap(),
+                EntryType::Tree => TreeEntry::directory(name, hash).unwrap(),
+                EntryType::Symlink => TreeEntry::symlink(name, hash).unwrap(),
+                EntryType::Gitlink => panic!("use TreeEntry::gitlink for gitlink tests"),
             })
             .collect();
         let tree = Tree::from_entries(tree_entries);
@@ -464,12 +464,9 @@ mod tests {
     fn test_diff_nested_directories() {
         let store = InMemoryStore::new();
         let sub_blob = create_blob(&store, "sub content");
-        let sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "nested.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let sub_tree = Tree::from_entries(vec![
+            TreeEntry::file("nested.txt", sub_blob, false).unwrap(),
+        ]);
         let sub_hash = store.put_tree(&sub_tree).unwrap();
 
         let from_hash = create_tree(&store, vec![("subdir", sub_hash, EntryType::Tree)]);
@@ -494,12 +491,9 @@ mod tests {
         // expected leaf paths.
         let store = InMemoryStore::new();
         let sub_blob = create_blob(&store, "sub content");
-        let sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "nested.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let sub_tree = Tree::from_entries(vec![
+            TreeEntry::file("nested.txt", sub_blob, false).unwrap(),
+        ]);
         let sub_hash = store.put_tree(&sub_tree).unwrap();
 
         let from_hash = create_tree(&store, vec![]);
@@ -520,19 +514,9 @@ mod tests {
         // recursion on the add side.
         let store = InMemoryStore::new();
         let leaf_blob = create_blob(&store, "leaf");
-        let c_tree = Tree::from_entries(vec![TreeEntry {
-            name: "c.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: leaf_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let c_tree = Tree::from_entries(vec![TreeEntry::file("c.txt", leaf_blob, false).unwrap()]);
         let c_hash = store.put_tree(&c_tree).unwrap();
-        let b_tree = Tree::from_entries(vec![TreeEntry {
-            name: "b".to_string(),
-            mode: FileMode::Normal,
-            hash: c_hash,
-            entry_type: EntryType::Tree,
-        }]);
+        let b_tree = Tree::from_entries(vec![TreeEntry::directory("b", c_hash).unwrap()]);
         let b_hash = store.put_tree(&b_tree).unwrap();
         let from_hash = create_tree(&store, vec![]);
         let to_hash = create_tree(&store, vec![("a", b_hash, EntryType::Tree)]);
@@ -547,20 +531,13 @@ mod tests {
     fn test_diff_changes_follow_sorted_tree_entry_order() {
         let store = InMemoryStore::new();
         let from_sub_blob = create_blob(&store, "old nested");
-        let from_sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "c.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: from_sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let from_sub_tree = Tree::from_entries(vec![
+            TreeEntry::file("c.txt", from_sub_blob, false).unwrap(),
+        ]);
         let from_sub_hash = store.put_tree(&from_sub_tree).unwrap();
         let to_sub_blob = create_blob(&store, "new nested");
-        let to_sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "b.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: to_sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let to_sub_tree =
+            Tree::from_entries(vec![TreeEntry::file("b.txt", to_sub_blob, false).unwrap()]);
         let to_sub_hash = store.put_tree(&to_sub_tree).unwrap();
 
         let from_hash = create_tree(
@@ -608,20 +585,13 @@ mod tests {
     fn test_visit_matches_collect_order() {
         let store = InMemoryStore::new();
         let from_sub_blob = create_blob(&store, "old nested");
-        let from_sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "c.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: from_sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let from_sub_tree = Tree::from_entries(vec![
+            TreeEntry::file("c.txt", from_sub_blob, false).unwrap(),
+        ]);
         let from_sub_hash = store.put_tree(&from_sub_tree).unwrap();
         let to_sub_blob = create_blob(&store, "new nested");
-        let to_sub_tree = Tree::from_entries(vec![TreeEntry {
-            name: "b.txt".to_string(),
-            mode: FileMode::Normal,
-            hash: to_sub_blob,
-            entry_type: EntryType::Blob,
-        }]);
+        let to_sub_tree =
+            Tree::from_entries(vec![TreeEntry::file("b.txt", to_sub_blob, false).unwrap()]);
         let to_sub_hash = store.put_tree(&to_sub_tree).unwrap();
 
         let from_hash = create_tree(
@@ -719,18 +689,8 @@ mod tests {
     fn test_visit_early_exit_inside_subtree() {
         let store = InMemoryStore::new();
         let sub_tree = Tree::from_entries(vec![
-            TreeEntry {
-                name: "x.txt".to_string(),
-                mode: FileMode::Normal,
-                hash: create_blob(&store, "x"),
-                entry_type: EntryType::Blob,
-            },
-            TreeEntry {
-                name: "y.txt".to_string(),
-                mode: FileMode::Normal,
-                hash: create_blob(&store, "y"),
-                entry_type: EntryType::Blob,
-            },
+            TreeEntry::file("x.txt", create_blob(&store, "x"), false).unwrap(),
+            TreeEntry::file("y.txt", create_blob(&store, "y"), false).unwrap(),
         ]);
         let sub_hash = store.put_tree(&sub_tree).unwrap();
         let from_hash = create_tree(&store, vec![]);

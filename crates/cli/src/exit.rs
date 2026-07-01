@@ -60,7 +60,9 @@ impl HeddleExitCode {
         match kind {
             // Missing precondition (no default remote for push/pull), not
             // an IO failure.
-            "remote_not_configured" => Some(Self::Config),
+            "remote_not_configured" | "remote_not_found" | "repository_not_found" => {
+                Some(Self::Config)
+            }
             // Well-formed input the command semantically rejects:
             // - nothing staged / no changes to capture
             // - a reconcile that needs a `--prefer` side
@@ -73,7 +75,10 @@ impl HeddleExitCode {
             | "reconcile_direction_required"
             | "dirty_worktree"
             | "state_corrupted"
+            | "state_not_found"
             | "conflict_not_found"
+            | "no_merge_in_progress"
+            | "operation_not_in_progress"
             | "json_unsupported"
             | "json_compact_unsupported" => Some(Self::DataErr),
             _ => None,
@@ -96,18 +101,38 @@ impl HeddleExitCode {
             }
             if let Some(heddle_err) = cause.downcast_ref::<objects::error::HeddleError>() {
                 match heddle_err {
+                    objects::error::HeddleError::Recovery(details) => {
+                        if let Some(code) = Self::for_advice_kind(details.kind) {
+                            return code;
+                        }
+                    }
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
                     objects::error::HeddleError::RepositoryFormatTooNew { .. } => {
                         return Self::DataErr;
                     }
+                    objects::error::HeddleError::StateNotFound(_)
+                    | objects::error::HeddleError::NoMergeInProgress
+                    | objects::error::HeddleError::ConfigInvalidValue { .. } => {
+                        return Self::DataErr;
+                    }
+                    objects::error::HeddleError::Config(_) => return Self::Config,
                     // Stored state that fails msgpack decoding is corrupted
                     // data, not a transient IO problem — same class as the
                     // serde_json/toml parse failures below.
                     objects::error::HeddleError::Serialization(_) => return Self::DataErr,
                     _ => {}
                 }
+            }
+            if let Some(remote_err) = cause.downcast_ref::<crate::remote::RemoteError>()
+                && matches!(
+                    remote_err,
+                    crate::remote::RemoteError::NotFound(_)
+                        | crate::remote::RemoteError::NoDefaultRemote
+                )
+            {
+                return Self::Config;
             }
             if let Some(io) = cause.downcast_ref::<std::io::Error>() {
                 return match io.kind() {
@@ -138,27 +163,6 @@ impl HeddleExitCode {
             if cause.is::<serde_json::Error>() || cause.is::<toml::de::Error>() {
                 return Self::DataErr;
             }
-        }
-
-        // Legacy string sentinels — LAST RESORT for raw-string error paths
-        // that carry no typed `RecoveryAdvice` or `HeddleError` (e.g. the
-        // stringified `RemoteError::NotFound` display from `resolve_remote`,
-        // or upstream messages flattened through `anyhow::Error::msg`).
-        // Any error that has a typed kind MUST be classified above via
-        // `for_advice_kind` / the `HeddleError` match — never add a sentinel
-        // here for a message a typed constructor produces. Keep these short
-        // and exact so they don't false-positive on unrelated messages.
-        let msg = format!("{err:#}");
-        if msg.contains("no upstream configured")
-            || msg.contains("no remote configured")
-            || msg.contains("no default remote configured")
-            || msg.contains("workspace config invalid")
-            || msg.contains("repository not found")
-        {
-            return Self::Config;
-        }
-        if msg.contains("dirty worktree") {
-            return Self::DataErr;
         }
 
         Self::IoErr
@@ -216,18 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn no_upstream_string_sentinel_is_config() {
-        let err = anyhow::anyhow!("push refused: no upstream configured for branch 'main'");
+    fn remote_error_no_default_remote_is_config() {
+        let err = anyhow::anyhow!(crate::remote::RemoteError::NoDefaultRemote);
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 
     #[test]
-    fn no_default_remote_string_sentinel_is_config() {
-        // `heddle pull` against a repo with no default remote surfaces the
-        // raw `RemoteError::NotFound` display via `anyhow::Error::msg`, so it
-        // is only matchable as a string. The persona-flagged divergence
-        // (HeddleCo/heddle#252) was this returning the `IoErr` catch-all.
-        let err = anyhow::anyhow!("remote not found: (no default remote configured)");
+    fn heddle_config_error_is_config() {
+        let err: anyhow::Error =
+            objects::error::HeddleError::Config("workspace config invalid".to_string()).into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 
@@ -279,8 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_repo_string_sentinel_is_config() {
-        let err = anyhow::anyhow!("repository not found at /tmp/whatever");
+    fn repository_not_found_recovery_details_are_config() {
+        let err: anyhow::Error = objects::error::HeddleError::recovery(
+            objects::RecoveryDetails::repository_not_found(std::path::Path::new("/tmp/whatever")),
+        )
+        .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 
@@ -301,6 +305,41 @@ mod tests {
         // are data corruption, not the IoErr catch-all.
         let err: anyhow::Error = objects::error::HeddleError::Serialization(
             "wrong msgpack marker FixArray(0)".to_string(),
+        )
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn state_not_found_typed_variant_is_data_err() {
+        let err: anyhow::Error =
+            objects::error::HeddleError::StateNotFound(objects::object::ChangeId::generate())
+                .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn invalid_config_value_typed_variant_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::ConfigInvalidValue {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            key: "output.format".to_string(),
+            value: "auto".to_string(),
+            valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn no_merge_in_progress_typed_variant_is_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::NoMergeInProgress.into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn recovery_details_kind_uses_advice_exit_code_mapping() {
+        let err: anyhow::Error = objects::error::HeddleError::recovery(
+            objects::RecoveryDetails::serialization_error("wrong msgpack marker FixArray(0)"),
         )
         .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
@@ -328,10 +367,15 @@ mod tests {
         // sentinel can no longer regress these to the IoErr catch-all.
         for (kind, expected) in [
             ("remote_not_configured", HeddleExitCode::Config),
+            ("remote_not_found", HeddleExitCode::Config),
+            ("repository_not_found", HeddleExitCode::Config),
             ("nothing_to_commit", HeddleExitCode::DataErr),
             ("reconcile_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
+            ("state_not_found", HeddleExitCode::DataErr),
+            ("no_merge_in_progress", HeddleExitCode::DataErr),
+            ("operation_not_in_progress", HeddleExitCode::DataErr),
             ("conflict_not_found", HeddleExitCode::DataErr),
             ("json_unsupported", HeddleExitCode::DataErr),
             ("json_compact_unsupported", HeddleExitCode::DataErr),
@@ -347,7 +391,7 @@ mod tests {
     #[test]
     fn dirty_worktree_advice_constructor_is_data_err() {
         // The real constructor's Display does not contain the legacy
-        // "dirty worktree" sentinel, so only the typed kind can classify it.
+        // "dirty worktree" phrase, so only the typed kind can classify it.
         let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::dirty_worktree(
             "merge",
             vec!["src/lib.rs".to_string()],
@@ -357,11 +401,17 @@ mod tests {
     }
 
     #[test]
-    fn dirty_worktree_string_sentinel_is_data_err() {
-        // Raw-string path (e.g. repository_worktree_apply's refusal) that
-        // carries no typed advice still classifies via the legacy sentinel.
-        let err =
-            anyhow::anyhow!("dirty worktree would be overwritten by full rematerialize (switch)");
+    fn dirty_worktree_recovery_details_are_data_err() {
+        let err: anyhow::Error =
+            objects::error::HeddleError::recovery(objects::RecoveryDetails::safety_refusal(
+                "dirty_worktree",
+                "reworded copy that matches no sentinel",
+                "hint",
+                "unsafe",
+                "would change",
+                "preserved",
+            ))
+            .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 
@@ -384,10 +434,11 @@ mod tests {
     }
 
     #[test]
-    fn state_corrupted_advice_is_data_err() {
-        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::serialization_error(
-            "wrong msgpack marker FixArray(0)"
-        ));
+    fn state_corrupted_recovery_details_are_data_err() {
+        let err: anyhow::Error = objects::error::HeddleError::recovery(
+            objects::RecoveryDetails::serialization_error("wrong msgpack marker FixArray(0)"),
+        )
+        .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 

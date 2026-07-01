@@ -1531,6 +1531,7 @@ dependencies = [
  "heddle-core",
  "heddle-crypto",
  "heddle-daemon",
+ "heddle-format",
  "heddle-grpc",
  "heddle-ingest",
  "heddle-merge",
@@ -1632,6 +1633,7 @@ dependencies = [
 name = "heddle-core"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "heddle-cli-shared",
  "heddle-crypto",
@@ -1639,7 +1641,9 @@ dependencies = [
  "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
+ "heddle-semantic",
  "rmp-serde",
+ "schemars",
  "serde",
  "serde_json",
  "sley",
@@ -1771,6 +1775,7 @@ dependencies = [
  "chrono",
  "criterion",
  "fuser",
+ "heddle-format",
  "heddle-objects",
  "heddle-oplog",
  "heddle-refs",
@@ -1782,6 +1787,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1811,6 +1817,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
@@ -1966,6 +1973,7 @@ dependencies = [
  "heddle-repo",
  "rmp-serde",
  "serde",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
 ]

@@ -26,6 +26,7 @@ rmp-serde.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
+sley.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true

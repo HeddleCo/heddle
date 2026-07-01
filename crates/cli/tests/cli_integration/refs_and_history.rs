@@ -145,8 +145,8 @@ fn test_cli_marker_list_filter_no_match_is_empty_array() {
 }
 
 #[test]
-fn test_cli_marker_delete_single_back_compat() {
-    // The single-positional form must keep working byte-for-byte.
+fn test_cli_marker_delete_single_name_form() {
+    // The single-positional form is the canonical one-marker delete path.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();

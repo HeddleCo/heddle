@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{TimeZone, Utc};
+use heddle_format::compression::CompressionConfig;
+use serde::Serialize;
 use tempfile::TempDir;
 
 use super::{
     FsStore, LooseObjectWriteMode,
-    fs_paths::{blobs_dir, hash_path, packs_dir},
+    fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
+    fs_atomic::temp_path,
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
     },
     store::{
         HeddleError, ObjectStore,
-        atomic::temp_path,
-        compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },
     sync::RwLockExt,
@@ -483,7 +484,6 @@ fn count_packs(store: &FsStore) -> usize {
 }
 
 fn count_loose_objects(store: &FsStore) -> usize {
-    use super::fs_paths::{blobs_dir, trees_dir};
     // Loose objects are sharded into 2-char prefix subdirectories
     // (see `hash_path`), so count files recursively.
     fn count_files_recursive(dir: &std::path::Path) -> usize {
@@ -558,6 +558,90 @@ fn pack_objects_then_prune_leaves_no_loose_packed_duplicates() {
             "blob {hash:?} must survive consolidation"
         );
     }
+}
+
+#[derive(Serialize)]
+struct LegacyTreeV1ForTest {
+    entries: Vec<LegacyTreeEntryV1ForTest>,
+}
+
+#[derive(Serialize)]
+struct LegacyTreeEntryV1ForTest {
+    name: String,
+    mode: LegacyFileModeForTest,
+    entry_type: LegacyEntryTypeForTest,
+    hash: ContentHash,
+}
+
+#[derive(Serialize)]
+enum LegacyFileModeForTest {
+    Normal,
+}
+
+#[derive(Serialize)]
+enum LegacyEntryTypeForTest {
+    Blob,
+}
+
+fn legacy_tree_v1_bytes_for_test(name: &str, hash: ContentHash) -> Vec<u8> {
+    rmp_serde::to_vec(&LegacyTreeV1ForTest {
+        entries: vec![LegacyTreeEntryV1ForTest {
+            name: name.to_string(),
+            mode: LegacyFileModeForTest::Normal,
+            entry_type: LegacyEntryTypeForTest::Blob,
+            hash,
+        }],
+    })
+    .unwrap()
+}
+
+#[test]
+fn gc_preserves_and_repacks_loose_v2_tree_shadow_over_packed_v1_body() {
+    let (_temp, store) = create_test_store();
+    let blob_hash = ContentHash::compute(b"shadowed-tree-blob");
+    let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
+    let tree_hash = tree.hash();
+    let legacy_bytes = legacy_tree_v1_bytes_for_test("file.txt", blob_hash);
+    let current_bytes = rmp_serde::to_vec(&tree).unwrap();
+
+    let mut builder = PackBuilder::new(CompressionConfig::default());
+    builder.add(tree_hash, PackObjectType::Tree, legacy_bytes);
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store.install_pack_files(&pack_data, &index_data).unwrap();
+    store
+        .put_tree_serialized(&current_bytes, tree_hash)
+        .expect("write migrated loose V2 shadow");
+
+    let tree_path = hash_path(&trees_dir(store.root()), &tree_hash);
+    assert!(tree_path.exists(), "test must have a loose V2 shadow");
+    assert!(store.get_tree(&tree_hash).unwrap().is_some());
+
+    let (pruned, _) = store.prune_loose_objects().unwrap();
+    assert_eq!(
+        pruned, 0,
+        "prune must keep a loose migrated V2 tree when the packed body differs"
+    );
+    assert!(tree_path.exists(), "loose V2 shadow must survive prune");
+
+    store.pack_objects(false).unwrap();
+    let Some((obj_type, packed_after)) = store
+        .get_pack_object(&PackObjectId::Hash(tree_hash))
+        .unwrap()
+    else {
+        panic!("tree should remain packed after GC");
+    };
+    assert_eq!(obj_type, PackObjectType::Tree);
+    assert_eq!(
+        packed_after, current_bytes,
+        "GC must carry the loose migrated V2 body, not the old packed V1 body"
+    );
+
+    let (pruned, _) = store.prune_loose_objects().unwrap();
+    assert_eq!(pruned, 1);
+    assert!(
+        !tree_path.exists(),
+        "once the pack carries V2 bytes, the loose duplicate can be pruned"
+    );
 }
 
 /// Running gc twice must not keep growing the pack count. The pre-fix
@@ -690,7 +774,10 @@ fn test_tree_roundtrip() {
     let retrieved = store.get_tree(&hash).unwrap().unwrap();
 
     assert_eq!(retrieved.entries().len(), 1);
-    assert_eq!(retrieved.get("foo.txt").unwrap().hash, blob_hash);
+    assert_eq!(
+        retrieved.get("foo.txt").unwrap().blob_hash(),
+        Some(blob_hash)
+    );
 }
 
 #[test]
@@ -908,12 +995,14 @@ fn test_get_action_rejects_wrong_object_swap() {
 fn test_get_tree_rejects_invalid_deserialized_entry_name() {
     let (_temp, store) = create_test_store();
 
-    let invalid_tree = Tree::from_entries(vec![TreeEntry {
-        name: "bad/name".to_string(),
-        mode: crate::object::FileMode::Normal,
-        entry_type: crate::object::EntryType::Blob,
-        hash: ContentHash::compute(b"blob"),
-    }]);
+    let invalid_tree =
+        Tree::from_entries_unchecked_for_tests(vec![TreeEntry::new_unchecked_for_tests(
+            "bad/name",
+            crate::object::TreeEntryTarget::Blob {
+                hash: ContentHash::compute(b"blob"),
+                executable: false,
+            },
+        )]);
     let tree_hash = invalid_tree.hash();
     let tree_path = store
         .root

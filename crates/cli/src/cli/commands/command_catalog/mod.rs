@@ -4,6 +4,11 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
+pub use heddle_core::ActionTemplate;
+use heddle_core::{
+    DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
+    StatusReport, VerifyReport,
+};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -14,7 +19,10 @@ use crate::cli::{
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
     StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
-    cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
+    cli_args::{
+        AgentFanoutCommands, AgentTaskCommands, DiscussCommands, ReviewCommands,
+        TransactionCommands,
+    },
     render::shell_quote,
 };
 #[cfg(feature = "client")]
@@ -131,20 +139,6 @@ pub struct CommandCatalogArgument {
     pub value_names: Vec<String>,
     pub help: Option<String>,
     pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ActionTemplate {
-    pub action: String,
-    pub argv_template: Vec<String>,
-    pub required_inputs: Vec<String>,
-    /// Whether an agent may replace placeholders in `argv_template`.
-    ///
-    /// When `agent_may_fill` is false, treat `action` and `argv_template` as
-    /// display-only: do not substitute `<name>`/`<url>` placeholders. Surface
-    /// the template to a human or discard it. Substituting and running it will
-    /// pass literal `<name>` to Heddle and fail.
-    pub agent_may_fill: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +282,7 @@ struct CommandContract {
     destructive_data: bool,
     operator_envelope: bool,
     json_kind: &'static str,
+    report_contract: Option<CoreReportContract>,
     json_discriminators: &'static [CommandJsonDiscriminatorSpec],
     schema_verbs: &'static [&'static str],
     documented_schema_verbs: &'static [&'static str],
@@ -695,6 +690,7 @@ const READ_JSON: CommandContract = CommandContract {
     destructive_data: false,
     operator_envelope: false,
     json_kind: "json",
+    report_contract: None,
     json_discriminators: &[],
     schema_verbs: &[],
     documented_schema_verbs: &[],
@@ -885,6 +881,18 @@ const fn documented_schemas(
     }
 }
 
+const fn documented_core_report_schema(
+    contract: CommandContract,
+    report_contract: CoreReportContract,
+) -> CommandContract {
+    CommandContract {
+        supports_json: true,
+        json_kind: machine_output_kind_json_kind(report_contract.machine_output_kind),
+        report_contract: Some(report_contract),
+        ..contract
+    }
+}
+
 const fn opaque_schemas(
     contract: CommandContract,
     schema_verbs: &'static [&'static str],
@@ -917,6 +925,55 @@ const fn json_discriminator(
         field,
         value,
         no_schema_reason: None,
+    }
+}
+
+fn contract_schema_verbs(contract: CommandContract) -> impl Iterator<Item = &'static str> {
+    contract
+        .report_contract
+        .into_iter()
+        .map(|report_contract| report_contract.schema_name)
+        .chain(contract.schema_verbs.iter().copied())
+}
+
+fn contract_documented_schema_verbs(
+    contract: CommandContract,
+) -> impl Iterator<Item = &'static str> {
+    contract
+        .report_contract
+        .into_iter()
+        .map(|report_contract| report_contract.schema_name)
+        .chain(contract.documented_schema_verbs.iter().copied())
+}
+
+fn contract_json_discriminators(
+    contract: CommandContract,
+) -> impl Iterator<Item = CommandJsonDiscriminatorSpec> {
+    contract
+        .report_contract
+        .into_iter()
+        .filter_map(report_json_discriminator_from_contract)
+        .chain(contract.json_discriminators.iter().copied())
+}
+
+fn report_json_discriminator_from_contract(
+    report_contract: CoreReportContract,
+) -> Option<CommandJsonDiscriminatorSpec> {
+    report_contract
+        .output_discriminator
+        .map(|discriminator| CommandJsonDiscriminatorSpec {
+            schema_verb: Some(report_contract.schema_name),
+            field: discriminator.field,
+            value: discriminator.value,
+            no_schema_reason: None,
+        })
+}
+
+const fn machine_output_kind_json_kind(kind: MachineOutputKind) -> &'static str {
+    match kind {
+        MachineOutputKind::Json => "json",
+        MachineOutputKind::JsonLines => "jsonl",
+        MachineOutputKind::JsonOrJsonLines => "json_or_jsonl",
     }
 }
 
@@ -978,6 +1035,13 @@ const fn feature_gated(contract: CommandContract, feature_gate: &'static str) ->
         ..contract
     }
 }
+
+const QUERY_ATTRIBUTION_SCHEMA_VERBS: &[&str] = &["query --attribution"];
+const QUERY_JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorSpec] = &[json_discriminator(
+    Some("query --attribution"),
+    "output_kind",
+    "query_attribution",
+)];
 
 const fn exits(
     contract: CommandContract,
@@ -1231,6 +1295,92 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
+    ),
+    entry(&["agent", "task"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "task", "create"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["agent task create"]),
+                &[json_discriminator(
+                    Some("agent task create"),
+                    "output_kind",
+                    "agent_task_create",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "list"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent task list"]),
+                &[json_discriminator(
+                    Some("agent task list"),
+                    "output_kind",
+                    "agent_task_list",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "show"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent task show"]),
+                &[json_discriminator(
+                    Some("agent task show"),
+                    "output_kind",
+                    "agent_task_show",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "task", "update"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["agent task update"]),
+                &[json_discriminator(
+                    Some("agent task update"),
+                    "output_kind",
+                    "agent_task_update",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(&["agent", "fanout"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "fanout", "plan"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent fanout plan"]),
+                &[json_discriminator(
+                    Some("agent fanout plan"),
+                    "output_kind",
+                    "agent_fanout_plan",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "fanout", "start"],
+        surface(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["agent fanout start"]),
+                &[json_discriminator(
+                    Some("agent fanout start"),
+                    "output_kind",
+                    "agent_fanout_start",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
     entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
@@ -1718,10 +1868,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["diff"],
         front_door(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["diff"]),
-                &[json_discriminator(Some("diff"), "output_kind", "diff")],
-            ),
+            documented_core_report_schema(READ_JSON, DiffReport::CONTRACT),
             20,
         ),
     ),
@@ -1838,7 +1985,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fsck"],
-        category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
+        category(
+            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+            "recovery",
+        ),
     ),
     entry(&["oplog"], category(GROUP, "recovery")),
     entry(
@@ -2107,15 +2257,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["query"],
         category(
             json_discriminators(
-                documented_schemas(READ_JSON, &["query", "query --attribution"]),
-                &[
-                    json_discriminator(Some("query"), "output_kind", "query"),
-                    json_discriminator(
-                        Some("query --attribution"),
-                        "output_kind",
-                        "query_attribution",
-                    ),
-                ],
+                documented_schemas(
+                    documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
+                    QUERY_ATTRIBUTION_SCHEMA_VERBS,
+                ),
+                QUERY_JSON_DISCRIMINATORS,
             ),
             "states",
         ),
@@ -2563,9 +2709,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["status"],
         exits(
             front_door(
-                json_discriminators(
-                    documented_schemas(compact_json(READ_JSON_OR_JSONL), &["status"]),
-                    &[json_discriminator(Some("status"), "output_kind", "status")],
+                documented_core_report_schema(
+                    compact_json(READ_JSON_OR_JSONL),
+                    StatusReport::CONTRACT,
                 ),
                 10,
             ),
@@ -2840,6 +2986,48 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["timeline"], surface(GROUP, "automation")),
     entry(
+        &["timeline", "status"],
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["timeline status"]),
+                &[json_discriminator(
+                    Some("timeline status"),
+                    "output_kind",
+                    "timeline_status",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "record-start"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline record-start"]),
+                &[json_discriminator(
+                    Some("timeline record-start"),
+                    "output_kind",
+                    "timeline_record_start",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "record-finish"],
+        surface(
+            json_discriminators(
+                documented_schemas(MUTATING, &["timeline record-finish"]),
+                &[json_discriminator(
+                    Some("timeline record-finish"),
+                    "output_kind",
+                    "timeline_record_finish",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
         &["timeline", "fork"],
         surface(
             json_discriminators(
@@ -2902,10 +3090,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["verify"],
         exits(
             front_door(
-                json_discriminators(
-                    documented_schemas(READ_JSON, &["verify"]),
-                    &[json_discriminator(Some("verify"), "output_kind", "verify")],
-                ),
+                documented_core_report_schema(READ_JSON, VerifyReport::CONTRACT),
                 110,
             ),
             &[
@@ -3075,10 +3260,8 @@ fn walk_commands(
 ) {
     for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
-        if !removed_phase_1_2_catalog_path(prefix) {
-            out.push(catalog_entry(subcommand, prefix, op_id_option));
-            walk_commands(subcommand, prefix, out, op_id_option);
-        }
+        out.push(catalog_entry(subcommand, prefix, op_id_option));
+        walk_commands(subcommand, prefix, out, op_id_option);
         prefix.pop();
     }
 }
@@ -3101,9 +3284,6 @@ fn append_feature_gated_command_entries(
         out.iter().map(|entry| entry.path.clone()).collect();
     for entry in CONTRACTS.iter() {
         if entry.contract.feature_gate.is_none() {
-            continue;
-        }
-        if removed_phase_1_2_contract_path(entry.path) {
             continue;
         }
         let owned_path: Vec<String> = entry.path.iter().map(|s| (*s).to_string()).collect();
@@ -3186,15 +3366,11 @@ fn feature_gated_catalog_entry(
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
-        schema_verbs: contract
-            .schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        schema_verbs: contract_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
-        documented_schema_verbs: contract
-            .documented_schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        documented_schema_verbs: contract_documented_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
         options,
         arguments: Vec::new(),
@@ -3207,38 +3383,6 @@ fn feature_gated_catalog_entry(
             })
             .collect(),
     }
-}
-
-fn removed_phase_1_2_catalog_path(path: &[String]) -> bool {
-    path.first()
-        .is_some_and(|root| removed_phase_1_2_root(root.as_str()))
-}
-
-fn removed_phase_1_2_root(root: &str) -> bool {
-    matches!(
-        root,
-        "attempt"
-            | "blame"
-            | "branch"
-            | "conflict"
-            | "delegate"
-            | "fork"
-            | "goto"
-            | "inspect"
-            | "marker"
-            | "purge"
-            | "stack"
-            | "workspace"
-    )
-}
-
-pub fn command_contract_removed_alias_root(root: &str) -> bool {
-    removed_phase_1_2_root(root)
-}
-
-fn removed_phase_1_2_contract_path(path: &[&str]) -> bool {
-    path.first()
-        .is_some_and(|root| removed_phase_1_2_root(root))
 }
 
 fn catalog_entry(
@@ -3317,15 +3461,11 @@ fn catalog_entry(
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
-        schema_verbs: contract
-            .schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        schema_verbs: contract_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
-        documented_schema_verbs: contract
-            .documented_schema_verbs
-            .iter()
-            .map(|verb| (*verb).to_string())
+        documented_schema_verbs: contract_documented_schema_verbs(contract)
+            .map(str::to_string)
             .collect(),
         options,
         arguments,
@@ -3770,12 +3910,10 @@ pub(crate) fn sibling_documented_schema_verbs(schema_verb: &str) -> Vec<&'static
     active_command_contract_entries()
         .iter()
         .filter(|entry| {
-            entry
-                .contract
-                .documented_schema_verbs
-                .contains(&schema_verb)
+            contract_documented_schema_verbs(entry.contract)
+                .any(|documented| documented == schema_verb)
         })
-        .flat_map(|entry| entry.contract.documented_schema_verbs.iter().copied())
+        .flat_map(|entry| contract_documented_schema_verbs(entry.contract))
         .filter(|documented| *documented != schema_verb)
         .collect()
 }
@@ -3835,13 +3973,9 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
     advertised_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .flat_map(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+            contract_json_discriminators(entry.contract)
+                .map(move |discriminator| json_discriminator_metadata(entry.path, &discriminator))
         })
         .collect()
 }
@@ -3871,28 +4005,22 @@ pub fn command_json_discriminators_for_schema_verb(
         .iter()
         .copied()
         .filter(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
+            contract_json_discriminators(entry.contract)
                 .any(|discriminator| discriminator.schema_verb == Some(schema_verb))
         })
         .flat_map(|entry| {
-            let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
-                && entry.contract.schema_verbs[0] == schema_verb;
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .filter_map(move |discriminator| {
-                    if discriminator.schema_verb == Some(schema_verb)
-                        || (include_same_command_siblings && discriminator.schema_verb.is_none())
-                    {
-                        Some(json_discriminator_metadata(entry.path, discriminator))
-                    } else {
-                        None
-                    }
-                })
+            let schema_verbs = contract_schema_verbs(entry.contract).collect::<Vec<_>>();
+            let include_same_command_siblings =
+                schema_verbs.len() == 1 && schema_verbs[0] == schema_verb;
+            contract_json_discriminators(entry.contract).filter_map(move |discriminator| {
+                if discriminator.schema_verb == Some(schema_verb)
+                    || (include_same_command_siblings && discriminator.schema_verb.is_none())
+                {
+                    Some(json_discriminator_metadata(entry.path, &discriminator))
+                } else {
+                    None
+                }
+            })
         })
         .collect()
 }
@@ -3904,14 +4032,10 @@ fn json_discriminators_for_path<'a>(
     advertised_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .filter(|entry| entry.path == path.as_slice())
         .flat_map(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
-                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+            contract_json_discriminators(entry.contract)
+                .map(move |discriminator| json_discriminator_metadata(entry.path, &discriminator))
         })
         .collect()
 }
@@ -4503,32 +4627,30 @@ pub(crate) fn split_recommended_action(action: &str) -> std::result::Result<Vec<
 }
 
 pub(crate) fn schema_verbs() -> Vec<&'static str> {
-    let mut verbs = collect_schema_verbs(|contract| contract.schema_verbs);
+    let mut verbs = collect_schema_verbs(contract_schema_verbs);
     verbs.push("error");
     verbs
 }
 
 pub(crate) fn documented_schema_verbs() -> Vec<&'static str> {
-    let mut verbs = collect_schema_verbs(|contract| contract.documented_schema_verbs);
+    let mut verbs = collect_schema_verbs(contract_documented_schema_verbs);
     verbs.push("error");
     verbs
 }
 
 pub(crate) fn opaque_schema_verbs() -> Vec<&'static str> {
-    collect_schema_verbs(|contract| contract.opaque_schema_verbs)
+    collect_schema_verbs(|contract| contract.opaque_schema_verbs.iter().copied())
 }
 
-fn collect_schema_verbs(
-    select: impl Fn(CommandContract) -> &'static [&'static str],
-) -> Vec<&'static str> {
+fn collect_schema_verbs<I>(select: impl Fn(CommandContract) -> I) -> Vec<&'static str>
+where
+    I: IntoIterator<Item = &'static str>,
+{
     let mut verbs = Vec::new();
     for entry in advertised_command_contract_entries().iter().copied() {
-        if removed_phase_1_2_contract_path(entry.path) {
-            continue;
-        }
         for verb in select(entry.contract) {
-            if !verbs.contains(verb) {
-                verbs.push(*verb);
+            if !verbs.contains(&verb) {
+                verbs.push(verb);
             }
         }
     }
@@ -4644,6 +4766,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
         },
         Commands::Timeline(args) => match &args.command {
+            TimelineCommands::Status(_) => vec!["timeline", "status"],
+            TimelineCommands::RecordStart(_) => vec!["timeline", "record-start"],
+            TimelineCommands::RecordFinish(_) => vec!["timeline", "record-finish"],
             TimelineCommands::Fork(_) => vec!["timeline", "fork"],
             TimelineCommands::Reset(_) => vec!["timeline", "reset"],
             TimelineCommands::Recover(_) => vec!["timeline", "recover"],
@@ -4746,6 +4871,16 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AgentCommands::Ready(_) => vec!["agent", "ready"],
             AgentCommands::Release(_) => vec!["agent", "release"],
             AgentCommands::List(_) => vec!["agent", "list"],
+            AgentCommands::Task(command) => match command {
+                AgentTaskCommands::Create(_) => vec!["agent", "task", "create"],
+                AgentTaskCommands::List(_) => vec!["agent", "task", "list"],
+                AgentTaskCommands::Show(_) => vec!["agent", "task", "show"],
+                AgentTaskCommands::Update(_) => vec!["agent", "task", "update"],
+            },
+            AgentCommands::Fanout(command) => match command {
+                AgentFanoutCommands::Plan(_) => vec!["agent", "fanout", "plan"],
+                AgentFanoutCommands::Start(_) => vec!["agent", "fanout", "start"],
+            },
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],

@@ -734,6 +734,18 @@ impl Repository {
             return Ok(ThreadCaptureOutcome::NoOp);
         }
 
+        let baseline_tree = match existing_manifest.as_ref() {
+            Some(manifest) => {
+                Some(self.store().get_tree(&manifest.tree_hash)?.ok_or_else(|| {
+                    HeddleError::Config(format!(
+                        "manifest baseline tree {} missing while capturing thread {thread}",
+                        manifest.tree_hash
+                    ))
+                })?)
+            }
+            None => None,
+        };
+
         // 1. Walk the on-disk worktree → fresh Tree (also stores
         //    every blob it sees as a side effect). When we have a
         //    manifest, pass it as a stat-cache so unchanged files
@@ -742,8 +754,14 @@ impl Repository {
         //    is preserved; we just avoid the redundant work for
         //    the (usually large) majority.
         let new_tree = match existing_manifest.as_ref() {
-            Some(m) => self.build_tree_with_stat_cache(root, m)?,
-            None => self.build_tree(root)?,
+            Some(m) => {
+                self.build_tree_profiled_with_stat_cache_against(root, baseline_tree.as_ref(), m)?
+                    .0
+            }
+            None => {
+                self.build_tree_profiled_against(root, baseline_tree.as_ref())?
+                    .0
+            }
         };
         let new_tree_hash = self.store().put_tree(&new_tree)?;
 
@@ -853,21 +871,24 @@ fn collect_tree_leaf_paths(
     use objects::object::EntryType;
     for entry in tree.entries() {
         let rel_path = if rel_prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{rel_prefix}/{}", entry.name)
+            format!("{rel_prefix}/{}", entry.name())
         };
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Tree => {
-                let subtree = repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
+                let Some(tree_hash) = entry.tree_hash() else {
+                    continue;
+                };
+                let subtree = repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
                     HeddleError::Config(format!(
                         "subtree {} missing while collecting leaf paths for {rel_path}",
-                        entry.hash
+                        tree_hash
                     ))
                 })?;
                 collect_tree_leaf_paths(repo, &subtree, &rel_path, out)?;
             }
-            EntryType::Blob | EntryType::Symlink => {
+            EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 out.insert(rel_path);
             }
         }
@@ -885,16 +906,19 @@ pub(crate) fn populate_manifest_from_tree(
     use objects::object::EntryType;
     for entry in tree.entries() {
         let rel_path = if rel_prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{rel_prefix}/{}", entry.name)
+            format!("{rel_prefix}/{}", entry.name())
         };
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Tree => {
-                let subtree = repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
+                let Some(tree_hash) = entry.tree_hash() else {
+                    continue;
+                };
+                let subtree = repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
                     HeddleError::Config(format!(
                         "subtree {} missing while populating manifest for {rel_path}",
-                        entry.hash
+                        tree_hash
                     ))
                 })?;
                 populate_manifest_from_tree(repo, &subtree, dest, &rel_path, out)?;
@@ -921,7 +945,7 @@ pub(crate) fn populate_manifest_from_tree(
                 out.insert(
                     rel_path,
                     ManifestFile {
-                        hash: entry.hash,
+                        hash: entry.require_content_hash(),
                         size,
                         inode,
                         mtime_ns,
@@ -930,6 +954,7 @@ pub(crate) fn populate_manifest_from_tree(
                     },
                 );
             }
+            EntryType::Gitlink => {}
         }
     }
     Ok(())
@@ -1002,18 +1027,21 @@ fn collect_subdirs_into(
 ) -> Result<()> {
     use objects::object::EntryType;
     for entry in tree.entries() {
-        if entry.entry_type != EntryType::Tree {
+        if entry.entry_type() != EntryType::Tree {
             continue;
         }
         let rel = if rel_prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{rel_prefix}/{}", entry.name)
+            format!("{rel_prefix}/{}", entry.name())
         };
-        let subtree = repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
+        let Some(tree_hash) = entry.tree_hash() else {
+            continue;
+        };
+        let subtree = repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
             HeddleError::Config(format!(
                 "subtree {} missing while collecting expected dirs at {rel}",
-                entry.hash
+                tree_hash
             ))
         })?;
         out.insert(rel.clone());
@@ -1256,10 +1284,23 @@ fn stat_cache_no_op(repo: &Repository, manifest: &ThreadManifest, root: &Path) -
 
 #[cfg(test)]
 mod tests {
+    use objects::{
+        object::{Blob, TreeEntry},
+        util::gitlink_placeholder_bytes,
+    };
+    use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
     use tempfile::TempDir;
 
     use super::*;
     use crate::thread_manifest::read_manifest;
+
+    fn gitlink_target_for_tests() -> GitObjectId {
+        GitObjectId::from_hex(
+            GitObjectFormat::Sha1,
+            "1234567890abcdef1234567890abcdef12345678",
+        )
+        .unwrap()
+    }
 
     fn seeded_repo() -> (TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
@@ -1267,6 +1308,72 @@ mod tests {
         fs::write(repo_dir.path().join("file.txt"), b"tracked\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         (repo_dir, repo)
+    }
+
+    #[test]
+    fn capture_thread_from_disk_preserves_unchanged_gitlink_when_sibling_changes() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let target = gitlink_target_for_tests();
+        let note_hash = repo
+            .store()
+            .put_blob(&Blob::new(b"before\n".to_vec()))
+            .unwrap();
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("note.txt", note_hash, false).unwrap(),
+            TreeEntry::gitlink("vendor", target).unwrap(),
+        ]);
+        repo.snapshot_tree_with_attribution_profiled(
+            tree,
+            Some("gitlink thread baseline".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap();
+
+        let dest = repo_dir.path().join("thread-out");
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert_eq!(
+            fs::read(dest.join("vendor")).unwrap(),
+            gitlink_placeholder_bytes(&target)
+        );
+
+        fs::write(dest.join("note.txt"), b"after\n").unwrap();
+        let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
+        let state_id = match outcome {
+            ThreadCaptureOutcome::Captured { state_id } => state_id,
+            ThreadCaptureOutcome::NoOp => panic!("sibling edit must capture a new state"),
+        };
+        let state = repo
+            .store()
+            .get_state(&state_id)
+            .unwrap()
+            .expect("captured state");
+        let captured_tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .expect("captured tree");
+
+        assert_eq!(
+            captured_tree
+                .get("vendor")
+                .expect("vendor gitlink")
+                .gitlink_target(),
+            Some(target)
+        );
+        let note_hash = captured_tree
+            .get("note.txt")
+            .expect("note entry")
+            .blob_hash()
+            .expect("note blob");
+        let note = repo
+            .store()
+            .get_blob(&note_hash)
+            .unwrap()
+            .expect("note blob");
+        assert_eq!(note.content(), b"after\n");
     }
 
     #[test]
@@ -2031,11 +2138,11 @@ mod tests {
             !tree
                 .entries()
                 .iter()
-                .any(|e| e.name == COURTESY_STUB_FILENAME),
+                .any(|e| e.name() == COURTESY_STUB_FILENAME),
             "captured tree must never contain the courtesy stub"
         );
         assert!(
-            tree.entries().iter().any(|e| e.name == "secret.rs"),
+            tree.entries().iter().any(|e| e.name() == "secret.rs"),
             "the withheld real content must remain intact in the thread"
         );
     }
@@ -2125,18 +2232,23 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(captured_tree.entries().iter().any(|e| e.name == "extra.rs"));
         assert!(
             captured_tree
                 .entries()
                 .iter()
-                .any(|e| e.name == "secret.rs")
+                .any(|e| e.name() == "extra.rs")
+        );
+        assert!(
+            captured_tree
+                .entries()
+                .iter()
+                .any(|e| e.name() == "secret.rs")
         );
         assert!(
             !captured_tree
                 .entries()
                 .iter()
-                .any(|e| e.name == COURTESY_STUB_FILENAME)
+                .any(|e| e.name() == COURTESY_STUB_FILENAME)
         );
 
         // Capture B: must be a no-op — its own worktree is withheld.

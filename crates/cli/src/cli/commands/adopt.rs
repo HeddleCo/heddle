@@ -12,10 +12,16 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    git_overlay_health::{
+        RepositoryVerificationState, build_repository_verification_state,
+        build_repository_verification_state_profiled,
+    },
     import_progress::ImportProgress,
 };
-use crate::cli::{AdoptArgs, Cli, should_output_json, style};
+use crate::{
+    cli::{AdoptArgs, Cli, should_output_json, style},
+    perf::{ProfileField, emit_profile, profile_enabled},
+};
 
 #[derive(Debug, Serialize)]
 struct AdoptOutput {
@@ -78,10 +84,34 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let source_label = repo.root().display().to_string();
     let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
     progress.begin_commit_import();
+    let import_start = std::time::Instant::now();
     let stats = import_git_history_for_adopt(&repo, &args.refs, &mut progress)?;
+    let import_ms = import_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
-    let trust = build_repository_verification_state(&repo);
+    let verification_start = std::time::Instant::now();
+    let (trust, verification_profile) = if profile_enabled() {
+        let (trust, profile) = build_repository_verification_state_profiled(&repo);
+        (trust, Some(profile))
+    } else {
+        (build_repository_verification_state(&repo), None)
+    };
+    let verification_ms = verification_start.elapsed().as_millis();
+    if let Some(profile) = verification_profile {
+        emit_profile(
+            "adopt",
+            &[
+                ProfileField::millis("import_ms", import_ms),
+                ProfileField::millis("verification_ms", verification_ms),
+                ProfileField::millis(
+                    "verification_worktree_status_ms",
+                    profile.worktree_status_ms,
+                ),
+                ProfileField::millis("verification_health_ms", profile.health_ms),
+                ProfileField::millis("verification_from_health_ms", profile.from_health_ms),
+            ],
+        );
+    }
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
     let recommended_action = action_value(&trust);
     // The .heddle data dir lives inside the repo; render it relative to the

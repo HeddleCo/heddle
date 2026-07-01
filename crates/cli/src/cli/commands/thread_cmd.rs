@@ -742,12 +742,10 @@ fn conflict_side_content(
     let Some(entry) = tree.get(path) else {
         return Ok(Vec::new());
     };
-    if entry.entry_type != objects::object::EntryType::Blob
-        && entry.entry_type != objects::object::EntryType::Symlink
-    {
+    let Some(hash) = entry.leaf_content_hash() else {
         return Ok(Vec::new());
-    }
-    Ok(repo.require_blob(&entry.hash)?.content().to_vec())
+    };
+    Ok(repo.require_blob(&hash)?.content().to_vec())
 }
 
 fn contains_conflict_marker_bytes(content: &[u8]) -> bool {

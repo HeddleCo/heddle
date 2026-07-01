@@ -55,6 +55,53 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["agent", "release", "--session", "session-1"],
     ),
     sample(&["agent", "list"], &["agent", "list"]),
+    sample(
+        &["agent", "task", "create"],
+        &[
+            "agent",
+            "task",
+            "create",
+            "--task-id",
+            "task-1",
+            "--title",
+            "Task one",
+            "--thread",
+            "feature/task-1",
+        ],
+    ),
+    sample(&["agent", "task", "list"], &["agent", "task", "list"]),
+    sample(
+        &["agent", "task", "show"],
+        &["agent", "task", "show", "task-1"],
+    ),
+    sample(
+        &["agent", "task", "update"],
+        &["agent", "task", "update", "task-1", "--status", "complete"],
+    ),
+    sample(
+        &["agent", "fanout", "plan"],
+        &[
+            "agent",
+            "fanout",
+            "plan",
+            "--title",
+            "Coordinate lanes",
+            "--lane",
+            "feature/a=../a:Implement A",
+        ],
+    ),
+    sample(
+        &["agent", "fanout", "start"],
+        &[
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Coordinate lanes",
+            "--lane",
+            "feature/a=../a:Implement A",
+        ],
+    ),
     #[cfg(feature = "client")]
     sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
     #[cfg(feature = "client")]
@@ -398,6 +445,15 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(
         &["thread", "marker", "show"],
         &["thread", "marker", "show", "checkpoint"],
+    ),
+    sample(&["timeline", "status"], &["timeline", "status"]),
+    sample(
+        &["timeline", "record-start"],
+        &["timeline", "record-start", "--tool-call", "call-1"],
+    ),
+    sample(
+        &["timeline", "record-finish"],
+        &["timeline", "record-finish", "--tool-call", "call-1"],
     ),
     sample(
         &["timeline", "fork"],
@@ -777,10 +833,6 @@ fn command_contract_table_matches_clap_command_tree() {
 
     let missing_contracts = clap_paths
         .difference(&active_contract_paths)
-        .filter(|path| {
-            let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
-            !removed_phase_1_2_contract_path(&parts)
-        })
         .map(|path| path.join(" "))
         .collect::<Vec<_>>();
     assert!(
@@ -1115,23 +1167,26 @@ fn command_contract_metadata_is_internally_consistent() {
                 "`{display}` destructive commands must be mutating commands"
             );
         }
-        for verb in contract.documented_schema_verbs {
+        let schema_verbs = contract_schema_verbs(contract).collect::<Vec<_>>();
+        let documented_schema_verbs =
+            contract_documented_schema_verbs(contract).collect::<Vec<_>>();
+        for verb in &documented_schema_verbs {
             assert!(
-                contract.schema_verbs.contains(verb),
+                schema_verbs.contains(verb),
                 "`{display}` documents schema verb `{verb}` without registering it"
             );
         }
         for verb in contract.opaque_schema_verbs {
             assert!(
-                contract.schema_verbs.contains(verb),
+                schema_verbs.contains(verb),
                 "`{display}` marks schema verb `{verb}` opaque without registering it"
             );
             assert!(
-                contract.documented_schema_verbs.contains(verb),
+                documented_schema_verbs.contains(verb),
                 "`{display}` marks schema verb `{verb}` opaque without documenting it"
             );
         }
-        if !contract.schema_verbs.is_empty() {
+        if !schema_verbs.is_empty() {
             assert!(
                 contract.supports_json,
                 "`{display}` registers JSON schema verbs but does not support JSON"
@@ -1235,10 +1290,6 @@ fn hidden_clap_flags_are_present_in_machine_catalog() {
         }
 
         let Some(entry) = catalog.command_by_display(&display) else {
-            if command_contract_removed_alias_root(display.split_whitespace().next().unwrap_or(""))
-            {
-                continue;
-            }
             failures.push(format!(
                 "{display}: hidden flag `{id}` command missing from catalog"
             ));
@@ -1308,6 +1359,12 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent stop",
             "agent capture",
             "agent ready",
+            "agent task create",
+            "agent task list",
+            "agent task show",
+            "agent task update",
+            "agent fanout plan",
+            "agent fanout start",
             "auth logout",
             "auth status",
             "auth create-service-token",
@@ -1411,6 +1468,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "thread marker create",
             "thread marker delete",
             "thread marker show",
+            "timeline status",
+            "timeline record-start",
+            "timeline record-finish",
             "timeline fork",
             "timeline reset",
             "timeline recover",
@@ -1618,7 +1678,7 @@ fn json_discriminator_metadata_is_internally_consistent() {
                 );
             }
             assert!(
-                contract.schema_verbs.contains(&schema_verb),
+                contract_schema_verbs(contract).any(|verb| verb == schema_verb),
                 "`{display}` advertises discriminator schema verb `{schema_verb}` not present in its command contract"
             );
             assert!(
@@ -1672,17 +1732,11 @@ fn command_catalog_exposes_active_json_discriminator_metadata() {
     assert_eq!(status.json_discriminators[0].value, "status");
 }
 
-fn raw_json_discriminator_specs() -> Vec<(
-    &'static [&'static str],
-    &'static CommandJsonDiscriminatorSpec,
-)> {
+fn raw_json_discriminator_specs() -> Vec<(&'static [&'static str], CommandJsonDiscriminatorSpec)> {
     CONTRACTS
         .iter()
         .flat_map(|entry| {
-            entry
-                .contract
-                .json_discriminators
-                .iter()
+            contract_json_discriminators(entry.contract)
                 .map(move |discriminator| (entry.path, discriminator))
         })
         .collect()

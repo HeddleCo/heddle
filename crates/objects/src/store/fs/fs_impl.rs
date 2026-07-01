@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use heddle_format::compression::{header_uncompressed_size, is_compressed};
 use tracing::{debug, instrument, trace};
 
 use super::{
@@ -20,7 +21,6 @@ use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
     store::{
         HeddleError, ObjectStore, Result, codec,
-        compression::{header_uncompressed_size, is_compressed},
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -54,7 +54,7 @@ fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
 }
 
 fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
-    let tree: Tree = rmp_serde::from_slice(data)?;
+    let tree = codec::decode_tree_serialized(data)?;
     let tree = validate_loaded_tree(tree)?;
     let found = tree.hash();
     if found != hash {
@@ -286,10 +286,7 @@ impl FsStore {
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         // Cache first. The recent-object cache only ever holds trees we
         // wrote or read this process, so a hit is authoritative for a
-        // read — no need to confirm on-disk existence first. Skipping
-        // that probe removes a `stat` (and a pack-index lookup) per
-        // call, which dominates `heddle status` on directory-heavy
-        // trees (the walker loads one subtree per directory).
+        // read.
         if let Ok(cache) = self.recent_trees.read()
             && let Some(tree) = cache.get(hash)
         {
@@ -297,12 +294,33 @@ impl FsStore {
             return Ok(Some(tree.clone()));
         }
 
+        // Loose trees may be migration-promoted V2 shadows of an older packed
+        // V1 encoding at the same semantic tree hash. Prefer the loose copy
+        // when it exists, then fall through to pack lookup.
+        let path = hash_path(&trees_dir(&self.root), hash);
+        if path.exists()
+            && let Some(data) = read_file_bytes(&path)?
+        {
+            trace!(size = data.as_slice().len(), "Tree data read");
+            let tree = validate_loaded_tree(codec::decode_tree(data.as_slice())?)?;
+            if tree.hash() != *hash {
+                return Err(HeddleError::Corruption {
+                    expected: *hash,
+                    found: tree.hash(),
+                });
+            }
+            if let Ok(mut cache) = self.recent_trees.write() {
+                cache.insert(*hash, tree.clone());
+            }
+            return Ok(Some(tree));
+        }
+
         if let Ok(manager) = self.pack_manager().read()
             && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
             && obj_type == ObjectType::Tree
         {
             trace!("Found tree in packfile");
-            let tree = validate_loaded_tree(rmp_serde::from_slice(&data)?)?;
+            let tree = validate_loaded_tree(codec::decode_tree_serialized(&data)?)?;
             if tree.hash() != *hash {
                 return Err(HeddleError::Corruption {
                     expected: *hash,
@@ -311,25 +329,25 @@ impl FsStore {
             }
             return Ok(Some(tree));
         }
+        Ok(None)
+    }
 
+    fn try_get_tree_serialized_once(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
         let path = hash_path(&trees_dir(&self.root), hash);
-        match read_file_bytes(&path)? {
-            Some(data) => {
-                trace!(size = data.as_slice().len(), "Tree data read");
-                let tree = validate_loaded_tree(codec::decode_tree(data.as_slice())?)?;
-                if tree.hash() != *hash {
-                    return Err(HeddleError::Corruption {
-                        expected: *hash,
-                        found: tree.hash(),
-                    });
-                }
-                if let Ok(mut cache) = self.recent_trees.write() {
-                    cache.insert(*hash, tree.clone());
-                }
-                Ok(Some(tree))
-            }
-            None => Ok(None),
+        if path.exists()
+            && let Some(data) = read_file_bytes(&path)?
+        {
+            return Ok(Some(codec::decode_tree_body(data.as_slice())?));
         }
+
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
+            && obj_type == ObjectType::Tree
+        {
+            return Ok(Some(data));
+        }
+
+        Ok(None)
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
@@ -659,6 +677,19 @@ impl ObjectStore for FsStore {
         Ok(None)
     }
 
+    #[instrument(skip(self), fields(hash = %hash.short()))]
+    fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        if let Some(data) = self.try_get_tree_serialized_once(hash)? {
+            return Ok(Some(data));
+        }
+        if self.reload_packs_if_stale()?
+            && let Some(data) = self.try_get_tree_serialized_once(hash)?
+        {
+            return Ok(Some(data));
+        }
+        Ok(None)
+    }
+
     #[instrument(skip(self, tree), fields(entry_count = tree.entries().len()))]
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
@@ -683,7 +714,11 @@ impl ObjectStore for FsStore {
         let tree = validate_tree_serialized(data, hash)?;
 
         let path = hash_path(&trees_dir(&self.root), &hash);
-        if !path.exists() {
+        let should_write = match read_file_bytes(&path)? {
+            Some(existing) => codec::decode_tree_body(existing.as_slice())? != data,
+            None => true,
+        };
+        if should_write {
             trace!(size = data.len(), "Writing raw serialized tree");
             self.write_loose_object_atomic(&path, data)?;
         }

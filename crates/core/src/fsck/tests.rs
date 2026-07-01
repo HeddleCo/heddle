@@ -3,10 +3,12 @@ use crypto::{Ed25519Signer, StateSigningExt};
 use objects::{
     object::{
         Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State, Tree,
+        TreeEntry,
     },
     store::ObjectStore,
 };
 use repo::Repository;
+use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
 use super::{
@@ -170,6 +172,33 @@ fn test_fsck_treats_explicitly_missing_partial_fetch_blob_as_warning() {
             .any(|warning| warning.contains("explicitly absent under partial fetch")),
         "expected partial-fetch warning, got {warnings:?}"
     );
+}
+
+#[test]
+fn test_fsck_does_not_require_gitlink_target_object() {
+    let (_temp, repo) = setup_repo();
+    let target: GitObjectId = "0303030303030303030303030303030303030303"
+        .parse()
+        .expect("git oid");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::gitlink("vendor", target).expect("gitlink entry"),
+    ]);
+    let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+    let state = State::new(tree_hash, vec![], sample_attribution());
+    repo.store().put_state(&state).expect("put state");
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut objects_checked = 0;
+
+    check_trees(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check trees");
+    check_blobs(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check blobs");
+
+    assert!(
+        errors.is_empty(),
+        "gitlink target lives outside the Heddle object store: {errors:?}"
+    );
+    assert!(warnings.is_empty(), "warnings={warnings:?}");
 }
 
 #[test]

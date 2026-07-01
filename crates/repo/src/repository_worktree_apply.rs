@@ -9,6 +9,7 @@ use std::{
 };
 
 use objects::{
+    RecoveryDetails,
     fs_atomic::{enrich_fs_error, is_directory_not_empty as fs_is_directory_not_empty},
     object::{EntryType, Tree, TreeEntry},
     store::ObjectStore,
@@ -359,32 +360,38 @@ impl Repository {
 
         while from_index < from_entries.len() || to_index < to_entries.len() {
             match (from_entries.get(from_index), to_entries.get(to_index)) {
-                (Some(from_entry), Some(to_entry)) => match from_entry.name.cmp(&to_entry.name) {
-                    std::cmp::Ordering::Less => {
-                        self.plan_remove_entry(&rel_path.join(&from_entry.name), from_entry, plan)?;
-                        from_index += 1;
+                (Some(from_entry), Some(to_entry)) => {
+                    match from_entry.name().cmp(to_entry.name()) {
+                        std::cmp::Ordering::Less => {
+                            self.plan_remove_entry(
+                                &rel_path.join(from_entry.name()),
+                                from_entry,
+                                plan,
+                            )?;
+                            from_index += 1;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            self.plan_add_entry(&rel_path.join(to_entry.name()), to_entry, plan)?;
+                            to_index += 1;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            self.plan_update_entry(
+                                &rel_path.join(from_entry.name()),
+                                from_entry,
+                                to_entry,
+                                plan,
+                            )?;
+                            from_index += 1;
+                            to_index += 1;
+                        }
                     }
-                    std::cmp::Ordering::Greater => {
-                        self.plan_add_entry(&rel_path.join(&to_entry.name), to_entry, plan)?;
-                        to_index += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        self.plan_update_entry(
-                            &rel_path.join(&from_entry.name),
-                            from_entry,
-                            to_entry,
-                            plan,
-                        )?;
-                        from_index += 1;
-                        to_index += 1;
-                    }
-                },
+                }
                 (Some(from_entry), None) => {
-                    self.plan_remove_entry(&rel_path.join(&from_entry.name), from_entry, plan)?;
+                    self.plan_remove_entry(&rel_path.join(from_entry.name()), from_entry, plan)?;
                     from_index += 1;
                 }
                 (None, Some(to_entry)) => {
-                    self.plan_add_entry(&rel_path.join(&to_entry.name), to_entry, plan)?;
+                    self.plan_add_entry(&rel_path.join(to_entry.name()), to_entry, plan)?;
                     to_index += 1;
                 }
                 (None, None) => break,
@@ -400,12 +407,12 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Blob => {
                 plan.stats.changed_count += 1;
                 plan.writes.push(WorktreeWriteOp::Blob {
                     path: self.root().join(rel_path),
-                    hash: entry.hash,
+                    hash: entry.require_content_hash(),
                     executable: entry.is_executable(),
                 });
             }
@@ -413,17 +420,27 @@ impl Repository {
                 plan.stats.changed_count += 1;
                 plan.writes.push(WorktreeWriteOp::Symlink {
                     path: self.root().join(rel_path),
-                    hash: entry.hash,
+                    hash: entry.require_content_hash(),
                     validation_root: self.root().to_path_buf(),
                 });
             }
             EntryType::Tree => {
                 plan.directories.push(self.root().join(rel_path));
+                let tree_hash = entry.require_content_hash();
                 let subtree = self
                     .store
-                    .get_tree(&entry.hash)?
-                    .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                    .get_tree(&tree_hash)?
+                    .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
                 self.plan_tree_apply_recursive(rel_path, None, Some(&subtree), plan)?;
+            }
+            EntryType::Gitlink => {
+                if let Some(target) = entry.gitlink_target() {
+                    plan.stats.changed_count += 1;
+                    plan.writes.push(WorktreeWriteOp::GitlinkPlaceholder {
+                        path: self.root().join(rel_path),
+                        target,
+                    });
+                }
             }
         }
 
@@ -436,16 +453,17 @@ impl Repository {
         entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
-        match entry.entry_type {
-            EntryType::Blob | EntryType::Symlink => {
+        match entry.entry_type() {
+            EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 plan.stats.changed_count += 1;
                 plan.removals.push(self.root().join(rel_path));
             }
             EntryType::Tree => {
+                let tree_hash = entry.require_content_hash();
                 let subtree = self
                     .store
-                    .get_tree(&entry.hash)?
-                    .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                    .get_tree(&tree_hash)?
+                    .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
                 self.plan_tree_apply_recursive(rel_path, Some(&subtree), None, plan)?;
                 plan.removals.push(self.root().join(rel_path));
             }
@@ -461,20 +479,22 @@ impl Repository {
         to_entry: &TreeEntry,
         plan: &mut WorktreeApplyPlan,
     ) -> Result<()> {
-        if from_entry.entry_type == EntryType::Tree && to_entry.entry_type == EntryType::Tree {
-            if from_entry.hash == to_entry.hash {
+        if from_entry.entry_type() == EntryType::Tree && to_entry.entry_type() == EntryType::Tree {
+            let from_hash = from_entry.require_content_hash();
+            let to_hash = to_entry.require_content_hash();
+            if from_hash == to_hash {
                 plan.stats.unchanged_count += 1;
                 return Ok(());
             }
 
             let from_subtree = self
                 .store
-                .get_tree(&from_entry.hash)?
-                .ok_or_else(|| HeddleError::NotFound(format!("tree {}", from_entry.hash)))?;
+                .get_tree(&from_hash)?
+                .ok_or_else(|| HeddleError::NotFound(format!("tree {}", from_hash)))?;
             let to_subtree = self
                 .store
-                .get_tree(&to_entry.hash)?
-                .ok_or_else(|| HeddleError::NotFound(format!("tree {}", to_entry.hash)))?;
+                .get_tree(&to_hash)?
+                .ok_or_else(|| HeddleError::NotFound(format!("tree {}", to_hash)))?;
             return self.plan_tree_apply_recursive(
                 rel_path,
                 Some(&from_subtree),
@@ -483,8 +503,10 @@ impl Repository {
             );
         }
 
-        if from_entry.entry_type == EntryType::Blob && to_entry.entry_type == EntryType::Blob {
-            if from_entry.hash == to_entry.hash && from_entry.mode == to_entry.mode {
+        if from_entry.entry_type() == EntryType::Blob && to_entry.entry_type() == EntryType::Blob {
+            let from_hash = from_entry.require_content_hash();
+            let to_hash = to_entry.require_content_hash();
+            if from_hash == to_hash && from_entry.mode() == to_entry.mode() {
                 plan.stats.unchanged_count += 1;
                 return Ok(());
             }
@@ -492,15 +514,18 @@ impl Repository {
             plan.stats.changed_count += 1;
             plan.writes.push(WorktreeWriteOp::Blob {
                 path: self.root().join(rel_path),
-                hash: to_entry.hash,
+                hash: to_hash,
                 executable: to_entry.is_executable(),
             });
             return Ok(());
         }
 
-        if from_entry.entry_type == EntryType::Symlink && to_entry.entry_type == EntryType::Symlink
+        if from_entry.entry_type() == EntryType::Symlink
+            && to_entry.entry_type() == EntryType::Symlink
         {
-            if from_entry.hash == to_entry.hash {
+            let from_hash = from_entry.require_content_hash();
+            let to_hash = to_entry.require_content_hash();
+            if from_hash == to_hash {
                 plan.stats.unchanged_count += 1;
                 return Ok(());
             }
@@ -509,9 +534,28 @@ impl Repository {
             plan.removals.push(self.root().join(rel_path));
             plan.writes.push(WorktreeWriteOp::Symlink {
                 path: self.root().join(rel_path),
-                hash: to_entry.hash,
+                hash: to_hash,
                 validation_root: self.root().to_path_buf(),
             });
+            return Ok(());
+        }
+
+        if from_entry.entry_type() == EntryType::Gitlink
+            && to_entry.entry_type() == EntryType::Gitlink
+        {
+            if from_entry.gitlink_target() == to_entry.gitlink_target() {
+                plan.stats.unchanged_count += 1;
+                return Ok(());
+            }
+
+            plan.stats.changed_count += 1;
+            plan.removals.push(self.root().join(rel_path));
+            if let Some(target) = to_entry.gitlink_target() {
+                plan.writes.push(WorktreeWriteOp::GitlinkPlaceholder {
+                    path: self.root().join(rel_path),
+                    target,
+                });
+            }
             return Ok(());
         }
 
@@ -744,49 +788,6 @@ impl Repository {
     /// Remove only the heddle-tracked descendants beneath `path`, preserving
     /// any untracked or explicitly ignored siblings.
     ///
-    /// This exists so commands that mutate the worktree at the top-level
-    /// tree-entry granularity (`merge`, `cherry-pick`, `revert`) can drop a
-    /// tracked directory without recursively destroying the user's local
-    /// build artifacts, dependencies, or co-located Git state. The shape
-    /// matches `remove_existing_path` in this module: tracked content is
-    /// removed, then the directory itself is removed *if empty*; if ignored
-    /// content keeps it occupied, the dir is left in place. That keeps disk
-    /// in lock-step with the new tree (no stale tracked file under the dir)
-    /// without nuking work the user expects to survive.
-    ///
-    /// Ignore-pattern based variant. Uses the *current* `.heddleignore` to
-    /// decide which children to preserve. This is unsafe for the
-    /// merge/cherry-pick/revert flow when a tracked path is also matched by
-    /// a current ignore rule: the file would silently survive on disk after
-    /// HEAD advances. Prefer
-    /// [`Self::remove_tracked_descendants_with_source`] in those flows so
-    /// removal is driven by the source-tree's actual tracked set.
-    ///
-    /// `path` must be inside the repository root. If it doesn't exist, this
-    /// is a no-op. If it's a regular file or symlink, it is removed.
-    pub fn remove_tracked_descendants(&self, path: &Path) -> Result<()> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(HeddleError::Io(enrich_fs_error(path, "inspecting", error))),
-        };
-
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() || file_type.is_file() {
-            fs::remove_file(path)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(path, "removing", e)))?;
-            return Ok(());
-        }
-        if !file_type.is_dir() {
-            return Ok(());
-        }
-
-        let patterns = self.ignore_patterns()?;
-        remove_tracked_descendants_inner_by_ignore(self.root(), path, &patterns)
-    }
-
-    /// Tree-driven variant of [`Self::remove_tracked_descendants`].
-    ///
     /// Removal is driven by `source_subtree` — the subtree at `path` in the
     /// state we're transitioning AWAY from. Every blob/symlink it lists is
     /// removed; nested directory entries are recursed into using the matching
@@ -826,9 +827,8 @@ impl Repository {
 
     /// Look up the subtree at `rel_path` within `root_tree`. Returns `None`
     /// if the path isn't reachable as a `Tree`-typed entry (missing entry,
-    /// blob entry, or unresolved hash). Used by
-    /// [`Self::remove_tracked_descendants_with_source`] callers to derive
-    /// the source subtree from a top-level tree entry.
+    /// blob entry, or unresolved hash). Used by callers to derive the
+    /// source subtree for [`Self::remove_tracked_descendants_with_source`].
     pub fn resolve_subtree(&self, root_tree: &Tree, rel_path: &Path) -> Result<Option<Tree>> {
         // Walk component-by-component, owning the current subtree at each
         // step. Each iteration consults the most recently resolved Tree,
@@ -861,13 +861,16 @@ impl Repository {
             Some(name) => name,
             None => return Ok(None),
         };
-        let Some(entry) = tree.entries().iter().find(|e| e.name == name) else {
+        let Some(entry) = tree.entries().iter().find(|e| e.name() == name) else {
             return Ok(None);
         };
-        if entry.entry_type != EntryType::Tree {
+        if entry.entry_type() != EntryType::Tree {
             return Ok(None);
         }
-        self.store().get_tree(&entry.hash)
+        let Some(tree_hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        self.store().get_tree(&tree_hash)
     }
 }
 
@@ -896,7 +899,7 @@ fn refresh_directory_index_entry_from_tree(
     };
     if let Some(directory_entry) = DirectoryCacheEntry::from_child_names(
         &metadata,
-        tree.entries().iter().map(|entry| entry.name.as_str()),
+        tree.entries().iter().map(|entry| entry.name()),
         tree.entries().len(),
         Some(tree.hash()),
     ) {
@@ -946,10 +949,10 @@ impl<'repo> DirectoryTreeHashLookup<'repo> {
             let Some(entry) = parent_tree.get(name) else {
                 return Ok(None);
             };
-            if entry.entry_type != EntryType::Tree {
+            if entry.entry_type() != EntryType::Tree {
                 return Ok(None);
             }
-            Some(entry.hash)
+            entry.tree_hash()
         }) else {
             return Ok(None);
         };
@@ -1051,10 +1054,17 @@ fn full_rematerialize_dirty_refusal(
     reason: WorktreeApplyFallbackReason,
     at_risk_paths: Vec<String>,
 ) -> HeddleError {
-    HeddleError::Conflict(format!(
-        "dirty worktree would be overwritten by full rematerialize ({reason}); unsnapped edits at risk: {paths}. Capture, commit, or stash them first, or rerun with --force to discard local changes.",
-        reason = reason.as_str(),
-        paths = format_at_risk_paths(&at_risk_paths),
+    let reason = reason.as_str();
+    let paths = format_at_risk_paths(&at_risk_paths);
+    HeddleError::recovery(RecoveryDetails::safety_refusal(
+        "dirty_worktree",
+        format!(
+            "dirty worktree would be overwritten by full rematerialize ({reason}); unsnapped edits at risk: {paths}. Capture, commit, or stash them first, or rerun with --force to discard local changes."
+        ),
+        "Capture, commit, or stash the worktree changes first, or rerun with --force to discard local changes.",
+        format!("unsnapped edits at risk: {paths}"),
+        format!("full rematerialize ({reason}) would write another tree into the worktree"),
+        "repository state and worktree files were left unchanged",
     ))
 }
 
@@ -1071,49 +1081,6 @@ fn format_at_risk_paths(paths: &[String]) -> String {
         rendered.push_str(&format!(", ... and {remaining} more"));
     }
     rendered
-}
-
-/// Legacy ignore-driven walker — backs the deprecated
-/// [`Repository::remove_tracked_descendants`] entrypoint. Walks `dir`
-/// recursively, removing every entry whose worktree-relative path is
-/// *not* heddle-ignored. New code should use the tree-driven variant
-/// (`remove_tracked_descendants_inner`) so that ignore-rule changes
-/// can't silently strand previously-tracked content on disk.
-fn remove_tracked_descendants_inner_by_ignore(
-    root: &Path,
-    dir: &Path,
-    patterns: &[String],
-) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(HeddleError::Io(enrich_fs_error(dir, "reading", error))),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let child = entry.path();
-        let rel = child.strip_prefix(root).unwrap_or(&child);
-
-        if should_ignore_path(rel, patterns) {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() || file_type.is_file() {
-            fs::remove_file(&child)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
-        } else if file_type.is_dir() {
-            remove_tracked_descendants_inner_by_ignore(root, &child, patterns)?;
-        }
-    }
-
-    match fs::remove_dir(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if is_directory_not_empty(&error) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(HeddleError::Io(enrich_fs_error(dir, "removing", error))),
-    }
 }
 
 /// Walk the entries listed in `source_subtree` and remove the matching
@@ -1138,22 +1105,24 @@ fn remove_tracked_descendants_inner(
     source_subtree: &Tree,
 ) -> Result<()> {
     for entry in source_subtree.entries() {
-        let child = dir.join(&entry.name);
-        match entry.entry_type {
-            EntryType::Blob | EntryType::Symlink => match fs::symlink_metadata(&child) {
-                Ok(_) => {
-                    fs::remove_file(&child)
-                        .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
+        let child = dir.join(entry.name());
+        match entry.entry_type() {
+            EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
+                match fs::symlink_metadata(&child) {
+                    Ok(_) => {
+                        fs::remove_file(&child)
+                            .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(HeddleError::Io(enrich_fs_error(
+                            &child,
+                            "inspecting",
+                            error,
+                        )));
+                    }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(HeddleError::Io(enrich_fs_error(
-                        &child,
-                        "inspecting",
-                        error,
-                    )));
-                }
-            },
+            }
             EntryType::Tree => {
                 let metadata = match fs::symlink_metadata(&child) {
                     Ok(m) => m,
@@ -1175,7 +1144,10 @@ fn remove_tracked_descendants_inner(
                         .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
                     continue;
                 }
-                let nested = match repo.store().get_tree(&entry.hash)? {
+                let Some(tree_hash) = entry.tree_hash() else {
+                    continue;
+                };
+                let nested = match repo.store().get_tree(&tree_hash)? {
                     Some(t) => t,
                     None => continue,
                 };
@@ -1313,6 +1285,12 @@ mod tests {
         fs::write(&notes, "local notes\n").unwrap();
 
         let err = repo.goto(&state_two.change_id).unwrap_err();
+        match &err {
+            HeddleError::Recovery(details) => {
+                assert_eq!(details.kind, "dirty_worktree");
+            }
+            other => panic!("dirty refusal should use typed recovery advice, got {other:?}"),
+        }
         let msg = err.to_string();
         assert!(
             msg.contains("dirty worktree")
@@ -1505,9 +1483,13 @@ mod tests {
         fs::write(nested_dir.join("app.rs"), "fn main() {}\n").unwrap();
         let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
         let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
-        let src_hash = tree.get("src").unwrap().hash;
+        let src_hash = tree.get("src").unwrap().tree_hash().expect("src is a tree");
         let src_tree = repo.store().get_tree(&src_hash).unwrap().unwrap();
-        let bin_hash = src_tree.get("bin").unwrap().hash;
+        let bin_hash = src_tree
+            .get("bin")
+            .unwrap()
+            .tree_hash()
+            .expect("bin is a tree");
         let mut lookup = DirectoryTreeHashLookup::new(&repo, &tree);
 
         assert_eq!(

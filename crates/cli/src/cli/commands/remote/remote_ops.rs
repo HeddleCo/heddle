@@ -311,11 +311,9 @@ pub async fn cmd_pull(
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
-    let (target, server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
     #[cfg(not(feature = "client"))]
-    let (target, _server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
+    let (target, _server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
 
     let head_ref = repo.head_ref()?;
     let remote_thread = default_pull_thread_name(thread, repo.capability(), &head_ref);
@@ -702,16 +700,16 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                 .then(|| git_overlay_default_remote_name(&repo))
                 .flatten();
             sync_git_overlay_remote_add(&repo, &name, &url)?;
-            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
+            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             let default_was_empty = cfg.default_name().is_none();
             cfg.add(&name, Remote { url: url.clone() })
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::new)?;
             if default_was_empty
                 && git_overlay_default_before
                     .as_deref()
                     .is_some_and(|default| default != name)
             {
-                cfg.clear_default().map_err(anyhow::Error::msg)?;
+                cfg.clear_default().map_err(anyhow::Error::new)?;
             }
             let default = resolved_default_remote_name(&repo)?;
             render_remote_mutation(
@@ -739,7 +737,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             // fallible step stranded the repo in partial state: the Heddle
             // remote gone, the Git remote still present.
             sync_git_overlay_remote_remove(&repo, &name)?;
-            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
+            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             match cfg.remove(&name) {
                 Ok(()) | Err(RemoteError::NotFound(_)) => {}
                 Err(err) => return Err(anyhow::Error::msg(err)),
@@ -765,7 +763,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
-            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
+            let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             // Git-overlay remotes added via `git remote add` only live in
             // `.git/config`. `merged_remote_items` surfaces them in
             // `remote list/show`, but `RemoteConfig::set_default` would
@@ -774,9 +772,9 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             // readers (including `resolve_remote_with_key`) can resolve
             // it, then set the default explicitly.
             if cfg.get(&name).is_err() {
-                cfg.add(&name, Remote { url }).map_err(anyhow::Error::msg)?;
+                cfg.add(&name, Remote { url }).map_err(anyhow::Error::new)?;
             }
-            cfg.set_default(&name).map_err(anyhow::Error::msg)?;
+            cfg.set_default(&name).map_err(anyhow::Error::new)?;
             render_remote_mutation(
                 RemoteMutationOutput {
                     output_kind: "remote_set_default",
@@ -878,7 +876,7 @@ pub(crate) fn resolve_default_remote_name(
         return Ok(requested.to_string());
     }
     if let Some(default) = RemoteConfig::open(repo)
-        .map_err(anyhow::Error::msg)?
+        .map_err(anyhow::Error::new)?
         .default_name()
     {
         return Ok(default.to_string());
@@ -892,7 +890,7 @@ pub(crate) fn resolve_default_remote_name(
 }
 
 pub(crate) fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>> {
-    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
     if let Some(default) = cfg.default_name() {
         return Ok(Some(default.to_string()));
     }
@@ -927,7 +925,7 @@ fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
 }
 
 fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
-    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
     let git_overlay_remotes = if repo.capability() == RepositoryCapability::GitOverlay {
         git_overlay_config_remotes(repo)
     } else {
@@ -1261,7 +1259,7 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
 /// appends a duplicate that the first-seen section would win over on the next
 /// read.
 fn upsert_git_remote_config(root: &Path, config_path: &Path, name: &str, url: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
     let remote = RemoteConfigSet::new(name)
         .with_url(url)
         .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
@@ -1271,7 +1269,7 @@ fn upsert_git_remote_config(root: &Path, config_path: &Path, name: &str, url: &s
         remote.entries,
     ));
     git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 
@@ -1279,11 +1277,11 @@ fn upsert_git_remote_config(root: &Path, config_path: &Path, name: &str, url: &s
 /// that uses the normal quoted subsection form. No-ops when the file is absent
 /// or defines no such remote.
 fn remove_git_remote_config(root: &Path, config_path: &Path, name: &str) -> Result<()> {
-    let git = SleyRepository::discover(root).map_err(anyhow::Error::msg)?;
+    let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
     let plan = ConfigEditPlan::new(config_path)
         .with_operation(ConfigEdit::remove_section("remote", Some(name.to_string())));
     git.apply_config_edit_plan(plan)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 

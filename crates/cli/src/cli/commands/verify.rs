@@ -1,83 +1,88 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository verification proof surface.
 
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck, VerifyOptions,
+    VerifyReport, verify as core_verify,
+};
+use objects::HeddleError;
 use repo::Repository;
-use serde::Serialize;
 
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    git_overlay_health::{
-        RepositoryVerificationState, VerificationCheck, build_plain_git_verification_probe,
-        build_repository_verification_state, repository_setup_guidance,
-    },
+    git_overlay_health::{build_plain_git_verification_probe, build_repository_verification_state},
 };
 use crate::{
     cli::{Cli, should_output_json, style},
-    perf::{ProfileField, emit_profile, profile_enabled},
+    config::UserConfig,
+    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-
-#[derive(Debug, Serialize)]
-struct VerifyOutput {
-    output_kind: &'static str,
-    clean: bool,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    #[serde(flatten)]
-    trust: RepositoryVerificationState,
-}
 
 pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
-    let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let probe_start = Instant::now();
-    let plain_git_probe = build_plain_git_verification_probe(start)?;
-    let plain_git_probe_ms = probe_start.elapsed().as_millis();
-    let mut repo_open_ms = 0u128;
-    let mut verification_ms = 0u128;
-    let (trust, presentation, repo_config) = if let Some(probe) = plain_git_probe {
-        (
-            probe.trust,
-            crate::cli::render::RepositoryPresentation {
-                label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-                context: None,
-            },
-            None,
-        )
-    } else {
-        let repo_open_start = Instant::now();
-        let repo = Repository::open(start)?;
-        repo_open_ms = repo_open_start.elapsed().as_millis();
-        let verification_start = Instant::now();
-        let trust = build_repository_verification_state(&repo);
-        verification_ms = verification_start.elapsed().as_millis();
-        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
-        let config = repo.config().clone();
-        (trust, presentation, Some(config))
-    };
+    let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
+    let ctx = verify_execution_context_from_cli(cli, &start)?;
+    let output = core_verify(
+        &ctx,
+        VerifyOptions::new(core_plain_git_probe, core_repository_trust)
+            .with_start_path(start.clone()),
+    )?;
     if profile_enabled() {
-        emit_profile(
-            "verify phases",
-            &[
-                ProfileField::millis("plain_git_probe_ms", plain_git_probe_ms),
-                ProfileField::millis("repo_open_ms", repo_open_ms),
-                ProfileField::millis("verification_ms", verification_ms),
-                ProfileField::duration("command_body_ms", body_start.elapsed()),
-            ],
-        );
+        let fields = [
+            ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
+            ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+            ProfileField::millis("verification_ms", output.profile.verification_ms),
+            ProfileField::duration("command_body_ms", body_start.elapsed()),
+        ];
+        match profile_mode() {
+            ProfileMode::Off => {}
+            ProfileMode::Human => emit_profile("verify phases", &fields),
+            ProfileMode::Jsonl => {
+                emit_profile(
+                    "verify plain git probe",
+                    &[ProfileField::millis(
+                        "plain_git_probe_ms",
+                        output.profile.plain_git_probe_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify repo open",
+                    &[ProfileField::millis(
+                        "repo_open_ms",
+                        output.profile.repo_open_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify repository checks",
+                    &[ProfileField::millis(
+                        "verification_ms",
+                        output.profile.verification_ms,
+                    )],
+                );
+                emit_profile(
+                    "verify command body",
+                    &[ProfileField::duration(
+                        "command_body_ms",
+                        body_start.elapsed(),
+                    )],
+                );
+            }
+        }
     }
-    let output = VerifyOutput {
-        output_kind: "verify",
-        clean: trust.verified,
-        repository_label: presentation.label,
-        repository_context: presentation.context,
-        trust,
-    };
+    let repo_config = output
+        .trust
+        .heddle_initialized
+        .then(|| {
+            Repository::open(&start)
+                .ok()
+                .map(|repo| repo.config().clone())
+        })
+        .flatten();
     let as_json = should_output_json(cli, repo_config.as_ref());
     if !output.clean && as_json {
         return Err(anyhow!(verify_failed_advice(&output.trust)));
@@ -89,7 +94,43 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn render_verify(output: &VerifyOutput, verbose: bool, as_json: bool) -> Result<()> {
+fn verify_execution_context_from_cli(
+    cli: &Cli,
+    start: &Path,
+) -> Result<heddle_core::ExecutionContext> {
+    let config = UserConfig::load_default()?;
+    let verbosity = if cli.quiet {
+        heddle_core::Verbosity::Quiet
+    } else if cli.verbose > 0 {
+        heddle_core::Verbosity::Verbose
+    } else {
+        heddle_core::Verbosity::Normal
+    };
+    let mut builder = heddle_core::ExecutionContext::builder()
+        .start_path(start.to_path_buf())
+        .config(config)
+        .verbosity(verbosity)
+        .progress(std::sync::Arc::new(heddle_core::NoopProgress))
+        .warnings(std::sync::Arc::new(heddle_core::NoopWarnings));
+
+    if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
+        builder = builder.op_id(op_id.to_string());
+    }
+
+    Ok(builder.build())
+}
+
+fn core_plain_git_probe(start: &Path) -> objects::error::Result<Option<PlainGitVerifyProbe>> {
+    build_plain_git_verification_probe(start)
+        .map(|probe| probe.map(|probe| PlainGitVerifyProbe { trust: probe.trust }))
+        .map_err(|err| HeddleError::Config(err.to_string()))
+}
+
+fn core_repository_trust(repo: &Repository) -> objects::error::Result<RepositoryVerificationState> {
+    Ok(build_repository_verification_state(repo))
+}
+
+fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {
     if as_json {
         crate::cli::render::write_json_stdout(output)?;
         return Ok(());
@@ -183,7 +224,7 @@ fn render_verify(output: &VerifyOutput, verbose: bool, as_json: bool) -> Result<
     Ok(())
 }
 
-fn render_compact_verify(output: &VerifyOutput) -> Result<()> {
+fn render_compact_verify(output: &VerifyReport) -> Result<()> {
     println!("{}", style::bold("Heddle verify"));
     println!("Repository: {}", output.repository_label);
     render_verify_repository_context(output);
@@ -249,7 +290,7 @@ fn render_verify_observe_only_note() {
     );
 }
 
-fn render_verify_repository_context(output: &VerifyOutput) {
+fn render_verify_repository_context(output: &VerifyReport) {
     let Some(context) = &output.repository_context else {
         return;
     };
@@ -264,7 +305,7 @@ fn render_verify_repository_context(output: &VerifyOutput) {
     }
 }
 
-fn human_verify_status(output: &VerifyOutput) -> String {
+fn human_verify_status(output: &VerifyReport) -> String {
     if let Some(check) = output.trust.checks.iter().find(|check| !check.clean) {
         if is_worktree_save_blocker(check) {
             return "changes to save".to_string();
@@ -279,7 +320,7 @@ fn human_verify_status(output: &VerifyOutput) -> String {
     output.trust.status.clone()
 }
 
-fn compact_verify_status(output: &VerifyOutput) -> String {
+fn compact_verify_status(output: &VerifyReport) -> String {
     if output.trust.verified {
         "verified".to_string()
     } else {
@@ -299,7 +340,7 @@ fn human_check_status(check: &VerificationCheck) -> String {
     }
 }
 
-fn human_output_summary(output: &VerifyOutput) -> String {
+fn human_output_summary(output: &VerifyReport) -> String {
     if let Some(check) = output.trust.checks.iter().find(|check| !check.clean) {
         if setup_needed_guidance(output).is_some() {
             return String::new();
@@ -327,7 +368,7 @@ fn is_checkpoint_blocker(check: &VerificationCheck) -> bool {
     check.name == "Worktree" && check.status == "needs_checkpoint"
 }
 
-fn verify_status_label(output: &VerifyOutput) -> &'static str {
+fn verify_status_label(output: &VerifyReport) -> &'static str {
     if output.trust.repository_mode == "git-overlay" || output.trust.repository_mode == "plain-git"
     {
         "Git and Heddle"
@@ -364,7 +405,7 @@ fn verify_failed_advice(verification: &RepositoryVerificationState) -> RecoveryA
     advice
 }
 
-fn human_clean_summary(output: &VerifyOutput) -> &str {
+fn human_clean_summary(output: &VerifyReport) -> &str {
     if output.trust.summary == "Git overlay and Heddle agree" {
         if output.trust.recommended_action.is_empty() {
             "Nothing to do. Workspace verified."
@@ -412,7 +453,7 @@ fn human_summary(
     override_summary.unwrap_or(&check.summary).to_string()
 }
 
-fn render_compact_setup_needed(output: &VerifyOutput) -> bool {
+fn render_compact_setup_needed(output: &VerifyReport) -> bool {
     let Some(setup) = setup_needed_guidance(output) else {
         return false;
     };
@@ -422,12 +463,86 @@ fn render_compact_setup_needed(output: &VerifyOutput) -> bool {
     true
 }
 
-fn setup_needed_guidance(
-    output: &VerifyOutput,
-) -> Option<super::git_overlay_health::RepositorySetupGuidance> {
+fn setup_needed_guidance(output: &VerifyReport) -> Option<VerifySetupGuidance> {
     let blocker = output.trust.checks.iter().find(|check| !check.clean)?;
     if !is_import_setup_blocker(blocker) {
         return None;
     }
     repository_setup_guidance(&output.trust)
+}
+
+#[derive(Debug, Clone)]
+struct VerifySetupGuidance {
+    setup_line: String,
+    effect: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositorySetupActionKind {
+    Init,
+    Adopt,
+    BridgeImport,
+    Other,
+}
+
+fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<VerifySetupGuidance> {
+    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
+        return None;
+    }
+    let action = trust.recommended_action.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let kind = repository_setup_action_kind(action);
+    let setup_line = match kind {
+        RepositorySetupActionKind::Init => {
+            format!("Git repo detected; initialize Heddle with {action}")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!("Git repo detected; connect this branch with {action}")
+        }
+        RepositorySetupActionKind::BridgeImport => {
+            format!("Git history not imported; import it with {action}")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("Run {action} to clear the primary setup blocker")
+        }
+    };
+    let worktree_tail = if trust.worktree_state == "clean" {
+        "and the Git worktree stays clean"
+    } else {
+        "and existing Git worktree changes stay untouched"
+    };
+    let effect = match kind {
+        RepositorySetupActionKind::Init => format!(
+            ".heddle metadata will be created; Git commits stay in Git storage, {worktree_tail}."
+        ),
+        RepositorySetupActionKind::Adopt
+            if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
+        {
+            format!(".heddle metadata will be created, Git history imported, {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
+        }
+        RepositorySetupActionKind::BridgeImport => {
+            format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("The recommended setup command runs {worktree_tail}.")
+        }
+    };
+    Some(VerifySetupGuidance { setup_line, effect })
+}
+
+fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
+    if action == "heddle init" {
+        RepositorySetupActionKind::Init
+    } else if action.starts_with("heddle adopt") {
+        RepositorySetupActionKind::Adopt
+    } else if action.starts_with("heddle bridge git import") {
+        RepositorySetupActionKind::BridgeImport
+    } else {
+        RepositorySetupActionKind::Other
+    }
 }

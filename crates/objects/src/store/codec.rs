@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Object body codecs for loose-object backends.
 
+use heddle_format::compression::{CompressionConfig, compress, decompress, is_compressed};
+
 use crate::{
-    object::{Action, ActionId, ContentHash, State, Tree},
-    store::{
-        CompressionConfig, Result,
-        compression::{compress, decompress, is_compressed},
-    },
+    object::{Action, ActionId, ContentHash, State, Tree, TreeDecodeError},
+    store::{HeddleError, Result},
 };
 
 pub fn encode_blob_content(content: &[u8], config: &CompressionConfig) -> Result<Vec<u8>> {
@@ -29,8 +28,22 @@ pub fn encode_tree(tree: &Tree, config: &CompressionConfig) -> Result<(ContentHa
 }
 
 pub fn decode_tree(data: &[u8]) -> Result<Tree> {
-    let decoded = decode_body(data)?;
-    Ok(rmp_serde::from_slice(&decoded)?)
+    let decoded = decode_tree_body(data)?;
+    decode_tree_serialized(&decoded)
+}
+
+pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
+    Tree::decode_current_msgpack(data).map_err(|error| match error {
+        TreeDecodeError::Decode(error) => HeddleError::from(error),
+        TreeDecodeError::Invalid(error) => HeddleError::InvalidTreeEntry(error),
+    })
+}
+
+/// Return the serialized tree body stored in a loose object, decompressing
+/// only the loose-object wrapper. Migration code uses this to decode older
+/// tree schemas without teaching the current [`Tree`] reader to accept them.
+pub fn decode_tree_body(data: &[u8]) -> Result<Vec<u8>> {
+    decode_body(data)
 }
 
 pub fn encode_state(state: &State, config: &CompressionConfig) -> Result<Vec<u8>> {

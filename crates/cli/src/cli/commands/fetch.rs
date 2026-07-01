@@ -27,7 +27,7 @@ use crate::{
     bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     client::LocalSync,
-    remote::{RemoteTarget, resolve_remote_with_key},
+    remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
 #[derive(Serialize)]
@@ -48,9 +48,17 @@ struct FetchOutput {
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
     let repo = cli.open_repo()?;
+
+    // A git-overlay repo (not a hosted-native repo) fetches through the
+    // git-overlay exporter *except* for remotes that resolve to a hosted
+    // `heddle://` network endpoint. Those must route through the native
+    // hosted-sync path (`fetch_network`), the same way `pull`/`clone` do —
+    // the overlay exporter cannot speak the `heddle://` scheme and hard-errors
+    // on it. `--all` may mix git and hosted remotes, so classify each remote
+    // by its own scheme rather than gating the whole batch on one guard.
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let remotes = if all {
-            let configured = repo.refs().list_remotes()?;
+            let configured = all_configured_remotes(&repo)?;
             if configured.is_empty() {
                 vec!["origin".to_string()]
             } else {
@@ -67,47 +75,64 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
             vec![selected]
         };
 
-        for remote_name in &remotes {
+        // Peel off hosted-network remotes; the rest fetch via the overlay
+        // exporter. A repo with a mixed set gets each remote routed by scheme.
+        let (hosted_remotes, overlay_remotes): (Vec<String>, Vec<String>) = remotes
+            .into_iter()
+            .partition(|name| {
+                super::remote::push_target_is_hosted_network(&repo, Some(name.as_str()))
+            });
+
+        for remote_name in &overlay_remotes {
             let mut bridge = GitBridge::new(&repo);
             bridge.fetch(remote_name)?;
         }
 
-        if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{}",
-                serde_json::to_string(&FetchOutput {
-                    output_kind: "fetch",
-                    remote: if all {
-                        "all".to_string()
+        // If every remote was hosted (or a mix), the hosted ones fall through
+        // to the shared network path below. Only short-circuit here when there
+        // is nothing hosted left to fetch.
+        if hosted_remotes.is_empty() {
+            if should_output_json(cli, Some(repo.config())) {
+                println!(
+                    "{}",
+                    serde_json::to_string(&FetchOutput {
+                        output_kind: "fetch",
+                        remote: if all {
+                            "all".to_string()
+                        } else {
+                            overlay_remotes
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "origin".to_string())
+                        },
+                        ref_scope: Some("branches_and_heddle_notes"),
+                        tags_included: Some(false),
+                        refs_fetched: overlay_remotes.len(),
+                        objects_fetched: 0,
+                        trust: build_repository_verification_state(&repo),
+                    })?
+                );
+            } else {
+                println!(
+                    "{} fetched branches + refs/notes/heddle from {} (tags skipped)",
+                    style::ok_marker(),
+                    if all {
+                        style::bold("all remotes")
                     } else {
-                        remotes
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "origin".to_string())
-                    },
-                    ref_scope: Some("branches_and_heddle_notes"),
-                    tags_included: Some(false),
-                    refs_fetched: remotes.len(),
-                    objects_fetched: 0,
-                    trust: build_repository_verification_state(&repo),
-                })?
-            );
-        } else {
-            println!(
-                "{} fetched branches + refs/notes/heddle from {} (tags skipped)",
-                style::ok_marker(),
-                if all {
-                    style::bold("all remotes")
-                } else {
-                    style::bold(&remotes.join(", "))
-                }
-            );
+                        style::bold(&overlay_remotes.join(", "))
+                    }
+                );
+            }
+            return Ok(());
         }
-        return Ok(());
+
+        // Hosted remotes remain: route them through the network path below.
+        // (Any overlay remotes were already fetched above.)
+        return fetch_via_network(cli, &repo, hosted_remotes, all).await;
     }
 
     let remotes = if all {
-        repo.refs().list_remotes()?
+        all_configured_remotes(&repo)?
     } else if let Some(remote) = remote.as_ref() {
         vec![remote.clone()]
     } else if let Some(default) = resolved_default_remote_name(&repo)? {
@@ -116,6 +141,47 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
         return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
     };
 
+    fetch_via_network(cli, &repo, remotes, all).await
+}
+
+/// Enumerate every configured remote for `fetch --all`, unioning the Heddle
+/// remote aliases (`.heddle/remotes.toml`) with the refs backend's
+/// remote-tracking namespaces. `refs().list_remotes()` alone only surfaces
+/// remotes that already have tracking refs, so a freshly-added remote that has
+/// never been fetched — e.g. a hosted `heddle://` remote — was silently dropped
+/// from `--all` (#839). Ordering is deterministic: Heddle-config remotes first
+/// (in config order), then any tracking-only remotes not already listed.
+fn all_configured_remotes(repo: &Repository) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Ok(cfg) = RemoteConfig::open(repo) {
+        for (name, _) in cfg.list() {
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+        }
+    }
+
+    for name in repo.refs().list_remotes()? {
+        if seen.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+
+    Ok(names)
+}
+
+/// Fetch each remote through the resolve → `RemoteTarget` routing (local heddle
+/// sync or hosted `fetch_network`). This is the shared tail for hosted-native
+/// repos and for git-overlay repos whose remote(s) are hosted `heddle://`
+/// endpoints.
+async fn fetch_via_network(
+    cli: &Cli,
+    repo: &Repository,
+    remotes: Vec<String>,
+    all: bool,
+) -> Result<()> {
     let mut total_refs = 0;
     let mut total_objects = 0;
     #[cfg(feature = "client")]
@@ -123,15 +189,15 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
     for remote_name in &remotes {
         #[cfg(feature = "client")]
-        let (target, server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
+        let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name.as_str()))
             .map_err(anyhow::Error::msg)?;
         #[cfg(not(feature = "client"))]
-        let (target, _server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
+        let (target, _server_key) = resolve_remote_with_key(repo, Some(remote_name.as_str()))
             .map_err(anyhow::Error::msg)?;
 
         match target {
             RemoteTarget::Local(path) => {
-                let (refs, objects) = fetch_local(&repo, &path, remote_name, cli).await?;
+                let (refs, objects) = fetch_local(repo, &path, remote_name, cli).await?;
                 total_refs += refs;
                 total_objects += objects;
             }
@@ -139,7 +205,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 #[cfg(feature = "client")]
                 {
                     let (refs, objects) = match fetch_network(
-                        &repo,
+                        repo,
                         FetchNetworkOptions {
                             addr,
                             repo_path: repo_path.as_deref(),
@@ -153,7 +219,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                     {
                         Ok(result) => result,
                         Err(err) => {
-                            return Err(augment_missing_blob_error(&repo, err));
+                            return Err(augment_missing_blob_error(repo, err));
                         }
                     };
                     total_refs += refs;
@@ -185,7 +251,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 tags_included: None,
                 refs_fetched: total_refs,
                 objects_fetched: total_objects,
-                trust: build_repository_verification_state(&repo),
+                trust: build_repository_verification_state(repo),
             })?
         );
     } else {
@@ -346,7 +412,7 @@ async fn fetch_remote_state(
     client
         .fetch_state(repo, repo_path, remote_name, state_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .map_err(anyhow::Error::new)
 }
 
 #[cfg(feature = "client")]

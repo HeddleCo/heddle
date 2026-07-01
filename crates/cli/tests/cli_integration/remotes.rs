@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::object::{MarkerName, ThreadName};
 
-use super::*;
+use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
@@ -363,6 +363,136 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
              loudly, not succeed (silent no-op). stdout: {stdout}\nstderr: {stderr}"
         );
     }
+}
+
+/// Regression (#839): `heddle fetch` on a git-overlay repo whose remote is a
+/// hosted `heddle://` endpoint (with an EMPTY `[hosted]` config block, so
+/// `hosted_enabled() == false`) must route through the native hosted-sync path
+/// (`fetch_network`), NOT the git-overlay exporter. The bug: the entry-gate
+/// guard in `cmd_fetch` lacked pull's `!fetch_uses_hosted_network` term, so a
+/// hosted remote entered the overlay branch and hit `local_path_from_url`,
+/// which HARD-ERRORS on any `heddle://` URL with "...cannot be pushed via the
+/// git-overlay exporter" — a push-flavoured error during a *fetch*.
+///
+/// No live server runs in CI, so we assert on the ROUTING DECISION: a correctly
+/// routed hosted fetch fails on the CONNECTION to the (absent) server, while the
+/// bug fails on the exporter's scheme rejection. We reject that specific
+/// scheme-rejection signature and accept any connection-flavoured failure.
+#[test]
+fn git_overlay_fetch_heddle_scheme_routes_to_hosted_not_git_exporter() {
+    let source = TempDir::new().unwrap();
+
+    // Real git-overlay repo (git init + heddle adopt): capability() is
+    // GitOverlay and `[hosted]` is empty — exactly the buggy predicate's input.
+    git_ok(&["init", "-b", "main"], source.path());
+    git_ok(&["config", "user.name", "Heddle Test"], source.path());
+    git_ok(
+        &["config", "user.email", "heddle@example.com"],
+        source.path(),
+    );
+    std::fs::write(source.path().join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], source.path());
+    git_ok(&["commit", "-m", "seed"], source.path());
+    heddle(&["adopt", "--ref", "main"], Some(source.path())).expect("adopt source Git repo");
+
+    // A hosted heddle:// remote pointing at a port nothing is listening on,
+    // exercised through both invocation forms that resolve to it (inline URL
+    // and named remote), each of which must route identically.
+    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    heddle(
+        &["remote", "add", "origin", hosted_url],
+        Some(source.path()),
+    )
+    .expect("add hosted origin remote");
+
+    for fetch_arg in [hosted_url, "origin"] {
+        let output = heddle_output(&["fetch", fetch_arg], Some(source.path()))
+            .expect("spawn heddle fetch");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}{stderr}");
+
+        // The exact bug signature: the git-overlay exporter rejecting the
+        // heddle:// scheme. That message must never appear for a fetch — a
+        // fetch that reaches the git-overlay exporter is mis-routed.
+        assert!(
+            !combined.contains("cannot be pushed via the git-overlay exporter"),
+            "`heddle fetch {fetch_arg}` was mis-routed to the git-overlay exporter \
+             (scheme-rejection error) instead of the hosted-sync path.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+
+        // A hosted fetch that cannot reach a server must fail loudly (the dead
+        // port yields a connection error, or a `client`-feature-less build's
+        // `network_feature_unavailable`) — proving it reached the hosted
+        // transport rather than the overlay exporter's local reconcile.
+        assert!(
+            !output.status.success(),
+            "`heddle fetch {fetch_arg}` to an unreachable hosted remote must fail \
+             loudly (connection error), not succeed.\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+}
+
+/// Regression (#839, `--all` mixed set): `heddle fetch --all` on a git-overlay
+/// repo that has BOTH a local-git remote and a hosted `heddle://` remote must
+/// route each remote by its own scheme — overlay-fetch the git remote, hosted
+/// `fetch_network` the heddle:// remote — not gate the whole batch on a single
+/// classification. The git remote is reachable (a real bare repo) so the batch
+/// gets as far as the hosted remote, which then fails on its dead-port
+/// connection — NOT on the overlay exporter's scheme rejection.
+#[test]
+fn git_overlay_fetch_all_routes_mixed_remotes_per_scheme() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+    let src = SleyRepository::init_bare(&source).expect("init bare source");
+
+    let tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    git_commit_with_tree(&src, Some("refs/heads/main"), tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let source_arg = source.to_str().expect("source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    // Clone from the local git remote — `origin` now points at the bare repo.
+    heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
+
+    // Add a SECOND, hosted heddle:// remote alongside the git `origin`.
+    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    heddle(&["remote", "add", "hosted", hosted_url], Some(&work))
+        .expect("add hosted remote");
+
+    let output = heddle_output(&["fetch", "--all"], Some(&work)).expect("spawn heddle fetch --all");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // The hosted remote in the batch must never be routed to the git-overlay
+    // exporter — that scheme-rejection error is the mis-route signature.
+    assert!(
+        !combined.contains("cannot be pushed via the git-overlay exporter"),
+        "`heddle fetch --all` mis-routed the hosted remote to the git-overlay \
+         exporter instead of the hosted-sync path.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The git remote is reachable but the hosted one is not, so the overall
+    // command must fail loudly on the hosted connection rather than silently
+    // succeed or reject the whole batch on the exporter scheme error.
+    assert!(
+        !output.status.success(),
+        "`heddle fetch --all` with an unreachable hosted remote in the set must \
+         fail loudly (hosted connection error).\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Regression guard: the reachable git remote was still fetched — its
+    // remote-tracking ref exists — proving the hosted failure did not skip the
+    // git remote's overlay fetch.
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], &source),
+        "the git remote in a mixed --all set must still be overlay-fetched"
+    );
 }
 
 #[test]
@@ -2227,45 +2357,24 @@ fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
 
 #[test]
 fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let backup = temp.path().join("backup.git");
-    let work = temp.path().join("work");
-    SleyRepository::init_bare(&origin).expect("init bare origin");
-    SleyRepository::init_bare(&backup).expect("init bare backup");
-    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    std::fs::write(backup.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-
-    std::fs::create_dir_all(&work).unwrap();
-    git_ok(&["init", "-b", "main"], &work);
-    git_ok(&["config", "user.name", "Heddle Test"], &work);
-    git_ok(&["config", "user.email", "heddle@example.com"], &work);
-    git_ok(
-        &[
-            "remote",
-            "add",
-            "origin",
-            origin.to_str().expect("origin path utf8"),
-        ],
-        &work,
-    );
-    std::fs::write(work.join("README.md"), "seed\n").unwrap();
-    git_ok(&["add", "README.md"], &work);
-    git_ok(&["commit", "-m", "seed"], &work);
-    git_ok(&["push", "-u", "origin", "main"], &work);
-    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt succeeds");
+    let fixture = GitOverlayFixture::adopted_main().with_bare_origin();
+    let work = fixture.path();
+    let origin = fixture.origin_path();
+    let backup = TempDir::new().unwrap();
+    SleyRepository::init_bare(backup.path()).expect("init bare backup");
+    std::fs::write(backup.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     heddle(
         &[
             "remote",
             "add",
             "backup",
-            backup.to_str().expect("backup path utf8"),
+            backup.path().to_str().expect("backup path utf8"),
         ],
-        Some(&work),
+        Some(work),
     )
     .expect("add backup remote");
-    let list_json = heddle(&["remote", "list", "--output", "json"], Some(&work)).unwrap();
+    let list_json = heddle(&["remote", "list", "--output", "json"], Some(work)).unwrap();
     let list: Value = serde_json::from_str(&list_json).expect("remote list JSON parses");
     assert!(
         list["remotes"]
@@ -2284,10 +2393,10 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         "new backup remote should not silently become default: {list}"
     );
 
-    std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
+    std::fs::write(work.join("README.md"), "base\nlocal heddle\n").unwrap();
     let commit_json = heddle(
         &["commit", "-m", "local heddle", "--output", "json"],
-        Some(&work),
+        Some(work),
     )
     .expect("heddle commit succeeds");
     let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
@@ -2296,14 +2405,14 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         .expect("commit should report Git OID")
         .to_string();
 
-    let push_json = heddle(&["push", "--output", "json"], Some(&work)).expect("push succeeds");
+    let push_json = heddle(&["push", "--output", "json"], Some(work)).expect("push succeeds");
     let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
     assert_eq!(
         push["remote"], "origin",
         "bare push should use tracked origin: {push}"
     );
     assert_eq!(
-        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], &origin),
+        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], origin),
         git_oid,
         "origin should receive the default push"
     );
@@ -2311,7 +2420,7 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         !Command::new("git")
             .args([
                 "--git-dir",
-                backup.to_str().unwrap(),
+                backup.path().to_str().unwrap(),
                 "show-ref",
                 "--verify",
                 "refs/heads/main"
@@ -3537,4 +3646,288 @@ fn push_network_validates_valid_config_before_bootstrapping_state() {
         repo.current_state().unwrap().is_some(),
         "valid network config should allow push bootstrap before transport failure"
     );
+}
+
+/// heddle#837: `push <remote> <thread>` names an EXISTING thread whose tip
+/// differs from the current checkout. Push always ships the CURRENT state, so
+/// this must REFUSE without `--force` (guard against overwriting a mismatched
+/// thread's ref), and with `--force` publish the current checkout's state under
+/// the named thread.
+#[test]
+fn native_push_named_mismatched_thread_refuses_without_force() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+
+    // A sibling thread `feat-x` with its own isolated checkout + work, so its
+    // tip differs from main's.
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    let main_state = current_thread_state(source.path(), "main");
+    assert_ne!(
+        feat_state, main_state,
+        "fixture invalid: feat-x tip must differ from main tip"
+    );
+
+    // Push `feat-x` BY NAME from the MAIN checkout (HEAD is on main). feat-x
+    // exists with a DIFFERENT tip → must refuse without --force.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle_output(
+        &["push", &remote_path, "feat-x"],
+        Some(source.path()),
+    )
+    .expect("invoke push");
+    assert!(
+        !output.status.success(),
+        "push under a mismatched existing thread must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("feat-x") && stderr.contains("--force"),
+        "refusal should name the thread and guide to --force: {stderr}"
+    );
+
+    // The remote must NOT have been given feat-x's ref by the refused push.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    assert!(
+        remote_repo
+            .refs()
+            .get_thread(&ThreadName::new("feat-x"))
+            .unwrap()
+            .is_none(),
+        "refused push must not write any ref for the mismatched thread"
+    );
+
+    // With --force, push the CURRENT (main) checkout state under feat-x.
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "feat-x", "--force"],
+        Some(source.path()),
+    )
+    .expect("forced push under named thread succeeds");
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "forced push should succeed: {parsed}");
+
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref should be written on the remote after --force");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        main_state,
+        "forced named-thread push must publish the CURRENT checkout state (heddle#837)"
+    );
+    assert_ne!(
+        remote_feat.short().to_string(),
+        feat_state,
+        "push never resolves the named thread's own tip (heddle#837)"
+    );
+}
+
+/// heddle#837: `push <remote> <thread>` naming a thread that does NOT exist
+/// locally must CREATE it on the remote from the current checkout state (this
+/// is the create-thread path — no guard applies, no `--force` needed).
+#[test]
+fn native_push_new_named_thread_creates_from_current_state() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+    let main_state = current_thread_state(source.path(), "main");
+
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "brand-new"],
+        Some(source.path()),
+    )
+    .expect("push creating a new named thread succeeds");
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "create-thread push should succeed: {parsed}");
+
+    // The remote brand-new ref must hold the current checkout state.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_new = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("brand-new"))
+        .unwrap()
+        .expect("brand-new ref should be created on the remote");
+    assert_eq!(
+        remote_new.short().to_string(),
+        main_state,
+        "creating a named thread must publish the current checkout state (heddle#837)"
+    );
+}
+
+/// heddle#837: an explicit `--state` pushes that exact state under the named
+/// thread, bypassing the current-checkout default and the mismatch guard.
+#[test]
+fn native_push_explicit_state_overrides_named_thread_tip() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+    let base_state = current_thread_state(source.path(), "main");
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    assert_ne!(base_state, feat_state);
+
+    // Name feat-x but pin the state to the base state — the explicit state wins.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    heddle(
+        &[
+            "push",
+            &remote_path,
+            "feat-x",
+            "--state",
+            &base_state,
+        ],
+        Some(source.path()),
+    )
+    .expect("push with explicit --state succeeds");
+
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref written");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        base_state,
+        "explicit --state must win over the named thread's tip (heddle#837)"
+    );
+}
+
+/// heddle#838: `push <remote> --all-threads` to a native-local target must push
+/// EVERY thread (including a sibling with its own isolated checkout), and
+/// `refs_written` must list exactly what was pushed.
+#[test]
+fn native_push_all_threads_fans_out_every_thread() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(source.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(source.path())).unwrap();
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feat-x",
+                "--workspace",
+                "auto",
+            ],
+            Some(source.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let feat_checkout =
+        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
+    heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
+    let feat_state = current_thread_state(source.path(), "feat-x");
+    let main_state = current_thread_state(source.path(), "main");
+
+    // Push --all-threads from the MAIN checkout.
+    let remote_path = remote.path().to_string_lossy().to_string();
+    let output = heddle(
+        &["--output", "json", "push", &remote_path, "--all-threads"],
+        Some(source.path()),
+    )
+    .expect("all-threads push succeeds");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1,
+        "push --output json must emit exactly one JSON value: {output}"
+    );
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
+    assert_eq!(parsed["success"], true, "push should succeed: {parsed}");
+    assert_eq!(parsed["push_scope"], "all_threads");
+    let refs_written: Vec<String> = parsed["refs_written"]
+        .as_array()
+        .expect("refs_written present")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        refs_written.contains(&"main".to_string())
+            && refs_written.contains(&"feat-x".to_string()),
+        "refs_written must list every pushed thread (heddle#838): {refs_written:?}"
+    );
+
+    // Both refs must land on the remote at their own tips.
+    let remote_repo = Repository::open(remote.path()).unwrap();
+    let remote_feat = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("feat-x"))
+        .unwrap()
+        .expect("feat-x ref should be written by --all-threads (heddle#838)");
+    assert_eq!(
+        remote_feat.short().to_string(),
+        feat_state,
+        "--all-threads must push feat-x at its own tip"
+    );
+    let remote_main = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("main ref should be written by --all-threads");
+    assert_eq!(remote_main.short().to_string(), main_state);
 }

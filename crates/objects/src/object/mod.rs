@@ -88,8 +88,10 @@ pub use timeline::{
     TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
+pub(crate) use tree::TreeDecodeError;
 pub use tree::{
-    EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name,
+    EntryType, FileMode, Tree, TreeEntry, TreeEntryTarget, TreeError,
+    validate_name as validate_tree_entry_name,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;

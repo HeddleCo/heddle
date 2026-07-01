@@ -210,11 +210,11 @@ fn walk_directory<P: WorktreeWalkPolicy>(
             push_key_component(&mut entry_key, name);
             while check_missing
                 && next_tree_entry < tree_entries.len()
-                && tree_entries[next_tree_entry].name.as_str() < name
+                && tree_entries[next_tree_entry].name() < name
             {
                 let missing_entry = &tree_entries[next_tree_entry];
                 policy.visit_missing(
-                    &directory.rel_path.join(&missing_entry.name),
+                    &directory.rel_path.join(missing_entry.name()),
                     missing_entry,
                     &mut state,
                 )?;
@@ -222,7 +222,7 @@ fn walk_directory<P: WorktreeWalkPolicy>(
             }
             let tree_entry = tree_entries
                 .get(next_tree_entry)
-                .filter(|entry| entry.name == name);
+                .filter(|entry| entry.name() == name);
             if tree_entry.is_some() {
                 next_tree_entry += 1;
             }
@@ -265,7 +265,8 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                         ignore_matcher,
                         tree_entry
                             .filter(|entry| entry.is_tree())
-                            .map(|entry| repo.store().get_tree(&entry.hash))
+                            .and_then(|entry| entry.tree_hash())
+                            .map(|hash| repo.store().get_tree(&hash))
                             .transpose()?
                             .flatten()
                             .as_ref(),
@@ -292,7 +293,7 @@ fn walk_directory<P: WorktreeWalkPolicy>(
 
     if check_missing {
         for entry in &tree_entries[next_tree_entry..] {
-            policy.visit_missing(&directory.rel_path.join(&entry.name), entry, &mut state)?;
+            policy.visit_missing(&directory.rel_path.join(entry.name()), entry, &mut state)?;
         }
     }
 

@@ -6,9 +6,8 @@ use std::path::PathBuf;
 use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
 pub mod agent_registry;
-pub mod atomic;
+pub mod agent_task;
 pub mod codec;
-pub mod compression;
 pub mod fs;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
@@ -22,8 +21,12 @@ pub use agent_registry::{
     ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
     ReserveOutcome, generate_agent_id,
 };
-pub use compression::{CompressionConfig, CompressionError, compress, decompress};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
+};
 pub use fs::FsStore;
+pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
@@ -107,6 +110,11 @@ impl ObjectStore for AnyStore {
             AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
         }
     }
+    fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::get_tree_serialized(inner, hash),
+        }
+    }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         any_store_dispatch!(self, put_tree(tree))
     }
@@ -146,7 +154,9 @@ impl ObjectStore for AnyStore {
         any_store_dispatch!(self, put_blob_bytes_with_hash(data, hash))
     }
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        any_store_dispatch!(self, put_tree_serialized(data, hash))
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::put_tree_serialized(inner, data, hash),
+        }
     }
     fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
         any_store_dispatch!(self, put_state_serialized(data, id))
@@ -340,6 +350,20 @@ pub trait ObjectStore: Send + Sync {
 
     fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
         self.put_blob_with_hash(&Blob::from_slice(data), hash)
+    }
+
+    /// Return the raw rmp-encoded tree body for `hash`.
+    ///
+    /// This is a migration seam, not a runtime compatibility reader: callers
+    /// that need current tree semantics should use [`ObjectStore::get_tree`].
+    /// Backends with direct raw storage override this so one-shot migrations can
+    /// canonicalize older tree encodings without reintroducing fallback decode
+    /// into the durable `Tree` type.
+    fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .get_tree(hash)?
+            .map(|tree| rmp_serde::to_vec(&tree))
+            .transpose()?)
     }
 
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {

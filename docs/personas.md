@@ -28,7 +28,7 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 
 - Migration cost — how much existing git knowledge transfers.
 - Surprise — places heddle's model differs from git in ways they wouldn't predict.
-- `bridge git import` / `git_compat` — the heddle/git interop surface.
+- `bridge git import` / `git_adapter` — the heddle/git interop surface.
 - `--help` and topic docs — they want the canonical reference.
 - "Why is this different from `git X`?" questions.
 

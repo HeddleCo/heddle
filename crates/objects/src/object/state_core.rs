@@ -603,20 +603,14 @@ impl State {
         })
     }
 
-    /// The pre-#565 content hash: the hash a state had BEFORE the git-fidelity
-    /// fields were folded into identity (the format bump in #565). It omits the
-    /// trailing fidelity block from both the hashed bytes AND the content-length
-    /// prefix, exactly as the old code did — so for a state signed before the
-    /// bump, this reproduces the hash its `StateSignature` was actually made
-    /// over.
+    /// Migration-only hash for states signed before #565 folded git-fidelity
+    /// fields into identity. Runtime callers should use [`Self::compute_hash`].
     ///
-    /// The #570 fidelity backfill verifies an existing signature against this
-    /// (in addition to the current `compute_hash`) before re-signing: a legacy
-    /// signature was made over THIS hash, not the post-bump one, so checking
-    /// only the new hash would wrongly reject a valid legacy signature as
-    /// unreproducible. #565 only *appended* the fidelity block to `hash_len` /
-    /// `update_hash`, so stopping before it is a faithful pre-bump hash.
-    pub fn compute_hash_pre_fidelity(&self) -> ContentHash {
+    /// Kept public only because repository migrations live in another crate.
+    /// Do not use for new compatibility checks; the deletion-wave migration is
+    /// the owner of this legacy recipe.
+    #[doc(hidden)]
+    pub fn compute_hash_for_legacy_signature_migration(&self) -> ContentHash {
         let content_len = self.hash_len_core();
         ContentHash::compute_typed_with_len("state", content_len, |hasher| {
             self.update_hash_core(hasher);
@@ -651,8 +645,8 @@ impl State {
     }
 
     /// Hashed length of the pre-#565 fields (everything through the status
-    /// byte). Mirrors [`Self::update_hash_core`]. Split out so the pre-bump
-    /// hash ([`Self::compute_hash_pre_fidelity`]) can be reproduced exactly.
+    /// byte). Mirrors [`Self::update_hash_core`]. Split out so the legacy
+    /// signature migration can reproduce the pre-#565 hash exactly.
     fn hash_len_core(&self) -> u64 {
         let principal = &self.attribution.principal;
         let mut len = 0u64;
@@ -719,7 +713,8 @@ impl State {
 
     /// Hashed length of the appended git-fidelity block (#565). Mirrors
     /// [`Self::update_hash_fidelity`] byte-for-byte. Kept separate from
-    /// [`Self::hash_len_core`] so the pre-bump hash can omit it exactly.
+    /// [`Self::hash_len_core`] so the migration-only pre-bump hash can omit it
+    /// exactly.
     fn hash_len_fidelity(&self) -> u64 {
         let mut len = 0u64;
 
@@ -762,9 +757,8 @@ impl State {
     }
 
     /// Hash the pre-#565 fields (everything through the status byte). Mirrors
-    /// [`Self::hash_len_core`]. The pre-bump hash
-    /// ([`Self::compute_hash_pre_fidelity`]) is exactly this with no fidelity
-    /// block appended.
+    /// [`Self::hash_len_core`]. The migration-only pre-bump hash is exactly
+    /// this with no fidelity block appended.
     fn update_hash_core(&self, hasher: &mut blake3::Hasher) {
         let principal = &self.attribution.principal;
 
@@ -836,7 +830,8 @@ impl State {
 
     /// Hash the appended git-fidelity block (#565). Mirrors
     /// [`Self::hash_len_fidelity`]. Kept separate from
-    /// [`Self::update_hash_core`] so a pre-bump hash can omit it exactly.
+    /// [`Self::update_hash_core`] so the migration-only pre-bump hash can omit
+    /// it exactly.
     ///
     /// git-fidelity fields (#564 de-lossy step 1, #565) are DELIBERATELY part
     /// of the content hash — the opposite of the W1 tail fields. Two git
@@ -1213,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_fidelity_hash_matches_legacy_golden_vector() {
+    fn legacy_signature_migration_hash_matches_golden_vector() {
         let state = State::new_snapshot(
             ContentHash::compute(b"issue-633-tree"),
             vec![ChangeId::from_bytes([0x11; 16])],
@@ -1235,10 +1230,10 @@ mod tests {
         .with_extra_headers(vec![(b"encoding".to_vec(), b"UTF-8".to_vec())])
         .with_status(Status::Published);
 
-        let legacy_hash = state.compute_hash_pre_fidelity();
+        let legacy_hash = state.compute_hash_for_legacy_signature_migration();
         // Golden vector for the pre-#565 state hash format. Legacy
-        // StateSignature verification depends on `compute_hash_pre_fidelity`
-        // staying byte-identical to that old format; if `hash_len_core` and
+        // StateSignature migration depends on this recipe staying
+        // byte-identical to that old format; if `hash_len_core` and
         // `update_hash_core` drift, real pre-#565 signatures become
         // unverifiable even though round-trip tests can still pass.
         assert_eq!(

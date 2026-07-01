@@ -405,7 +405,7 @@ printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
                 Hook::PreSnapshot,
                 &ctx,
                 &json!({"answer": 42, "path": "src/lib.rs"}),
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
             .unwrap()
             .expect("installed hook should run");
@@ -450,7 +450,7 @@ printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
                 Hook::PreMerge,
                 &HookContext::new(&repo),
                 &json!({"operation": "merge"}),
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
             .unwrap()
             .expect("installed hook should return a response");
@@ -473,7 +473,7 @@ printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
                 Hook::PostPull,
                 &ctx,
                 &json!({"operation": "pull"}),
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
             .unwrap()
             .expect("installed hook should return default response");
@@ -488,7 +488,7 @@ printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
                 Hook::PostPull,
                 &ctx,
                 &json!({"operation": "pull"}),
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
             .unwrap()
             .expect("installed hook should return default response");

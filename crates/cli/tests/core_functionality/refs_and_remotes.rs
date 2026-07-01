@@ -32,7 +32,7 @@ fn test_marker_move_to_state() {
 }
 
 #[test]
-fn test_track_delete() {
+fn test_thread_drop_deletes_thread_ref() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
@@ -40,19 +40,25 @@ fn test_track_delete() {
     heddle_must_succeed(&["thread", "create", "feature/test"], temp.path());
     let result = heddle(&["thread", "list"], Some(temp.path())).unwrap();
     assert!(result.contains("feature/test"));
-    let result = heddle(&["thread", "delete", "feature/test"], Some(temp.path()));
+    let result = heddle(
+        &["thread", "drop", "feature/test", "--delete-thread"],
+        Some(temp.path()),
+    );
     assert!(result.is_ok());
     let result = heddle(&["thread", "list"], Some(temp.path())).unwrap();
     assert!(!result.contains("feature/test"));
 }
 
 #[test]
-fn test_track_cannot_delete_current() {
+fn test_thread_drop_delete_thread_refuses_current() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    let result = heddle(&["thread", "delete", "main"], Some(temp.path()));
+    let result = heddle(
+        &["thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    );
     assert!(result.is_err());
 }
 
@@ -95,26 +101,21 @@ fn test_thread_current_json_output() {
 }
 
 #[test]
-fn test_thread_delete_is_alias_for_drop() {
-    // `thread delete` is a visible alias for `thread drop` so new users
-    // whose mental model says "delete" land in the right verb. Bypass
-    // the test harness's legacy-args translator by spawning the binary
-    // directly — the translator rewrites `thread delete <name>` into
-    // `thread drop <name> --delete-thread`, which would mask the alias.
+fn test_thread_drop_delete_thread_removes_thread() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    heddle_must_succeed(&["thread", "create", "feature/delete-alias"], temp.path());
+    heddle_must_succeed(&["thread", "create", "feature/drop-delete"], temp.path());
 
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args(["thread", "delete", "feature/delete-alias"])
+        .args(["thread", "drop", "feature/drop-delete", "--delete-thread"])
         .current_dir(temp.path())
         .output()
         .expect("spawn heddle");
     assert!(
         output.status.success(),
-        "thread delete (alias) failed: stdout={} stderr={}",
+        "thread drop --delete-thread failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

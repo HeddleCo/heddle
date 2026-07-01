@@ -4,6 +4,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{DiffReport, SemanticChangeEntry, compute_state_diff, compute_tree_diff};
 use objects::{
     object::{Attribution, ChangeId, ThreadName, Tree},
     store::ObjectStore,
@@ -22,7 +23,6 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         override_trust_recommended_action, repository_verification_blocked_advice,
@@ -132,7 +132,7 @@ pub(crate) struct MergeOutput {
     /// non-preview merge the from/to are the pre-merge parent tip and
     /// the thread tip — i.e. the change set that just landed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub diff: Option<DiffOutput>,
+    pub diff: Option<DiffReport>,
     /// Preview of the git commit that *would* be written if the user
     /// re-ran without `--preview`. Populated only with
     /// `--git-commit --preview`.
@@ -164,7 +164,7 @@ struct MergeOutputInput<'a> {
     merge_state: Option<String>,
     fast_forward: bool,
     preview_only: bool,
-    diff: Option<DiffOutput>,
+    diff: Option<DiffReport>,
     git_commit_preview: Option<GitCommitPreview>,
     git_commit: Option<GitCommitInfo>,
     /// Extra blockers contributed by post-merge coordination steps
@@ -533,7 +533,7 @@ pub(crate) fn merge_thread_into_current(
     // payload is wrong for non-fast-forward 3-way merges (it can include
     // removals of current-branch edits that the merge actually preserves)
     // and for `AlreadyUpToDate` (it can be non-empty when nothing landed).
-    let diff_for = |from: &ChangeId, to: &ChangeId| -> Result<Option<DiffOutput>> {
+    let diff_for = |from: &ChangeId, to: &ChangeId| -> Result<Option<DiffReport>> {
         if !with_diff {
             return Ok(None);
         }
@@ -548,7 +548,7 @@ pub(crate) fn merge_thread_into_current(
     // `Some(vec![])` (not `None`) on the with-diff+semantic path even
     // when the driver found no symbol changes, so consumers can branch
     // on field presence to detect "semantic mode honored".
-    let top_level_semantic = |diff: Option<&DiffOutput>| -> Option<Vec<SemanticChangeEntry>> {
+    let top_level_semantic = |diff: Option<&DiffReport>| -> Option<Vec<SemanticChangeEntry>> {
         if !use_semantic || !with_diff {
             return None;
         }
@@ -1034,7 +1034,7 @@ pub(crate) fn merge_thread_into_current(
         // 3-way clean merge, not committed. The actual change set is
         // `current_tree..merge_result.tree`, but the merged tree isn't
         // yet a committed `State` — `compute_state_diff` can't run, and
-        // the public `DiffOutput`/`FileChange` constructor surface goes
+        // the public `DiffReport`/`FileChange` constructor surface goes
         // through a private module we can't import here. Document the
         // gap honestly: when the operator passes `--with-diff` together
         // with `--no-commit`, surface `None`; the diff materializes on
@@ -1051,7 +1051,7 @@ pub(crate) fn merge_thread_into_current(
         )
         .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
         let no_commit_changed_paths = diff_changed_paths(&no_commit_path_diff);
-        let no_commit_diff: Option<DiffOutput> = None;
+        let no_commit_diff: Option<DiffReport> = None;
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
             thread: &thread,
@@ -1584,12 +1584,12 @@ fn validate_git_commit_preconditions_extended(
     blockers
 }
 
-/// Empty `DiffOutput` keyed at the given change-id. Used for return paths
+/// Empty `DiffReport` keyed at the given change-id. Used for return paths
 /// that didn't actually advance state (already-up-to-date, conflicted,
 /// pre-snapshot blocked) so the JSON honestly reports "no change set
 /// landed" instead of pointing at an arbitrary parent..target diff.
-fn empty_diff_output(state_id: &ChangeId) -> DiffOutput {
-    DiffOutput::new(
+fn empty_diff_output(state_id: &ChangeId) -> DiffReport {
+    DiffReport::new(
         Some(state_id.short()),
         Some(state_id.short()),
         Vec::new(),
@@ -2141,18 +2141,18 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     }
 }
 
-fn diff_changed_paths(diff: &DiffOutput) -> Vec<String> {
+fn diff_changed_paths(diff: &DiffReport) -> Vec<String> {
     diff.changes
         .iter()
         .map(|change| change.path.clone())
         .collect()
 }
 
-fn diff_with_known_renames(diff: DiffOutput, renames: &[RenameEntry]) -> DiffOutput {
+fn diff_with_known_renames(diff: DiffReport, renames: &[RenameEntry]) -> DiffReport {
     if renames.is_empty() {
         return diff;
     }
-    let DiffOutput {
+    let DiffReport {
         from_state,
         to_state,
         changes: original_changes,
@@ -2182,7 +2182,7 @@ fn diff_with_known_renames(diff: DiffOutput, renames: &[RenameEntry]) -> DiffOut
         }
         changes.push(change);
     }
-    DiffOutput::new(
+    DiffReport::new(
         from_state,
         to_state,
         changes,

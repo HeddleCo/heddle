@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, path::Path, process::Command, time::Instant};
 
 use objects::{
-    object::{Blob, ContentHash, EntryType, FileMode, SemanticChange, Tree, TreeEntry},
+    object::{Blob, ContentHash, SemanticChange, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
 };
 
@@ -25,13 +25,9 @@ fn create_tree(store: &InMemoryStore, entries: Vec<(&str, ContentHash)>) -> Cont
     let tree = Tree::from_entries(
         entries
             .into_iter()
-            .map(|(name, hash)| TreeEntry {
-                name: name.to_string(),
-                mode: FileMode::Normal,
-                hash,
-                entry_type: EntryType::Blob,
-            })
-            .collect(),
+            .map(|(name, hash)| TreeEntry::file(name.to_string(), hash, false))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
     );
     match store.put_tree(&tree) {
         Ok(hash) => hash,
@@ -43,13 +39,9 @@ fn create_owned_tree(store: &InMemoryStore, entries: Vec<(String, ContentHash)>)
     let tree = Tree::from_entries(
         entries
             .into_iter()
-            .map(|(name, hash)| TreeEntry {
-                name,
-                mode: FileMode::Normal,
-                hash,
-                entry_type: EntryType::Blob,
-            })
-            .collect(),
+            .map(|(name, hash)| TreeEntry::file(name, hash, false))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
     );
     match store.put_tree(&tree) {
         Ok(hash) => hash,

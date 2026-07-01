@@ -336,14 +336,19 @@ fn find_file_in_tree(repo: &Repository, tree: &Tree, file: &Path) -> Result<Cont
     components.next();
     let rest = components.as_path();
     if rest.as_os_str().is_empty() {
-        return Ok(entry.hash);
+        return entry
+            .blob_hash()
+            .ok_or_else(|| anyhow!(blame_file_not_found_advice(file)));
     }
     if !entry.is_tree() {
         return Err(anyhow!(blame_file_not_found_advice(file)));
     }
+    let Some(hash) = entry.tree_hash() else {
+        return Err(anyhow!(blame_file_not_found_advice(file)));
+    };
     let subtree = repo
         .store()
-        .get_tree(&entry.hash)?
+        .get_tree(&hash)?
         .ok_or_else(|| anyhow!(blame_file_not_found_advice(file)))?;
     find_file_in_tree(repo, &subtree, rest)
 }

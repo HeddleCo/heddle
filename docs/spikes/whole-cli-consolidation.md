@@ -35,7 +35,7 @@ Grouped by family. Each survives because it is the one irreducible path; justifi
 
 **Inspect / read (7)** — `status`, `diff`, `log`, `show`, `blame`, `query`, `watch`. `status` = working-tree + next-action (`commands_main.rs:62`); `diff` = what changed (absorbs `compare`); `log` = history walk; `show` = one object (absorbs `inspect`); `blame` = per-line provenance (`blame.rs`); `query` = structured oplog filter (`query.rs`); `watch` = live oplog tail (`watch.rs`). `blame` is the marginal survivor (see open questions).
 
-**Save / land core — the #461 accepted baseline (4)** — `commit`, `ready`, `land`, `sync`. Untouched. `commit -m` is the canonical repo-type-aware save (`git_compat.rs:113`); `ready` is the read-only verdict gate (`ready_cmd.rs:49`); `land` is the capture->refresh->land->checkpoint composite (renamed from `ship` per #461/#464, `workflow.rs:188`); `sync` is the native refresh-onto-target (`operator_loop.rs:41`).
+**Save / land core — the #461 accepted baseline (4)** — `commit`, `ready`, `land`, `sync`. Untouched. `commit -m` is the canonical repo-type-aware save (`git_adapter.rs:113`); `ready` is the read-only verdict gate (`ready_cmd.rs:49`); `land` is the capture->refresh->land->checkpoint composite (renamed from `ship` per #461/#464, `workflow.rs:188`); `sync` is the native refresh-onto-target (`operator_loop.rs:41`).
 
 **Lanes / isolation / execution (4)** — `start`, `switch`, `try`, `run`. `start` is the one isolated-checkout path (#466) and absorbs `delegate`/`fork`; `switch` is the single git-compat survivor for moving the checkout (absorbs `goto`, `checkout`); `try` is the ephemeral-sandbox-with-rollback (absorbs `attempt` via `--parallel`); `run` is exec-in-existing-thread (`run_cmd.rs`).
 
@@ -57,7 +57,7 @@ Grouped by family. Each survives because it is the one irreducible path; justifi
 |---|---|---|---|---|
 | Save & snapshot | commit, capture, checkpoint, ready | commit, ready | capture->advanced, checkpoint->advanced (folded into commit) | #461 spike; `snapshot.rs:393` all funnel to create_snapshot |
 | Land & rewrite-history | ship, merge, resolve, continue, abort, rebase, cherry-pick, revert, collapse, undo, redo | land, undo, resolve, continue, abort | ship->land; merge/rebase/cherry-pick/revert/collapse->advanced; redo->undo --redo; conflict->resolve | `workflow.rs:188`; per-verb --continue/--abort -> top-level continue/abort |
-| Thread & isolation | start, fork, branch, switch, checkout, goto, workspace, stack, try, attempt, run, delegate (+thread group) | start, switch, try, run, thread(group) | branch->thread; checkout/goto->switch; workspace/stack->status; attempt->try; delegate/fork->start | `main.rs:512` switch|checkout shared arm; `git_compat.rs:1294` switch->cmd_switch_state_checkout |
+| Thread & isolation | start, fork, branch, switch, checkout, goto, workspace, stack, try, attempt, run, delegate (+thread group) | start, switch, try, run, thread(group) | branch->thread; checkout/goto->switch; workspace/stack->status; attempt->try; delegate/fork->start | `main.rs:512` switch|checkout shared arm; `git_adapter.rs:1294` switch->cmd_switch_state_checkout |
 | Remote & publish | push, pull, fetch, clone, remote, presence | push, pull, clone, remote | fetch->advanced; presence->agent | `remote/mod.rs:229` push->bridge.push |
 | Inspect & diff | log, show, inspect, diff, compare, status, blame, retro, query, conflict, schemas, diagnose, doctor, verify, semantic | log, show, diff, status, blame, query, doctor, verify | inspect->show; compare->diff; diagnose->doctor; schemas/verify-render->doctor; retro/semantic->query; conflict->resolve | `main.rs:293` diagnose==doctor None |
 | Recovery loop | continue, abort, resolve, conflict, goto, switch, checkout, transaction | continue, abort, resolve | conflict->resolve; goto->switch; checkout->switch alias; transaction stays hidden | `operator_core.rs:203/264` |
@@ -122,7 +122,7 @@ Per the standing no-backcompat stance: delete + replace, no aliases/flags/phased
 
 - `crates/cli/src/main.rs:512` — `Commands::Switch(args) | Commands::Checkout(args)` share one arm (checkout removal is free).
 - `crates/cli/src/main.rs:293-299` — `Doctor{None}` calls `cmd_diagnose` with identical args (diagnose==doctor).
-- `crates/cli/src/cli/commands/git_compat.rs:1294` — `switch <state>` delegates to `cmd_switch_state_checkout` (goto->switch).
+- `crates/cli/src/cli/commands/git_adapter.rs:1294` — `switch <state>` delegates to `cmd_switch_state_checkout` (goto->switch).
 - `crates/cli/src/cli/commands/remote/mod.rs:229` — top-level push routes git-overlay through `bridge.push` (bridge git push redundant).
 - `crates/cli/src/cli/commands/bisect.rs:56` — `start` writes `"{}\n"`, good/bad echo only (no binary search; remove).
 - `crates/cli/src/cli/commands/actor_cmd.rs` + `agent_cmd.rs` — share `.heddle/agents` AgentRegistry (unify under agent).

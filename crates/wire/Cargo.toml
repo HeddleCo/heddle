@@ -36,3 +36,4 @@ name = "wire"
 repo = { path = "../repo", package = "heddle-repo" }
 tempfile.workspace = true
 chrono.workspace = true
+sley.workspace = true

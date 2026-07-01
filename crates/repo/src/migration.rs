@@ -3,9 +3,7 @@
 //!
 //! A single registered, ordered list of forward-only migrations applied on
 //! repo open. `apply_pending` walks the list and runs anything missing from
-//! `.heddle/state/schema_versions.toml`. The list is currently empty (a clean
-//! no-op); the framework stays so future schema changes have a place to land
-//! without tangling `Repository::open_raw`/`open`.
+//! `.heddle/state/schema_versions.toml`.
 //!
 //! # Adding a migration
 //!
@@ -34,13 +32,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::{DateTime, Utc};
+use crypto::verify_state_signature_bytes;
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
+    legacy,
+    store::ObjectStore,
 };
+use oplog::OpLogBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::Repository;
+use crate::{
+    Repository, ResignOutcome,
+    repository::repo_config,
+    thread_model::{
+        EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
+        ThreadIntegrationPolicy, ThreadMode, ThreadRecord, ThreadState, ThreadVerificationSummary,
+    },
+    thread_record_store::FilesystemThreadRecordStore,
+};
 
 /// One declarative migration. The `run` closure receives a [`MigrationCtx`]
 /// so it can read the repo and persist any changes; it returns `Ok(())` on
@@ -58,6 +69,17 @@ pub struct Migration {
     pub run: fn(&mut MigrationCtx) -> Result<()>,
 }
 
+/// A future migration that is intentionally NOT registered in [`MIGRATIONS`]
+/// yet. These entries reserve the deletion-wave hooks and name the safety gate
+/// that must be satisfied before the runtime backcompat reader can be removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedDeletionMigration {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub applies_to: SchemaTarget,
+    pub safe_to_register_when: &'static str,
+}
+
 /// Coarse-grained subsystem a migration touches. Useful for logging and for
 /// future per-target conditional skip logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +92,7 @@ pub enum SchemaTarget {
     RefSummary,
     PullPlannerCache,
     ColdCloneManifest,
+    Trees,
     /// Catch-all for migrations that touch multiple stores.
     Mixed,
 }
@@ -80,6 +103,10 @@ pub enum SchemaTarget {
 pub struct MigrationCtx<'a> {
     pub repo: &'a Repository,
 }
+
+/// Reserved hooks for the next legacy-deletion wave. Keep this list in sync
+/// with `docs/LEGACY_DELETION_NEXT_WAVE.md`.
+pub const NEXT_DELETION_WAVE_MIGRATIONS: &[PlannedDeletionMigration] = &[];
 
 /// Per-migration outcome. Returned by [`apply_pending`] for telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,12 +183,45 @@ fn ledger_path(repo: &Repository) -> PathBuf {
 /// Registered migrations, run in this order. New migrations append at the
 /// tail; never reorder existing ids.
 ///
-/// Currently empty: the framework exists so future schema changes have a
-/// place to land without tangling `Repository::open_raw`. The former
-/// `0001_legacy_tracks` migration (which renamed a pre-v0.2.0 `tracks/`
-/// layout that was never publicly produced) was removed — `apply_pending`
-/// over an empty list is a clean no-op.
-pub static MIGRATIONS: &[Migration] = &[];
+/// `0001_legacy_tracks` is intentionally retired with no registered body:
+/// it covered a pre-v0.2.0 ref layout that was removed from the runtime.
+/// The deletion-prep migrations after it make durable data canonical before
+/// their runtime fallbacks are removed.
+pub static MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: "0002_canonicalize_thread_records",
+        description: "Rewrite durable thread records so readers no longer need serde defaults",
+        applies_to: SchemaTarget::ThreadRecords,
+        run: run_canonicalize_thread_records,
+    },
+    Migration {
+        id: "0003_canonicalize_tree_entries",
+        // Load-bearing for strict Tree V2 reads: Repository::open must keep
+        // running this before any caller can touch tree objects, otherwise old
+        // V1 tree bytes become arbitrary runtime read failures.
+        description: "Rewrite removed V1 tree entries into the current first-class gitlink tree envelope",
+        applies_to: SchemaTarget::Trees,
+        run: run_canonicalize_tree_entries,
+    },
+    Migration {
+        id: "0004_canonicalize_context_roots",
+        description: "Rewrite legacy direct-path context roots without breaking signed states",
+        applies_to: SchemaTarget::ContextBlobs,
+        run: run_canonicalize_context_roots,
+    },
+    Migration {
+        id: "0005_resecure_pre_fidelity_signatures",
+        description: "Backfill pre-fidelity state signatures onto current hashes",
+        applies_to: SchemaTarget::Mixed,
+        run: run_resecure_pre_fidelity_signatures,
+    },
+    Migration {
+        id: "0006_canonicalize_packed_oplog",
+        description: "Rewrite packed oplog files into the latest container and record schema",
+        applies_to: SchemaTarget::OpLog,
+        run: run_canonicalize_packed_oplog,
+    },
+];
 
 /// Apply any registered migration not yet present in
 /// `<repo>/.heddle/state/schema_versions.toml`. Idempotent: a second
@@ -181,7 +241,15 @@ pub fn apply_pending(repo: &Repository) -> Result<MigrationReport> {
             continue;
         }
         let mut ctx = MigrationCtx { repo };
-        (migration.run)(&mut ctx)?;
+        // Hard gate, not telemetry: a failed migration means the repo may still
+        // contain bytes that current strict readers reject. Do not downgrade
+        // this to warn-and-continue.
+        (migration.run)(&mut ctx).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "migration {} ({}) failed: {err}",
+                migration.id, migration.description
+            ))
+        })?;
         newly_applied.push(migration.id.to_string());
         outcomes.push(MigrationOutcome {
             id: migration.id,
@@ -197,12 +265,275 @@ pub fn apply_pending(repo: &Repository) -> Result<MigrationReport> {
     Ok(MigrationReport { outcomes })
 }
 
+fn run_canonicalize_thread_records(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    let store = FilesystemThreadRecordStore::new(ctx.repo.heddle_dir().join("thread_records"));
+    if !store.root().exists() {
+        return Ok(());
+    }
+    for dir_entry in std::fs::read_dir(store.root())? {
+        let path = dir_entry?.path();
+        if !path.extension().map(|ext| ext == "toml").unwrap_or(false) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let legacy: LegacyThreadRecord = toml::from_str(&content).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "thread record {} is malformed and cannot be migrated: {err}",
+                path.display()
+            ))
+        })?;
+        let record: ThreadRecord = legacy.into();
+        store.save_record(&record)?;
+    }
+    Ok(())
+}
+
+fn run_canonicalize_context_roots(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    let mut blocked = Vec::new();
+
+    for state_id in ctx.repo.store().list_states()? {
+        let Some(state) = ctx.repo.store().get_state(&state_id)? else {
+            continue;
+        };
+        let Some(context_root) = state.context else {
+            continue;
+        };
+        let (canonical_root, changed) = ctx.repo.canonicalize_context_root(&context_root)?;
+        if !changed {
+            continue;
+        }
+
+        let prior_hash = state.compute_hash();
+        let prior_pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
+        let mut rewritten = state.with_context(canonical_root);
+
+        match ctx
+            .repo
+            .resign_if_owned(&mut rewritten, &[prior_hash, prior_pre_fidelity_hash])
+        {
+            ResignOutcome::Unsigned | ResignOutcome::Resigned => {
+                ctx.repo.store().put_state(&rewritten)?;
+            }
+            ResignOutcome::Unreproducible => {
+                blocked.push(state_id);
+            }
+        }
+    }
+
+    if blocked.is_empty() {
+        Ok(())
+    } else {
+        Err(HeddleError::Conflict(format!(
+            "0004_canonicalize_context_roots left {} signed state(s) with unreproducible legacy direct-path context roots; keep the legacy context fallback or migrate them with the owning key",
+            blocked.len()
+        )))
+    }
+}
+
+fn run_resecure_pre_fidelity_signatures(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    let mut blocked = Vec::new();
+
+    for state_id in ctx.repo.store().list_states()? {
+        let Some(mut state) = ctx.repo.store().get_state(&state_id)? else {
+            continue;
+        };
+        let Some(signature) = state.signature.clone() else {
+            continue;
+        };
+        let current_hash = state.compute_hash();
+        if verify_state_signature_bytes(&signature, &current_hash).is_ok() {
+            continue;
+        }
+        let pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
+        if verify_state_signature_bytes(&signature, &pre_fidelity_hash).is_err() {
+            continue;
+        }
+
+        match ctx
+            .repo
+            .resign_if_owned(&mut state, &[current_hash, pre_fidelity_hash])
+        {
+            ResignOutcome::Resigned => ctx.repo.store().put_state(&state)?,
+            ResignOutcome::Unsigned => {}
+            ResignOutcome::Unreproducible => blocked.push(state_id),
+        }
+    }
+
+    if blocked.is_empty() {
+        Ok(())
+    } else {
+        Err(HeddleError::Conflict(format!(
+            "0005_resecure_pre_fidelity_signatures found {} valid pre-fidelity signature(s) whose key is not owned by this repo; keep the legacy signature migration hash until they are explicitly preserved or re-signed by the owning key",
+            blocked.len()
+        )))
+    }
+}
+
+fn run_canonicalize_packed_oplog(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    ctx.repo.oplog().migrate_to_current_format()
+}
+
+fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    for tree_hash in ctx.repo.store().list_trees()? {
+        let Some(raw) = ctx.repo.store().get_tree_serialized(&tree_hash)? else {
+            continue;
+        };
+
+        if let Ok(tree) = rmp_serde::from_slice::<objects::object::Tree>(&raw) {
+            tree.validate()?;
+            let found = tree.hash();
+            if found != tree_hash {
+                return Err(HeddleError::Corruption {
+                    expected: tree_hash,
+                    found,
+                });
+            }
+            continue;
+        }
+
+        let tree = legacy::decode_legacy_tree_v1(&raw).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "failed to decode legacy V1 tree {} during 0003_canonicalize_tree_entries: {err}",
+                tree_hash.short()
+            ))
+        })?;
+        let found = tree.hash();
+        if found != tree_hash {
+            return Err(HeddleError::Corruption {
+                expected: tree_hash,
+                found,
+            });
+        }
+        let canonical = rmp_serde::to_vec(&tree).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "failed to encode canonical V2 tree {} during 0003_canonicalize_tree_entries: {err}",
+                tree_hash.short()
+            ))
+        })?;
+        ctx.repo
+            .store()
+            .put_tree_serialized(&canonical, tree_hash)
+            .map_err(|err| {
+                HeddleError::InvalidObject(format!(
+                    "failed to write canonical V2 tree {} during 0003_canonicalize_tree_entries: {err}",
+                    tree_hash.short()
+                ))
+            })?;
+    }
+
+    bump_repo_format_to_supported(ctx.repo)
+}
+
+fn bump_repo_format_to_supported(repo: &Repository) -> Result<()> {
+    let config_path = repo.heddle_dir().join("config.toml");
+    let mut config = repo_config::RepoConfig::load(&config_path)?;
+    if config.repository.version < repo_config::SUPPORTED_REPO_FORMAT {
+        config.repository.version = repo_config::SUPPORTED_REPO_FORMAT;
+        config.save(&config_path)?;
+    }
+    Ok(())
+}
+
+/// Decode-only shape for `0002_canonicalize_thread_records`.
+///
+/// This is intentionally private to the migration: live `ThreadRecord` loading
+/// stays strict, while the one-shot gate can still read pre-gate records and
+/// rewrite them into the current durable schema.
+#[derive(Debug, Deserialize)]
+struct LegacyThreadRecord {
+    id: String,
+    thread: String,
+    #[serde(default)]
+    target_thread: Option<String>,
+    #[serde(default)]
+    parent_thread: Option<String>,
+    mode: ThreadMode,
+    state: ThreadState,
+    base_state: String,
+    base_root: String,
+    #[serde(default)]
+    current_state: Option<String>,
+    #[serde(default)]
+    merged_state: Option<String>,
+    #[serde(default)]
+    task: Option<String>,
+    #[serde(default)]
+    changed_paths: Vec<String>,
+    #[serde(default)]
+    impact_categories: Vec<ThreadImpactCategory>,
+    #[serde(default)]
+    heavy_impact_paths: Vec<String>,
+    #[serde(default)]
+    promotion_suggested: bool,
+    #[serde(default = "legacy_thread_freshness")]
+    freshness: ThreadFreshness,
+    #[serde(default)]
+    verification_summary: ThreadVerificationSummary,
+    #[serde(default)]
+    confidence_summary: ThreadConfidenceSummary,
+    #[serde(default)]
+    integration_policy_result: ThreadIntegrationPolicy,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    ephemeral: Option<EphemeralMarker>,
+    #[serde(default)]
+    auto: bool,
+    #[serde(default)]
+    shared_target_dir: Option<PathBuf>,
+}
+
+fn legacy_thread_freshness() -> ThreadFreshness {
+    ThreadFreshness::Unknown
+}
+
+impl From<LegacyThreadRecord> for ThreadRecord {
+    fn from(record: LegacyThreadRecord) -> Self {
+        Self {
+            id: record.id,
+            thread: record.thread,
+            target_thread: record.target_thread,
+            parent_thread: record.parent_thread,
+            mode: record.mode,
+            state: record.state,
+            base_state: record.base_state,
+            base_root: record.base_root,
+            current_state: record.current_state,
+            merged_state: record.merged_state,
+            task: record.task,
+            changed_paths: record.changed_paths,
+            impact_categories: record.impact_categories,
+            heavy_impact_paths: record.heavy_impact_paths,
+            promotion_suggested: record.promotion_suggested,
+            freshness: record.freshness,
+            verification_summary: record.verification_summary,
+            confidence_summary: record.confidence_summary,
+            integration_policy_result: record.integration_policy_result,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            ephemeral: record.ephemeral,
+            auto: record.auto,
+            shared_target_dir: record.shared_target_dir,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, sync::Mutex};
+
+    use crypto::StateSigningExt;
+    use objects::object::{
+        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, ContentHash, ContextBlob,
+        ContextTarget, EntryType, Principal, SignatureStatus, State, Tree, TreeEntry,
+    };
+    use serde::Serialize;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::Repository;
+    use crate::{Repository, thread_record_store::FilesystemThreadRecordStore};
+
+    static SIGNING_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn fresh_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
@@ -210,15 +541,131 @@ mod tests {
         (temp, repo)
     }
 
+    fn with_signing_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = SIGNING_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn remove_ledger(repo: &Repository) {
+        let ledger_file = ledger_path(repo);
+        if ledger_file.exists() {
+            std::fs::remove_file(&ledger_file).unwrap();
+        }
+    }
+
+    fn loose_tree_path(repo: &Repository, hash: ContentHash) -> PathBuf {
+        let hex = hash.to_hex();
+        let (prefix, rest) = hex.split_at(2);
+        repo.heddle_dir()
+            .join("objects")
+            .join("trees")
+            .join(prefix)
+            .join(rest)
+    }
+
+    fn write_loose_tree_bytes(repo: &Repository, hash: ContentHash, bytes: &[u8]) {
+        let path = loose_tree_path(repo, hash);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[derive(Serialize)]
+    struct LegacyTreeV1ForTest {
+        entries: Vec<LegacyTreeEntryV1ForTest>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyTreeEntryV1ForTest {
+        name: String,
+        mode: LegacyFileModeForTest,
+        entry_type: LegacyEntryTypeForTest,
+        hash: ContentHash,
+    }
+
+    #[derive(Serialize)]
+    enum LegacyFileModeForTest {
+        Normal,
+    }
+
+    #[derive(Serialize)]
+    enum LegacyEntryTypeForTest {
+        Blob,
+    }
+
+    fn legacy_tree_v1_bytes(name: &str, hash: ContentHash) -> Vec<u8> {
+        rmp_serde::to_vec(&LegacyTreeV1ForTest {
+            entries: vec![LegacyTreeEntryV1ForTest {
+                name: name.to_string(),
+                mode: LegacyFileModeForTest::Normal,
+                entry_type: LegacyEntryTypeForTest::Blob,
+                hash,
+            }],
+        })
+        .unwrap()
+    }
+
+    fn test_annotation(content: &str) -> Annotation {
+        Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Rationale,
+            content.to_string(),
+            vec![],
+            "test@example.com".to_string(),
+            1700000000,
+            None,
+            None,
+        )
+    }
+
+    fn tree_path(repo: &Repository, components: &[String], blob_hash: ContentHash) -> ContentHash {
+        let mut tree = Tree::new();
+        if components.len() == 1 {
+            tree.insert(TreeEntry::file(&components[0], blob_hash, false).unwrap());
+        } else {
+            let subtree = tree_path(repo, &components[1..], blob_hash);
+            tree.insert(TreeEntry::directory(&components[0], subtree).unwrap());
+        }
+        repo.store().put_tree(&tree).unwrap()
+    }
+
+    fn legacy_context_root(repo: &Repository, path: &str, blob: &ContextBlob) -> ContentHash {
+        let bytes = blob.encode().unwrap();
+        let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
+        let components = Path::new(path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        tree_path(repo, &components, blob_hash)
+    }
+
+    fn unsigned_state() -> State {
+        State::new_snapshot(
+            ContentHash::compute(b"tree"),
+            vec![],
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+    }
+
     #[test]
     fn first_apply_runs_every_registered_migration() {
         let (_temp, repo) = fresh_repo();
         // Clear any auto-applied state from `init_default` so we have a
         // clean comparison.
-        let ledger_file = ledger_path(&repo);
-        if ledger_file.exists() {
-            std::fs::remove_file(&ledger_file).unwrap();
-        }
+        remove_ledger(&repo);
         let report = apply_pending(&repo).unwrap();
         let applied: Vec<&str> = report.applied().collect();
         assert_eq!(applied.len(), MIGRATIONS.len());
@@ -227,10 +674,7 @@ mod tests {
     #[test]
     fn second_apply_is_a_no_op() {
         let (_temp, repo) = fresh_repo();
-        let ledger_file = ledger_path(&repo);
-        if ledger_file.exists() {
-            std::fs::remove_file(&ledger_file).unwrap();
-        }
+        remove_ledger(&repo);
         apply_pending(&repo).unwrap();
         let report = apply_pending(&repo).unwrap();
         assert!(report.applied().next().is_none());
@@ -241,21 +685,226 @@ mod tests {
     fn ledger_persists_applied_ids() {
         let (_temp, repo) = fresh_repo();
         let ledger_file = ledger_path(&repo);
-        if ledger_file.exists() {
-            std::fs::remove_file(&ledger_file).unwrap();
+        remove_ledger(&repo);
+        apply_pending(&repo).unwrap();
+        let raw = std::fs::read_to_string(&ledger_file).unwrap();
+        for migration in MIGRATIONS {
+            assert!(
+                raw.contains(migration.id),
+                "missing {} in ledger",
+                migration.id
+            );
         }
-        let report = apply_pending(&repo).unwrap();
-        let applied: Vec<&str> = report.applied().collect();
-        // Every id that `apply_pending` reports as Applied must be durable in
-        // the ledger. When the registry is empty nothing is applied and no
-        // ledger is written — that is the correct no-op.
-        if applied.is_empty() {
-            assert!(!ledger_file.exists());
-        } else {
-            let raw = std::fs::read_to_string(&ledger_file).unwrap();
-            for id in applied {
-                assert!(raw.contains(id), "missing {id} in ledger");
-            }
+    }
+
+    #[test]
+    fn deletion_wave_hooks_are_registered_in_order() {
+        let registered = MIGRATIONS
+            .iter()
+            .map(|migration| migration.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            registered,
+            vec![
+                "0002_canonicalize_thread_records",
+                "0003_canonicalize_tree_entries",
+                "0004_canonicalize_context_roots",
+                "0005_resecure_pre_fidelity_signatures",
+                "0006_canonicalize_packed_oplog",
+            ],
+            "the deletion-wave migration ids must stay ordered and reviewable",
+        );
+        assert!(NEXT_DELETION_WAVE_MIGRATIONS.is_empty());
+    }
+
+    #[test]
+    fn migration_0003_rewrites_v1_tree_bytes_and_preserves_marker_blob() {
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+        let config_path = repo.heddle_dir().join("config.toml");
+        let mut config = repo_config::RepoConfig::load(&config_path).unwrap();
+        config.repository.version = 1;
+        config.save(&config_path).unwrap();
+
+        let marker = b"heddle-submodule: 0808080808080808080808080808080808080808";
+        let blob_hash = repo.store().put_blob(&Blob::from_slice(marker)).unwrap();
+        let current_tree =
+            Tree::from_entries(vec![TreeEntry::file("vendor", blob_hash, false).unwrap()]);
+        let tree_hash = current_tree.hash();
+        let legacy_tree_bytes = legacy_tree_v1_bytes("vendor", blob_hash);
+        write_loose_tree_bytes(&repo, tree_hash, &legacy_tree_bytes);
+
+        assert!(
+            repo.store().get_tree(&tree_hash).is_err(),
+            "current runtime reader must reject legacy V1 tree bytes before migration"
+        );
+        assert_eq!(
+            repo.store()
+                .get_tree_serialized(&tree_hash)
+                .unwrap()
+                .expect("raw legacy tree exists"),
+            legacy_tree_bytes,
+            "migration raw-read seam must not use current Tree deserialization"
+        );
+
+        apply_pending(&repo).unwrap();
+
+        let decoded = repo
+            .store()
+            .get_tree(&tree_hash)
+            .unwrap()
+            .expect("tree exists after migration");
+        let entry = decoded.get("vendor").expect("entry preserved");
+        assert!(entry.is_blob());
+        assert_eq!(entry.blob_hash(), Some(blob_hash));
+        assert!(entry.gitlink_target().is_none());
+
+        let raw_after = repo
+            .store()
+            .get_tree_serialized(&tree_hash)
+            .unwrap()
+            .expect("raw tree exists after migration");
+        rmp_serde::from_slice::<Tree>(&raw_after).expect("tree is canonical V2 after migration");
+
+        let config = repo_config::RepoConfig::load(&config_path).unwrap();
+        assert_eq!(
+            config.repository.version,
+            repo_config::SUPPORTED_REPO_FORMAT
+        );
+    }
+
+    #[test]
+    fn migration_0002_rewrites_minimal_thread_record_with_concrete_defaults() {
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+        let store = FilesystemThreadRecordStore::new(repo.heddle_dir().join("thread_records"));
+        let path = store.record_path("legacy-minimal").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+id = "legacy-minimal"
+thread = "legacy/minimal"
+mode = "solid"
+state = "active"
+base_state = "abc123"
+base_root = "def456"
+created_at = "2024-01-01T00:00:00Z"
+updated_at = "2024-01-01T00:00:01Z"
+"#,
+        )
+        .unwrap();
+
+        apply_pending(&repo).unwrap();
+
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(rewritten.contains("changed_paths = []"));
+        assert!(rewritten.contains("impact_categories = []"));
+        assert!(rewritten.contains("heavy_impact_paths = []"));
+        assert!(rewritten.contains("promotion_suggested = false"));
+        assert!(rewritten.contains("freshness = \"unknown\""));
+        assert!(rewritten.contains("auto = false"));
+        assert!(rewritten.contains("[verification_summary]"));
+        assert!(rewritten.contains("[confidence_summary]"));
+        assert!(rewritten.contains("[integration_policy_result]"));
+        assert!(rewritten.contains("conflicts_resolved_manually = false"));
+    }
+
+    #[test]
+    fn migration_0003_canonicalizes_owned_signed_context_root_and_resigns() {
+        let home = TempDir::new().unwrap();
+        with_signing_home(home.path(), || {
+            let temp = TempDir::new().unwrap();
+            let repo = Repository::init(temp.path()).unwrap();
+            remove_ledger(&repo);
+            let target = ContextTarget::file("src/main.rs").unwrap();
+            let blob = ContextBlob::new(vec![test_annotation("legacy")]);
+            let legacy_root = legacy_context_root(&repo, "src/main.rs", &blob);
+
+            let signer = repo.signing_signer().unwrap();
+            let mut state = unsigned_state().with_context(legacy_root);
+            state.sign(&*signer).unwrap();
+            let state_id = state.change_id;
+            repo.store().put_state(&state).unwrap();
+
+            apply_pending(&repo).unwrap();
+
+            let migrated = repo.store().get_state(&state_id).unwrap().unwrap();
+            assert_ne!(migrated.context, Some(legacy_root));
+            assert_eq!(
+                repo.verify_state_signature(&state_id).unwrap(),
+                SignatureStatus::Valid
+            );
+            let new_root = migrated.context.unwrap();
+            assert_eq!(
+                repo.get_context_blob(&new_root, &target).unwrap(),
+                Some(blob)
+            );
+            let top = repo.store().get_tree(&new_root).unwrap().unwrap();
+            assert!(top.get("src").is_none());
+            assert_eq!(
+                top.get("__files").map(|entry| entry.entry_type()),
+                Some(EntryType::Tree),
+            );
+        });
+    }
+
+    #[test]
+    fn migration_0005_resigns_owned_pre_fidelity_signature() {
+        let home = TempDir::new().unwrap();
+        with_signing_home(home.path(), || {
+            let temp = TempDir::new().unwrap();
+            let repo = Repository::init(temp.path()).unwrap();
+            remove_ledger(&repo);
+
+            let signer = repo.signing_signer().unwrap();
+            let mut state = unsigned_state();
+            let legacy_hash = state.compute_hash_for_legacy_signature_migration();
+            state.signature = Some(
+                crypto::state_signature_from_signer(&legacy_hash, &*signer)
+                    .expect("sign legacy hash"),
+            );
+            let state_id = state.change_id;
+            repo.store().put_state(&state).unwrap();
+            assert_eq!(
+                repo.verify_state_signature(&state_id).unwrap(),
+                SignatureStatus::Invalid,
+            );
+
+            apply_pending(&repo).unwrap();
+
+            assert_eq!(
+                repo.verify_state_signature(&state_id).unwrap(),
+                SignatureStatus::Valid,
+            );
+        });
+    }
+
+    #[test]
+    fn migration_0005_refuses_to_mark_foreign_pre_fidelity_signature_complete() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        remove_ledger(&repo);
+        let foreign = crypto::Ed25519Signer::generate().unwrap();
+        let mut state = unsigned_state();
+        let legacy_hash = state.compute_hash_for_legacy_signature_migration();
+        state.signature = Some(
+            crypto::state_signature_from_signer(&legacy_hash, &foreign)
+                .expect("foreign-sign legacy hash"),
+        );
+        repo.store().put_state(&state).unwrap();
+
+        let err = apply_pending(&repo).expect_err("foreign legacy signature blocks 0005");
+        assert!(
+            err.to_string()
+                .contains("0005_resecure_pre_fidelity_signatures"),
+            "{err}"
+        );
+        let ledger_file = ledger_path(&repo);
+        if ledger_file.exists() {
+            let ledger = std::fs::read_to_string(&ledger_file).unwrap();
+            assert!(!ledger.contains("0005_resecure_pre_fidelity_signatures"));
         }
     }
 }

@@ -2,17 +2,23 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
+use objects::object::{ChangeId, ContentHash};
 use repo::{
-    Repository, TimelineBranchId, TimelineBranchReason, TimelineMaterializationRecoveryStatus,
+    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineBranchReason,
+    TimelineCursorMoveReason, TimelineLabel, TimelineMaterializationRecoveryStatus,
     TimelineMaterializeMode, TimelineMaterializeStatus, TimelineNativeToolKey,
+    TimelineNavigationRecoveryStatus, TimelineOperationBodyV1, TimelineOperationEnvelope,
     TimelineSeekBranchConstraint, TimelineSeekSelector, TimelineStepId, TimelineStore,
+    TimelineToolCallStatus, TimelineToolPayloadMetadata, TimelineView, ToolCallFinishedV1,
+    ToolCallStartedV1,
 };
 use serde::Serialize;
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{
-    Cli, TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineTargetArgs, should_output_json, style,
+    Cli, TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
+    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
+    TimelineStatusArgs, TimelineTargetArgs, should_output_json, style,
 };
 
 const TIMELINE_RESET_CURRENT_COMMAND: &str = "heddle timeline reset --thread <thread> --current";
@@ -28,10 +34,207 @@ pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
     let store = TimelineStore::open(repo.heddle_dir())?;
 
     match args.command {
+        TimelineCommands::Status(args) => cmd_timeline_status(cli, &repo, &store, args),
+        TimelineCommands::RecordStart(args) => cmd_timeline_record_start(cli, &repo, &store, args),
+        TimelineCommands::RecordFinish(args) => {
+            cmd_timeline_record_finish(cli, &repo, &store, args)
+        }
         TimelineCommands::Fork(args) => cmd_timeline_fork(cli, &repo, &store, args),
         TimelineCommands::Reset(args) => cmd_timeline_reset(cli, &repo, &store, args),
         TimelineCommands::Recover(args) => cmd_timeline_recover(cli, &repo, &store, args),
     }
+}
+
+fn cmd_timeline_status(
+    cli: &Cli,
+    repo: &Repository,
+    store: &TimelineStore,
+    args: TimelineStatusArgs,
+) -> Result<()> {
+    if args.thread.trim().is_empty() {
+        return Err(anyhow!(RecoveryAdvice::missing_option(
+            "timeline_thread_required",
+            "--thread",
+            "timeline status",
+            "heddle timeline status --thread <thread>",
+        )));
+    }
+    let snapshot = repo.timeline_navigation_snapshot(store, &args.thread)?;
+    let current_step = snapshot
+        .cursor
+        .step_id
+        .as_ref()
+        .and_then(|cursor| snapshot.steps.iter().find(|step| &step.step_id == cursor))
+        .map(|step| TimelineStatusStepOutput {
+            step_id: step.step_id.to_string(),
+            branch_id: step.branch_id.to_string(),
+            parent_step_id: step.parent_step_id.as_ref().map(ToString::to_string),
+            tool_name: step.tool_name.clone(),
+            tool_status: step.status.as_ref().map(timeline_tool_status_label),
+            changed: step.changed,
+            payload_summary: step.payload_summary.clone(),
+            payload_hash: step.payload_hash.map(|hash| hash.to_hex()),
+            labels: step.labels.iter().map(timeline_label).collect(),
+            started_at_ms: step.started_at_ms,
+            finished_at_ms: step.finished_at_ms,
+            can_seek: step.can_seek,
+            can_fork: step.can_fork,
+            can_reset: step.can_reset,
+            can_materialize: step.can_materialize,
+            has_boundary_warning: step.has_boundary_warning,
+        });
+    let output = TimelineStatusOutput {
+        output_kind: "timeline_status",
+        status: "ok",
+        thread: snapshot.thread,
+        cursor_branch_id: snapshot.cursor.branch_id.as_ref().map(ToString::to_string),
+        cursor_step_id: snapshot.cursor.step_id.as_ref().map(ToString::to_string),
+        cursor_state: snapshot.cursor.state.map(|state| state.to_string_full()),
+        current_step,
+        active_branch_path: snapshot
+            .active_branch_path
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        can_undo: snapshot.actions.can_undo,
+        can_redo: snapshot.actions.can_redo,
+        branch_count: snapshot.branches.len(),
+        step_count: snapshot.steps.len(),
+        recovery: snapshot
+            .recovery
+            .map(|recovery| TimelineStatusRecoveryOutput {
+                status: timeline_navigation_recovery_status_label(&recovery.status),
+                branch_id: recovery.branch_id.to_string(),
+                from_step_id: recovery.from_step_id.as_ref().map(ToString::to_string),
+                to_step_id: recovery.to_step_id.as_ref().map(ToString::to_string),
+                from_state: recovery.from_state.to_string_full(),
+                to_state: recovery.to_state.to_string_full(),
+                reason: timeline_cursor_move_reason_label(&recovery.reason).to_string(),
+                moved_at_ms: recovery.moved_at_ms,
+                checkout_state: recovery.checkout_state.map(|state| state.to_string_full()),
+            }),
+    };
+    print_timeline_status(cli, repo, output)
+}
+
+fn cmd_timeline_record_start(
+    cli: &Cli,
+    repo: &Repository,
+    store: &TimelineStore,
+    args: TimelineRecordStartArgs,
+) -> Result<()> {
+    let native = native_tool_ref(&args.tool)?;
+    let step_id = recording_step_id(&args.tool, &native);
+    let before_state = require_current_change(repo, "timeline record-start")?;
+    let payload = payload_metadata(&args.tool)?;
+    let _record_guard = store.lock_recording(&args.tool.thread)?;
+    let view = TimelineView::rebuild(store)?;
+    let (branch_id, parent_step_id) = timeline_position_for_recording(&view, &args.tool, &step_id);
+    let envelope = TimelineOperationEnvelope::new(
+        TimelineOperationBodyV1::ToolCallStarted(ToolCallStartedV1 {
+            thread: args.tool.thread.clone(),
+            step_id: step_id.clone(),
+            branch_id: branch_id.clone(),
+            parent_step_id: parent_step_id.clone(),
+            native,
+            tool_name: args.tool_name,
+            before_state,
+            payload,
+            started_at_ms: now_ms(),
+        }),
+        vec![TimelineLabel::ExternalSideEffectsUnknown],
+    );
+    let operation_id = store.write_operation(&envelope)?;
+    let snapshot = repo.timeline_navigation_snapshot(store, &args.tool.thread)?;
+    let output = TimelineRecordingOutput {
+        output_kind: "timeline_record_start",
+        status: "ok",
+        action: "record-start",
+        thread: args.tool.thread,
+        step_id: step_id.to_string(),
+        branch_id: branch_id.to_string(),
+        parent_step_id: parent_step_id.as_ref().map(ToString::to_string),
+        operation_id: operation_id.to_string_full(),
+        before_state: Some(before_state.to_string_full()),
+        after_state: None,
+        changed: None,
+        tool_status: None,
+        payload_summary: args.tool.summary,
+        payload_hash: payload_hash_string(args.tool.payload_hash.as_deref())?,
+        branch_count: snapshot.branches.len(),
+        step_count: snapshot.steps.len(),
+    };
+    print_timeline_recording(cli, repo, output)
+}
+
+fn cmd_timeline_record_finish(
+    cli: &Cli,
+    repo: &Repository,
+    store: &TimelineStore,
+    args: TimelineRecordFinishArgs,
+) -> Result<()> {
+    let tool_status = parse_tool_status(&args.status)?;
+    let tool_status_label = timeline_tool_status_label(&tool_status);
+    let native = native_tool_ref(&args.tool)?;
+    let step_id = recording_step_id(&args.tool, &native);
+    let payload = payload_metadata(&args.tool)?;
+    let _record_guard = store.lock_recording(&args.tool.thread)?;
+    let view = TimelineView::rebuild(store)?;
+    let existing_step = view.step(&args.tool.thread, &step_id).cloned();
+    let (branch_id, parent_step_id) = existing_step
+        .as_ref()
+        .map(|step| (step.branch_id.clone(), step.parent_step_id.clone()))
+        .unwrap_or_else(|| timeline_position_for_recording(&view, &args.tool, &step_id));
+    let current_state = require_current_change(repo, "timeline record-finish")?;
+    let before_state = existing_step
+        .as_ref()
+        .and_then(|step| step.before_state)
+        .unwrap_or(current_state);
+    let after_state = current_state;
+    let changed = before_state != after_state;
+    let mut labels = vec![TimelineLabel::ExternalSideEffectsUnknown];
+    if changed {
+        labels.push(TimelineLabel::RepoReversible);
+    }
+    let envelope = TimelineOperationEnvelope::new(
+        TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
+            thread: args.tool.thread.clone(),
+            step_id: step_id.clone(),
+            branch_id: branch_id.clone(),
+            native,
+            status: tool_status,
+            before_state,
+            after_state,
+            capture_state: None,
+            capture_oplog_batch_id: None,
+            changed,
+            touched_paths: Vec::new(),
+            payload,
+            finished_at_ms: now_ms(),
+        }),
+        labels,
+    );
+    let operation_id = store.write_operation(&envelope)?;
+    let snapshot = repo.timeline_navigation_snapshot(store, &args.tool.thread)?;
+    let output = TimelineRecordingOutput {
+        output_kind: "timeline_record_finish",
+        status: "ok",
+        action: "record-finish",
+        thread: args.tool.thread,
+        step_id: step_id.to_string(),
+        branch_id: branch_id.to_string(),
+        parent_step_id: parent_step_id.as_ref().map(ToString::to_string),
+        operation_id: operation_id.to_string_full(),
+        before_state: Some(before_state.to_string_full()),
+        after_state: Some(after_state.to_string_full()),
+        changed: Some(changed),
+        tool_status: Some(tool_status_label),
+        payload_summary: args.tool.summary,
+        payload_hash: payload_hash_string(args.tool.payload_hash.as_deref())?,
+        branch_count: snapshot.branches.len(),
+        step_count: snapshot.steps.len(),
+    };
+    print_timeline_recording(cli, repo, output)
 }
 
 fn cmd_timeline_fork(
@@ -264,6 +467,222 @@ fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOut
     Ok(())
 }
 
+fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOutput) -> Result<()> {
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+
+    println!(
+        "Timeline {}: {} step{} on {} branch{}",
+        style::bold(&output.thread),
+        output.step_count,
+        plural(output.step_count),
+        output.branch_count,
+        plural(output.branch_count)
+    );
+    if let Some(step) = &output.cursor_step_id {
+        println!(
+            "Cursor: {}/{}",
+            output.cursor_branch_id.as_deref().unwrap_or("-"),
+            step
+        );
+    } else {
+        println!("Cursor: none");
+    }
+    if let Some(recovery) = &output.recovery {
+        println!("Recovery: {}", recovery.status);
+    }
+    Ok(())
+}
+
+fn print_timeline_recording(
+    cli: &Cli,
+    repo: &Repository,
+    output: TimelineRecordingOutput,
+) -> Result<()> {
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+
+    println!(
+        "Recorded timeline {} {} ({})",
+        output.action,
+        style::bold(&output.step_id),
+        output.operation_id
+    );
+    Ok(())
+}
+
+fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1> {
+    if args.thread.trim().is_empty() {
+        return Err(anyhow!(RecoveryAdvice::missing_option(
+            "timeline_thread_required",
+            "--thread",
+            "timeline recording",
+            "heddle timeline record-start --thread <thread> --tool-call <id>",
+        )));
+    }
+    if args.harness.trim().is_empty() {
+        return Err(anyhow!(RecoveryAdvice::missing_option(
+            "timeline_record_harness_required",
+            "--harness",
+            "timeline recording",
+            "heddle timeline record-start --harness opencode --tool-call <id>",
+        )));
+    }
+    if args.tool_call.trim().is_empty() {
+        return Err(anyhow!(RecoveryAdvice::missing_option(
+            "timeline_record_tool_call_required",
+            "--tool-call",
+            "timeline recording",
+            "heddle timeline record-start --tool-call <id>",
+        )));
+    }
+    Ok(NativeToolCallRefV1 {
+        harness: args.harness.clone(),
+        session_id: args.session.clone(),
+        message_id: args.message.clone(),
+        tool_call_id: args.tool_call.clone(),
+    })
+}
+
+fn recording_step_id(
+    args: &TimelineRecordToolArgs,
+    native: &NativeToolCallRefV1,
+) -> TimelineStepId {
+    args.step_id
+        .as_ref()
+        .map(|step| TimelineStepId::new(step.clone()))
+        .unwrap_or_else(|| {
+            let key = format!(
+                "{}\0{}\0{}\0{}",
+                native.harness,
+                native.session_id.as_deref().unwrap_or(""),
+                native.message_id.as_deref().unwrap_or(""),
+                native.tool_call_id
+            );
+            let hash =
+                ContentHash::compute_typed("timeline-native-tool-call-v1", key.as_bytes()).to_hex();
+            TimelineStepId::new(format!("tls-{}", &hash[..24]))
+        })
+}
+
+fn timeline_position_for_recording(
+    view: &TimelineView,
+    args: &TimelineRecordToolArgs,
+    step_id: &TimelineStepId,
+) -> (TimelineBranchId, Option<TimelineStepId>) {
+    let branch_id = args
+        .branch
+        .as_ref()
+        .map(|branch| TimelineBranchId::new(branch.clone()))
+        .or_else(|| {
+            view.status(&args.thread)
+                .and_then(|status| status.current_branch_id.clone())
+        })
+        .unwrap_or_else(|| TimelineBranchId::new("tlb-main"));
+    let parent_step_id = view
+        .status(&args.thread)
+        .and_then(|status| status.current_step_id.clone())
+        .filter(|current| current != step_id);
+    (branch_id, parent_step_id)
+}
+
+fn payload_metadata(args: &TimelineRecordToolArgs) -> Result<Option<TimelineToolPayloadMetadata>> {
+    let hash = match args.payload_hash.as_deref() {
+        Some(hash) => Some(parse_payload_hash(hash)?),
+        None => None,
+    };
+    if args.summary.is_none() && hash.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(TimelineToolPayloadMetadata {
+        summary: args.summary.clone(),
+        hash,
+    }))
+}
+
+fn parse_payload_hash(value: &str) -> Result<ContentHash> {
+    ContentHash::from_hex(value).map_err(|_| {
+        anyhow!(RecoveryAdvice::malformed_option_value(
+            "timeline_payload_hash_invalid",
+            "--payload-hash",
+            value,
+            "a 64-character hex content hash",
+            "heddle timeline record-start --tool-call <id> --payload-hash <hex>",
+        ))
+    })
+}
+
+fn payload_hash_string(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|hash| parse_payload_hash(hash).map(|parsed| parsed.to_hex()))
+        .transpose()
+}
+
+fn require_current_change(repo: &Repository, context: &str) -> Result<ChangeId> {
+    repo.current_state()?
+        .map(|state| state.change_id)
+        .or(repo.head()?)
+        .ok_or_else(|| anyhow!("{context} requires a repository state"))
+}
+
+fn parse_tool_status(value: &str) -> Result<TimelineToolCallStatus> {
+    match value {
+        "succeeded" => Ok(TimelineToolCallStatus::Succeeded),
+        "failed" => Ok(TimelineToolCallStatus::Failed),
+        "cancelled" => Ok(TimelineToolCallStatus::Cancelled),
+        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
+            "timeline_tool_status_invalid",
+            "--status",
+            other,
+            "succeeded, failed, or cancelled",
+            "heddle timeline record-finish --tool-call <id> --status succeeded",
+        ))),
+    }
+}
+
+fn timeline_tool_status_label(status: &TimelineToolCallStatus) -> &'static str {
+    match status {
+        TimelineToolCallStatus::Succeeded => "succeeded",
+        TimelineToolCallStatus::Failed => "failed",
+        TimelineToolCallStatus::Cancelled => "cancelled",
+    }
+}
+
+fn timeline_cursor_move_reason_label(reason: &TimelineCursorMoveReason) -> &'static str {
+    match reason {
+        TimelineCursorMoveReason::SeekToolCall => "seek-tool-call",
+        TimelineCursorMoveReason::Undo => "undo",
+        TimelineCursorMoveReason::Redo => "redo",
+        TimelineCursorMoveReason::Reset => "reset",
+        TimelineCursorMoveReason::AutoAdvance => "auto-advance",
+    }
+}
+
+fn timeline_label(label: &TimelineLabel) -> &'static str {
+    match label {
+        TimelineLabel::RepoReversible => "repo-reversible",
+        TimelineLabel::ExternalSideEffectsUnknown => "external-side-effects-unknown",
+        TimelineLabel::IgnoredPathTouched => "ignored-path-touched",
+        TimelineLabel::OutsideRepoTouched => "outside-repo-touched",
+        TimelineLabel::PurgeBoundary => "purge-boundary",
+        TimelineLabel::CaptureFailed => "capture-failed",
+    }
+}
+
+fn timeline_navigation_recovery_status_label(
+    status: &TimelineNavigationRecoveryStatus,
+) -> &'static str {
+    match status {
+        TimelineNavigationRecoveryStatus::PendingCursorRecord => "pending-cursor-record",
+        TimelineNavigationRecoveryStatus::Blocked => "blocked",
+        TimelineNavigationRecoveryStatus::AlreadyApplied => "already-applied",
+    }
+}
+
 #[derive(Debug)]
 struct TimelineSelection {
     thread: String,
@@ -403,6 +822,76 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct TimelineStatusOutput {
+    output_kind: &'static str,
+    status: &'static str,
+    thread: String,
+    cursor_branch_id: Option<String>,
+    cursor_step_id: Option<String>,
+    cursor_state: Option<String>,
+    current_step: Option<TimelineStatusStepOutput>,
+    active_branch_path: Vec<String>,
+    can_undo: bool,
+    can_redo: bool,
+    branch_count: usize,
+    step_count: usize,
+    recovery: Option<TimelineStatusRecoveryOutput>,
+}
+
+#[derive(Serialize)]
+struct TimelineStatusStepOutput {
+    step_id: String,
+    branch_id: String,
+    parent_step_id: Option<String>,
+    tool_name: Option<String>,
+    tool_status: Option<&'static str>,
+    changed: Option<bool>,
+    payload_summary: Option<String>,
+    payload_hash: Option<String>,
+    labels: Vec<&'static str>,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    can_seek: bool,
+    can_fork: bool,
+    can_reset: bool,
+    can_materialize: bool,
+    has_boundary_warning: bool,
+}
+
+#[derive(Serialize)]
+struct TimelineStatusRecoveryOutput {
+    status: &'static str,
+    branch_id: String,
+    from_step_id: Option<String>,
+    to_step_id: Option<String>,
+    from_state: String,
+    to_state: String,
+    reason: String,
+    moved_at_ms: i64,
+    checkout_state: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TimelineRecordingOutput {
+    output_kind: &'static str,
+    status: &'static str,
+    action: &'static str,
+    thread: String,
+    step_id: String,
+    branch_id: String,
+    parent_step_id: Option<String>,
+    operation_id: String,
+    before_state: Option<String>,
+    after_state: Option<String>,
+    changed: Option<bool>,
+    tool_status: Option<&'static str>,
+    payload_summary: Option<String>,
+    payload_hash: Option<String>,
+    branch_count: usize,
+    step_count: usize,
 }
 
 #[derive(Serialize)]

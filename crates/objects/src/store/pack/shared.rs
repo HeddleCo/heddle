@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 #![deny(clippy::cast_possible_truncation)]
 
+use heddle_format::compression::CompressionConfig;
+
 use super::{
     ObjectType, varint,
     versioned_header::{HeaderChecksum, VersionedHeader},
 };
 use crate::{
     object::{ChangeId, ContentHash},
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{Result, StoreError},
 };
 
 pub const PACK_CHECKSUM_LEN: usize = 32;

@@ -120,26 +120,33 @@ where
         files: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         for entry in tree.entries() {
-            let path = prefix.join(&entry.name);
-            match entry.entry_type {
+            let path = prefix.join(entry.name());
+            match entry.entry_type() {
                 EntryType::Blob => {
                     let Some(path) = path.to_str() else {
                         continue;
                     };
+                    let Some(hash) = entry.blob_hash() else {
+                        continue;
+                    };
                     let blob = self
                         .store()
-                        .get_blob(&entry.hash)?
-                        .ok_or_else(|| missing_object("blob", entry.hash))?;
+                        .get_blob(&hash)?
+                        .ok_or_else(|| missing_object("blob", hash))?;
                     files.insert(path.to_string(), blob.content().to_vec());
                 }
                 EntryType::Tree => {
+                    let Some(hash) = entry.tree_hash() else {
+                        continue;
+                    };
                     let subtree = self
                         .store()
-                        .get_tree(&entry.hash)?
-                        .ok_or_else(|| missing_object("tree", entry.hash))?;
+                        .get_tree(&hash)?
+                        .ok_or_else(|| missing_object("tree", hash))?;
                     self.collect_tree_file_bytes_inner(&subtree, path, files)?;
                 }
                 EntryType::Symlink => {}
+                EntryType::Gitlink => {}
             }
         }
         Ok(())

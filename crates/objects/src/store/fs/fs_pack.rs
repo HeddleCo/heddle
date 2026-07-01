@@ -5,13 +5,13 @@ use std::fs;
 
 use super::{
     FsStore,
-    fs_io::list_hashes_from_dir,
+    fs_io::{list_hashes_from_dir, read_file_bytes},
     fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
     object::ContentHash,
     store::{
-        HeddleError, ObjectStore, Result,
+        HeddleError, ObjectStore, Result, codec,
         pack::{ObjectType as PackObjectType, PackBuilder},
     },
 };
@@ -149,6 +149,8 @@ impl FsStore {
             compression.max_delta_size = 0;
         }
         let mut builder = PackBuilder::new(compression);
+        let loose_tree_set: std::collections::HashSet<ContentHash> =
+            loose_trees.iter().copied().collect();
         let mut seen: std::collections::HashSet<crate::store::pack::PackObjectId> =
             std::collections::HashSet::new();
 
@@ -166,7 +168,14 @@ impl FsStore {
                 })?;
                 manager.get_object(&id)?
             };
-            if let Some((obj_type, data)) = obj_type {
+            if let Some((obj_type, mut data)) = obj_type {
+                if let crate::store::pack::PackObjectId::Hash(hash) = id
+                    && obj_type == PackObjectType::Tree
+                    && loose_tree_set.contains(&hash)
+                    && let Some(loose_data) = ObjectStore::get_tree_serialized(self, &hash)?
+                {
+                    data = loose_data;
+                }
                 builder.add_id(id, obj_type, data);
             }
         }
@@ -368,8 +377,18 @@ impl FsStore {
         }
 
         for hash in &trees {
-            if pack_manager.get_hashed_object(hash)?.is_some() {
-                let path = hash_path(&trees_dir(&self.root), hash);
+            let Some((obj_type, packed_data)) = pack_manager.get_hashed_object(hash)? else {
+                continue;
+            };
+            if obj_type != PackObjectType::Tree {
+                continue;
+            }
+            let path = hash_path(&trees_dir(&self.root), hash);
+            let Some(loose_data) = read_file_bytes(&path)? else {
+                continue;
+            };
+            let loose_data = codec::decode_tree_body(loose_data.as_slice())?;
+            if packed_data == loose_data {
                 match fs::metadata(&path) {
                     Ok(metadata) => match fs::remove_file(&path) {
                         Ok(()) => {

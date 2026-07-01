@@ -15,13 +15,15 @@
 //! change so stage transitions show immediately. This mirrors the cadence of
 //! the bespoke import progress line this sink replaces.
 
-use std::io::{self, IsTerminal, Write};
-use std::sync::Mutex;
+use std::{
+    io::{self, IsTerminal, Write},
+    sync::Mutex,
+};
 
 use objects::{Progress, ProgressSnapshot, Sink};
+use repo::Repository;
 
 use crate::cli::{Cli, should_output_json, style};
-use repo::Repository;
 
 /// Redraw the live line at most once per this many completed units, so a large
 /// operation doesn't spend its time flushing the terminal. Matches the historic
@@ -85,6 +87,24 @@ impl TerminalSink {
             || snap.done.is_multiple_of(COMMIT_TICK_INTERVAL)
     }
 
+    /// Format the line to paint: the phase label, plus a live `(done/total,
+    /// pct%)` suffix when the snapshot carries a real count.
+    ///
+    /// A consumer that pre-formats its own counts into the phase string (the
+    /// import flow) never advances `done`, so `done == 0` and no suffix is
+    /// appended — its lines paint verbatim. A count-driven seam (tree
+    /// materialization) leaves the phase a bare label and increments `done`, so
+    /// the suffix supplies the live count. This is the single rule that lets one
+    /// renderer serve both styles without double-counting.
+    fn format_line(snap: &ProgressSnapshot) -> String {
+        if snap.done > 0 && snap.total > 0 {
+            let pct = snap.done.saturating_mul(100) / snap.total;
+            format!("{} ({}/{}, {}%)", snap.phase, snap.done, snap.total, pct)
+        } else {
+            snap.phase.clone()
+        }
+    }
+
     fn paint(line: &str) {
         if io::stdout().is_terminal() {
             // `\r` to column 0, `\x1b[K` clears to end of line so a shorter line
@@ -99,8 +119,9 @@ impl TerminalSink {
 
 impl Sink for TerminalSink {
     fn render(&self, snap: ProgressSnapshot) {
-        // The phase label carries the fully-formatted line the caller wants
-        // painted; the counters drive throttling. An empty phase is a no-op.
+        // The phase label is the human line; the counters drive throttling and
+        // (for count-driven seams) the live `(done/total)` suffix. An empty
+        // phase is a no-op.
         if snap.phase.is_empty() {
             return;
         }
@@ -108,23 +129,18 @@ impl Sink for TerminalSink {
         if !Self::should_repaint(&state, &snap) {
             return;
         }
-        Self::paint(&snap.phase);
+        Self::paint(&Self::format_line(&snap));
         state.last_phase = Some(snap.phase);
         state.painted = true;
     }
 }
 
-/// Erase the live progress line so a subsequent `println!` starts clean.
-///
-/// On a TTY the live line is drawn with `\r` and no trailing newline, so
-/// without this the next line would overwrite it from column 0. Off a TTY each
-/// throttled tick already printed its own newline-terminated line, so there is
-/// nothing to clear. No-op for a null (inactive) handle.
-///
-/// Only the hosted (network) push path drives progress, so this is gated on the
-/// `client` feature to stay dead-code-clean in default-feature builds.
-#[cfg(feature = "client")]
-pub(crate) fn clear_progress_line(progress: &Progress) {
+/// Clear the live progress line without printing a completion message. No-op
+/// for a null (inactive) handle or off a TTY (where each tick was already a
+/// standalone line, not a `\r`-overwritten one). Used by consumers that print
+/// their own final output right after the operation (e.g. `switch` printing
+/// `Now at: …`, or the hosted push path clearing the transient upload line).
+pub(crate) fn clear_line(progress: &Progress) {
     if !progress.is_active() {
         return;
     }
@@ -171,14 +187,55 @@ mod tests {
     }
 
     #[test]
+    fn count_driven_snapshot_gets_a_live_suffix() {
+        // A materialize-style seam leaves the phase a bare label and advances
+        // `done`; the renderer supplies the live `(done/total, pct%)` suffix.
+        let snap = ProgressSnapshot {
+            done: 32,
+            total: 128,
+            phase: "checking out files".into(),
+        };
+        assert_eq!(
+            TerminalSink::format_line(&snap),
+            "checking out files (32/128, 25%)"
+        );
+    }
+
+    #[test]
+    fn preformatted_line_without_a_count_paints_verbatim() {
+        // The import flow pre-formats its own counts into the phase and never
+        // advances `done` (stays 0), so no suffix is appended and the line is
+        // painted exactly as given — no double-counting.
+        let snap = ProgressSnapshot {
+            done: 0,
+            total: 3,
+            phase: "[2/3] importing commits... 64/128 inspected (50%)".into(),
+        };
+        assert_eq!(
+            TerminalSink::format_line(&snap),
+            "[2/3] importing commits... 64/128 inspected (50%)"
+        );
+        // A count with an unknown total (total == 0) also gets no suffix.
+        let counting = ProgressSnapshot {
+            done: 500,
+            total: 0,
+            phase: "scanning".into(),
+        };
+        assert_eq!(TerminalSink::format_line(&counting), "scanning");
+    }
+
+    #[test]
     fn repaints_on_throttle_boundary_and_edges() {
         let state = RenderState {
             last_phase: Some("p".into()),
             painted: true,
         };
-        for (done, total, want) in
-            [(0, 100, true), (64, 100, true), (100, 100, true), (63, 100, false)]
-        {
+        for (done, total, want) in [
+            (0, 100, true),
+            (64, 100, true),
+            (100, 100, true),
+            (63, 100, false),
+        ] {
             let snap = ProgressSnapshot {
                 done,
                 total,

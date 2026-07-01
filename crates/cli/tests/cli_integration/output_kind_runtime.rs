@@ -958,6 +958,14 @@ fn discuss_open_show_append_emit_output_kind() {
     );
     assert_output_kind(&resolve, "discuss_resolve");
     assert_eq!(resolve["id"].as_str(), Some(discussion_id.as_str()));
+    assert!(
+        resolve["resolution"].get("change_id").is_some(),
+        "discussion resolution must expose change_id, even when null: {resolve}"
+    );
+    assert!(
+        resolve["resolution"].get("state_id").is_none(),
+        "discussion resolution must not expose the retired state_id alias: {resolve}"
+    );
 }
 
 #[test]
@@ -1016,4 +1024,40 @@ fn purge_list_envelope_includes_recent_apply() {
         value["count"].as_u64().is_some_and(|n| n >= 1),
         "purge list after purge apply must show at least one entry: {value}"
     );
+}
+
+/// #844 suppression proof: `switch` installs a live tree-materialization
+/// progress line, but the JSON guard (#550) makes that handle null under
+/// `--output json`, so stdout is byte-clean — exactly the one `thread_switch`
+/// envelope with no progress lines leaked. The test harness pipes stdout (no
+/// TTY); had the guard regressed to an active sink, the non-TTY renderer would
+/// `println!` extra dim lines onto stdout and the single-line assertion below
+/// would fail. This is the "`--output json` byte output is UNCHANGED" DoD test.
+#[test]
+fn switch_output_json_is_byte_clean_of_progress() {
+    let temp = init_and_capture();
+    capture_second(&temp);
+
+    // Switch back to the first state: the worktree really changes, so
+    // materialization has files to write and would drive the progress line if
+    // it were active.
+    let stdout = heddle(&["--output", "json", "switch", "HEAD~1"], Some(temp.path()))
+        .expect("switch --output json");
+
+    let non_empty: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        non_empty.len(),
+        1,
+        "json stdout must be exactly one line (no progress leak), got: {stdout:?}"
+    );
+    let value: Value = serde_json::from_str(non_empty[0]).unwrap_or_else(|err| {
+        panic!(
+            "switch json stdout not JSON: {err}\n  line: {}",
+            non_empty[0]
+        )
+    });
+    assert_output_kind(&value, "thread_switch");
 }

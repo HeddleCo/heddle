@@ -39,7 +39,9 @@ fn discussion_survives_context_set_advance() {
 
     let opened = json(
         &heddle(
-            &["--output", "json", "discuss", "open", "main.rs", "main", "review q"],
+            &[
+                "--output", "json", "discuss", "open", "main.rs", "main", "review q",
+            ],
             dir,
         )
         .unwrap(),
@@ -50,8 +52,16 @@ fn discussion_survives_context_set_advance() {
     // file than the discussion anchor — exactly the issue's scenario.
     heddle(
         &[
-            "context", "set", "--path", "other.rs", "--scope", "symbol:f", "--kind", "rationale",
-            "-m", "note",
+            "context",
+            "set",
+            "--path",
+            "other.rs",
+            "--scope",
+            "symbol:f",
+            "--kind",
+            "rationale",
+            "-m",
+            "note",
         ],
         dir,
     )
@@ -88,7 +98,9 @@ fn advanced_head_state_carries_the_discussion() {
 
     let opened = json(
         &heddle(
-            &["--output", "json", "discuss", "open", "main.rs", "main", "q"],
+            &[
+                "--output", "json", "discuss", "open", "main.rs", "main", "q",
+            ],
             dir,
         )
         .unwrap(),
@@ -97,8 +109,16 @@ fn advanced_head_state_carries_the_discussion() {
 
     heddle(
         &[
-            "context", "set", "--path", "other.rs", "--scope", "symbol:f", "--kind", "rationale",
-            "-m", "note",
+            "context",
+            "set",
+            "--path",
+            "other.rs",
+            "--scope",
+            "symbol:f",
+            "--kind",
+            "rationale",
+            "-m",
+            "note",
         ],
         dir,
     )
@@ -114,7 +134,14 @@ fn advanced_head_state_carries_the_discussion() {
 
     let by_state = json(
         &heddle(
-            &["--output", "json", "discuss", "list", "--state", &head_state],
+            &[
+                "--output",
+                "json",
+                "discuss",
+                "list",
+                "--state",
+                &head_state,
+            ],
             dir,
         )
         .unwrap(),
@@ -140,7 +167,9 @@ fn discuss_show_state_flag_resolves_on_prior_state() {
 
     let opened = json(
         &heddle(
-            &["--output", "json", "discuss", "open", "main.rs", "main", "q"],
+            &[
+                "--output", "json", "discuss", "open", "main.rs", "main", "q",
+            ],
             dir,
         )
         .unwrap(),
@@ -151,8 +180,16 @@ fn discuss_show_state_flag_resolves_on_prior_state() {
 
     heddle(
         &[
-            "context", "set", "--path", "other.rs", "--scope", "symbol:f", "--kind", "rationale",
-            "-m", "note",
+            "context",
+            "set",
+            "--path",
+            "other.rs",
+            "--scope",
+            "symbol:f",
+            "--kind",
+            "rationale",
+            "-m",
+            "note",
         ],
         dir,
     )
@@ -160,7 +197,15 @@ fn discuss_show_state_flag_resolves_on_prior_state() {
 
     let shown = json(
         &heddle(
-            &["--output", "json", "discuss", "show", &id, "--state", &prior_state],
+            &[
+                "--output",
+                "json",
+                "discuss",
+                "show",
+                &id,
+                "--state",
+                &prior_state,
+            ],
             dir,
         )
         .expect("discuss show --state must resolve a discussion on the named prior state"),
@@ -177,7 +222,9 @@ fn discuss_append_works_after_context_set_advance() {
 
     let opened = json(
         &heddle(
-            &["--output", "json", "discuss", "open", "main.rs", "main", "first"],
+            &[
+                "--output", "json", "discuss", "open", "main.rs", "main", "first",
+            ],
             dir,
         )
         .unwrap(),
@@ -186,8 +233,16 @@ fn discuss_append_works_after_context_set_advance() {
 
     heddle(
         &[
-            "context", "set", "--path", "other.rs", "--scope", "symbol:f", "--kind", "rationale",
-            "-m", "note",
+            "context",
+            "set",
+            "--path",
+            "other.rs",
+            "--scope",
+            "symbol:f",
+            "--kind",
+            "rationale",
+            "-m",
+            "note",
         ],
         dir,
     )
@@ -201,6 +256,10 @@ fn discuss_append_works_after_context_set_advance() {
         .expect("discuss append must find the discussion on HEAD after the advance"),
     );
     let turns = appended["turns"].as_array().unwrap();
-    assert_eq!(turns.len(), 2, "append should add a second turn: {appended}");
+    assert_eq!(
+        turns.len(),
+        2,
+        "append should add a second turn: {appended}"
+    );
     assert_eq!(turns[1]["body"].as_str(), Some("second"));
 }

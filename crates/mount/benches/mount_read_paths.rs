@@ -39,10 +39,10 @@ use std::{
 };
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use heddle_format::compression::{CompressionConfig, compress, decompress};
 use mount::{
     BlobCachePool, ContentAddressedMount, MountOptions, NodeId, PlatformShell, PromotionPolicy,
 };
-use objects::store::compression::{CompressionConfig, compress, decompress};
 use repo::Repository;
 use tempfile::TempDir;
 

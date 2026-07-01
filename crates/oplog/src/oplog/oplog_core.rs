@@ -532,6 +532,17 @@ impl OpLog {
 }
 
 impl OpLogBackend for OpLog {
+    fn migrate_to_current_format(&self) -> Result<()> {
+        let path = self.oplog_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let _lock = self.write_lock()?;
+        PackedOpLog::ensure_latest(&path)?;
+        *self.cached.lock_or_poisoned() = None;
+        Ok(())
+    }
+
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -759,9 +770,10 @@ impl OpLogBackend for OpLog {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::ChangeId;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn snapshot_record() -> OpRecord {
         let state = ChangeId::generate();

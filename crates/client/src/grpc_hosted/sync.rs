@@ -32,8 +32,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use wire::{
-    ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete, PushComplete, RefEntry,
-    RefUpdated,
+    GitLaneTransferIntent, ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete,
+    PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
 };
 
 use super::{
@@ -55,6 +55,7 @@ struct PullOptions<'a> {
 
 struct PullWantPlan {
     wants: Vec<ObjectDescriptor>,
+    transfer_plan: RepositoryTransferPlan<ObjectInfo>,
     wanted_types: WantedTypes,
     want_full_closure: bool,
 }
@@ -333,15 +334,28 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let object_plan = wire::enumerate_state_closure_plan(repo.store(), local_state)?;
-        let full_objects = if object_plan.len() <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
-            Some(wire::enumerate_state_closure(repo.store(), local_state)?)
+        // TODO: Gate hosted Git-lane transfer planning on the Sley reachable-pack
+        // facade. Keep this as ExistingImplementation until Sley can return the
+        // exact pack identity and stream from one boundary; do not add a
+        // Heddle-local reachable-pack planner or wire variant here.
+        let git_lane_intent = if git_lane.is_some() {
+            GitLaneTransferIntent::ExistingImplementation
         } else {
-            None
+            GitLaneTransferIntent::HeddleObjectsOnly
         };
+        let object_plan = RepositoryTransferPlan::from_planned_objects(
+            wire::enumerate_state_closure_plan(repo.store(), local_state)?,
+            git_lane_intent,
+        );
+        let full_objects =
+            if object_plan.stats.total_objects <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
+                Some(wire::enumerate_state_closure(repo.store(), local_state)?)
+            } else {
+                None
+            };
         let object_count = full_objects
             .as_ref()
-            .map_or(object_plan.len(), std::vec::Vec::len);
+            .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
         let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
@@ -353,7 +367,13 @@ impl HostedGrpcClient {
                 create_thread: true,
                 force,
                 objects: full_objects.as_ref().map_or_else(
-                    || object_plan.iter().map(to_proto_planned_object).collect(),
+                    || {
+                        object_plan
+                            .partitions
+                            .iter()
+                            .map(to_proto_planned_object)
+                            .collect()
+                    },
                     |objects| objects.iter().map(to_proto_object_info).collect(),
                 ),
                 transfer: Some(self.transport.transfer_checkpoint_with_mode(
@@ -401,11 +421,12 @@ impl HostedGrpcClient {
                 .map(|info| (descriptor_id_from_info(&info), info))
                 .collect::<HashMap<_, _>>(),
             None => object_plan
-                .into_iter()
+                .partitions
+                .iter()
                 .map(|object| {
                     (
-                        descriptor_id_from_plan(&object),
-                        object_info_from_plan(&object),
+                        descriptor_id_from_plan(object),
+                        object_info_from_plan(object),
                     )
                 })
                 .collect::<HashMap<_, _>>(),
@@ -429,19 +450,13 @@ impl HostedGrpcClient {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Split want_objects: blob/tree/state/action → native pack;
-        // sidecars → out-of-pack transfer channels. Sidecars live outside
-        // `.heddle/objects/` so GC can't reach them and they can't ride the
-        // pack — `build_native_pack` skips the same object-type set.
-        let (wanted_sidecars, wanted_packable): (Vec<_>, Vec<_>) = wanted_infos
-            .into_iter()
-            .partition(|info| is_out_of_pack_transfer_object_type(info.obj_type));
+        let wanted_plan = RepositoryTransferPlan::from_object_infos(wanted_infos, git_lane_intent);
 
-        if !wanted_packable.is_empty() {
+        if !wanted_plan.partitions.packable_objects.is_empty() {
             send_native_pack_streaming_messages(
                 &tx,
                 repo,
-                &wanted_packable,
+                &wanted_plan.partitions.packable_objects,
                 &transfer_id,
                 self.transport.chunk_size.max(1),
                 &self.transport,
@@ -450,7 +465,7 @@ impl HostedGrpcClient {
             .await?;
         }
 
-        for info in wanted_sidecars {
+        for info in wanted_plan.partitions.sidecar_objects {
             let message = sidecar_push_message(repo, info)?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
@@ -851,6 +866,7 @@ impl HostedGrpcClient {
         let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
             wants,
+            transfer_plan,
             wanted_types,
             want_full_closure,
         } = plan_pull_wants(
@@ -860,7 +876,7 @@ impl HostedGrpcClient {
             ready.objects_to_fetch,
             allow_partial_fetch,
         )?;
-        let native_pack_required = native_pack_required_for_pull(want_full_closure, &wanted_types);
+        let native_pack_required = native_pack_required_for_pull(want_full_closure, &transfer_plan);
 
         tx.send(PullMessage {
             body: Some(pull_message::Body::Want(WantObjects {
@@ -1218,20 +1234,11 @@ fn redaction_push_message(
     })
 }
 
-fn is_out_of_pack_transfer_object_type(obj_type: ObjectType) -> bool {
-    matches!(
-        obj_type,
-        ObjectType::Redaction | ObjectType::StateVisibility
-    )
-}
-
-fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedTypes) -> bool {
-    want_full_closure
-        || wanted_types
-            .values()
-            .flatten()
-            .copied()
-            .any(wire::is_native_packable_object_type)
+fn native_pack_required_for_pull(
+    want_full_closure: bool,
+    transfer_plan: &RepositoryTransferPlan<ObjectInfo>,
+) -> bool {
+    transfer_plan.requires_native_pack(want_full_closure)
 }
 
 fn object_info_from_plan(object: &PlannedObject) -> ObjectInfo {
@@ -1341,6 +1348,10 @@ fn plan_pull_wants(
     if full_closure_available {
         return Ok(PullWantPlan {
             wants: Vec::new(),
+            transfer_plan: RepositoryTransferPlan::from_object_infos(
+                Vec::<ObjectInfo>::new(),
+                GitLaneTransferIntent::HeddleObjectsOnly,
+            ),
             wanted_types: HashMap::new(),
             want_full_closure: true,
         });
@@ -1348,6 +1359,7 @@ fn plan_pull_wants(
     let request_full_closure =
         should_request_full_closure(repo, remote_state, allow_partial_fetch)?;
     let mut wants = Vec::with_capacity(objects_to_fetch.len());
+    let mut wanted_infos = Vec::with_capacity(objects_to_fetch.len());
     let mut wanted_types = HashMap::with_capacity(objects_to_fetch.len());
 
     for descriptor in objects_to_fetch {
@@ -1370,11 +1382,16 @@ fn plan_pull_wants(
                 ObjectAvailabilityStatus::Missing,
                 "requested by client",
             ));
+            wanted_infos.push(info);
         }
     }
 
     Ok(PullWantPlan {
         wants,
+        transfer_plan: RepositoryTransferPlan::from_object_infos(
+            wanted_infos,
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        ),
         wanted_types,
         want_full_closure: false,
     })
@@ -1713,20 +1730,26 @@ fn collect_missing_blobs_recursive(
         return Ok(());
     };
     for entry in tree.entries() {
-        match entry.entry_type {
+        match entry.entry_type() {
             objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                if !repo.store().has_blob(&entry.hash).map_err(|err| {
+                let Some(hash) = entry.content_hash() else {
+                    continue;
+                };
+                if !repo.store().has_blob(&hash).map_err(|err| {
                     ProtocolError::InvalidState(format!(
                         "check blob {} while collecting lazy hydration missing blobs: {err}",
-                        entry.hash.to_hex()
+                        hash.to_hex()
                     ))
                 })? {
-                    missing.push(entry.hash);
+                    missing.push(hash);
                 }
             }
             objects::object::EntryType::Tree => {
-                collect_missing_blobs_recursive(repo, &entry.hash, missing)?;
+                if let Some(hash) = entry.tree_hash() {
+                    collect_missing_blobs_recursive(repo, &hash, missing)?;
+                }
             }
+            objects::object::EntryType::Gitlink => {}
         }
     }
     Ok(())
@@ -1810,9 +1833,10 @@ fn build_git_mirror_plan_from_sley(
     chunk_size: usize,
     remote_ref_expectations: &HashMap<String, GitRefRemoteExpectation>,
 ) -> Result<GitLanePushPlan, ProtocolError> {
-    let refs = git_repo.references().list_refs().map_err(|err| {
-        ProtocolError::InvalidState(format!("list git-overlay refs: {err}"))
-    })?;
+    let refs = git_repo
+        .references()
+        .list_refs()
+        .map_err(|err| ProtocolError::InvalidState(format!("list git-overlay refs: {err}")))?;
 
     let mut roots: Vec<GitObjectId> = Vec::new();
     let mut ref_updates: Vec<PushMessage> = Vec::new();
@@ -1863,7 +1887,8 @@ fn build_git_mirror_plan_from_sley(
             .unwrap_or(GitRefRemoteExpectation::Missing);
 
         let kind = git_ref_kind_from_name(&reference.name);
-        let mut message = git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
+        let mut message =
+            git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
         apply_git_ref_expectation_value(&mut message, &expectation)?;
         ref_updates.push(message);
     }
@@ -1918,6 +1943,10 @@ fn build_git_lane_multi_root_pack_plan(
     }
     let objects = git_repo.objects();
     let mut sink = io::sink();
+    // TODO: Replace this metadata-only reachable-pack walk and the later
+    // streaming walk with the Sley reachable-pack facade gate once it can expose
+    // stable size/checksum plus streaming. Do not grow a second planner in
+    // Heddle.
     let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
         git_repo.object_format(),
@@ -1925,13 +1954,9 @@ fn build_git_lane_multi_root_pack_plan(
         &HashSet::new(),
         &mut sink,
     )
-    .map_err(|err| {
-        ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}"))
-    })?
+    .map_err(|err| ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}")))?
     .ok_or_else(|| {
-        ProtocolError::InvalidState(
-            "roots did not produce a reachable Git pack".to_string(),
-        )
+        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
     })?;
     if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
         return Err(ProtocolError::InvalidState(format!(
@@ -1987,6 +2012,9 @@ fn stream_git_pack_messages_blocking(
         chunk_size,
         progress,
     );
+    // TODO: This is the second walk of the same reachable Git closure planned
+    // in build_git_lane_pack_plan. Collapse both walks behind Sley's
+    // reachable-pack facade when available, without changing the protobuf lane.
     let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
         pack.git_repo.object_format(),
@@ -1994,13 +2022,9 @@ fn stream_git_pack_messages_blocking(
         &HashSet::new(),
         &mut writer,
     )
-    .map_err(|err| {
-        ProtocolError::InvalidState(format!("stream reachable Git pack: {err}"))
-    })?
+    .map_err(|err| ProtocolError::InvalidState(format!("stream reachable Git pack: {err}")))?
     .ok_or_else(|| {
-        ProtocolError::InvalidState(
-            "roots did not produce a reachable Git pack".to_string(),
-        )
+        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
     })?;
     writer.finish()?;
     if summary.pack_size != pack.pack_size || summary.checksum.as_bytes() != pack.pack_id.as_slice()
@@ -3131,9 +3155,8 @@ mod tests {
                 pack_bytes.extend_from_slice(&pack.pack_chunk);
             }
         }
-        let indexed =
-            sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
-                .expect("mirror pack indexes");
+        let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
+            .expect("mirror pack indexes");
         let packed: HashSet<Vec<u8>> = indexed
             .objects
             .iter()
@@ -3516,7 +3539,7 @@ mod tests {
     fn non_packable_object_types_are_in_out_of_pack_transfer_partition() {
         for obj_type in wire::native_pack_excluded_object_types() {
             assert!(
-                is_out_of_pack_transfer_object_type(*obj_type),
+                wire::TransferPartitions::<ObjectInfo>::is_sidecar_object_type(*obj_type),
                 "{obj_type:?} is excluded from native packs but missing from the out-of-pack transfer partition"
             );
         }
@@ -3527,25 +3550,39 @@ mod tests {
         let blob = sample_blob();
         let state = ChangeId::from_bytes([9u8; 16]);
 
-        let sidecar_only = HashMap::from([(
-            PackObjectId::ChangeId(state),
-            vec![ObjectType::StateVisibility],
-        )]);
+        let sidecar_only = RepositoryTransferPlan::from_object_infos(
+            vec![state_visibility_info(state)],
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
         assert!(!native_pack_required_for_pull(false, &sidecar_only));
 
-        let redaction_only =
-            HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Redaction])]);
+        let redaction_only = RepositoryTransferPlan::from_object_infos(
+            vec![redaction_info(blob)],
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
         assert!(!native_pack_required_for_pull(false, &redaction_only));
 
-        let packable = HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Blob])]);
+        let packable = RepositoryTransferPlan::from_object_infos(
+            vec![ObjectInfo {
+                id: ObjectId::Hash(blob),
+                obj_type: ObjectType::Blob,
+                size: 0,
+                delta_base: None,
+            }],
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
         assert!(native_pack_required_for_pull(false, &packable));
 
-        let state_with_sidecar = HashMap::from([(
-            PackObjectId::ChangeId(state),
-            vec![ObjectType::State, ObjectType::StateVisibility],
-        )]);
+        let state_with_sidecar = RepositoryTransferPlan::from_object_infos(
+            vec![state_info(state), state_visibility_info(state)],
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
         assert!(native_pack_required_for_pull(false, &state_with_sidecar));
-        assert!(native_pack_required_for_pull(true, &HashMap::new()));
+        let empty = RepositoryTransferPlan::from_object_infos(
+            Vec::<ObjectInfo>::new(),
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        );
+        assert!(native_pack_required_for_pull(true, &empty));
     }
 
     #[test]
@@ -3582,7 +3619,7 @@ mod tests {
         );
         assert!(native_pack_required_for_pull(
             plan.want_full_closure,
-            &plan.wanted_types
+            &plan.transfer_plan
         ));
     }
 
@@ -4445,11 +4482,7 @@ mod tests {
 
     /// Put a state whose tree holds one blob into `repo`'s store. Returns the
     /// state id. With `parents`, builds a child on top of an existing state.
-    fn put_state_with_blob(
-        repo: &Repository,
-        contents: &str,
-        parents: Vec<ChangeId>,
-    ) -> ChangeId {
+    fn put_state_with_blob(repo: &Repository, contents: &str, parents: Vec<ChangeId>) -> ChangeId {
         let blob = Blob::from(contents);
         let blob_hash = repo.store().put_blob(&blob).expect("put blob");
         let tree = Tree::from_entries(vec![
@@ -4500,8 +4533,8 @@ mod tests {
 
         // A fetch_state-style override drives the want plan directly; the
         // thread head is unrelated to what's being fetched.
-        let advertised = locally_complete_pull_head(&repo, "main", Some(head))
-            .expect("completeness check");
+        let advertised =
+            locally_complete_pull_head(&repo, "main", Some(head)).expect("completeness check");
         assert_eq!(advertised, None);
     }
 
@@ -4567,8 +4600,8 @@ mod tests {
             .set_thread(&ThreadName::from("feature"), &head)
             .expect("set thread");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised,
             Some(head),
@@ -4613,8 +4646,8 @@ mod tests {
         repo.record_missing_blob(ContentHash::from_bytes([88u8; 32]))
             .expect("record missing blob");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised, None,
             "a repo carrying missing blobs must never advertise an explicit local-thread head"
@@ -4642,8 +4675,8 @@ mod tests {
             .set_thread(&ThreadName::from("feature"), &child_id)
             .expect("set thread");
 
-        let advertised = locally_complete_local_thread_head(&repo, "feature", None)
-            .expect("completeness check");
+        let advertised =
+            locally_complete_local_thread_head(&repo, "feature", None).expect("completeness check");
         assert_eq!(
             advertised, None,
             "an explicit local-thread head whose closure has an absent parent must not be advertised"
@@ -4734,7 +4767,11 @@ mod tests {
                     (Vec::new(), None, true)
                 } else if exclude.contains(&parent_full) {
                     // Client is behind at `known_parent`; send only the delta.
-                    (svc.delta_objects.clone(), Some(svc.delta_pack.clone()), false)
+                    (
+                        svc.delta_objects.clone(),
+                        Some(svc.delta_pack.clone()),
+                        false,
+                    )
                 } else {
                     // No usable advertisement; send the full closure.
                     (svc.full_closure.clone(), Some(svc.full_pack.clone()), false)
@@ -4933,8 +4970,12 @@ mod tests {
             wire::enumerate_state_closure(src_repo.store(), parent).expect("parent closure");
         let parent_pack =
             wire::build_native_pack(src_repo.store(), &parent_closure).expect("parent pack");
-        wire::install_received_pack(repo.store(), &parent_pack.pack_data, &parent_pack.index_data)
-            .expect("install parent closure into client");
+        wire::install_received_pack(
+            repo.store(),
+            &parent_pack.pack_data,
+            &parent_pack.index_data,
+        )
+        .expect("install parent closure into client");
         repo.refs()
             .set_thread(&ThreadName::from("main"), &parent)
             .expect("set thread to parent");
@@ -4942,7 +4983,10 @@ mod tests {
         wire::enumerate_state_closure(repo.store(), parent).expect("client holds parent closure");
         // ...but NOT the child yet.
         assert!(
-            repo.store().get_state(&child).expect("probe child").is_none(),
+            repo.store()
+                .get_state(&child)
+                .expect("probe child")
+                .is_none(),
             "client must start without the child state"
         );
         let parent_clone = parent;

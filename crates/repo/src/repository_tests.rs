@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::fs;
+use std::{fs, path::Path};
 
 use objects::{
-    object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
-    store::ObjectStore,
-    util::symlink_target_bytes,
+    object::{
+        Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State,
+        ThreadName, Tree, TreeEntry,
+    },
+    store::{ObjectStore, ShallowInfo},
+    util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
-use oplog::{OpLogBackend, OpRecord};
-use refs::Head;
+use oplog::{OpLog, OpLogBackend, OpRecord};
+use refs::{Head, RefManager};
+use serde::Serialize;
 use serde_json::json;
+use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
 
 use super::{
@@ -24,6 +29,65 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+fn open_test_repo_with_store<S: ObjectStore>(
+    heddle_dir: impl AsRef<Path>,
+    store: S,
+) -> Repository<RefManager, OpLog, S> {
+    let heddle_dir = heddle_dir.as_ref().to_path_buf();
+    let root = heddle_dir
+        .parent()
+        .expect("test heddle dir should live under a worktree root")
+        .to_path_buf();
+    let config = RepoConfig::load(&heddle_dir.join("config.toml")).unwrap();
+    let refs = RefManager::new(&heddle_dir);
+    let oplog = OpLog::new_unattributed(&heddle_dir);
+    let shallow = ShallowInfo::load(&heddle_dir).unwrap();
+    Repository::from_parts(root, heddle_dir, store, refs, oplog, config, shallow)
+}
+
+fn gitlink_target_for_tests() -> GitObjectId {
+    GitObjectId::from_hex(
+        GitObjectFormat::Sha1,
+        "1234567890abcdef1234567890abcdef12345678",
+    )
+    .unwrap()
+}
+
+fn loose_tree_path(repo: &Repository, hash: ContentHash) -> std::path::PathBuf {
+    let hex = hash.to_hex();
+    let (prefix, rest) = hex.split_at(2);
+    repo.heddle_dir()
+        .join("objects")
+        .join("trees")
+        .join(prefix)
+        .join(rest)
+}
+
+#[derive(Serialize)]
+struct LegacyTreeV1ForOpenTest {
+    entries: Vec<LegacyTreeEntryV1ForOpenTest>,
+}
+
+#[derive(Serialize)]
+struct LegacyTreeEntryV1ForOpenTest {
+    name: String,
+    mode: FileMode,
+    entry_type: EntryType,
+    hash: ContentHash,
+}
+
+fn legacy_tree_v1_bytes_for_open_test(name: &str, hash: ContentHash) -> Vec<u8> {
+    rmp_serde::to_vec(&LegacyTreeV1ForOpenTest {
+        entries: vec![LegacyTreeEntryV1ForOpenTest {
+            name: name.to_string(),
+            mode: FileMode::Normal,
+            entry_type: EntryType::Blob,
+            hash,
+        }],
+    })
+    .unwrap()
 }
 
 #[cfg(unix)]
@@ -55,11 +119,10 @@ fn test_init_creates_structure() {
 }
 
 #[test]
-fn test_open_with_store_threads_a_custom_object_store() {
-    // heddle#283: `Repository::open_with_store` is generic over the object
-    // store `S`, so the whole `Repository<RefManager, OpLog, S>` plumbing has
-    // to compile and run with a concrete store that is *not* the default
-    // `AnyStore`. Inject a bare `FsStore` and round-trip an object through it.
+fn test_custom_store_fixture_threads_a_custom_object_store() {
+    // heddle#283: keep coverage that `Repository<RefManager, OpLog, S>`
+    // compiles and runs with a concrete store that is not the default
+    // `AnyStore`, without exposing a production custom-store open helper.
     use objects::store::FsStore;
 
     let temp_dir = TempDir::new().unwrap();
@@ -68,9 +131,9 @@ fn test_open_with_store_threads_a_custom_object_store() {
     drop(repo);
 
     let store = FsStore::new(&heddle_dir);
-    let repo: Repository<_, _, FsStore> = Repository::open_with_store(&heddle_dir, store).unwrap();
+    let repo: Repository<_, _, FsStore> = open_test_repo_with_store(&heddle_dir, store);
 
-    let blob = objects::object::Blob::from("open_with_store round-trip");
+    let blob = objects::object::Blob::from("custom store round-trip");
     let hash = repo.store().put_blob(&blob).unwrap();
     assert_eq!(
         repo.store().get_blob(&hash).unwrap().unwrap().content(),
@@ -134,6 +197,99 @@ fn open_accepts_supported_repository_format() {
     .unwrap();
 
     Repository::open(temp_dir.path()).expect("supported repo format should open");
+}
+
+#[test]
+fn open_fails_when_required_migration_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let ledger = repo.heddle_dir().join("state/schema_versions.toml");
+    if ledger.exists() {
+        fs::remove_file(&ledger).unwrap();
+    }
+
+    let config_path = repo.heddle_dir().join("config.toml");
+    fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
+
+    let bad_tree_hash = ContentHash::compute(b"bad legacy tree bytes");
+    let bad_tree_path = loose_tree_path(&repo, bad_tree_hash);
+    fs::create_dir_all(bad_tree_path.parent().unwrap()).unwrap();
+    fs::write(&bad_tree_path, b"not a msgpack tree").unwrap();
+    drop(repo);
+
+    let err = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("migration failure must block open"),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("0003_canonicalize_tree_entries"),
+        "open error should name the failing migration: {message}"
+    );
+    assert!(
+        message.contains("failed to decode legacy V1 tree"),
+        "open error should keep the underlying migration failure: {message}"
+    );
+}
+
+#[test]
+fn open_migrates_v1_tree_bytes_before_strict_tree_reads() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let ledger = repo.heddle_dir().join("state/schema_versions.toml");
+    if ledger.exists() {
+        fs::remove_file(&ledger).unwrap();
+    }
+
+    let config_path = repo.heddle_dir().join("config.toml");
+    fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
+
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::from("legacy tree body"))
+        .unwrap();
+    let current_tree = Tree::from_entries(vec![
+        TreeEntry::file("legacy.txt", blob_hash, false).expect("legacy tree entry"),
+    ]);
+    let tree_hash = current_tree.hash();
+    let legacy_tree_bytes = legacy_tree_v1_bytes_for_open_test("legacy.txt", blob_hash);
+    let legacy_tree_path = loose_tree_path(&repo, tree_hash);
+    fs::create_dir_all(legacy_tree_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_tree_path, &legacy_tree_bytes).unwrap();
+
+    assert!(
+        repo.store().get_tree(&tree_hash).is_err(),
+        "strict runtime reader must reject V1 bytes before open migration"
+    );
+
+    let state = State::new_snapshot(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Migration Tester", "migration@example.test")),
+    );
+    let state_id = state.change_id;
+    repo.store().put_state(&state).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_id)
+        .unwrap();
+    drop(repo);
+
+    let opened = Repository::open(temp_dir.path()).expect("normal open runs pending migrations");
+    let migrated = opened
+        .store()
+        .get_tree(&tree_hash)
+        .expect("strict reader succeeds after open migration")
+        .expect("migrated tree exists");
+    assert_eq!(
+        migrated.get("legacy.txt").and_then(TreeEntry::blob_hash),
+        Some(blob_hash)
+    );
+    assert_eq!(
+        opened.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(state_id)
+    );
+    let config = RepoConfig::load(&config_path).unwrap();
+    assert_eq!(config.repository.version, SUPPORTED_REPO_FORMAT);
 }
 
 #[test]
@@ -215,24 +371,25 @@ fn courtesy_filename_scoped_root_only() {
         !tree
             .entries()
             .iter()
-            .any(|e| e.name == "HEDDLE-EMBARGO.txt"),
+            .any(|e| e.name() == "HEDDLE-EMBARGO.txt"),
         "the root-level courtesy stub must stay ignored at the worktree root"
     );
     let sub = tree
         .entries()
         .iter()
-        .find(|e| e.name == "sub" && e.is_tree())
+        .find(|e| e.name() == "sub" && e.is_tree())
         .expect("sub/ subtree must be captured");
+    let sub_hash = sub.tree_hash().expect("sub is a tree");
     let sub_tree = repo
         .store()
-        .get_tree(&sub.hash)
+        .get_tree(&sub_hash)
         .unwrap()
         .expect("sub subtree");
     assert!(
         sub_tree
             .entries()
             .iter()
-            .any(|e| e.name == "HEDDLE-EMBARGO.txt"),
+            .any(|e| e.name() == "HEDDLE-EMBARGO.txt"),
         "a user's own sub/HEDDLE-EMBARGO.txt must be captured (root-anchored ignore)"
     );
 }
@@ -269,6 +426,148 @@ fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
     // snapshot returned — no orphaned commit.
     let head = repo.head().unwrap();
     assert_eq!(head, Some(state.change_id));
+}
+
+#[test]
+fn snapshot_preserves_unchanged_materialized_gitlink_placeholder() {
+    let (temp_dir, repo) = create_test_repo();
+    let target = gitlink_target_for_tests();
+    let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).unwrap()]);
+    let baseline = repo
+        .snapshot_tree_with_attribution_profiled(
+            tree.clone(),
+            Some("gitlink baseline".to_string()),
+            None,
+            repo.get_attribution().unwrap(),
+        )
+        .unwrap()
+        .state;
+
+    repo.materialize_computed_tree(&tree, temp_dir.path())
+        .unwrap();
+    assert_eq!(
+        fs::read(temp_dir.path().join("vendor")).unwrap(),
+        gitlink_placeholder_bytes(&target)
+    );
+
+    let recaptured = repo
+        .snapshot(Some("recapture unchanged gitlink".to_string()), None)
+        .unwrap();
+    assert_eq!(recaptured.parents, vec![baseline.change_id]);
+    let recaptured_tree = repo
+        .store()
+        .get_tree(&recaptured.tree)
+        .unwrap()
+        .expect("recaptured tree");
+    let entry = recaptured_tree.get("vendor").expect("vendor entry");
+    assert_eq!(entry.gitlink_target(), Some(target));
+}
+
+#[test]
+fn snapshot_captures_edited_gitlink_placeholder_as_blob() {
+    let (temp_dir, repo) = create_test_repo();
+    let target = gitlink_target_for_tests();
+    let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).unwrap()]);
+    repo.snapshot_tree_with_attribution_profiled(
+        tree.clone(),
+        Some("gitlink baseline".to_string()),
+        None,
+        repo.get_attribution().unwrap(),
+    )
+    .unwrap();
+    repo.materialize_computed_tree(&tree, temp_dir.path())
+        .unwrap();
+
+    fs::write(temp_dir.path().join("vendor"), "this is a real file now").unwrap();
+
+    let recaptured = repo
+        .snapshot(
+            Some("recapture edited gitlink placeholder".to_string()),
+            None,
+        )
+        .unwrap();
+    let recaptured_tree = repo
+        .store()
+        .get_tree(&recaptured.tree)
+        .unwrap()
+        .expect("recaptured tree");
+    let entry = recaptured_tree.get("vendor").expect("vendor entry");
+    let blob_hash = entry.blob_hash().expect("edited placeholder becomes blob");
+    let blob = repo
+        .store()
+        .get_blob(&blob_hash)
+        .unwrap()
+        .expect("captured edited placeholder blob");
+    assert_eq!(blob.content(), b"this is a real file now");
+}
+
+#[test]
+fn snapshot_captures_placeholder_bytes_without_gitlink_baseline_as_blob() {
+    let (temp_dir, repo) = create_test_repo();
+    let target = gitlink_target_for_tests();
+    fs::write(
+        temp_dir.path().join("vendor"),
+        gitlink_placeholder_bytes(&target),
+    )
+    .unwrap();
+
+    let state = repo
+        .snapshot(Some("capture placeholder-looking file".to_string()), None)
+        .unwrap();
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)
+        .unwrap()
+        .expect("snapshot tree");
+    let entry = tree.get("vendor").expect("vendor entry");
+    let blob_hash = entry.blob_hash().expect("placeholder bytes remain blob");
+    let blob = repo
+        .store()
+        .get_blob(&blob_hash)
+        .unwrap()
+        .expect("captured placeholder-looking blob");
+    assert_eq!(blob.content(), gitlink_placeholder_bytes(&target));
+}
+
+#[test]
+fn materialize_tree_keeps_legacy_gitlink_marker_blob_as_file() {
+    let (temp_dir, repo) = create_test_repo();
+    let marker = b"heddle-submodule: 0303030303030303030303030303030303030303\n";
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::new(marker.to_vec()))
+        .expect("blob");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("vendor", blob_hash, false).expect("blob entry"),
+    ]);
+
+    repo.materialize_computed_tree(&tree, temp_dir.path())
+        .expect("materialize marker blob");
+
+    assert_eq!(
+        fs::read(temp_dir.path().join("vendor")).expect("materialized blob"),
+        marker,
+        "legacy marker bytes are ordinary file content at runtime"
+    );
+}
+
+#[test]
+fn compare_worktree_cached_treats_materialized_gitlink_as_clean_leaf() {
+    let (temp_dir, repo) = create_test_repo();
+    let target = gitlink_target_for_tests();
+    let tree = Tree::from_entries(vec![TreeEntry::gitlink("vendor", target).unwrap()]);
+
+    repo.materialize_computed_tree(&tree, temp_dir.path())
+        .expect("materialize gitlink placeholder");
+
+    let status = repo.compare_worktree_cached(&tree).expect("status");
+    assert!(status.modified.is_empty(), "modified={:?}", status.modified);
+    assert!(status.added.is_empty(), "added={:?}", status.added);
+    assert!(status.deleted.is_empty(), "deleted={:?}", status.deleted);
+    assert_eq!(
+        fs::read(temp_dir.path().join("vendor")).expect("gitlink placeholder"),
+        gitlink_placeholder_bytes(&target)
+    );
 }
 
 #[test]
@@ -428,15 +727,19 @@ fn test_goto_restores_state() {
         tree2.get("a.txt").is_some(),
         "state2 should have a.txt in tree"
     );
-    assert_ne!(
-        tree1.get("a.txt").unwrap().hash,
-        tree2.get("a.txt").unwrap().hash
-    );
+    let tree1_hash = tree1
+        .get("a.txt")
+        .unwrap()
+        .blob_hash()
+        .expect("a.txt is a blob");
+    let tree2_hash = tree2
+        .get("a.txt")
+        .unwrap()
+        .blob_hash()
+        .expect("a.txt is a blob");
+    assert_ne!(tree1_hash, tree2_hash);
 
-    let blob1 = repo
-        .store()
-        .get_blob(&tree1.get("a.txt").unwrap().hash)
-        .unwrap();
+    let blob1 = repo.store().get_blob(&tree1_hash).unwrap();
     assert!(blob1.is_some(), "blob for a.txt v1 should exist");
     assert_eq!(blob1.unwrap().content_str(), Some("version 1"));
 

@@ -12,16 +12,14 @@ use std::{
 };
 
 use objects::{
-    fs_atomic::enrich_fs_error,
-    object::{ChangeId, ContentHash, EntryType, Tree},
+    fs_atomic::{enrich_fs_error, is_directory_not_empty},
+    object::{Blob, ChangeId, ContentHash, Tree, TreeEntryTarget},
     store::ObjectStore,
+    util::gitlink_placeholder_bytes,
 };
+use sley::ObjectId as GitObjectId;
 use tracing::{debug, instrument};
 
-// Only consumed by the `#[cfg(unix)]` `remove_materialized_leaf`
-// helper; gate the import so Windows builds don't warn it unused.
-#[cfg(unix)]
-use super::repository_worktree_apply::is_directory_not_empty;
 use super::{HeddleError, Repository, Result};
 use crate::{
     worktree_index::IndexEntry,
@@ -134,31 +132,42 @@ pub(crate) enum WorktreeWriteOp {
         hash: ContentHash,
         validation_root: PathBuf,
     },
+    GitlinkPlaceholder {
+        path: PathBuf,
+        target: GitObjectId,
+    },
 }
 
 impl WorktreeWriteOp {
     pub(crate) fn path(&self) -> &Path {
         match self {
-            Self::Blob { path, .. } | Self::Symlink { path, .. } => path,
+            Self::Blob { path, .. }
+            | Self::Symlink { path, .. }
+            | Self::GitlinkPlaceholder { path, .. } => path,
         }
     }
 
     pub(crate) fn hash(&self) -> ContentHash {
         match self {
             Self::Blob { hash, .. } | Self::Symlink { hash, .. } => *hash,
+            Self::GitlinkPlaceholder { target, .. } => {
+                Blob::new(gitlink_placeholder_bytes(target)).hash()
+            }
         }
     }
 
     pub(crate) fn executable(&self) -> bool {
         match self {
             Self::Blob { executable, .. } => *executable,
-            Self::Symlink { .. } => false,
+            Self::Symlink { .. } | Self::GitlinkPlaceholder { .. } => false,
         }
     }
 
     pub(crate) fn index_kind(&self) -> crate::worktree_index::IndexEntryKind {
         match self {
-            Self::Blob { .. } => crate::worktree_index::IndexEntryKind::File,
+            Self::Blob { .. } | Self::GitlinkPlaceholder { .. } => {
+                crate::worktree_index::IndexEntryKind::File
+            }
             Self::Symlink { .. } => crate::worktree_index::IndexEntryKind::Symlink,
         }
     }
@@ -280,17 +289,18 @@ impl Repository {
             // tiny symlink-target blobs is dwarfed by the
             // decompress cost of even one real source file. Keep
             // it simple: promote everything reachable.
-            match entry.entry_type {
-                EntryType::Blob | EntryType::Symlink => {
-                    out.insert(entry.hash);
+            match entry.target() {
+                TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                    out.insert(*hash);
                 }
-                EntryType::Tree => {
+                TreeEntryTarget::Tree { hash } => {
                     let subtree = self
                         .store
-                        .get_tree(&entry.hash)?
-                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                        .get_tree(hash)?
+                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
                     self.collect_blob_hashes(&subtree, out)?;
                 }
+                TreeEntryTarget::Gitlink { .. } => {}
             }
         }
         Ok(())
@@ -380,54 +390,45 @@ impl Repository {
             child_names: tree
                 .entries()
                 .iter()
-                .map(|entry| entry.name.clone())
+                .map(|entry| entry.name().to_string())
                 .collect(),
             tree_hash: tree.hash(),
         });
 
         for entry in tree.entries() {
-            let path = dir.join(&entry.name);
-            let rel_path = rel_dir.join(&entry.name);
-            // Defensive routing: a tree entry whose `mode` is Symlink should
-            // be materialized as a real symlink even if its `entry_type`
-            // says Blob. Pre-Phase-E imports stored symlinks as
-            // `(EntryType::Blob, FileMode::Symlink)` and the resulting
-            // worktree wrote the symlink target as plain file content.
-            // This guard makes those legacy trees materialize correctly
-            // on `goto` without requiring a re-import.
-            let is_symlink = entry.entry_type == EntryType::Symlink
-                || entry.mode == objects::object::FileMode::Symlink;
-            if is_symlink {
-                plan.symlink_count += 1;
-                plan.leaves.push(WorktreeWriteOp::Symlink {
-                    path,
-                    hash: entry.hash,
-                    validation_root: plan.validation_root.clone(),
-                });
-                continue;
-            }
-            match entry.entry_type {
-                EntryType::Blob => {
+            let path = dir.join(entry.name());
+            let rel_path = rel_dir.join(entry.name());
+            match entry.target() {
+                TreeEntryTarget::Blob { hash, executable } => {
                     plan.file_count += 1;
                     plan.leaves.push(WorktreeWriteOp::Blob {
                         path,
-                        hash: entry.hash,
-                        executable: entry.is_executable(),
+                        hash: *hash,
+                        executable: *executable,
                     });
                 }
-                EntryType::Tree => {
+                TreeEntryTarget::Tree { hash } => {
                     let subtree = self
                         .store
-                        .get_tree(&entry.hash)?
-                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                        .get_tree(hash)?
+                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
                     plan.directories.push(path.clone());
                     self.plan_materialization(&subtree, &rel_path, &path, plan)?;
                 }
-                EntryType::Symlink => {
-                    // Already handled above; left here for exhaustiveness.
-                    unreachable!(
-                        "EntryType::Symlink should have been routed by the is_symlink guard"
-                    );
+                TreeEntryTarget::Symlink { hash } => {
+                    plan.symlink_count += 1;
+                    plan.leaves.push(WorktreeWriteOp::Symlink {
+                        path,
+                        hash: *hash,
+                        validation_root: plan.validation_root.clone(),
+                    });
+                }
+                TreeEntryTarget::Gitlink { target } => {
+                    plan.file_count += 1;
+                    plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
+                        path,
+                        target: *target,
+                    });
                 }
             }
         }
@@ -458,10 +459,21 @@ impl Repository {
         // dedicated probe.
         let context = MaterializationContext::new();
 
+        // Drive the repository's live progress handle: one `inc` per
+        // materialized write op. On the common null handle this is a relaxed
+        // atomic add plus a predicted-not-taken branch (no render). When a CLI
+        // command has installed a real sink, this paints a live "checking out
+        // files (n/total)" line. The handle is a cheap `Arc` clone, so it
+        // survives the `thread::scope` seam below — each worker gets its own
+        // clone and increments the shared atomic counter.
+        let progress = self.progress();
+        progress.set_total(writes.len());
+
         let result = if worker_count <= 1 {
             let mut seeded = Vec::with_capacity(writes.len());
             for write in writes {
                 seeded.push(self.materialize_write_op(write, &context)?);
+                progress.inc(1);
             }
             Ok((worker_count, seeded))
         } else {
@@ -470,10 +482,12 @@ impl Repository {
                 let mut workers = Vec::new();
                 let context = &context;
                 for chunk in writes.chunks(chunk_size) {
+                    let progress = progress.clone();
                     workers.push(scope.spawn(move || -> Result<Vec<SeededWorktreeEntry>> {
                         let mut seeded = Vec::with_capacity(chunk.len());
                         for write in chunk {
                             seeded.push(self.materialize_write_op(write, context)?);
+                            progress.inc(1);
                         }
                         Ok(seeded)
                     }));
@@ -551,6 +565,11 @@ impl Repository {
                 {
                     let _ = (blob, path, validation_root);
                 }
+            }
+            WorktreeWriteOp::GitlinkPlaceholder { path, target } => {
+                remove_materialized_leaf(path)?;
+                fs::write(path, gitlink_placeholder_bytes(target))
+                    .map_err(|err| HeddleError::Io(enrich_fs_error(path, "writing", err)))?;
             }
         }
 
@@ -849,9 +868,9 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort removal of a leaf path, used by the symlink-write
-/// branch when a tree entry has changed shape (e.g. a directory has
-/// become a symlink in the new tree).
+/// Best-effort removal of a leaf path before replacing it with another
+/// materialized leaf, such as a symlink on Unix or a gitlink placeholder
+/// on every platform.
 ///
 /// Tolerates `ENOTEMPTY` from `remove_dir` for the same reason the
 /// incremental apply path does: untracked or explicitly ignored siblings
@@ -861,11 +880,6 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
 /// tracked directory into a symlink aborts mid-apply with `os error
 /// 66`, leaving HEAD stuck and disk diverged from state.
 ///
-/// Only called from the `#[cfg(unix)]` symlink-write branch above;
-/// the `#[cfg(not(unix))]` build skips the call (no Windows symlink
-/// materialization), which would warn "function never used" without
-/// the matching gate here.
-#[cfg(unix)]
 fn remove_materialized_leaf(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -941,6 +955,73 @@ mod tests {
         MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
         materialization_worker_count, remove_materialized_leaf,
     };
+
+    /// The generic [`Progress`](objects::Progress) handle installed on a
+    /// repository must survive the `thread::scope` parallel-materialization seam:
+    /// a single shared `Arc` handle, cloned into each worker, whose atomic
+    /// counter ends at exactly the file count no matter how the work was split
+    /// across threads. This is the load-bearing acceptance criterion for #844.
+    #[test]
+    fn progress_handle_survives_parallel_materialization_seam() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use objects::{Progress, ProgressSnapshot, Sink};
+
+        /// Active sink that just counts render calls, proving the active path
+        /// ran concurrently across workers without panicking.
+        struct CountingSink(Arc<AtomicUsize>);
+        impl Sink for CountingSink {
+            fn render(&self, _snap: ProgressSnapshot) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+
+        // Well over MATERIALIZE_PARALLEL_THRESHOLD (32): on any multi-core host
+        // this exercises the `thread::scope` branch; on a single core it
+        // degrades to the serial branch and the counter assertion still holds.
+        let file_count = 256usize;
+        for i in 0..file_count {
+            std::fs::write(
+                temp_dir.path().join(format!("seam-{i:04}.txt")),
+                format!("seam payload {i} {}", "y".repeat(48)),
+            )
+            .unwrap();
+        }
+        let state = repo.snapshot(Some("seam".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+
+        let render_count = Arc::new(AtomicUsize::new(0));
+        let progress = Progress::with_sink(Box::new(CountingSink(render_count.clone())));
+        repo.set_progress(progress.clone());
+
+        let dest = temp_dir.path().join("materialized");
+        repo.materialize_tree(&tree, &dest).unwrap();
+
+        // Every write op incremented the shared counter exactly once, across
+        // however many worker threads split the batch.
+        assert_eq!(
+            progress.done(),
+            file_count,
+            "shared progress counter must equal the file count after the parallel seam"
+        );
+        assert_eq!(
+            progress.total(),
+            file_count,
+            "total set from the write batch"
+        );
+        // The active handle rendered at least once through the seam (throttled,
+        // so not once-per-file) — proving the sink is driven across threads.
+        assert!(
+            render_count.load(Ordering::Relaxed) > 0,
+            "active sink should have rendered during materialization"
+        );
+    }
 
     /// heddle#571 (round 2, finding 2): a clone syscall that raises ENOENT
     /// because the loose source vanished AFTER the pre-check (TOCTOU) must
@@ -1576,13 +1657,13 @@ mod tests {
         repo.materialize_tree(&tree, &worktree_b).unwrap();
 
         for entry in tree.entries() {
-            let path_a = worktree_a.join(&entry.name);
-            let path_b = worktree_b.join(&entry.name);
+            let path_a = worktree_a.join(entry.name());
+            let path_b = worktree_b.join(entry.name());
             assert_eq!(
                 std::fs::read(&path_a).unwrap(),
                 std::fs::read(&path_b).unwrap(),
                 "{} must read back identically across worktrees",
-                entry.name
+                entry.name()
             );
         }
     }
@@ -1706,8 +1787,8 @@ mod tests {
         // No materialized file shares an inode with the canonical
         // loose blob — that would be the hardlink bug.
         let mut canonical_inodes = HashSet::new();
-        for hash in tree.entries().iter().map(|e| &e.hash) {
-            if let Some(loose) = repo.store().loose_blob_path(hash) {
+        for hash in tree.entries().iter().filter_map(|e| e.blob_hash()) {
+            if let Some(loose) = repo.store().loose_blob_path(&hash) {
                 canonical_inodes.insert(std::fs::metadata(&loose).unwrap().ino());
             }
         }

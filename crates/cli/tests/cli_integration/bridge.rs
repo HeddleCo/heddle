@@ -451,7 +451,7 @@ fn test_cli_bridge_git_init() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
 
-    assert!(heddle(&["bridge", "init"], Some(temp.path())).is_ok());
+    assert!(heddle(&["bridge", "git", "init"], Some(temp.path())).is_ok());
     assert!(
         temp.path().join(".heddle/git").exists(),
         "Git mirror should exist"
@@ -469,11 +469,17 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     std::fs::write(source.path().join("file.txt"), "bridge export").unwrap();
     heddle(&["capture", "-m", "Bridge source"], Some(source.path())).unwrap();
 
-    // Phase A: `bridge export` requires `--destination`. Pre-Phase-A
+    // Phase A: `bridge git export` requires `--destination`. Pre-Phase-A
     // it silently no-op'd if no flag was given (writing only the sidecar
     // mapping, not actually exporting any git objects). Now it errors.
     let export = heddle(
-        &["bridge", "export", "--destination", dest.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
         Some(source.path()),
     );
     assert!(export.is_ok(), "bridge export failed: {:?}", export.err());
@@ -483,7 +489,7 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
 
     heddle(&["init"], Some(target.path())).unwrap();
     let pull = heddle(
-        &["bridge", "pull", dest.to_str().unwrap()],
+        &["bridge", "git", "pull", dest.to_str().unwrap()],
         Some(target.path()),
     );
     assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
@@ -516,6 +522,7 @@ fn test_cli_bridge_git_import_from_external_repo() {
     let result = heddle(
         &[
             "bridge",
+            "git",
             "import",
             "--path",
             git_repo_dir.path().to_str().unwrap(),
@@ -544,7 +551,7 @@ fn test_cli_bridge_git_push_to_local_bare_remote() {
     heddle(&["capture", "-m", "Bridge push"], Some(source.path())).unwrap();
 
     let result = heddle(
-        &["bridge", "push", remote.path().to_str().unwrap()],
+        &["bridge", "git", "push", remote.path().to_str().unwrap()],
         Some(source.path()),
     );
     assert!(result.is_ok(), "Bridge push failed: {:?}", result.err());

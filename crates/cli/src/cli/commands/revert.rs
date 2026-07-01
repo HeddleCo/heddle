@@ -47,7 +47,7 @@ pub fn cmd_revert(
     // this, the per-entry materialize path below would surface the
     // same corruption later with a less helpful "missing blob"-shaped
     // error. `require_tree` carries the fsck recovery hint.
-    repo.require_tree(&target_state.tree)?;
+    let target_tree = repo.require_tree(&target_state.tree)?;
 
     let empty_tree = Tree::new();
     let parent_hash = if target_state.first_parent().is_some() {
@@ -66,7 +66,13 @@ pub fn cmd_revert(
 
     let mut files_affected: Vec<String> = Vec::new();
 
-    apply_inverse_changes(&repo, &parent_tree, &changes, &mut files_affected)?;
+    apply_inverse_changes(
+        &repo,
+        &parent_tree,
+        &target_tree,
+        &changes,
+        &mut files_affected,
+    )?;
 
     if no_commit {
         if should_output_json(cli, Some(repo.config())) {
@@ -138,6 +144,7 @@ fn no_changes_to_revert_advice(state: &str) -> RecoveryAdvice {
 fn apply_inverse_changes(
     repo: &Repository,
     parent_tree: &Tree,
+    target_tree: &Tree,
     changes: &FileChangeSet,
     files_affected: &mut Vec<String>,
 ) -> Result<()> {
@@ -150,13 +157,24 @@ fn apply_inverse_changes(
                     if full_path.is_symlink() {
                         fs::remove_file(&full_path)?;
                     } else if full_path.is_dir() {
-                        // Reverting an "Added" directory removes only its
-                        // heddle-tracked descendants. Heddle-ignored
-                        // siblings (`.git/`, `target/`, `node_modules/`, …)
-                        // that the user materialized after the snapshot
-                        // must survive — `remove_path_recursively` would
-                        // silently nuke them.
-                        repo.remove_tracked_descendants(&full_path)?;
+                        if let Some(source_subtree) =
+                            repo.resolve_subtree(target_tree, std::path::Path::new(&change.path))?
+                        {
+                            // Reverting an "Added" directory removes only its
+                            // heddle-tracked descendants. Heddle-ignored
+                            // siblings (`.git/`, `target/`, `node_modules/`, ...)
+                            // that the user materialized after the snapshot
+                            // must survive.
+                            repo.remove_tracked_descendants_with_source(
+                                &full_path,
+                                &source_subtree,
+                            )?;
+                        } else {
+                            return Err(anyhow!(
+                                "cannot safely revert added path `{}`: worktree holds a directory but the target state has no tracked subtree for that path",
+                                change.path
+                            ));
+                        }
                     } else {
                         fs::remove_file(&full_path)?;
                     }
@@ -172,7 +190,11 @@ fn apply_inverse_changes(
                     files_affected.push(format!("+ {}", change.path));
                     continue;
                 }
-                let blob = repo.require_blob(&entry.hash)?;
+                let Some(hash) = entry.blob_hash() else {
+                    files_affected.push(format!("+ {}", change.path));
+                    continue;
+                };
+                let blob = repo.require_blob(&hash)?;
 
                 if let Some(parent) = full_path.parent()
                     && !parent.exists()
@@ -191,7 +213,11 @@ fn apply_inverse_changes(
                     files_affected.push(format!("M {}", change.path));
                     continue;
                 }
-                let blob = repo.require_blob(&entry.hash)?;
+                let Some(hash) = entry.blob_hash() else {
+                    files_affected.push(format!("M {}", change.path));
+                    continue;
+                };
+                let blob = repo.require_blob(&hash)?;
                 fs::write(&full_path, blob.content())?;
                 files_affected.push(format!("M {}", change.path));
             }

@@ -6,10 +6,7 @@
 
 use std::{collections::HashSet, fs, path::Path};
 
-use crate::{
-    object::ChangeId,
-    store::{Result, atomic::write_file_atomic},
-};
+use crate::{fs_atomic::write_file_atomic, object::ChangeId, store::Result};
 
 /// Manages shallow state information.
 pub struct ShallowInfo {

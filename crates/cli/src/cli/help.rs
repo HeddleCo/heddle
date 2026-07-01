@@ -890,17 +890,16 @@ const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | list | sh
 \n\
 Discussions anchor at the symbol level (file + symbol name, no line range)\n\
 so they survive renames and cross-file moves. Each discussion accumulates\n\
-turns and resolves into one of three terminal states:\n\
+turns and can resolve by edit, dismissal, or context annotation:\n\
 \n\
-- `resolve <id> --mode into-annotation`  with `--annotation-kind`,\n\
-  `--annotation-content`, optional `--annotation-tags`. Atomically\n\
-  creates the annotation and bidirectionally links it.\n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
+- `resolve <id> --mode into-annotation` requires `--annotation-content` and\n\
+  records active context on the discussion anchor.\n\
 \n\
-Visibility: `--visibility public|internal|team:NAME|restricted:LABEL`.\n\
-Defaults to the repo's namespace policy.\n";
+Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
+Empty visibility uses the configured discussion visibility policy.\n";
 
 const GIT_OVERLAY_TOPIC: &str = "Git-overlay workflow\n\
 \n\

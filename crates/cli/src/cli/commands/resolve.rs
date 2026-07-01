@@ -337,7 +337,10 @@ fn resolve_file_with_version(
         let our_tree = repo.require_tree(&our_state.tree)?;
 
         if let Some(entry) = our_tree.get(path) {
-            let blob = repo.require_blob(&entry.hash)?;
+            let Some(hash) = entry.leaf_content_hash() else {
+                return Ok(());
+            };
+            let blob = repo.require_blob(&hash)?;
             fs::write(&full_path, blob.content())?;
         }
     } else if theirs {
@@ -348,7 +351,10 @@ fn resolve_file_with_version(
         let their_tree = repo.require_tree(&their_state.tree)?;
 
         if let Some(entry) = their_tree.get(path) {
-            let blob = repo.require_blob(&entry.hash)?;
+            let Some(hash) = entry.leaf_content_hash() else {
+                return Ok(());
+            };
+            let blob = repo.require_blob(&hash)?;
             fs::write(&full_path, blob.content())?;
         }
     }

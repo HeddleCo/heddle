@@ -55,31 +55,24 @@ fn check_tree_recursive(
     *objects_checked += 1;
 
     for entry in tree.entries() {
-        if entry.is_blob() {
-            if !repo.store().has_blob(&entry.hash)? {
-                if repo.is_missing_blob(&entry.hash)? {
+        if let Some(hash) = entry.blob_hash() {
+            if !repo.store().has_blob(&hash)? {
+                if repo.is_missing_blob(&hash)? {
                     warnings.push(format!(
                         "Tree entry '{}' references blob {} that is explicitly absent under partial fetch",
-                        entry.name,
-                        entry.hash.short()
+                        entry.name(),
+                        hash.short()
                     ));
                 } else {
                     errors.push(make_error(
                         "missing_blob",
-                        &format!("Tree entry '{}' references missing blob", entry.name),
-                        Some(entry.hash.short()),
+                        &format!("Tree entry '{}' references missing blob", entry.name()),
+                        Some(hash.short()),
                     ));
                 }
             }
-        } else if entry.is_tree() {
-            check_tree_recursive(
-                repo,
-                &entry.hash,
-                checked,
-                errors,
-                warnings,
-                objects_checked,
-            )?;
+        } else if let Some(hash) = entry.tree_hash() {
+            check_tree_recursive(repo, &hash, checked, errors, warnings, objects_checked)?;
         }
     }
 
@@ -134,10 +127,10 @@ fn collect_blobs_from_tree(
     blobs: &mut HashSet<ContentHash>,
 ) -> Result<()> {
     for entry in tree.entries() {
-        if entry.is_blob() {
-            blobs.insert(entry.hash);
-        } else if entry.is_tree()
-            && let Some(subtree) = repo.store().get_tree(&entry.hash)?
+        if let Some(hash) = entry.blob_hash() {
+            blobs.insert(hash);
+        } else if let Some(hash) = entry.tree_hash()
+            && let Some(subtree) = repo.store().get_tree(&hash)?
         {
             collect_blobs_from_tree(repo, &subtree, blobs)?;
         }

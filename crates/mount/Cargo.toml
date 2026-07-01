@@ -70,6 +70,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 chrono.workspace = true
 criterion = "0.8"
+heddle-format = { path = "../format", version = "0.6" }
 # Used by the Linux mount integration tests to exercise the
 # `mmap(MAP_SHARED, ...)` path on mounted files. Required for the
 # `fuse_mount_serves_mmap_readers` regression test, which locks in
@@ -78,6 +79,7 @@ criterion = "0.8"
 # FUSE-capable kernel.
 memmap2.workspace = true
 proptest.workspace = true
+sley.workspace = true
 tempfile.workspace = true
 
 # Cross-platform PlatformShell microbench. Walks `lookup`, `read`,

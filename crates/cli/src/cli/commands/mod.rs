@@ -33,8 +33,9 @@ mod fetch;
 mod ff_record;
 mod fsck;
 mod gc;
-mod git_compat;
+mod git_adapter;
 mod git_overlay_health;
+mod git_overlay_txn;
 mod goto;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
@@ -66,7 +67,6 @@ mod revert;
 mod review;
 mod run_cmd;
 mod schemas;
-mod semantic_change_output;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 mod session;
@@ -123,12 +123,11 @@ pub use clone::{
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
     CommandCatalogOutput, advanced_help_groups, build_command_catalog, command_canonical_command,
-    command_contract_removed_alias_root, command_contract_root_commands, command_help_tier,
-    command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
-    command_runtime_contract_for_command, command_supports_json_for_command,
-    command_supports_op_id, command_supports_op_id_for_command, command_surface,
-    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
-    root_commands_for_advanced_help, root_commands_for_help_visibility,
+    command_contract_root_commands, command_help_tier, command_help_visibility, command_path,
+    command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
+    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
+    command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
+    operator_envelope_verbs, root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use completion::{cmd_complete, cmd_completion};
 pub use context::{
@@ -150,7 +149,7 @@ pub use expand::cmd_expand;
 pub use fetch::cmd_fetch;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
-pub use git_compat::{cmd_commit_compat, cmd_switch_compat};
+pub use git_adapter::{cmd_commit_git_adapter, cmd_switch_git_adapter};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 #[cfg(feature = "client")]

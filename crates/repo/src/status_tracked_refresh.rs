@@ -87,17 +87,19 @@ fn refresh_tracked_directory(
 
     let mut subtree_clean = true;
     for entry in tree.entries() {
-        let child_rel_path = join_relative_path(rel_path, &entry.name);
-        let child_key = child_key(dir_key, &entry.name);
-        let child_clean = match entry.entry_type {
+        let child_rel_path = join_relative_path(rel_path, entry.name());
+        let child_key = child_key(dir_key, entry.name());
+        let child_clean = match entry.entry_type() {
             EntryType::Blob => refresh_tracked_file(ctx, &child_rel_path, &child_key, entry)?,
             EntryType::Symlink => refresh_tracked_symlink(ctx, &child_rel_path, &child_key, entry)?,
             EntryType::Tree => {
-                let subtree = ctx.repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
-                    objects::error::HeddleError::NotFound(format!("tree {}", entry.hash))
+                let tree_hash = entry.require_content_hash();
+                let subtree = ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
+                    objects::error::HeddleError::NotFound(format!("tree {}", tree_hash))
                 })?;
                 refresh_tracked_directory(ctx, &child_rel_path, &child_key, &subtree)?
             }
+            EntryType::Gitlink => false,
         };
         subtree_clean &= child_clean;
     }
@@ -142,7 +144,9 @@ fn refresh_tracked_file(
         )?
     };
 
-    if tree_entry.hash == hash && tree_entry.is_executable() == is_executable(&metadata) {
+    if Some(hash) == tree_entry.blob_hash()
+        && tree_entry.is_executable() == is_executable(&metadata)
+    {
         Ok(true)
     } else {
         ctx.status.modified.push(rel_path.to_path_buf());
@@ -182,7 +186,7 @@ fn refresh_tracked_symlink(
         compute_and_cache_symlink(&path, key, &metadata, ctx.index)?
     };
 
-    if tree_entry.hash == hash {
+    if Some(hash) == tree_entry.symlink_hash() {
         Ok(true)
     } else {
         ctx.status.modified.push(rel_path.to_path_buf());

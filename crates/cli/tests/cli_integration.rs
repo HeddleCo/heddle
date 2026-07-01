@@ -286,6 +286,8 @@ mod error_envelope_lint;
 mod exit_codes;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
+#[path = "cli_integration/git_overlay_fixtures.rs"]
+mod git_overlay_fixtures;
 #[path = "cli_integration/git_overlay_interop_matrix.rs"]
 mod git_overlay_interop_matrix;
 #[path = "cli_integration/git_overlay_matrix.rs"]
@@ -318,6 +320,8 @@ mod output_kind_runtime;
 mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
+#[path = "cli_integration/perf_trace.rs"]
+mod perf_trace;
 #[path = "cli_integration/placeholder_identity.rs"]
 mod placeholder_identity;
 #[path = "cli_integration/realworld_git.rs"]
@@ -338,6 +342,8 @@ mod stdout_stderr_split;
 mod thread_cleanup;
 #[path = "cli_integration/thread_default_current.rs"]
 mod thread_default_current;
+#[path = "cli_integration/timeline.rs"]
+mod timeline;
 #[path = "cli_integration/try_cmd.rs"]
 mod try_cmd;
 #[path = "cli_integration/unrelated_histories_recovery.rs"]
@@ -348,42 +354,6 @@ mod visibility;
 mod watch;
 #[path = "cli_integration/worktree_target_advice.rs"]
 mod worktree_target_advice;
-
-fn translate_legacy_args(args: &[&str]) -> Vec<String> {
-    let mut prefix = Vec::new();
-    let mut i = 0;
-    while i < args.len() && args[i].starts_with("--") {
-        prefix.push(args[i].to_string());
-        i += 1;
-    }
-    let rest = &args[i..];
-    let translated = match rest {
-        ["thread", "delete", name] => vec![
-            "thread".into(),
-            "drop".into(),
-            (*name).into(),
-            "--delete-thread".into(),
-        ],
-        // Legacy flat bridge form (`heddle bridge import`, `bridge
-        // export`, etc.) — main wrapped these under `BridgeCommands::Git`,
-        // so insert the `git` token between `bridge` and the
-        // sub-verb. Tests stay readable; production CLI follows main's
-        // canonical wrapped form.
-        ["bridge", verb, rest_args @ ..]
-            if matches!(
-                *verb,
-                "import" | "export" | "sync" | "push" | "pull" | "init" | "ingest" | "reason"
-            ) =>
-        {
-            let mut translated: Vec<String> = vec!["bridge".into(), "git".into(), (*verb).into()];
-            translated.extend(rest_args.iter().map(|arg| (*arg).to_string()));
-            translated
-        }
-        _ => rest.iter().map(|arg| (*arg).to_string()).collect(),
-    };
-    prefix.extend(translated);
-    prefix
-}
 
 pub(crate) fn assert_json_recovery_advice_fields(envelope: &Value, context: &str) {
     for field in [
@@ -471,7 +441,7 @@ fn heddle_help(args: &[&str]) -> String {
 
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
 
     let temp;
     let dir = if let Some(dir) = cwd {
@@ -522,7 +492,7 @@ fn heddle_output_with_env_removed(
     remove_envs: &[&str],
 ) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
 
     let temp;
     let dir = if let Some(dir) = cwd {
@@ -553,7 +523,7 @@ fn heddle_output_with_stdin(
     stdin: &str,
 ) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     cmd.current_dir(cwd);
     let config_path = default_test_user_config_path(cwd);
     seed_default_test_user_config(&config_path, cwd)?;

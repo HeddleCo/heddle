@@ -28,9 +28,11 @@ pub use cli_args::{
     StashCommands, SwitchArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs,
     ThreadListArgs, ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
     ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs,
-    TimelineCommands, TimelineForkArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineTargetArgs,
-    TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs,
-    VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs, WorkspaceModeArg,
+    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs,
+    VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs,
+    WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
@@ -48,6 +50,8 @@ pub fn is_tty() -> bool {
 }
 
 pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<heddle_core::ExecutionContext> {
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let repo = cli.open_repo()?;
     let config = UserConfig::load_default()?;
     let verbosity = if cli.quiet {
@@ -59,6 +63,7 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<heddle_core::Exec
     };
     let mut builder = heddle_core::ExecutionContext::builder()
         .repo(repo)
+        .start_path(start)
         .config(config)
         .verbosity(verbosity)
         .progress(std::sync::Arc::new(heddle_core::NoopProgress))

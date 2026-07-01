@@ -2691,7 +2691,7 @@ fn state_to_state_add_round_trips() {
 // ---------------------------------------------------------------------------
 // Surface — embedded diff payload (`merge --with-diff --output json`). Covers
 // cid 3319484733: `compute_state_diff`/`compute_tree_diff` returned a
-// `DiffOutput` whose `.patch` defaulted to `None`, so structured consumers of
+// `DiffReport` whose `.patch` defaulted to `None`, so structured consumers of
 // the merge preview saw hunks in `.changes` but no applicable patch text.
 // ---------------------------------------------------------------------------
 
