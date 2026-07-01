@@ -29,6 +29,12 @@ pub struct PlannedObject {
     pub obj_type: ObjectType,
 }
 
+#[derive(Debug, Clone)]
+pub struct StateClosureTransferObjects {
+    pub planned_objects: Vec<PlannedObject>,
+    pub full_objects: Option<Vec<ObjectInfo>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectType {
     Blob,
@@ -68,76 +74,13 @@ pub fn enumerate_state_closure_with_options(
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<ObjectInfo>> {
-    let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
-
     let mut out = Vec::new();
-    let mut seen_states: HashSet<ChangeId> = HashSet::new();
-    let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
-    let mut queue: VecDeque<(ChangeId, u32)> = VecDeque::new();
-    queue.push_back((state_id, 0));
-
-    while let Some((id, depth)) = queue.pop_front() {
-        if excluded_states.contains(&id) {
-            continue;
+    walk_state_closure(store, state_id, options, |event| {
+        if let Some(info) = object_info_from_event(store, event)? {
+            out.push(info);
         }
-        if !seen_states.insert(id) {
-            continue;
-        }
-
-        let state = store
-            .get_state(&id)?
-            .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
-
-        let state_bytes = rmp_serde::to_vec_named(&state)?;
-        out.push(ObjectInfo {
-            id: ObjectId::ChangeId(id),
-            obj_type: ObjectType::State,
-            size: state_bytes.len() as u64,
-            delta_base: None,
-        });
-        emit_state_visibility_info(store, &id, &mut out)?;
-
-        if options.depth.map(|max| depth < max).unwrap_or(true) {
-            for parent in &state.parents {
-                queue.push_back((*parent, depth + 1));
-            }
-        }
-
-        enumerate_tree_closure_filtered(
-            store,
-            state.tree,
-            &excluded_hashes,
-            &mut seen_hashes,
-            &mut out,
-        )?;
-        if let Some(provenance_root) = state.provenance {
-            enumerate_tree_closure_filtered(
-                store,
-                provenance_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )?;
-        }
-        if let Some(context_root) = state.context {
-            enumerate_tree_closure_filtered(
-                store,
-                context_root,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )?;
-        }
-        for metadata_blob in state_blob_dependencies(&state) {
-            enumerate_blob_filtered(
-                store,
-                metadata_blob,
-                &excluded_hashes,
-                &mut seen_hashes,
-                &mut out,
-            )?;
-        }
-    }
+        Ok(())
+    })?;
 
     Ok(out)
 }
@@ -154,9 +97,74 @@ pub fn enumerate_state_closure_plan_with_options(
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
+    let mut out = Vec::new();
+    walk_state_closure(store, state_id, options, |event| {
+        if let Some(object) = planned_object_from_event(store, event)? {
+            out.push(object);
+        }
+        Ok(())
+    })?;
+
+    Ok(out)
+}
+
+pub fn enumerate_state_closure_transfer_with_options(
+    store: &impl ObjectStore,
+    state_id: ChangeId,
+    options: StateClosureOptions,
+    full_descriptor_object_threshold: usize,
+) -> Result<StateClosureTransferObjects> {
+    let mut planned_objects = Vec::new();
+    let mut full_objects = Some(Vec::new());
+
+    walk_state_closure(store, state_id, options, |event| {
+        if let Some(object) = planned_object_from_event(store, event)? {
+            planned_objects.push(object);
+        }
+
+        if full_objects.is_some() && planned_objects.len() > full_descriptor_object_threshold {
+            full_objects = None;
+        }
+        if let Some(objects) = full_objects.as_mut()
+            && let Some(info) = object_info_from_event(store, event)?
+        {
+            objects.push(info);
+        }
+
+        Ok(())
+    })?;
+
+    Ok(StateClosureTransferObjects {
+        planned_objects,
+        full_objects,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobSource {
+    Tree,
+    StateMetadata,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StateClosureEvent<'a> {
+    State { id: ChangeId, state: &'a State },
+    Tree { hash: ContentHash, tree: &'a objects::object::Tree },
+    Blob { hash: ContentHash, source: BlobSource },
+    Redaction { blob: ContentHash },
+    StateVisibility { state: ChangeId },
+    ExcludedState { id: ChangeId },
+    ExcludedHash { hash: ContentHash },
+}
+
+fn walk_state_closure(
+    store: &impl ObjectStore,
+    state_id: ChangeId,
+    options: StateClosureOptions,
+    mut visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
     let (excluded_states, excluded_hashes) = collect_excluded(store, &options.exclude_states)?;
 
-    let mut out = Vec::new();
     let mut seen_states: HashSet<ChangeId> = HashSet::new();
     let mut seen_hashes: HashSet<ContentHash> = HashSet::new();
     let mut queue: VecDeque<(ChangeId, u32)> = VecDeque::new();
@@ -164,6 +172,7 @@ pub fn enumerate_state_closure_plan_with_options(
 
     while let Some((id, depth)) = queue.pop_front() {
         if excluded_states.contains(&id) {
+            visit(StateClosureEvent::ExcludedState { id })?;
             continue;
         }
         if !seen_states.insert(id) {
@@ -174,11 +183,10 @@ pub fn enumerate_state_closure_plan_with_options(
             .get_state(&id)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
 
-        out.push(PlannedObject {
-            id: ObjectId::ChangeId(id),
-            obj_type: ObjectType::State,
-        });
-        emit_state_visibility_plan(store, &id, &mut out)?;
+        visit(StateClosureEvent::State { id, state: &state })?;
+        if store.has_state_visibility_for_state(&id)? {
+            visit(StateClosureEvent::StateVisibility { state: id })?;
+        }
 
         if options.depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
@@ -186,53 +194,55 @@ pub fn enumerate_state_closure_plan_with_options(
             }
         }
 
-        enumerate_tree_plan_filtered(
+        walk_tree_closure_filtered(
             store,
             state.tree,
             &excluded_hashes,
             &mut seen_hashes,
-            &mut out,
+            &mut visit,
         )?;
         if let Some(provenance_root) = state.provenance {
-            enumerate_tree_plan_filtered(
+            walk_tree_closure_filtered(
                 store,
                 provenance_root,
                 &excluded_hashes,
                 &mut seen_hashes,
-                &mut out,
+                &mut visit,
             )?;
         }
         if let Some(context_root) = state.context {
-            enumerate_tree_plan_filtered(
+            walk_tree_closure_filtered(
                 store,
                 context_root,
                 &excluded_hashes,
                 &mut seen_hashes,
-                &mut out,
+                &mut visit,
             )?;
         }
         for metadata_blob in state_blob_dependencies(&state) {
-            enumerate_blob_plan_filtered(
+            walk_blob_filtered(
                 store,
                 metadata_blob,
+                BlobSource::StateMetadata,
                 &excluded_hashes,
                 &mut seen_hashes,
-                &mut out,
+                &mut visit,
             )?;
         }
     }
 
-    Ok(out)
+    Ok(())
 }
 
-fn enumerate_tree_closure_filtered(
+fn walk_tree_closure_filtered(
     store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<ObjectInfo>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
     if excluded.contains(&tree_hash) {
+        visit(StateClosureEvent::ExcludedHash { hash: tree_hash })?;
         return Ok(());
     }
     if !seen.insert(tree_hash) {
@@ -243,36 +253,25 @@ fn enumerate_tree_closure_filtered(
         .get_tree(&tree_hash)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(tree_hash.to_hex()))?;
 
-    let tree_bytes = rmp_serde::to_vec_named(&tree)?;
-    out.push(ObjectInfo {
-        id: ObjectId::Hash(tree_hash),
-        obj_type: ObjectType::Tree,
-        size: tree_bytes.len() as u64,
-        delta_base: None,
-    });
+    visit(StateClosureEvent::Tree {
+        hash: tree_hash,
+        tree: &tree,
+    })?;
 
     for entry in tree.entries() {
         match entry.target() {
             TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
-                if excluded.contains(hash) {
-                    continue;
-                }
-                if !seen.insert(*hash) {
-                    continue;
-                }
-                let blob = store
-                    .get_blob(hash)?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-                out.push(ObjectInfo {
-                    id: ObjectId::Hash(*hash),
-                    obj_type: ObjectType::Blob,
-                    size: blob.size() as u64,
-                    delta_base: None,
-                });
-                emit_redaction_info(store, hash, out)?;
+                walk_blob_filtered(
+                    store,
+                    *hash,
+                    BlobSource::Tree,
+                    excluded,
+                    seen,
+                    visit,
+                )?;
             }
             TreeEntryTarget::Tree { hash } => {
-                enumerate_tree_closure_filtered(store, *hash, excluded, seen, out)?;
+                walk_tree_closure_filtered(store, *hash, excluded, seen, visit)?;
             }
             TreeEntryTarget::Gitlink { .. } => {}
         }
@@ -281,164 +280,174 @@ fn enumerate_tree_closure_filtered(
     Ok(())
 }
 
-fn enumerate_blob_filtered(
+fn walk_blob_filtered(
     store: &impl ObjectStore,
     blob_hash: ContentHash,
+    source: BlobSource,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<ObjectInfo>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
-    if excluded.contains(&blob_hash) || !seen.insert(blob_hash) {
+    if excluded.contains(&blob_hash) {
+        visit(StateClosureEvent::ExcludedHash { hash: blob_hash })?;
         return Ok(());
     }
-    let blob = store
-        .get_blob(&blob_hash)?
-        .ok_or_else(|| ProtocolError::ObjectNotFound(blob_hash.to_hex()))?;
-    out.push(ObjectInfo {
-        id: ObjectId::Hash(blob_hash),
-        obj_type: ObjectType::Blob,
-        size: blob.size() as u64,
-        delta_base: None,
-    });
-    emit_redaction_info(store, &blob_hash, out)
-}
-
-/// If `state` carries a state-visibility sidecar, push a StateVisibility
-/// `ObjectInfo` keyed by the state id. No-op when the state is public by
-/// absence.
-fn emit_state_visibility_info(
-    store: &impl ObjectStore,
-    state: &ChangeId,
-    out: &mut Vec<ObjectInfo>,
-) -> Result<()> {
-    if let Some(bytes) = store.get_state_visibility_bytes_for_state(state)? {
-        out.push(ObjectInfo {
-            id: ObjectId::ChangeId(*state),
-            obj_type: ObjectType::StateVisibility,
-            size: bytes.len() as u64,
-            delta_base: None,
-        });
+    if !seen.insert(blob_hash) {
+        return Ok(());
+    }
+    visit(StateClosureEvent::Blob {
+        hash: blob_hash,
+        source,
+    })?;
+    if store.has_redactions_for_blob(&blob_hash)? {
+        visit(StateClosureEvent::Redaction { blob: blob_hash })?;
     }
     Ok(())
 }
 
-fn emit_state_visibility_plan(
+fn object_info_from_event(
     store: &impl ObjectStore,
-    state: &ChangeId,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()> {
-    if store.has_state_visibility_for_state(state)? {
-        out.push(PlannedObject {
-            id: ObjectId::ChangeId(*state),
-            obj_type: ObjectType::StateVisibility,
-        });
+    event: StateClosureEvent<'_>,
+) -> Result<Option<ObjectInfo>> {
+    match event {
+        StateClosureEvent::State { id, state } => {
+            let state_bytes = rmp_serde::to_vec_named(state)?;
+            Ok(Some(ObjectInfo {
+                id: ObjectId::ChangeId(id),
+                obj_type: ObjectType::State,
+                size: state_bytes.len() as u64,
+                delta_base: None,
+            }))
+        }
+        StateClosureEvent::Tree { hash, tree } => {
+            let tree_bytes = rmp_serde::to_vec_named(tree)?;
+            Ok(Some(ObjectInfo {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::Tree,
+                size: tree_bytes.len() as u64,
+                delta_base: None,
+            }))
+        }
+        StateClosureEvent::Blob { hash, .. } => {
+            let blob = store
+                .get_blob(&hash)?
+                .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+            Ok(Some(ObjectInfo {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::Blob,
+                size: blob.size() as u64,
+                delta_base: None,
+            }))
+        }
+        StateClosureEvent::Redaction { blob } => {
+            Ok(store.get_redactions_bytes_for_blob(&blob)?.map(|bytes| ObjectInfo {
+                id: ObjectId::Hash(blob),
+                obj_type: ObjectType::Redaction,
+                size: bytes.len() as u64,
+                delta_base: None,
+            }))
+        }
+        StateClosureEvent::StateVisibility { state } => Ok(store
+            .get_state_visibility_bytes_for_state(&state)?
+            .map(|bytes| ObjectInfo {
+                id: ObjectId::ChangeId(state),
+                obj_type: ObjectType::StateVisibility,
+                size: bytes.len() as u64,
+                delta_base: None,
+            })),
+        StateClosureEvent::ExcludedState { id } => {
+            let _ = id;
+            Ok(None)
+        }
+        StateClosureEvent::ExcludedHash { hash } => {
+            let _ = hash;
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
-/// If `blob` carries a redaction sidecar, push a Redaction `ObjectInfo`
-/// keyed by the blob hash. No-op when the blob has no redactions.
-///
-/// Redactions are not deduped via the `seen: HashSet<ContentHash>` used
-/// for blob/tree dedup because the `ObjectId` for a redaction is the
-/// *redacted blob's* hash — and that hash is already inserted into
-/// `seen` by the blob's own emission. A blob can only appear once in
-/// the closure (dedup'd by hash), so its redaction can only be emitted
-/// once too.
-fn emit_redaction_info(
+fn planned_object_from_event(
     store: &impl ObjectStore,
-    blob: &ContentHash,
-    out: &mut Vec<ObjectInfo>,
-) -> Result<()> {
-    if let Some(bytes) = store.get_redactions_bytes_for_blob(blob)? {
-        out.push(ObjectInfo {
-            id: ObjectId::Hash(*blob),
+    event: StateClosureEvent<'_>,
+) -> Result<Option<PlannedObject>> {
+    match event {
+        StateClosureEvent::State { id, .. } => Ok(Some(PlannedObject {
+            id: ObjectId::ChangeId(id),
+            obj_type: ObjectType::State,
+        })),
+        StateClosureEvent::Tree { hash, .. } => Ok(Some(PlannedObject {
+            id: ObjectId::Hash(hash),
+            obj_type: ObjectType::Tree,
+        })),
+        StateClosureEvent::Blob { hash, source } => {
+            if source == BlobSource::StateMetadata && store.get_blob(&hash)?.is_none() {
+                return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
+            }
+            Ok(Some(PlannedObject {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::Blob,
+            }))
+        }
+        StateClosureEvent::Redaction { blob } => Ok(Some(PlannedObject {
+            id: ObjectId::Hash(blob),
             obj_type: ObjectType::Redaction,
-            size: bytes.len() as u64,
-            delta_base: None,
-        });
+        })),
+        StateClosureEvent::StateVisibility { state } => Ok(Some(PlannedObject {
+            id: ObjectId::ChangeId(state),
+            obj_type: ObjectType::StateVisibility,
+        })),
+        StateClosureEvent::ExcludedState { id } => {
+            let _ = id;
+            Ok(None)
+        }
+        StateClosureEvent::ExcludedHash { hash } => {
+            let _ = hash;
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
-fn enumerate_tree_plan_filtered(
+pub fn missing_blobs_in_tree(
     store: &impl ObjectStore,
     tree_hash: ContentHash,
-    excluded: &HashSet<ContentHash>,
-    seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<PlannedObject>,
+) -> Result<Vec<ContentHash>> {
+    let mut missing = Vec::new();
+    collect_missing_blobs_recursive(store, &tree_hash, &mut missing)?;
+    Ok(missing)
+}
+
+fn collect_missing_blobs_recursive(
+    store: &impl ObjectStore,
+    tree_hash: &ContentHash,
+    missing: &mut Vec<ContentHash>,
 ) -> Result<()> {
-    if excluded.contains(&tree_hash) {
+    let Some(tree) = store.get_tree(tree_hash).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "load tree {} while collecting lazy hydration missing blobs: {err}",
+            tree_hash.to_hex()
+        ))
+    })?
+    else {
         return Ok(());
-    }
-    if !seen.insert(tree_hash) {
-        return Ok(());
-    }
-
-    let tree = store
-        .get_tree(&tree_hash)?
-        .ok_or_else(|| ProtocolError::ObjectNotFound(tree_hash.to_hex()))?;
-
-    out.push(PlannedObject {
-        id: ObjectId::Hash(tree_hash),
-        obj_type: ObjectType::Tree,
-    });
+    };
 
     for entry in tree.entries() {
         match entry.target() {
             TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
-                if excluded.contains(hash) {
-                    continue;
+                if !store.has_blob(hash).map_err(|err| {
+                    ProtocolError::InvalidState(format!(
+                        "check blob {} while collecting lazy hydration missing blobs: {err}",
+                        hash.to_hex()
+                    ))
+                })? {
+                    missing.push(*hash);
                 }
-                if !seen.insert(*hash) {
-                    continue;
-                }
-                out.push(PlannedObject {
-                    id: ObjectId::Hash(*hash),
-                    obj_type: ObjectType::Blob,
-                });
-                emit_redaction_plan(store, hash, out)?;
             }
             TreeEntryTarget::Tree { hash } => {
-                enumerate_tree_plan_filtered(store, *hash, excluded, seen, out)?;
+                collect_missing_blobs_recursive(store, hash, missing)?;
             }
             TreeEntryTarget::Gitlink { .. } => {}
         }
-    }
-
-    Ok(())
-}
-
-fn enumerate_blob_plan_filtered(
-    store: &impl ObjectStore,
-    blob_hash: ContentHash,
-    excluded: &HashSet<ContentHash>,
-    seen: &mut HashSet<ContentHash>,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()> {
-    if excluded.contains(&blob_hash) || !seen.insert(blob_hash) {
-        return Ok(());
-    }
-    if store.get_blob(&blob_hash)?.is_none() {
-        return Err(ProtocolError::ObjectNotFound(blob_hash.to_hex()));
-    }
-    out.push(PlannedObject {
-        id: ObjectId::Hash(blob_hash),
-        obj_type: ObjectType::Blob,
-    });
-    emit_redaction_plan(store, &blob_hash, out)
-}
-
-fn emit_redaction_plan(
-    store: &impl ObjectStore,
-    blob: &ContentHash,
-    out: &mut Vec<PlannedObject>,
-) -> Result<()> {
-    if store.has_redactions_for_blob(blob)? {
-        out.push(PlannedObject {
-            id: ObjectId::Hash(*blob),
-            obj_type: ObjectType::Redaction,
-        });
     }
     Ok(())
 }
@@ -567,19 +576,21 @@ mod tests {
     use chrono::Utc;
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
-            DiscussionsBlob, Principal, Redaction, State, StateVisibility, SymbolAnchor, Tree,
-            TreeEntry, VisibilityTier,
+            Action, ActionId, Attribution, Blob, ChangeId, ContentHash, Discussion,
+            DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal, Redaction, State,
+            StateVisibility, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
         },
-        store::ObjectStore,
+        store::{ObjectStore, Result as StoreResult},
     };
     use repo::Repository;
     use sley::ObjectId as GitObjectId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     use super::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
-        enumerate_state_closure_plan_with_options, enumerate_state_closure_with_options,
+        enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
+        enumerate_state_closure_with_options, missing_blobs_in_tree,
     };
 
     fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
@@ -593,6 +604,22 @@ mod tests {
         objects
             .iter()
             .map(|info| (info.id.clone(), info.obj_type))
+            .collect()
+    }
+
+    fn object_info_fingerprint(
+        objects: &[ObjectInfo],
+    ) -> Vec<(ObjectId, ObjectType, u64, Option<ContentHash>)> {
+        objects
+            .iter()
+            .map(|info| {
+                (
+                    info.id.clone(),
+                    info.obj_type,
+                    info.size,
+                    info.delta_base,
+                )
+            })
             .collect()
     }
 
@@ -610,6 +637,98 @@ mod tests {
         let plan_pairs = pairs_from_plan(&plan);
         assert_eq!(full_pairs, plan_pairs);
         full_pairs
+    }
+
+    fn assert_contains_object(
+        objects: &HashSet<(ObjectId, ObjectType)>,
+        id: ObjectId,
+        obj_type: ObjectType,
+    ) {
+        assert!(
+            objects.contains(&(id.clone(), obj_type)),
+            "expected closure to contain {id:?} as {obj_type:?}: {objects:?}"
+        );
+    }
+
+    struct CountingStore<'a, S> {
+        inner: &'a S,
+        state_reads: AtomicUsize,
+    }
+
+    impl<'a, S> CountingStore<'a, S> {
+        fn new(inner: &'a S) -> Self {
+            Self {
+                inner,
+                state_reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn state_reads(&self) -> usize {
+            self.state_reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl<S: ObjectStore> ObjectStore for CountingStore<'_, S> {
+        fn get_blob(&self, hash: &ContentHash) -> StoreResult<Option<Blob>> {
+            self.inner.get_blob(hash)
+        }
+
+        fn put_blob(&self, blob: &Blob) -> StoreResult<ContentHash> {
+            self.inner.put_blob(blob)
+        }
+
+        fn has_blob(&self, hash: &ContentHash) -> StoreResult<bool> {
+            self.inner.has_blob(hash)
+        }
+
+        fn get_tree(&self, hash: &ContentHash) -> StoreResult<Option<Tree>> {
+            self.inner.get_tree(hash)
+        }
+
+        fn put_tree(&self, tree: &Tree) -> StoreResult<ContentHash> {
+            self.inner.put_tree(tree)
+        }
+
+        fn has_tree(&self, hash: &ContentHash) -> StoreResult<bool> {
+            self.inner.has_tree(hash)
+        }
+
+        fn get_state(&self, id: &ChangeId) -> StoreResult<Option<State>> {
+            self.state_reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_state(id)
+        }
+
+        fn put_state(&self, state: &State) -> StoreResult<()> {
+            self.inner.put_state(state)
+        }
+
+        fn has_state(&self, id: &ChangeId) -> StoreResult<bool> {
+            self.inner.has_state(id)
+        }
+
+        fn list_states(&self) -> StoreResult<Vec<ChangeId>> {
+            self.inner.list_states()
+        }
+
+        fn get_action(&self, id: &ActionId) -> StoreResult<Option<Action>> {
+            self.inner.get_action(id)
+        }
+
+        fn put_action(&self, action: &mut Action) -> StoreResult<ActionId> {
+            self.inner.put_action(action)
+        }
+
+        fn list_actions(&self) -> StoreResult<Vec<ActionId>> {
+            self.inner.list_actions()
+        }
+
+        fn list_blobs(&self) -> StoreResult<Vec<ContentHash>> {
+            self.inner.list_blobs()
+        }
+
+        fn list_trees(&self) -> StoreResult<Vec<ContentHash>> {
+            self.inner.list_trees()
+        }
     }
 
     fn test_attribution() -> Attribution {
@@ -653,6 +772,263 @@ mod tests {
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::ChangeId(_)))
         );
+    }
+
+    #[test]
+    fn transfer_projection_matches_full_and_plan_on_mixed_state_closure_fixture() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let excluded_blob = repo
+            .store()
+            .put_blob(&Blob::from("excluded"))
+            .expect("put excluded blob");
+        let excluded_tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("excluded.txt", excluded_blob, false).unwrap(),
+            ]))
+            .expect("put excluded tree");
+        let excluded_parent = State::new(excluded_tree_hash, Vec::new(), test_attribution());
+        repo.store()
+            .put_state(&excluded_parent)
+            .expect("put excluded parent");
+
+        let redacted_blob = repo
+            .store()
+            .put_blob(&Blob::from("secret"))
+            .expect("put redacted blob");
+        let nested_blob = repo
+            .store()
+            .put_blob(&Blob::from("nested"))
+            .expect("put nested blob");
+        let symlink_blob = repo
+            .store()
+            .put_blob(&Blob::from("target"))
+            .expect("put symlink blob");
+        let context_blob = repo
+            .store()
+            .put_blob(&Blob::from("context"))
+            .expect("put context blob");
+        let provenance_blob = repo
+            .store()
+            .put_blob(&Blob::from("provenance"))
+            .expect("put provenance blob");
+        let risk_blob = repo
+            .store()
+            .put_blob(&Blob::from("risk"))
+            .expect("put risk blob");
+        let review_blob = repo
+            .store()
+            .put_blob(&Blob::from("review"))
+            .expect("put review blob");
+        let discussions_blob = repo
+            .store()
+            .put_blob(&Blob::from("discussion"))
+            .expect("put discussion blob");
+        let conflicts_blob = repo
+            .store()
+            .put_blob(&Blob::from("conflicts"))
+            .expect("put conflicts blob");
+
+        let nested_tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("nested.txt", nested_blob, false).unwrap(),
+                TreeEntry::symlink("latest", symlink_blob).unwrap(),
+            ]))
+            .expect("put nested tree");
+        let context_tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("context.txt", context_blob, false).unwrap(),
+            ]))
+            .expect("put context tree");
+        let provenance_tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("lineage.txt", provenance_blob, false).unwrap(),
+            ]))
+            .expect("put provenance tree");
+        let gitlink_target: GitObjectId = "0303030303030303030303030303030303030303"
+            .parse()
+            .expect("git oid");
+        let root_tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("secret.txt", redacted_blob, false).unwrap(),
+                TreeEntry::directory("nested", nested_tree_hash).unwrap(),
+                TreeEntry::gitlink("vendor", gitlink_target).unwrap(),
+            ]))
+            .expect("put root tree");
+        let state = State::new(
+            root_tree_hash,
+            vec![excluded_parent.change_id],
+            test_attribution(),
+        )
+        .with_context(context_tree_hash)
+        .with_provenance(provenance_tree_hash)
+        .with_risk_signals(risk_blob)
+        .with_review_signatures(review_blob)
+        .with_discussions(discussions_blob)
+        .with_structured_conflicts(conflicts_blob);
+        repo.store().put_state(&state).expect("put state");
+
+        repo.put_redaction(Redaction {
+            redacted_blob,
+            state: state.change_id,
+            path: "secret.txt".to_string(),
+            reason: "test leak".to_string(),
+            redactor: Principal::new("Tester", "tester@example.test"),
+            redacted_at: Utc::now(),
+            signature: None,
+            purged_at: None,
+            supersedes: None,
+        })
+        .expect("put redaction");
+        repo.put_state_visibility(StateVisibility {
+            state: state.change_id,
+            tier: VisibilityTier::Restricted {
+                scope_label: "security".to_string(),
+            },
+            embargo_until: None,
+            declarer: Principal::new("Tester", "tester@example.test"),
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("put visibility");
+
+        let options = StateClosureOptions {
+            depth: None,
+            exclude_states: vec![excluded_parent.change_id],
+        };
+        let transfer = enumerate_state_closure_transfer_with_options(
+            repo.store(),
+            state.change_id,
+            options.clone(),
+            512,
+        )
+        .expect("transfer projection");
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            options.clone(),
+        )
+        .expect("full closure");
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.change_id,
+            options,
+        )
+        .expect("plan closure");
+        assert_eq!(
+            transfer.full_objects.as_deref().map(object_info_fingerprint),
+            Some(object_info_fingerprint(&full))
+        );
+        assert_eq!(transfer.planned_objects, plan);
+
+        let full_pairs = pairs_from_full(&full);
+        assert_eq!(full_pairs, pairs_from_plan(&plan));
+        assert_contains_object(
+            &full_pairs,
+            ObjectId::ChangeId(state.change_id),
+            ObjectType::State,
+        );
+        assert_contains_object(
+            &full_pairs,
+            ObjectId::ChangeId(state.change_id),
+            ObjectType::StateVisibility,
+        );
+        assert_contains_object(&full_pairs, ObjectId::Hash(redacted_blob), ObjectType::Blob);
+        assert_contains_object(&full_pairs, ObjectId::Hash(redacted_blob), ObjectType::Redaction);
+        for hash in [
+            root_tree_hash,
+            nested_tree_hash,
+            context_tree_hash,
+            provenance_tree_hash,
+        ] {
+            assert_contains_object(&full_pairs, ObjectId::Hash(hash), ObjectType::Tree);
+        }
+        for hash in [
+            nested_blob,
+            symlink_blob,
+            context_blob,
+            provenance_blob,
+            risk_blob,
+            review_blob,
+            discussions_blob,
+            conflicts_blob,
+        ] {
+            assert_contains_object(&full_pairs, ObjectId::Hash(hash), ObjectType::Blob);
+        }
+        assert!(!full_pairs.contains(&(
+            ObjectId::ChangeId(excluded_parent.change_id),
+            ObjectType::State
+        )));
+        assert!(!full_pairs.contains(&(ObjectId::Hash(excluded_tree_hash), ObjectType::Tree)));
+        assert!(!full_pairs.contains(&(ObjectId::Hash(excluded_blob), ObjectType::Blob)));
+    }
+
+    #[test]
+    fn transfer_projection_reads_root_state_once_on_small_transfer() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let blob = repo
+            .store()
+            .put_blob(&Blob::from("hello\n"))
+            .expect("put blob");
+        let tree_hash = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("README.md", blob, false).unwrap(),
+            ]))
+            .expect("put tree");
+        let state = State::new(tree_hash, Vec::new(), test_attribution());
+        repo.store().put_state(&state).expect("put state");
+        let store = CountingStore::new(repo.store());
+
+        let transfer = enumerate_state_closure_transfer_with_options(
+            &store,
+            state.change_id,
+            StateClosureOptions::default(),
+            512,
+        )
+        .expect("transfer projection");
+
+        assert!(
+            !transfer.planned_objects.is_empty(),
+            "lean projection should be available"
+        );
+        assert!(transfer.full_objects.is_some());
+        assert_eq!(
+            store.state_reads(),
+            1,
+            "small transfer projection must not read the root state through a second closure walk"
+        );
+    }
+
+    #[test]
+    fn transfer_projection_drops_full_descriptors_after_threshold() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        let transfer = enumerate_state_closure_transfer_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+            0,
+        )
+        .expect("transfer projection");
+
+        assert!(
+            !transfer.planned_objects.is_empty(),
+            "lean projection should still be available over the threshold"
+        );
+        assert!(transfer.full_objects.is_none());
     }
 
     #[test]
@@ -803,6 +1179,39 @@ mod tests {
         assert!(full.iter().any(|info| {
             info.id == ObjectId::Hash(root_hash) && info.obj_type == ObjectType::Tree
         }));
+    }
+
+    #[test]
+    fn missing_blobs_in_tree_skips_gitlinks_and_walks_nested_side_paths() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let present_blob = repo
+            .store()
+            .put_blob(&Blob::from("already local"))
+            .expect("put present blob");
+        let missing_nested = ContentHash::from_bytes([7; 32]);
+        let missing_symlink = ContentHash::from_bytes([8; 32]);
+        let nested_tree = Tree::from_entries(vec![
+            TreeEntry::file("remote.txt", missing_nested, false).unwrap(),
+            TreeEntry::symlink("remote-link", missing_symlink).unwrap(),
+        ]);
+        let nested_tree_hash = repo.store().put_tree(&nested_tree).expect("put nested tree");
+        let gitlink_target: GitObjectId = "0404040404040404040404040404040404040404"
+            .parse()
+            .expect("git oid");
+        let root = Tree::from_entries(vec![
+            TreeEntry::file("local.txt", present_blob, false).unwrap(),
+            TreeEntry::directory("nested", nested_tree_hash).unwrap(),
+            TreeEntry::gitlink("vendor", gitlink_target).unwrap(),
+        ]);
+        let root_hash = repo.store().put_tree(&root).expect("put root tree");
+
+        let missing = missing_blobs_in_tree(repo.store(), root_hash).expect("missing blobs");
+
+        assert_eq!(
+            missing.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([missing_nested, missing_symlink])
+        );
     }
 
     /// Once a redaction is declared for a blob in a snapshot, the
