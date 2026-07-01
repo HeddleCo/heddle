@@ -30,6 +30,7 @@ mod timeline;
 mod tree;
 mod tree_path;
 mod tree_diff;
+mod tree_walk;
 mod visibility_tier;
 
 pub use action_id::ActionId;
@@ -102,4 +103,5 @@ pub use tree_path::resolve_tree_path_async;
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
 pub use tree_diff::{diff_trees, diff_trees_visit};
+pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
