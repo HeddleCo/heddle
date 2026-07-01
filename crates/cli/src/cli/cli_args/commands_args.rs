@@ -1152,6 +1152,10 @@ pub struct RemoteOperationArgs {
 
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Advanced (hidden) flags:
+  --git-mirror pushes ALL git-overlay refs to a hosted remote in one multi-ref transfer (one pack + N checkpoint-less ref updates). Opt-in; the native single-ref checkpoint path stays the default.
+")]
 pub struct PushArgs {
     /// Remote name, local path, URL, or hosted address.
     pub remote: Option<String>,
