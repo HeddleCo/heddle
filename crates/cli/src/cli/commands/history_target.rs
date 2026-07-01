@@ -12,12 +12,8 @@
 //! * `HEAD`, `@`, `HEAD~N`, `@~N`
 //! * a thread name
 //!
-//! The hard work happens in [`Repository::resolve_state`]; this layer
-//! adds two pieces of CLI-friendly polish:
-//!
-//! 1. A precise "not found" error message instead of `Ok(None)`.
-//! 2. A targeted hint when the spec matches a tip-only Git overlay
-//!    branch/tag whose history hasn't been imported yet.
+//! Resolution policy and lookup live in [`repo::resolve_state_for_command`];
+//! this layer maps structured failures to CLI [`RecoveryAdvice`] envelopes.
 //!
 //! Use [`resolve_state_id`] for the typed [`ChangeId`]. Use
 //! [`resolve_state_id_bytes`] when you need the wire-form 16-byte
@@ -29,9 +25,23 @@ use objects::{
     object::{ChangeId, State},
     store::ObjectStore,
 };
-use repo::Repository;
+use repo::{
+    ResolvePolicy, StateResolveFailure, resolve_state_for_command, Repository,
+};
 
 use super::advice::RecoveryAdvice;
+
+pub(crate) fn state_resolve_failure_to_error(failure: StateResolveFailure) -> anyhow::Error {
+    match failure {
+        StateResolveFailure::GitBranchHistoryNotImported { branch } => {
+            anyhow!(tip_only_branch_history_advice(&branch))
+        }
+        StateResolveFailure::GitTagHistoryNotImported { tag } => {
+            anyhow!(tip_only_tag_history_advice(&tag))
+        }
+        StateResolveFailure::NotFound { spec } => anyhow!(state_not_found_advice(&spec)),
+    }
+}
 
 /// Resolve a state spec to a typed [`ChangeId`].
 ///
@@ -42,21 +52,23 @@ use super::advice::RecoveryAdvice;
 /// * A targeted import-history hint when the spec matches a tip-only
 ///   Git-overlay ref whose history we haven't pulled yet.
 pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<ChangeId> {
-    match repo.resolve_state(spec)? {
-        Some(id) => Ok(id),
-        None => {
-            if let Some(tip) = repo.git_overlay_branch_tip(spec)?
-                && !tip.history_imported
-            {
-                return Err(anyhow!(tip_only_branch_history_advice(&tip.branch)));
-            }
-            if let Some(tip) = repo.git_overlay_tag_tip(spec)?
-                && !tip.history_imported
-            {
-                return Err(anyhow!(tip_only_tag_history_advice(&tip.tag)));
-            }
-            Err(anyhow!(state_not_found_advice(spec)))
-        }
+    resolve_state_id_with_policy(repo, spec, ResolvePolicy::with_git_overlay_hints())
+}
+
+pub(crate) fn resolve_state_id_with_policy(
+    repo: &Repository,
+    spec: &str,
+    policy: ResolvePolicy<'_>,
+) -> Result<ChangeId> {
+    resolve_state_for_command(repo, spec, policy)
+        .map(|resolved| resolved.change_id)
+        .map_err(state_resolve_error_to_anyhow)
+}
+
+fn state_resolve_error_to_anyhow(error: repo::StateResolveError) -> anyhow::Error {
+    match error {
+        repo::StateResolveError::Repository(err) => err.into(),
+        repo::StateResolveError::Failure(failure) => state_resolve_failure_to_error(failure),
     }
 }
 

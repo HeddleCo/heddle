@@ -16,7 +16,10 @@ use objects::{
     store::ObjectStore,
     worktree::{WorktreeStatus, diff_blobs},
 };
-use repo::Repository;
+use repo::{
+    ResolvePolicy, Repository, StateResolveError, StateResolveFailure,
+    resolve_state_for_command,
+};
 #[cfg(feature = "semantic")]
 use semantic::diff::{SemanticDiffOptions, WorktreeStatus as SemanticWorktreeStatus};
 use sley::{EntryKind, Repository as SleyRepository};
@@ -392,12 +395,16 @@ fn file_change_set_from_status(status: &WorktreeStatus) -> FileChangeSet {
     changes
 }
 
-fn resolve_state_id(repo: &Repository, spec: &str) -> Result<ChangeId> {
-    repo.resolve_state(spec)?.ok_or_else(|| {
-        anyhow!(HeddleError::recovery(RecoveryDetails::state_not_found(
-            spec
-        )))
-    })
+fn resolve_state_id(repository: &Repository, spec: &str) -> Result<ChangeId> {
+    resolve_state_for_command(repository, spec, ResolvePolicy::minimal())
+        .map(|resolved| resolved.change_id)
+        .map_err(|error| match error {
+            StateResolveError::Repository(err) => err.into(),
+            StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {
+                anyhow!(HeddleError::recovery(RecoveryDetails::state_not_found(spec)))
+            }
+            StateResolveError::Failure(other) => anyhow!("{other}"),
+        })
 }
 
 fn require_resolved_state(repo: &Repository, id: &ChangeId) -> Result<State> {
@@ -2628,6 +2635,41 @@ mod tests {
                 .map(|l| l.content.as_str()),
             Some("@ -1,2 +1,4 @@"),
             "display trim must not rewrite the `@@` header: {display:?}"
+        );
+    }
+
+    /// Characterization: core::diff maps minimal-policy not-found failures to
+    /// [`RecoveryDetails::state_not_found`], not plain strings.
+    #[test]
+    fn minimal_resolve_failure_maps_to_recovery_state_not_found() {
+        use objects::{
+            RecoveryDetails,
+            error::HeddleError,
+            store::ObjectStore,
+        };
+        use repo::{
+            ResolvePolicy, StateResolveError, StateResolveFailure, resolve_state_for_command,
+        };
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let repo = repo::Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let err =
+            resolve_state_for_command(&repo, "hd-zzzzzzzzzzzz", ResolvePolicy::minimal())
+                .unwrap_err();
+        let mapped = match err {
+            StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {
+                HeddleError::recovery(RecoveryDetails::state_not_found(spec))
+            }
+            other => panic!("expected not-found failure, got {other:?}"),
+        };
+        assert!(matches!(mapped, HeddleError::Recovery(_)));
+        assert!(
+            mapped.to_string().contains("State not found"),
+            "unexpected message: {mapped}"
         );
     }
 }
