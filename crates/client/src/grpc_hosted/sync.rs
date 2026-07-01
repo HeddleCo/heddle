@@ -1843,6 +1843,23 @@ fn build_git_mirror_plan_from_sley(
     let mut newest_root: Option<GitObjectId> = None;
 
     for reference in refs {
+        // Local-only bookkeeping refs must NOT ship to the hosted server now
+        // that the mirror path is the DEFAULT `heddle push` (#846). These four
+        // namespaces are purely local git machinery, never content:
+        //   - refs/stash       : the stash reflog stack (local WIP)
+        //   - refs/remotes/*    : this clone's remote-tracking refs (the
+        //                         server has its own view of remotes)
+        //   - refs/original/*   : filter-branch/-repo backups (local undo)
+        //   - refs/replace/*    : local object replacements (grafts)
+        // Excluding them BEFORE the readability check below also means a
+        // single dangling/unreadable ref in one of these namespaces (e.g. a
+        // stale `refs/original/*` backup) no longer fails the whole push.
+        // Content refs — refs/heads/*, refs/tags/*, refs/notes/* (incl.
+        // heddle's `refs/notes/heddle` state metadata) — are kept.
+        if is_local_only_ref(&reference.name) {
+            continue;
+        }
+
         // Only direct refs are pushable ref updates. Symbolic refs (e.g.
         // `HEAD`) name another ref that is itself pushed separately; sending
         // a ref update for the symbolic name would push the pointed-at oid
@@ -1912,6 +1929,24 @@ fn build_git_mirror_plan_from_sley(
         pack,
         ref_updates,
     })
+}
+
+/// Local-only bookkeeping ref namespaces that the default mirror push must NOT
+/// ship to the hosted server (#846). Denylist rather than allowlist so that
+/// content namespaces we do not enumerate here — heddle's `refs/notes/heddle`,
+/// any future content ref — are pushed by default; only these four purely-local
+/// git-machinery prefixes are dropped.
+///
+///   - `refs/stash`     : the local stash reflog stack (exact match — the ref
+///                        is `refs/stash`, individual entries live in reflog).
+///   - `refs/remotes/`  : this clone's remote-tracking refs.
+///   - `refs/original/` : filter-branch/-repo backups.
+///   - `refs/replace/`  : local object replacements (grafts).
+fn is_local_only_ref(name: &str) -> bool {
+    name == "refs/stash"
+        || name.starts_with("refs/remotes/")
+        || name.starts_with("refs/original/")
+        || name.starts_with("refs/replace/")
 }
 
 /// Classify a full ref name into the wire `GitRefKind` the server expects.

@@ -1309,9 +1309,14 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
-    // --all-threads (heddle#838): fan out over every pushable thread, each at
-    // its own tip. Git-overlay repos fan out mirror pushes (the default path).
-    if options.all_threads {
+    // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
+    // per pushable thread. The git-overlay mirror path (the #846 default)
+    // already ships EVERY ref in one transfer, so a mirror push IS an
+    // all-threads push — routing it through the per-thread loop would rebuild
+    // and re-upload the identical full pack once per thread and print a
+    // misleading "pushed to <thread>" line each time. Short-circuit it to a
+    // single mirror push below; only the non-git-overlay path loops.
+    if options.all_threads && repo.capability() != RepositoryCapability::GitOverlay {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
@@ -1320,10 +1325,24 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // lane with no native conversion. Native heddle conversion stays opt-in via
     // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
     // plain native push below. `progress` drives the live push line on a TTY.
+    //
+    // In `--all-threads` mode `state_id` is `None` (the fan-out resolves each
+    // thread's tip); the mirror push nominates the current checkout state as
+    // its advisory `local_state` — every ref ships regardless.
     let progress = progress_for(options.cli, repo);
-    let state_id = *options
-        .state_id
-        .expect("single-thread push resolves a state");
+    let state_id = match options.state_id {
+        Some(state_id) => *state_id,
+        None => {
+            // --all-threads git-overlay+hosted: mirror ships all refs, so the
+            // nominated state is advisory. Use the current checkout state.
+            let user_config = UserConfig::load_default()?;
+            ensure_current_state(
+                repo,
+                &user_config,
+                Some("Bootstrap git-overlay before push".to_string()),
+            )?
+        }
+    };
     let result = push_network_one_thread(
         repo,
         &mut client,
@@ -1348,6 +1367,13 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 style::ok_marker(),
                 style::bold(options.track_name)
             );
+            if options.all_threads {
+                // Single git-overlay mirror push covers every ref/thread.
+                println!(
+                    "{}",
+                    style::dim("mirror push covers all threads (every ref shipped in one transfer)")
+                );
+            }
             if let Some(new_state) = result.new_state {
                 println!(
                     "{}",
@@ -1393,10 +1419,17 @@ async fn push_network_one_thread(
     Ok(result)
 }
 
-/// `--all-threads` fan-out over the hosted transport (heddle#838): the RPC is
-/// single-thread, so loop once per pushable thread (each at its own tip —
-/// composes with the heddle#837 fix). Not atomic; every thread is attempted,
-/// per-thread results reported, and any failure exits non-zero.
+/// `--all-threads` fan-out over the NATIVE hosted transport (heddle#838): the
+/// native push RPC is single-thread, so loop once per pushable thread (each at
+/// its own tip — composes with the heddle#837 fix). Not atomic; every thread is
+/// attempted, per-thread results reported, and any failure exits non-zero.
+///
+/// This path is git-overlay-free by construction: `push_network` short-circuits
+/// git-overlay `--all-threads` to a single mirror push (which already ships
+/// every ref) before ever reaching here. The native `push` RPC does not drive
+/// live progress, so there is no transient progress line to clear between the
+/// per-thread `println!`s (a `null` handle is passed to satisfy the shared
+/// helper signature).
 #[cfg(feature = "client")]
 async fn push_network_all_threads(
     repo: &Repository,
@@ -1410,9 +1443,8 @@ async fn push_network_all_threads(
     let mut pushed: Vec<String> = Vec::new();
     let mut failures: Vec<(String, String)> = Vec::new();
 
-    // One progress handle drives the live line across the fan-out; each thread's
-    // mirror push reuses it and it is cleared once the loop finishes.
-    let progress = progress_for(options.cli, repo);
+    // Native push does not render a live progress line; pass a null handle.
+    let progress = objects::Progress::null();
     for thread in &threads {
         let outcome = push_network_one_thread(
             repo,
@@ -1469,8 +1501,6 @@ async fn push_network_all_threads(
             }
         }
     }
-    // Erase any residual live progress line before the summary / JSON output.
-    clear_line(&progress);
 
     if json {
         let trust = build_repository_verification_state(repo);
