@@ -18,8 +18,12 @@ use refs::Head;
 use repo::Repository;
 use serde::Serialize;
 
+use objects::error::HeddleError;
+use repo::ResolvePolicy;
+
 use super::{
-    advice::RecoveryAdvice, history_target::resolve_state_id as resolve_state_id_impl,
+    advice::RecoveryAdvice,
+    history_target::resolve_state_id_with_policy,
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -262,14 +266,21 @@ pub(crate) fn resolve_target(
 /// (e.g. `hd-q99fkjzgjmjv`), full IDs, or ref-manager names — matching the
 /// disambiguation that `heddle show` and `heddle context list --ref` already do.
 pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects::object::ChangeId> {
-    if matches!(spec, "HEAD" | "@") && repo.current_state()?.is_none() {
+    let user_config = UserConfig::load_default().unwrap_or_default();
+    let bootstrap = |repo: &Repository| {
         ensure_current_state(
             repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &user_config,
             Some("Bootstrap git-overlay before resolving HEAD context".to_string()),
-        )?;
-    }
-    resolve_state_id_impl(repo, spec)
+        )
+        .map(|_| ())
+        .map_err(|err| HeddleError::Conflict(err.to_string()))
+    };
+    let policy = ResolvePolicy {
+        git_overlay_import_hints: true,
+        bootstrap_on_empty_head: Some(&bootstrap),
+    };
+    resolve_state_id_with_policy(repo, spec, policy)
 }
 
 pub(crate) fn target_label(target: &ContextTarget) -> (String, String) {

@@ -24,6 +24,8 @@ pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
+#[path = "repository_resolve_for_command.rs"]
+mod repository_resolve_for_command;
 mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
@@ -87,6 +89,10 @@ pub use objects::{
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
+pub use repository_resolve_for_command::{
+    EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
+    resolve_state_for_command,
+};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
