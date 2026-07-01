@@ -890,13 +890,13 @@ const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | list | sh
 \n\
 Discussions anchor at the symbol level (file + symbol name, no line range)\n\
 so they survive renames and cross-file moves. Each discussion accumulates\n\
-turns and can currently resolve by edit or dismissal:\n\
+turns and can resolve by edit, dismissal, or context annotation:\n\
 \n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
-`--mode into-annotation` is reserved but returns unimplemented until the\n\
-annotation write path exists.\n\
+- `resolve <id> --mode into-annotation` requires `--annotation-content` and\n\
+  records active context on the discussion anchor.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n";

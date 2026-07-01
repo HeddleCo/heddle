@@ -7,27 +7,32 @@
 //! existing blob, mutate, encode back to a new [`Blob`], persist a new
 //! `State` with the updated `discussions` content hash.
 //!
-//! State-scoped discovery reads the requested state's blob. `GetDiscussion`
-//! keeps its documented HEAD default unless callers provide an explicit
-//! `state_id`. Repository-wide symbol lookup is not wired yet; the local
-//! scaffold returns `unimplemented` rather than pretending a HEAD scan is a
-//! complete index.
+//! State-scoped discovery reads the requested state's blob. Repository-wide
+//! discovery walks reachable states and deduplicates by discussion id, preferring
+//! the current HEAD copy when a carried-forward discussion exists in multiple
+//! states.
+
+use std::collections::HashSet;
 
 use grpc::heddle::v1::{
-    AppendTurnRequest, Discussion as ProtoDiscussion,
+    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion,
     DiscussionResolution as ProtoDiscussionResolution, DiscussionTurn as ProtoDiscussionTurn,
     GetDiscussionRequest, ListDiscussionsByStateRequest, ListDiscussionsBySymbolRequest,
     ListDiscussionsResponse, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
+    resolve_discussion_request::ResolveIntoAnnotation,
 };
 use objects::{
+    lock::RepositoryLockExt,
     object::{
-        Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
+        Annotation, AnnotationKind, AnnotationScope, Blob, ChangeId, ContentHash, ContextBlob,
+        ContextTarget, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
         Principal, State, SymbolAnchor, VisibilityTier,
     },
     store::ObjectStore,
 };
 use prost::Message;
+use refs::Head;
 use repo::Repository;
 use tonic::{Request, Response, Status};
 
@@ -221,13 +226,7 @@ fn save_discussions_blob(
     state: &State,
     blob: &DiscussionsBlob,
 ) -> Result<State, Status> {
-    let bytes = blob
-        .encode()
-        .map_err(|err| Status::internal(format!("failed to encode discussions blob: {err}")))?;
-    let hash = repo
-        .store()
-        .put_blob(&Blob::new(bytes))
-        .map_err(to_status)?;
+    let hash = put_discussions_blob(repo, blob)?;
     let new_state = state.clone().with_discussions(hash);
     repo.store().put_state(&new_state).map_err(to_status)?;
     Ok(new_state)
@@ -266,6 +265,272 @@ fn status_matches(d: &Discussion, status: &str) -> bool {
         "orphaned" => d.orphaned,
         // "all", "", anything else.
         _ => true,
+    }
+}
+
+fn put_discussions_blob(repo: &Repository, blob: &DiscussionsBlob) -> Result<ContentHash, Status> {
+    let bytes = blob
+        .encode()
+        .map_err(|err| Status::internal(format!("failed to encode discussions blob: {err}")))?;
+    repo.store().put_blob(&Blob::new(bytes)).map_err(to_status)
+}
+
+fn reachable_discussions(repo: &Repository) -> Result<Vec<(ChangeId, Discussion)>, Status> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(head_id) = repo.head().map_err(to_status)?
+        && let Some(head) = repo.store().get_state(&head_id).map_err(to_status)?
+    {
+        push_discussions_from_state(repo, head_id, &head, &mut seen, &mut out)?;
+    }
+
+    for state_id in repo
+        .reachable_states()
+        .map_err(|err| Status::internal(format!("walk reachable states: {err}")))?
+    {
+        let Some(state) = repo.store().get_state(&state_id).map_err(to_status)? else {
+            continue;
+        };
+        push_discussions_from_state(repo, state_id, &state, &mut seen, &mut out)?;
+    }
+
+    Ok(out)
+}
+
+fn push_discussions_from_state(
+    repo: &Repository,
+    state_id: ChangeId,
+    state: &State,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<(ChangeId, Discussion)>,
+) -> Result<(), Status> {
+    let blob = decode_blob_for_state(repo, state)?;
+    for discussion in blob.discussions {
+        if seen.insert(discussion.id.clone()) {
+            out.push((state_id, discussion));
+        }
+    }
+    Ok(())
+}
+
+fn annotation_kind_from_proto(kind: i32) -> Result<AnnotationKind, Status> {
+    match ContextAnnotationKind::try_from(kind)
+        .map_err(|_| Status::invalid_argument(format!("unknown annotation kind tag {kind}")))?
+    {
+        ContextAnnotationKind::Unspecified | ContextAnnotationKind::Rationale => {
+            Ok(AnnotationKind::Rationale)
+        }
+        ContextAnnotationKind::Constraint => Ok(AnnotationKind::Constraint),
+        ContextAnnotationKind::Invariant => Ok(AnnotationKind::Invariant),
+    }
+}
+
+fn resolve_discussion_into_annotation(
+    repo: &Repository,
+    head: &State,
+    discussions: &mut DiscussionsBlob,
+    discussion_index: usize,
+    payload: ResolveIntoAnnotation,
+) -> Result<Discussion, Status> {
+    if payload.content.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "into-annotation resolution requires non-empty content",
+        ));
+    }
+    let kind = annotation_kind_from_proto(payload.kind)?;
+    let attribution = repo
+        .get_attribution()
+        .map_err(|err| Status::internal(format!("resolve attribution: {err}")))?;
+
+    let discussion = discussions
+        .discussions
+        .get(discussion_index)
+        .ok_or_else(|| Status::internal("discussion index out of range"))?
+        .clone();
+    let target = ContextTarget::file(discussion.anchor.file.clone())
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let mut scope = AnnotationScope::Symbol {
+        name: discussion.anchor.symbol.clone(),
+        resolved_lines: None,
+    };
+    target
+        .validate_scope(&scope)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let source = target.path().and_then(|path| {
+        std::fs::read(repo.root().join(path))
+            .ok()
+            .map(|bytes| (path.to_string(), bytes))
+    });
+    scope = resolve_annotation_scope(
+        source
+            .as_ref()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice())),
+        scope,
+    );
+    let source_hash =
+        compute_annotation_source_hash(source.as_ref().map(|(_, bytes)| bytes.as_slice()), &scope);
+
+    let mut annotation = Annotation::new(
+        scope,
+        kind,
+        payload.content,
+        payload.tags,
+        attribution.to_string(),
+        now_secs(),
+        source_hash,
+        Some(head.change_id),
+    );
+    annotation.resolved_from_discussion = Some(discussion.id.clone());
+    annotation.visibility = discussion.visibility.clone();
+    let annotation_id = annotation.annotation_id.clone();
+
+    let mut context = match head.context {
+        Some(root) => repo
+            .get_context_blob(&root, &target)
+            .map_err(to_status)?
+            .unwrap_or_else(|| ContextBlob::new(Vec::new())),
+        None => ContextBlob::new(Vec::new()),
+    };
+    context.annotations.push(annotation);
+    let context_root = repo
+        .set_context_blob(head.context.as_ref(), &target, &context)
+        .map_err(to_status)?;
+
+    let updated = discussions
+        .discussions
+        .get_mut(discussion_index)
+        .ok_or_else(|| Status::internal("discussion index out of range"))?;
+    updated.resolution = DiscussionResolution::ResolvedIntoAnnotation {
+        annotation_id: annotation_id.clone(),
+    };
+    updated.resolved_annotation_id = Some(annotation_id);
+    updated
+        .validate()
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let updated = updated.clone();
+
+    let discussions_hash = put_discussions_blob(repo, discussions)?;
+    let mut new_state = State::new(head.tree, vec![head.change_id], attribution)
+        .with_intent(format!(
+            "discussion: resolve {} into annotation",
+            updated.id
+        ))
+        .with_context(context_root)
+        .with_discussions(discussions_hash);
+    if let Some(provenance) = head.provenance {
+        new_state = new_state.with_provenance(provenance);
+    }
+    if let Some(risk_signals) = head.risk_signals {
+        new_state = new_state.with_risk_signals(risk_signals);
+    }
+    if let Some(review_signatures) = head.review_signatures {
+        new_state = new_state.with_review_signatures(review_signatures);
+    }
+    if let Some(structured_conflicts) = head.structured_conflicts {
+        new_state = new_state.with_structured_conflicts(structured_conflicts);
+    }
+    repo.put_authored_state(&mut new_state).map_err(to_status)?;
+    advance_head(repo, &new_state).map_err(to_status)?;
+
+    Ok(updated)
+}
+
+fn resolve_annotation_scope(
+    source: Option<(&str, &[u8])>,
+    scope: AnnotationScope,
+) -> AnnotationScope {
+    let AnnotationScope::Symbol {
+        name,
+        resolved_lines: None,
+    } = scope
+    else {
+        return scope;
+    };
+    let Some((path, source)) = source else {
+        return AnnotationScope::Symbol {
+            name,
+            resolved_lines: None,
+        };
+    };
+    #[cfg(feature = "semantic")]
+    {
+        match repo::symbol_resolver::resolve_symbol_lines(source, std::path::Path::new(path), &name)
+        {
+            Ok((start, end)) => AnnotationScope::Symbol {
+                name,
+                resolved_lines: Some((start, end)),
+            },
+            Err(_) => AnnotationScope::Symbol {
+                name,
+                resolved_lines: None,
+            },
+        }
+    }
+    #[cfg(not(feature = "semantic"))]
+    {
+        let _ = path;
+        let _ = source;
+        AnnotationScope::Symbol {
+            name,
+            resolved_lines: None,
+        }
+    }
+}
+
+fn compute_annotation_source_hash(
+    source: Option<&[u8]>,
+    scope: &AnnotationScope,
+) -> Option<ContentHash> {
+    let source = source?;
+    let scoped = match scope {
+        AnnotationScope::Lines(start, end) => extract_line_range(source, *start, *end),
+        AnnotationScope::Symbol {
+            resolved_lines: Some((start, end)),
+            ..
+        } => extract_line_range(source, *start, *end),
+        _ => source.to_vec(),
+    };
+    Some(ContentHash::compute(&scoped))
+}
+
+fn extract_line_range(source: &[u8], start: u32, end: u32) -> Vec<u8> {
+    let start_line = start.max(1);
+    let end_line = end.max(start_line);
+    let mut current_line = 1;
+    let mut start_byte = (start_line == 1).then_some(0);
+    let mut end_byte = None;
+
+    for (idx, byte) in source.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        if current_line == end_line {
+            end_byte = Some(idx + 1);
+            break;
+        }
+        current_line += 1;
+        if current_line == start_line {
+            start_byte = Some(idx + 1);
+        }
+    }
+
+    let Some(start_byte) = start_byte else {
+        return Vec::new();
+    };
+    let end_byte = end_byte.unwrap_or(source.len());
+    if start_byte > end_byte || start_byte > source.len() {
+        return Vec::new();
+    }
+    source[start_byte..end_byte].to_vec()
+}
+
+fn advance_head(repo: &Repository, state: &State) -> repo::Result<()> {
+    match repo.refs().read_head()? {
+        Head::Attached { thread } => repo.refs().set_thread(&thread, &state.change_id),
+        Head::Detached { .. } => repo.refs().write_head(&Head::Detached {
+            state: state.change_id,
+        }),
     }
 }
 
@@ -444,10 +709,27 @@ impl DiscussionService for LocalDiscussionService {
                         .clone()
                         .ok_or_else(|| Status::invalid_argument("resolution mode is required"))?;
                     match resolution {
-                        Resolution::IntoAnnotation(_payload) => {
-                            return Err(Status::unimplemented(
-                                "resolving discussions into annotations is not implemented",
-                            ));
+                        Resolution::IntoAnnotation(payload) => {
+                            let _lock = repo
+                                .locker()
+                                .write()
+                                .map_err(|err| Status::internal(err.to_string()))?;
+                            let head = head_state(repo)?;
+                            let mut blob = decode_blob_for_state(repo, &head)?;
+                            let idx = blob
+                                .discussions
+                                .iter()
+                                .position(|d| d.id == req.discussion_id)
+                                .ok_or_else(|| {
+                                    Status::not_found(format!(
+                                        "discussion {} not found",
+                                        req.discussion_id
+                                    ))
+                                })?;
+                            let updated = resolve_discussion_into_annotation(
+                                repo, &head, &mut blob, idx, payload,
+                            )?;
+                            return Ok(discussion_to_proto(&updated));
                         }
                         Resolution::ByEdit(payload) => {
                             let state_id =
@@ -513,9 +795,18 @@ impl DiscussionService for LocalDiscussionService {
                 "anchor.file and anchor.symbol are required",
             ));
         }
-        Err(Status::unimplemented(
-            "repository-wide discussion lookup by symbol is not implemented; use list_by_state with an explicit state_id",
-        ))
+        let repo = self.inner.repo();
+        let discussions = reachable_discussions(repo)?
+            .into_iter()
+            .map(|(_, discussion)| discussion)
+            .filter(|discussion| {
+                discussion.anchor.file == anchor.file
+                    && discussion.anchor.symbol == anchor.symbol
+                    && status_matches(discussion, &req.status)
+            })
+            .map(|discussion| discussion_to_proto(&discussion))
+            .collect();
+        Ok(Response::new(ListDiscussionsResponse { discussions }))
     }
 
     async fn get_discussion(
@@ -526,17 +817,21 @@ impl DiscussionService for LocalDiscussionService {
         if req.discussion_id.is_empty() {
             return Err(Status::invalid_argument("discussion_id is required"));
         }
-        // Default: HEAD. Optional `state_id` (#836) resolves the discussion
-        // against a specific prior state — the bounded, cheap recoverability
-        // safety net when a discussion no longer lives on HEAD.
-        // TODO(W2-followup): scan all states / oplog instead of HEAD-only when
-        // no explicit state is given.
+        // Default: HEAD first, then reachable states. Optional `state_id`
+        // (#836) resolves the discussion against a specific prior state.
         let repo = self.inner.repo();
-        let state = if req.state_id.is_empty() {
-            head_state(repo)?
-        } else {
-            load_state(repo, &req.state_id)?.1
-        };
+        if req.state_id.is_empty() {
+            let discussion = reachable_discussions(repo)?
+                .into_iter()
+                .map(|(_, discussion)| discussion)
+                .find(|discussion| discussion.id == req.discussion_id)
+                .ok_or_else(|| {
+                    Status::not_found(format!("discussion {} not found", req.discussion_id))
+                })?;
+            return Ok(Response::new(discussion_to_proto(&discussion)));
+        }
+
+        let state = load_state(repo, &req.state_id)?.1;
         let blob = decode_blob_for_state(repo, &state)?;
         let discussion = blob
             .discussions
@@ -751,7 +1046,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn resolve_into_annotation_is_unimplemented() {
+    async fn resolve_into_annotation_creates_context_and_resolves_discussion() {
         let (_t, state_id, svc) = fresh_service();
         let opened = svc
             .open_discussion(Request::new(open_request(&state_id, "why?", "")))
@@ -760,28 +1055,80 @@ mod tests {
             .into_inner();
 
         use grpc::heddle::v1::resolve_discussion_request::{Resolution, ResolveIntoAnnotation};
-        let err = svc
+        let resolved = svc
             .resolve_discussion(Request::new(ResolveDiscussionRequest {
                 repo_path: String::new(),
-                discussion_id: opened.id,
+                discussion_id: opened.id.clone(),
                 resolution: Some(Resolution::IntoAnnotation(ResolveIntoAnnotation {
-                    kind: 0,
+                    kind: ContextAnnotationKind::Rationale as i32,
                     content: "capture this".into(),
                     tags: vec!["todo".into()],
                 })),
                 client_operation_id: String::new(),
             }))
             .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+            .unwrap()
+            .into_inner();
+        let annotation_id = resolved.resolved_annotation_id.clone();
+        assert!(
+            !annotation_id.is_empty(),
+            "into-annotation resolution should return the created annotation id"
+        );
+
+        let repo = svc.inner.repo();
+        let head_id = repo.head().unwrap().unwrap();
+        assert_ne!(
+            head_id, state_id,
+            "resolving into context should create and publish a new HEAD state"
+        );
+        let head = repo.store().get_state(&head_id).unwrap().unwrap();
+        let context_root = head.context.expect("new state should carry context");
+        let (target, context, index) = repo
+            .find_annotation(&context_root, &annotation_id)
+            .unwrap()
+            .expect("created annotation should be indexed in the context tree");
+        assert_eq!(target.path(), Some("src/lib.rs"));
+        let annotation = &context.annotations[index];
+        assert_eq!(
+            annotation.resolved_from_discussion.as_deref(),
+            Some(opened.id.as_str())
+        );
+        assert_eq!(
+            annotation.current_revision().unwrap().content,
+            "capture this"
+        );
+        assert_eq!(
+            annotation.current_revision().unwrap().tags,
+            vec!["todo".to_string()]
+        );
+
+        let discussion_blob = decode_blob_for_state(repo, &head).unwrap();
+        let stored = discussion_blob
+            .discussions
+            .iter()
+            .find(|discussion| discussion.id == opened.id)
+            .expect("resolved discussion should still be present on new HEAD");
+        assert_eq!(
+            stored.resolved_annotation_id.as_deref(),
+            Some(annotation_id.as_str())
+        );
+        assert!(matches!(
+            stored.resolution,
+            DiscussionResolution::ResolvedIntoAnnotation { .. }
+        ));
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn list_by_symbol_is_unimplemented_without_a_real_index() {
-        let (_t, _state_id, svc) = fresh_service();
+    async fn list_by_symbol_finds_reachable_discussions() {
+        let (_t, state_id, svc) = fresh_service();
+        let opened = svc
+            .open_discussion(Request::new(open_request(&state_id, "symbol thread", "")))
+            .await
+            .unwrap()
+            .into_inner();
 
-        let err = svc
+        let listed = svc
             .list_by_symbol(Request::new(ListDiscussionsBySymbolRequest {
                 repo_path: String::new(),
                 anchor: Some(PathSymbolRef {
@@ -791,8 +1138,39 @@ mod tests {
                 status: "all".into(),
             }))
             .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.discussions.len(), 1);
+        assert_eq!(listed.discussions[0].id, opened.id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn get_discussion_without_state_scans_reachable_discussions() {
+        let (temp, state_id, svc) = fresh_service();
+        std::fs::write(temp.path().join("later.txt"), "later\n").unwrap();
+        svc.inner
+            .repo()
+            .snapshot(Some("later".into()), None)
+            .expect("advance HEAD");
+
+        let opened = svc
+            .open_discussion(Request::new(open_request(&state_id, "old state", "")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let fetched = svc
+            .get_discussion(Request::new(GetDiscussionRequest {
+                repo_path: String::new(),
+                discussion_id: opened.id.clone(),
+                state_id: Vec::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(fetched.id, opened.id);
+        assert_eq!(fetched.turns[0].body, "old state");
     }
 
     #[tokio::test]

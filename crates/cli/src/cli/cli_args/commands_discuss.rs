@@ -9,7 +9,7 @@ pub enum DiscussCommands {
     Open(DiscussOpenArgs),
     /// Append a turn to an existing discussion.
     Append(DiscussAppendArgs),
-    /// Resolve a discussion (by-edit or dismissed; into-annotation is not wired yet).
+    /// Resolve a discussion by edit, dismissal, or context annotation.
     Resolve(DiscussResolveArgs),
     /// List discussions on a state, symbol, or by status.
     List(DiscussListArgs),
@@ -45,16 +45,16 @@ pub struct DiscussAppendArgs {
 #[derive(Clone, Debug, Args)]
 pub struct DiscussResolveArgs {
     pub discussion_id: String,
-    /// Resolution kind: `by-edit` | `dismiss`. `into-annotation` is reserved but unavailable.
+    /// Resolution kind: `by-edit` | `dismiss` | `into-annotation`.
     #[arg(long, value_enum)]
     pub mode: ResolveModeArg,
-    /// Reserved for future `into-annotation`: annotation kind.
+    /// For `into-annotation`: annotation kind.
     #[arg(long)]
     pub annotation_kind: Option<String>,
-    /// Reserved for future `into-annotation`: annotation content.
+    /// For `into-annotation`: annotation content.
     #[arg(long)]
     pub annotation_content: Option<String>,
-    /// Reserved for future `into-annotation`: optional comma-separated tags.
+    /// For `into-annotation`: optional comma-separated tags.
     #[arg(long)]
     pub annotation_tags: Option<String>,
     /// For `by-edit`: state the edit lives on (defaults to HEAD).
@@ -80,7 +80,7 @@ pub struct DiscussListArgs {
     /// Filter by file path.
     #[arg(long)]
     pub file: Option<String>,
-    /// Filter by symbol name. Requires `--file`; repository-wide symbol lookup is not wired yet.
+    /// Filter by symbol name across reachable states. Requires `--file`.
     #[arg(long)]
     pub symbol: Option<String>,
     /// Status filter: `open`|`resolved`|`all`|`orphaned`. Default `all`.

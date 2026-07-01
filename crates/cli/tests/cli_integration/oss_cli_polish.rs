@@ -9687,47 +9687,63 @@ fn context_invalid_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn discuss_resolve_into_annotation_reports_unimplemented_json() {
+fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
+    let capture = json_value(temp.path(), &["capture", "-m", "seed"]);
+    let state_id = capture["change_id"]
+        .as_str()
+        .expect("capture output should include change_id")
+        .to_string();
+    let opened = json_value(
+        temp.path(),
         &[
-            "--output",
-            "json",
+            "discuss",
+            "open",
+            "src/lib.rs",
+            "foo",
+            "Please keep this rationale",
+            "--state",
+            &state_id,
+        ],
+    );
+    let discussion_id = opened["id"]
+        .as_str()
+        .expect("discuss open should return an id")
+        .to_string();
+
+    let resolved = json_value(
+        temp.path(),
+        &[
             "discuss",
             "resolve",
-            "d1",
+            &discussion_id,
             "--mode",
             "into-annotation",
             "--annotation-kind",
             "rationale",
             "--annotation-content",
             "Future annotation body",
+            "--annotation-tags",
+            "review,design",
         ],
-        Some(temp.path()),
-    )
-    .expect("invoke discuss resolve");
-    assert!(
-        !output.status.success(),
-        "reserved discuss resolve mode should fail"
     );
+    assert_eq!(resolved["output_kind"], "discuss_resolve");
+    assert_eq!(resolved["id"].as_str(), Some(discussion_id.as_str()));
+    assert_eq!(resolved["resolution"]["kind"], "resolved_into_annotation");
+    let annotation_id = resolved["resolved_annotation_id"]
+        .as_str()
+        .expect("resolved discussion should expose the created annotation id");
     assert!(
-        output.stdout.is_empty(),
-        "JSON-mode discuss refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
+        annotation_id.starts_with("hd-"),
+        "annotation id should be a Heddle change id: {resolved}"
     );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
-    assert_eq!(envelope["kind"], "runtime_error");
-    assert_json_recovery_advice_fields(&envelope, stderr);
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error
-                .contains("discuss resolve --mode into-annotation is not implemented yet")),
-        "reserved discuss mode should report that it is not wired yet: {stderr}"
+    assert_eq!(
+        resolved["resolution"]["annotation_id"].as_str(),
+        Some(annotation_id),
+        "resolution payload and top-level convenience id should match: {resolved}"
     );
 }
 

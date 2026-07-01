@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use daemon::grpc_local_impl::{GrpcLocalService, LocalDiscussionService};
 use grpc::heddle::v1::{
-    AppendTurnRequest, GetDiscussionRequest, ListDiscussionsByStateRequest,
+    AppendTurnRequest, ContextAnnotationKind, GetDiscussionRequest, ListDiscussionsByStateRequest,
     ListDiscussionsBySymbolRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
@@ -143,24 +143,26 @@ async fn run_resolve(
     args: &DiscussResolveArgs,
 ) -> Result<()> {
     use grpc::heddle::v1::resolve_discussion_request::{
-        Resolution, ResolveByEdit, ResolveDismissed,
+        Resolution, ResolveByEdit, ResolveDismissed, ResolveIntoAnnotation,
     };
-    let resolution = match args.mode {
-        ResolveModeArg::IntoAnnotation => {
-            return Err(anyhow!(
-                "discuss resolve --mode into-annotation is not implemented yet; use --mode by-edit or --mode dismiss"
-            ));
-        }
-        ResolveModeArg::ByEdit => Resolution::ByEdit(ResolveByEdit {
-            state_id: resolve_state(cli, args.state.as_deref())?,
-        }),
-        ResolveModeArg::Dismiss => Resolution::Dismissed(ResolveDismissed {
-            reason: args
-                .reason
-                .clone()
-                .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?,
-        }),
-    };
+    let resolution =
+        match args.mode {
+            ResolveModeArg::IntoAnnotation => Resolution::IntoAnnotation(ResolveIntoAnnotation {
+                kind: parse_annotation_kind(args.annotation_kind.as_deref())? as i32,
+                content: args.annotation_content.clone().ok_or_else(|| {
+                    anyhow!("--annotation-content is required for into-annotation")
+                })?,
+                tags: parse_annotation_tags(args.annotation_tags.as_deref()),
+            }),
+            ResolveModeArg::ByEdit => Resolution::ByEdit(ResolveByEdit {
+                state_id: resolve_state(cli, args.state.as_deref())?,
+            }),
+            ResolveModeArg::Dismiss => Resolution::Dismissed(ResolveDismissed {
+                reason: args.reason.clone().ok_or_else(|| {
+                    anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason())
+                })?,
+            }),
+        };
     let req = ResolveDiscussionRequest {
         repo_path: String::new(),
         discussion_id: args.discussion_id.clone(),
@@ -357,6 +359,26 @@ fn to_view(d: &grpc::heddle::v1::Discussion) -> DiscussionOutput {
 
 fn opt_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
+}
+
+fn parse_annotation_kind(kind: Option<&str>) -> Result<ContextAnnotationKind> {
+    match kind.unwrap_or("rationale") {
+        "constraint" => Ok(ContextAnnotationKind::Constraint),
+        "invariant" => Ok(ContextAnnotationKind::Invariant),
+        "rationale" => Ok(ContextAnnotationKind::Rationale),
+        other => Err(anyhow!(
+            "invalid annotation kind '{other}'; expected constraint, invariant, or rationale"
+        )),
+    }
+}
+
+fn parse_annotation_tags(tags: Option<&str>) -> Vec<String> {
+    tags.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
