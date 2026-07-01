@@ -3225,7 +3225,7 @@ mod tests {
             .collect();
         for oid in [main_commit, feature_commit, tagged_commit, tag_oid] {
             assert!(
-                packed.contains(&oid.as_bytes().to_vec()),
+                packed.contains(oid.as_bytes()),
                 "pack must contain {}",
                 oid.to_hex()
             );
