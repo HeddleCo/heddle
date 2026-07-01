@@ -10,7 +10,7 @@ mod commit_graph_persistence;
 #[path = "context_suggestions.rs"]
 mod context_suggestions;
 #[path = "repo_config.rs"]
-mod repo_config;
+pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
 mod repository_context;
 #[path = "repository_diff.rs"]
@@ -473,14 +473,13 @@ impl Repository {
     /// bound to the default `AnyStore` flavor (`apply_pending` and
     /// `BlobHydrator` operate on the bare `Repository`), so they live here
     /// rather than in the generic `open_raw`.
-    fn run_open_hooks(&self) {
+    fn run_open_hooks(&self) -> Result<()> {
         // Run any pending declarative migrations. Idempotent:
         // re-opening a repo a second time is a no-op for the migration pass.
-        // Failures here are logged but non-fatal; surfacing migration errors
-        // through `open` is worse than letting the repo open and warning later.
-        if let Err(err) = crate::migration::apply_pending(self) {
-            tracing::warn!("declarative migrations failed during repo open: {err}");
-        }
+        // Hard schema migrations are part of the open contract: if they cannot
+        // complete, continuing with a partially-upgraded repo would make later
+        // strict readers fail at arbitrary call sites.
+        crate::migration::apply_pending(self)?;
         // Reconstruct any persisted lazy-clone blob hydrator. When
         // `.heddle/lazy-hydrator.toml` exists, look up the registered
         // factory for its `kind` and install the hydrator on the
@@ -501,6 +500,7 @@ impl Repository {
                 tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
             }
         }
+        Ok(())
     }
 
     /// Build an object store from the repository configuration.
@@ -721,7 +721,7 @@ impl Repository {
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
                     let repo =
                         Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
-                    repo.run_open_hooks();
+                    repo.run_open_hooks()?;
                     return Ok(repo);
                 }
 
@@ -733,7 +733,7 @@ impl Repository {
                     let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
-                    repo.run_open_hooks();
+                    repo.run_open_hooks()?;
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
                             Ok(Some(GitHeadState::Attached(thread))) => {

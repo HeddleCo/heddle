@@ -5,12 +5,8 @@ use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
-    object::{
-        Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
-        TreeEntry,
-    },
+    object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
-    util::gitlink_blob_content,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -36,8 +32,8 @@ use super::{
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
         create_snapshot_profiled_with_worktree_status, is_placeholder_principal,
-        placeholder_principal_warning, preflight_large_capture_for_git_adapter_commit_with_worktree_status,
-        resolve_principal,
+        placeholder_principal_warning,
+        preflight_large_capture_for_git_adapter_commit_with_worktree_status, resolve_principal,
     },
     thread_cmd::cmd_thread,
 };
@@ -909,7 +905,7 @@ impl IndexTreeBuilder {
         for (name, node) in self.entries {
             match node {
                 IndexTreeNode::Blob(mut entry) => {
-                    entry.name = name;
+                    entry.set_name(name)?;
                     entries.push(entry);
                 }
                 IndexTreeNode::Tree(builder) => {
@@ -932,35 +928,17 @@ fn index_entry_node(
     let tree_entry = match entry.mode {
         mode if mode == GIT_MODE_FILE || mode == GIT_MODE_FILE_EXECUTABLE => {
             let hash = import_index_blob(repo, git, entry.oid, path)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: if entry.mode == GIT_MODE_FILE_EXECUTABLE {
-                    FileMode::Executable
-                } else {
-                    FileMode::Normal
-                },
-                entry_type: EntryType::Blob,
+            TreeEntry::file(
+                leaf_name(path),
                 hash,
-            }
+                entry.mode == GIT_MODE_FILE_EXECUTABLE,
+            )?
         }
         mode if mode == GIT_MODE_SYMLINK => {
             let hash = import_index_blob(repo, git, entry.oid, path)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: FileMode::Symlink,
-                entry_type: EntryType::Symlink,
-                hash,
-            }
+            TreeEntry::symlink(leaf_name(path), hash)?
         }
-        mode if mode == GIT_MODE_COMMIT => {
-            let hash = import_index_gitlink(repo, entry.oid)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: FileMode::Normal,
-                entry_type: EntryType::Blob,
-                hash,
-            }
-        }
+        mode if mode == GIT_MODE_COMMIT => TreeEntry::gitlink(leaf_name(path), entry.oid)?,
         mode if mode == GIT_MODE_DIR => {
             return Err(anyhow!(sparse_git_index_advice(path)));
         }
@@ -990,11 +968,6 @@ fn import_index_blob(
         ));
     }
     let blob = Blob::new(object.body.clone());
-    Ok(repo.store().put_blob(&blob)?)
-}
-
-fn import_index_gitlink(repo: &Repository, oid: ObjectId) -> Result<ContentHash> {
-    let blob = Blob::new(gitlink_blob_content(oid));
     Ok(repo.store().put_blob(&blob)?)
 }
 

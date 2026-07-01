@@ -383,8 +383,8 @@ fn roundtrip_submodule_gitlink() {
         ls.contains("160000 commit"),
         "expected a 160000 gitlink tree entry, got: {ls}"
     );
-    // Gitlinks import losslessly via the heddle-submodule blob convention and
-    // export back to mode 160000, so no --lossy opt-in is required.
+    // Gitlinks import losslessly as first-class Gitlink tree entries and export
+    // back to mode 160000, so no --lossy opt-in is required.
     assert_roundtrip_fidelity("submodule-gitlink", dir);
 }
 

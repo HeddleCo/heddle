@@ -668,21 +668,24 @@ fn walk_tree_for_blob(
 ) -> Result<()> {
     for entry in tree.iter() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_blob() {
-            if entry.hash == *target {
+            if entry.blob_hash() == Some(*target) {
                 out.push(path);
             }
             continue;
         }
         if entry.is_tree() {
+            let Some(tree_hash) = entry.tree_hash() else {
+                continue;
+            };
             let Some(subtree) = repo
                 .store()
-                .get_tree(&entry.hash)
-                .with_context(|| format!("load subtree {}", entry.hash.short()))?
+                .get_tree(&tree_hash)
+                .with_context(|| format!("load subtree {}", tree_hash.short()))?
             else {
                 // Missing subtree object — treat as unreachable, don't fail.
                 continue;

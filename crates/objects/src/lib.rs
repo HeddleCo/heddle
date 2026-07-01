@@ -6,6 +6,7 @@ pub mod fault_inject;
 pub mod fs_atomic;
 pub mod fs_clone;
 pub mod fs_ops;
+pub mod legacy;
 pub mod lock;
 pub mod object;
 pub mod observe;

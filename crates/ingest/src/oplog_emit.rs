@@ -711,9 +711,7 @@ mod tests {
             )
             .unwrap();
         // HEAD checkout -> goto
-        reference
-            .record_goto(&cid_a, Some(&cid_b), scope)
-            .unwrap();
+        reference.record_goto(&cid_a, Some(&cid_b), scope).unwrap();
         // branch: deleted
         reference
             .record_thread_delete(&ThreadName::from("main"), &cid_b, scope)
@@ -755,8 +753,7 @@ mod tests {
 
         let mut all = log.recent(1024).unwrap();
         all.reverse();
-        let distinct: std::collections::BTreeSet<u64> =
-            all.iter().map(|e| e.batch_id).collect();
+        let distinct: std::collections::BTreeSet<u64> = all.iter().map(|e| e.batch_id).collect();
         assert_eq!(all.len(), 3);
         assert_eq!(distinct.len(), 3, "three events => three distinct batches");
         // ids are globally sequential across the batches.

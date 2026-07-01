@@ -1760,20 +1760,26 @@ fn collect_missing_blobs_recursive(
         return Ok(());
     };
     for entry in tree.entries() {
-        match entry.entry_type {
+        match entry.entry_type() {
             objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                if !repo.store().has_blob(&entry.hash).map_err(|err| {
+                let Some(hash) = entry.content_hash() else {
+                    continue;
+                };
+                if !repo.store().has_blob(&hash).map_err(|err| {
                     ProtocolError::InvalidState(format!(
                         "check blob {} while collecting lazy hydration missing blobs: {err}",
-                        entry.hash.to_hex()
+                        hash.to_hex()
                     ))
                 })? {
-                    missing.push(entry.hash);
+                    missing.push(hash);
                 }
             }
             objects::object::EntryType::Tree => {
-                collect_missing_blobs_recursive(repo, &entry.hash, missing)?;
+                if let Some(hash) = entry.tree_hash() {
+                    collect_missing_blobs_recursive(repo, &hash, missing)?;
+                }
             }
+            objects::object::EntryType::Gitlink => {}
         }
     }
     Ok(())
@@ -1919,9 +1925,10 @@ fn build_git_mirror_plan_from_sley(
     chunk_size: usize,
     remote_ref_expectations: &HashMap<String, GitRefRemoteExpectation>,
 ) -> Result<GitLanePushPlan, ProtocolError> {
-    let refs = git_repo.references().list_refs().map_err(|err| {
-        ProtocolError::InvalidState(format!("list git-overlay refs: {err}"))
-    })?;
+    let refs = git_repo
+        .references()
+        .list_refs()
+        .map_err(|err| ProtocolError::InvalidState(format!("list git-overlay refs: {err}")))?;
 
     let mut roots: Vec<GitObjectId> = Vec::new();
     let mut ref_updates: Vec<PushMessage> = Vec::new();
@@ -1972,7 +1979,8 @@ fn build_git_mirror_plan_from_sley(
             .unwrap_or(GitRefRemoteExpectation::Missing);
 
         let kind = git_ref_kind_from_name(&reference.name);
-        let mut message = git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
+        let mut message =
+            git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
         apply_git_ref_expectation_value(&mut message, &expectation)?;
         ref_updates.push(message);
     }
@@ -2056,13 +2064,9 @@ fn build_git_lane_multi_root_pack_plan(
         &HashSet::new(),
         &mut sink,
     )
-    .map_err(|err| {
-        ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}"))
-    })?
+    .map_err(|err| ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}")))?
     .ok_or_else(|| {
-        ProtocolError::InvalidState(
-            "roots did not produce a reachable Git pack".to_string(),
-        )
+        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
     })?;
     if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
         return Err(ProtocolError::InvalidState(format!(
@@ -2124,13 +2128,9 @@ fn stream_git_pack_messages_blocking(
         &HashSet::new(),
         &mut writer,
     )
-    .map_err(|err| {
-        ProtocolError::InvalidState(format!("stream reachable Git pack: {err}"))
-    })?
+    .map_err(|err| ProtocolError::InvalidState(format!("stream reachable Git pack: {err}")))?
     .ok_or_else(|| {
-        ProtocolError::InvalidState(
-            "roots did not produce a reachable Git pack".to_string(),
-        )
+        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
     })?;
     writer.finish()?;
     if summary.pack_size != pack.pack_size || summary.checksum.as_bytes() != pack.pack_id.as_slice()
@@ -3239,9 +3239,8 @@ mod tests {
                 pack_bytes.extend_from_slice(&pack.pack_chunk);
             }
         }
-        let indexed =
-            sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
-                .expect("mirror pack indexes");
+        let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
+            .expect("mirror pack indexes");
         let packed: HashSet<Vec<u8>> = indexed
             .objects
             .iter()
@@ -3329,8 +3328,8 @@ mod tests {
         let git = sley::Repository::init(dir.path()).expect("init git");
         let commit_oid = write_commit(&git, "native");
 
-        let pack = build_git_lane_pack_plan(&git, commit_oid, 64 * 1024)
-            .expect("build native pack plan");
+        let pack =
+            build_git_lane_pack_plan(&git, commit_oid, 64 * 1024).expect("build native pack plan");
         assert_eq!(pack.roots, vec![commit_oid], "native path has one root");
 
         // Reconstruct the native ref update as build_git_lane_push_plan does.

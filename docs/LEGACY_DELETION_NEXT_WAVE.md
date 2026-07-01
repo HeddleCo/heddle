@@ -24,17 +24,17 @@ but durable signed data still needs a deletion path that preserves verification.
   `Repository::get_context_blob`, `list_context_entries`, `set_context_blob`,
   and `remove_context_target` now operate on canonical `__files/<path>` /
   `__states/<id>` entries only. The direct-path reader is private to
-  `0003_canonicalize_context_roots`.
+  `0004_canonicalize_context_roots`.
 - Top-level `ThreadRecord` serde defaults were removed from the live durable
-  reader. Old minimal TOML is parsed only by the private `LegacyThreadRecord`
-  used by `0002_canonicalize_thread_records`, then rewritten as current
-  canonical TOML.
+  reader. Old minimal TOML is parsed only by the private, migration-only
+  `LegacyThreadRecord` used by `0002_canonicalize_thread_records`, then
+  rewritten as current canonical TOML.
 - The pre-fidelity state hash is no longer a normal-looking public API.
   `State::compute_hash_for_legacy_signature_migration()` is hidden and owned by
-  `0003`/`0004`; ordinary signing tests no longer exercise it as live behavior.
+  `0005`; ordinary signing tests no longer exercise it as live behavior.
 - `PackedOpLog::load` is current-format only. V2/V3 containers and old
   OpRecord schemas decode only through `PackedOpLog::ensure_latest`, which is
-  now driven by registered migration `0005_canonicalize_packed_oplog`.
+  now driven by registered migration `0006_canonicalize_packed_oplog`.
 - The deprecated ignore-driven worktree descendant remover was deleted.
   `revert` now uses the tree-driven tracked-removal interface when it can prove
   the target state contains a subtree for the path, and otherwise refuses the
@@ -51,9 +51,10 @@ Lane 6 registered the first deletion-prep migrations in
 `crates/repo/src/migration.rs`:
 
 - `0002_canonicalize_thread_records`
-- `0003_canonicalize_context_roots`
-- `0004_resecure_pre_fidelity_signatures`
-- `0005_canonicalize_packed_oplog`
+- `0003_canonicalize_tree_entries`
+- `0004_canonicalize_context_roots`
+- `0005_resecure_pre_fidelity_signatures`
+- `0006_canonicalize_packed_oplog`
 
 These migrations are durable gates. The current deletion pass moved the
 remaining old readers behind those gates rather than leaving them mixed into
@@ -68,7 +69,7 @@ layout. The direct-path fallback is migration-only because `State.context`
 participates in `State::compute_hash()`, so rewriting historical states from
 direct-path roots to canonical roots changes author-signature input.
 
-Registered migration: `0003_canonicalize_context_roots`.
+Registered migration: `0004_canonicalize_context_roots`.
 
 Current migration behavior:
 - Rewrites unsigned states and locally owned signed states from direct-path
@@ -103,7 +104,7 @@ Verification:
 ### Thread-record serde defaults
 
 Live thread metadata now requires current canonical fields. Missing-field legacy
-records are parsed only by the migration-local `LegacyThreadRecord`.
+records are parsed only by the private, migration-only `LegacyThreadRecord`.
 
 Registered migration: `0002_canonicalize_thread_records`.
 
@@ -135,7 +136,7 @@ Verification:
 The legacy pre-fidelity state hash is now a hidden migration-only helper used to
 verify states signed before the git-fidelity hash bump.
 
-Registered migration: `0004_resecure_pre_fidelity_signatures`.
+Registered migration: `0005_resecure_pre_fidelity_signatures`.
 
 Current migration behavior:
 - Scans signed states, verifies the existing signature against both the current
@@ -150,9 +151,9 @@ Current migration behavior:
 Deletion-prep tests:
 - Existing unsigned-state coverage remains
   `repository_signing::tests::resign_if_owned_reports_unsigned`.
-- `migration::tests::migration_0004_resigns_owned_pre_fidelity_signature`
+- `migration::tests::migration_0005_resigns_owned_pre_fidelity_signature`
   proves the registered migration re-signs owned legacy signatures.
-- `migration::tests::migration_0004_refuses_to_mark_foreign_pre_fidelity_signature_complete`
+- `migration::tests::migration_0005_refuses_to_mark_foreign_pre_fidelity_signature_complete`
   proves foreign valid pre-fidelity signatures block the migration ledger.
 
 Verification:
@@ -165,7 +166,7 @@ Normal packed-oplog loads now accept only latest container + current OpRecord
 schema. Old V2/V3 containers and old per-record schemas remain decodable only
 through `PackedOpLog::ensure_latest`.
 
-Registered migration: `0005_canonicalize_packed_oplog`.
+Registered migration: `0006_canonicalize_packed_oplog`.
 
 Verification:
 - `cargo test -p heddle-oplog packed_oplog -- --nocapture`
@@ -175,38 +176,39 @@ Verification:
 
 ### Legacy gitlink blob convention
 
-The `heddle-submodule:` blob convention is a bridge compromise. Deleting it
-now has a settled target model in
+The `heddle-submodule:` blob convention was a bridge compromise. Runtime
+import/export no longer uses it; the remaining allowance is migration-only
+decoding of old stores. The settled target model is in
 [`ADR-0041`](adr/0041-first-class-gitlinks.md): Gitlinks are first-class tree
 entry targets whose value is a format-aware Sley Git object id.
 
-Current live writers/readers:
-- `crates/ingest/src/importer.rs` writes synthetic blob content for Git gitlinks.
-- `crates/cli/src/cli/commands/git_adapter.rs` writes the same representation
-  for Git-index gitlinks.
-- `crates/cli/src/bridge/git_export.rs` sniffs ordinary normal-file blobs for
-  the magic prefix and emits a Git gitlink.
+Removed runtime writers/readers:
+- `crates/ingest/src/importer.rs` now writes first-class Gitlink tree entries.
+- `crates/cli/src/cli/commands/git_adapter.rs` now writes first-class Gitlink
+  entries for Git-index gitlinks.
+- `crates/cli/src/bridge/git_export.rs` now emits Git gitlinks only from
+  first-class Gitlink targets and never sniffs ordinary blob content.
 
-Deletion direction:
-- Replace the flat `TreeEntry { name, mode, entry_type, hash }` shape with a
-  closed target model: blob, tree, symlink, or gitlink. Keep constructors and
-  accessors as the public interface so invalid mode/type combinations cannot be
-  constructed directly.
-- Add explicit V2 durable tree encoding with stable target tags. Hash entries
-  from semantic target data, not from serde bytes.
-- Move import paths to write first-class Gitlink targets instead of
-  `heddle-submodule:` blob content.
-- Move export paths to emit Git gitlinks only from the first-class
-  representation.
-- Register `0006_gitlink_tree_entries` as a hard migration gate. Decode the old
-  unversioned tree shape only inside the migration. Normal runtime should not
-  keep a long-lived dual reader for the magic-prefix convention.
+Completed deletion direction:
+- Replaced the flat `TreeEntry { name, mode, entry_type, hash }` shape with a
+  closed target model: blob, tree, symlink, or gitlink.
+- Added explicit V2 durable tree encoding with stable target tags.
+- Moved import/export paths to first-class Gitlink targets.
+- Moved the old marker parser out of general utilities into
+  `objects::legacy::decode_gitlink_blob_marker`.
+- Registered `0003_canonicalize_tree_entries` as the hard tree-format gate.
+  It decodes the old unversioned tree shape only inside the migration and
+  rewrites it as current V2 tree bytes at the same semantic tree hash.
+- Bumped the repo-level format gate to 2 so older binaries refuse migrated
+  repositories cleanly.
+- Fixed GC pack/prune so migrated loose V2 tree shadows are not erased in
+  favor of older packed V1 bodies with the same semantic tree hash.
+
+Remaining migration direction:
 - Convert legacy magic blobs only when Sley can prove the original mapped Git
   tree had mode `160000` at the same path with the same target OID. Preserve
   ambiguous magic blobs as ordinary files and report
   `ambiguous_legacy_gitlink_blob` from migration/verify/fsck.
-- Bump the repo-level format gate with the migration so older binaries refuse
-  migrated repositories cleanly.
 - Preserve logical `ChangeId` while recomputing affected tree/state hashes.
   Re-sign locally owned rewritten states with the existing `resign_if_owned`
   path and refuse foreign signed states that require rewrite.

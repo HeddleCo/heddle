@@ -182,11 +182,11 @@ fn get_blob_recursive(
         // semantics), NOT the content of the file it points at — following the
         // link is a higher-level fs concern. `is_symlink()` lets such callers
         // opt into following it themselves.
-        if entry.is_blob() || entry.is_symlink() {
-            return Ok(store.get_blob(&entry.hash)?);
+        if let Some(blob_hash) = entry.leaf_content_hash() {
+            return Ok(store.get_blob(&blob_hash)?);
         }
-    } else if entry.is_tree()
-        && let Some(subtree) = store.get_tree(&entry.hash)?
+    } else if let Some(tree_hash) = entry.tree_hash()
+        && let Some(subtree) = store.get_tree(&tree_hash)?
     {
         return get_blob_recursive(store, &subtree, &parts[1..]);
     }
@@ -230,11 +230,11 @@ where
     if parts.len() == 1 {
         // See `get_blob_recursive`: symlink entries resolve to their blob
         // (the target-path bytes), git-style; we do not follow the link.
-        if entry.is_blob() || entry.is_symlink() {
-            return Ok(store.get_blob(&entry.hash).await?);
+        if let Some(blob_hash) = entry.leaf_content_hash() {
+            return Ok(store.get_blob(&blob_hash).await?);
         }
-    } else if entry.is_tree()
-        && let Some(subtree) = store.get_tree(&entry.hash).await?
+    } else if let Some(tree_hash) = entry.tree_hash()
+        && let Some(subtree) = store.get_tree(&tree_hash).await?
     {
         return Box::pin(get_blob_recursive_async(store, &subtree, &parts[1..])).await;
     }
@@ -251,7 +251,7 @@ mod tests {
     #[cfg(feature = "async-source")]
     use objects::{
         object::{
-            Blob, ChangeId, DiffKind, EntryType, FileChange, FileMode, TreeEntry, diff_trees_visit,
+            Blob, ChangeId, DiffKind, EntryType, FileChange, TreeEntry, diff_trees_visit,
             diff_trees_visit_async,
         },
         store::{AsyncObjectSource, InMemoryStore},
@@ -318,13 +318,14 @@ mod tests {
     ) -> ContentHash {
         let entries = entries
             .into_iter()
-            .map(|(name, hash, entry_type)| TreeEntry {
-                name: name.to_string(),
-                mode: FileMode::Normal,
-                hash,
-                entry_type,
+            .map(|(name, hash, entry_type)| match entry_type {
+                EntryType::Blob => TreeEntry::file(name.to_string(), hash, false),
+                EntryType::Tree => TreeEntry::directory(name.to_string(), hash),
+                EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
+                EntryType::Gitlink => unreachable!("staleness tests do not build gitlinks"),
             })
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
         ObjectStore::put_tree(store, &Tree::from_entries(entries)).unwrap()
     }
 

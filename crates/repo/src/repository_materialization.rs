@@ -13,9 +13,11 @@ use std::{
 
 use objects::{
     fs_atomic::enrich_fs_error,
-    object::{ChangeId, ContentHash, EntryType, Tree},
+    object::{Blob, ChangeId, ContentHash, Tree, TreeEntryTarget},
     store::ObjectStore,
+    util::gitlink_placeholder_bytes,
 };
+use sley::ObjectId as GitObjectId;
 use tracing::{debug, instrument};
 
 // Only consumed by the `#[cfg(unix)]` `remove_materialized_leaf`
@@ -134,31 +136,42 @@ pub(crate) enum WorktreeWriteOp {
         hash: ContentHash,
         validation_root: PathBuf,
     },
+    GitlinkPlaceholder {
+        path: PathBuf,
+        target: GitObjectId,
+    },
 }
 
 impl WorktreeWriteOp {
     pub(crate) fn path(&self) -> &Path {
         match self {
-            Self::Blob { path, .. } | Self::Symlink { path, .. } => path,
+            Self::Blob { path, .. }
+            | Self::Symlink { path, .. }
+            | Self::GitlinkPlaceholder { path, .. } => path,
         }
     }
 
     pub(crate) fn hash(&self) -> ContentHash {
         match self {
             Self::Blob { hash, .. } | Self::Symlink { hash, .. } => *hash,
+            Self::GitlinkPlaceholder { target, .. } => {
+                Blob::new(gitlink_placeholder_bytes(target)).hash()
+            }
         }
     }
 
     pub(crate) fn executable(&self) -> bool {
         match self {
             Self::Blob { executable, .. } => *executable,
-            Self::Symlink { .. } => false,
+            Self::Symlink { .. } | Self::GitlinkPlaceholder { .. } => false,
         }
     }
 
     pub(crate) fn index_kind(&self) -> crate::worktree_index::IndexEntryKind {
         match self {
-            Self::Blob { .. } => crate::worktree_index::IndexEntryKind::File,
+            Self::Blob { .. } | Self::GitlinkPlaceholder { .. } => {
+                crate::worktree_index::IndexEntryKind::File
+            }
             Self::Symlink { .. } => crate::worktree_index::IndexEntryKind::Symlink,
         }
     }
@@ -280,17 +293,18 @@ impl Repository {
             // tiny symlink-target blobs is dwarfed by the
             // decompress cost of even one real source file. Keep
             // it simple: promote everything reachable.
-            match entry.entry_type {
-                EntryType::Blob | EntryType::Symlink => {
-                    out.insert(entry.hash);
+            match entry.target() {
+                TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                    out.insert(*hash);
                 }
-                EntryType::Tree => {
+                TreeEntryTarget::Tree { hash } => {
                     let subtree = self
                         .store
-                        .get_tree(&entry.hash)?
-                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                        .get_tree(hash)?
+                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
                     self.collect_blob_hashes(&subtree, out)?;
                 }
+                TreeEntryTarget::Gitlink { .. } => {}
             }
         }
         Ok(())
@@ -380,54 +394,45 @@ impl Repository {
             child_names: tree
                 .entries()
                 .iter()
-                .map(|entry| entry.name.clone())
+                .map(|entry| entry.name().to_string())
                 .collect(),
             tree_hash: tree.hash(),
         });
 
         for entry in tree.entries() {
-            let path = dir.join(&entry.name);
-            let rel_path = rel_dir.join(&entry.name);
-            // Defensive routing: a tree entry whose `mode` is Symlink should
-            // be materialized as a real symlink even if its `entry_type`
-            // says Blob. Pre-Phase-E imports stored symlinks as
-            // `(EntryType::Blob, FileMode::Symlink)` and the resulting
-            // worktree wrote the symlink target as plain file content.
-            // This guard makes those legacy trees materialize correctly
-            // on `goto` without requiring a re-import.
-            let is_symlink = entry.entry_type == EntryType::Symlink
-                || entry.mode == objects::object::FileMode::Symlink;
-            if is_symlink {
-                plan.symlink_count += 1;
-                plan.leaves.push(WorktreeWriteOp::Symlink {
-                    path,
-                    hash: entry.hash,
-                    validation_root: plan.validation_root.clone(),
-                });
-                continue;
-            }
-            match entry.entry_type {
-                EntryType::Blob => {
+            let path = dir.join(entry.name());
+            let rel_path = rel_dir.join(entry.name());
+            match entry.target() {
+                TreeEntryTarget::Blob { hash, executable } => {
                     plan.file_count += 1;
                     plan.leaves.push(WorktreeWriteOp::Blob {
                         path,
-                        hash: entry.hash,
-                        executable: entry.is_executable(),
+                        hash: *hash,
+                        executable: *executable,
                     });
                 }
-                EntryType::Tree => {
+                TreeEntryTarget::Tree { hash } => {
                     let subtree = self
                         .store
-                        .get_tree(&entry.hash)?
-                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+                        .get_tree(hash)?
+                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
                     plan.directories.push(path.clone());
                     self.plan_materialization(&subtree, &rel_path, &path, plan)?;
                 }
-                EntryType::Symlink => {
-                    // Already handled above; left here for exhaustiveness.
-                    unreachable!(
-                        "EntryType::Symlink should have been routed by the is_symlink guard"
-                    );
+                TreeEntryTarget::Symlink { hash } => {
+                    plan.symlink_count += 1;
+                    plan.leaves.push(WorktreeWriteOp::Symlink {
+                        path,
+                        hash: *hash,
+                        validation_root: plan.validation_root.clone(),
+                    });
+                }
+                TreeEntryTarget::Gitlink { target } => {
+                    plan.file_count += 1;
+                    plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
+                        path,
+                        target: *target,
+                    });
                 }
             }
         }
@@ -564,6 +569,11 @@ impl Repository {
                 {
                     let _ = (blob, path, validation_root);
                 }
+            }
+            WorktreeWriteOp::GitlinkPlaceholder { path, target } => {
+                remove_materialized_leaf(path)?;
+                fs::write(path, gitlink_placeholder_bytes(target))
+                    .map_err(|err| HeddleError::Io(enrich_fs_error(path, "writing", err)))?;
             }
         }
 
@@ -1007,7 +1017,11 @@ mod tests {
             file_count,
             "shared progress counter must equal the file count after the parallel seam"
         );
-        assert_eq!(progress.total(), file_count, "total set from the write batch");
+        assert_eq!(
+            progress.total(),
+            file_count,
+            "total set from the write batch"
+        );
         // The active handle rendered at least once through the seam (throttled,
         // so not once-per-file) — proving the sink is driven across threads.
         assert!(
@@ -1650,13 +1664,13 @@ mod tests {
         repo.materialize_tree(&tree, &worktree_b).unwrap();
 
         for entry in tree.entries() {
-            let path_a = worktree_a.join(&entry.name);
-            let path_b = worktree_b.join(&entry.name);
+            let path_a = worktree_a.join(entry.name());
+            let path_b = worktree_b.join(entry.name());
             assert_eq!(
                 std::fs::read(&path_a).unwrap(),
                 std::fs::read(&path_b).unwrap(),
                 "{} must read back identically across worktrees",
-                entry.name
+                entry.name()
             );
         }
     }
@@ -1780,8 +1794,8 @@ mod tests {
         // No materialized file shares an inode with the canonical
         // loose blob — that would be the hardlink bug.
         let mut canonical_inodes = HashSet::new();
-        for hash in tree.entries().iter().map(|e| &e.hash) {
-            if let Some(loose) = repo.store().loose_blob_path(hash) {
+        for hash in tree.entries().iter().filter_map(|e| e.blob_hash()) {
+            if let Some(loose) = repo.store().loose_blob_path(&hash) {
                 canonical_inodes.insert(std::fs::metadata(&loose).unwrap().ino());
             }
         }

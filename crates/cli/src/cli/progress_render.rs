@@ -228,9 +228,12 @@ mod tests {
             last_phase: Some("p".into()),
             painted: true,
         };
-        for (done, total, want) in
-            [(0, 100, true), (64, 100, true), (100, 100, true), (63, 100, false)]
-        {
+        for (done, total, want) in [
+            (0, 100, true),
+            (64, 100, true),
+            (100, 100, true),
+            (63, 100, false),
+        ] {
             let snap = ProgressSnapshot {
                 done,
                 total,

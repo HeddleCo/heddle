@@ -1787,6 +1787,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1816,6 +1817,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
@@ -1971,6 +1973,7 @@ dependencies = [
  "heddle-repo",
  "rmp-serde",
  "serde",
+ "sley",
  "tempfile",
  "thiserror 2.0.18",
 ]

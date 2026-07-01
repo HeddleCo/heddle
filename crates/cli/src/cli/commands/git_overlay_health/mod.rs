@@ -1072,8 +1072,11 @@ pub(crate) fn build_repository_verification_state_profiled(
     let health_ms = health_start.elapsed().as_millis();
 
     let from_health_start = std::time::Instant::now();
-    let state =
-        RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status);
+    let state = repository_verification_state_from_health_with_worktree_status(
+        repo,
+        health,
+        &worktree_status,
+    );
     let from_health_ms = from_health_start.elapsed().as_millis();
 
     (

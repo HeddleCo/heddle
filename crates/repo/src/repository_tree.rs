@@ -6,6 +6,7 @@ use std::{collections::HashSet, fs, path::Path, time::Instant};
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::ObjectStore,
+    util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
 use tracing::{debug, instrument, trace, warn};
@@ -99,13 +100,21 @@ impl Repository {
         dir: &Path,
         manifest: &crate::thread_manifest::ThreadManifest,
     ) -> Result<Tree> {
-        self.build_tree_profiled_inner(dir, Some(manifest))
+        self.build_tree_profiled_inner(dir, None, Some(manifest))
             .map(|(tree, _)| tree)
     }
 
     #[instrument(skip(self), fields(dir = %dir.display()))]
     pub fn build_tree_profiled(&self, dir: &Path) -> Result<(Tree, TreeBuildProfile)> {
-        self.build_tree_profiled_inner(dir, None)
+        self.build_tree_profiled_inner(dir, None, None)
+    }
+
+    pub(crate) fn build_tree_profiled_against(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+    ) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_inner(dir, baseline_tree, None)
     }
 
     /// Profiled tree-build that reuses a manifest's stat-cache. Same
@@ -121,19 +130,30 @@ impl Repository {
         dir: &Path,
         manifest: &crate::thread_manifest::ThreadManifest,
     ) -> Result<(Tree, TreeBuildProfile)> {
-        self.build_tree_profiled_inner(dir, Some(manifest))
+        self.build_tree_profiled_inner(dir, None, Some(manifest))
+    }
+
+    pub(crate) fn build_tree_profiled_with_stat_cache_against(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+        manifest: &crate::thread_manifest::ThreadManifest,
+    ) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_inner(dir, baseline_tree, Some(manifest))
     }
 
     fn build_tree_profiled_inner(
         &self,
         dir: &Path,
+        baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<(Tree, TreeBuildProfile)> {
         let patterns = self.ignore_patterns()?;
         debug!(pattern_count = patterns.len(), "Starting tree build");
         let start = Instant::now();
         let nested_exclusions = self.nested_thread_worktree_exclusions(dir)?;
-        let tree = self.build_tree_walk(dir, &patterns, nested_exclusions, stat_cache);
+        let tree =
+            self.build_tree_walk(dir, &patterns, nested_exclusions, baseline_tree, stat_cache);
         let elapsed = start.elapsed().as_millis();
         debug!(duration_ms = elapsed, "Tree build complete");
         tree.map(|output| {
@@ -143,18 +163,19 @@ impl Repository {
         })
     }
 
-    #[instrument(skip(self, patterns, nested_exclusions, stat_cache), fields(dir = %dir.display()))]
+    #[instrument(skip(self, patterns, nested_exclusions, baseline_tree, stat_cache), fields(dir = %dir.display()))]
     fn build_tree_walk(
         &self,
         dir: &Path,
         patterns: &[String],
         nested_exclusions: Vec<std::path::PathBuf>,
+        baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<TreeBuildOutput> {
         let ignore_matcher =
             WorktreeIgnoreMatcher::new(patterns).with_nested_worktree_exclusions(nested_exclusions);
         let mut policy = TreeBuildPolicy::new(self, dir, stat_cache);
-        let mut output = walk_worktree(self, dir, &ignore_matcher, None, &mut policy)?;
+        let mut output = walk_worktree(self, dir, &ignore_matcher, baseline_tree, &mut policy)?;
 
         // Flush every newly-seen blob as a single packfile. Stores
         // that don't override `put_blobs_packed` fall back to per-blob
@@ -498,10 +519,37 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
-        _tree_entry: Option<&TreeEntry>,
+        tree_entry: Option<&TreeEntry>,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
         trace!(file = %entry.path.display(), size = entry.metadata.len(), "Processing file");
+
+        if let Some(target) = tree_entry.and_then(TreeEntry::gitlink_target) {
+            let read_start = Instant::now();
+            let (blob, hash) = read_blob_with_hash(entry.path, entry.metadata.len())?;
+            let read_elapsed = read_start.elapsed().as_millis();
+            if blob.content() == gitlink_placeholder_bytes(&target) {
+                state.profile.file_count += 1;
+                state.profile.blob_prep_ms += read_elapsed;
+                state
+                    .entries
+                    .push(TreeEntry::gitlink(entry.name.to_string(), target)?);
+                return Ok(());
+            }
+
+            let enqueue_start = Instant::now();
+            self.enqueue_blob(blob, hash)?;
+            let enqueue_elapsed = enqueue_start.elapsed().as_millis();
+            state.profile.file_count += 1;
+            state.profile.blob_prep_ms += read_elapsed;
+            state.profile.blob_write_ms += enqueue_elapsed;
+            state.entries.push(TreeEntry::file(
+                entry.name.to_string(),
+                hash,
+                entry.executable,
+            )?);
+            return Ok(());
+        }
 
         // Stat-cache fast path: when this build is on behalf of a
         // capture against a previously-materialised thread, reuse the

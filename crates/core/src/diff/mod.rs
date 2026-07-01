@@ -949,7 +949,7 @@ fn tree_side_kind(repo: &Repository, tree: Option<&Tree>, path: &str) -> Result<
         return Ok(SideKind::Absent);
     };
     if let Some(entry) = find_entry_in_tree(repo, tree, path)? {
-        return Ok(if entry.entry_type == EntryType::Symlink {
+        return Ok(if entry.entry_type() == EntryType::Symlink {
             SideKind::Symlink
         } else {
             SideKind::Regular
@@ -1194,7 +1194,10 @@ fn dir_subtree_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Opt
         if !entry.is_tree() {
             return Ok(None);
         }
-        let Some(subtree) = repo.store().get_tree(&entry.hash)? else {
+        let Some(hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        let Some(subtree) = repo.store().get_tree(&hash)? else {
             return Ok(None);
         };
         if parts.peek().is_none() {
@@ -1214,9 +1217,11 @@ fn collect_subtree_blob_paths(
     out: &mut Vec<String>,
 ) -> Result<()> {
     for entry in subtree.entries() {
-        let child_path = format!("{prefix}/{}", entry.name);
+        let child_path = format!("{prefix}/{}", entry.name());
         if entry.is_tree() {
-            if let Some(nested) = repo.store().get_tree(&entry.hash)? {
+            if let Some(hash) = entry.tree_hash()
+                && let Some(nested) = repo.store().get_tree(&hash)?
+            {
                 collect_subtree_blob_paths(repo, &nested, &child_path, out)?;
             }
         } else {
@@ -2362,7 +2367,12 @@ fn number_lines(lines: Vec<LineDiff>) -> Vec<LineDiff> {
 
 fn find_blob_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Option<Blob>> {
     match find_entry_in_tree(repo, tree, path)? {
-        Some(entry) => Ok(Some(repo.require_blob(&entry.hash)?)),
+        Some(entry) => match entry.content_hash() {
+            Some(hash) if entry.is_blob() || entry.is_symlink() => {
+                Ok(Some(repo.require_blob(&hash)?))
+            }
+            _ => Ok(None),
+        },
         None => Ok(None),
     }
 }
@@ -2395,11 +2405,12 @@ fn find_entry_recursive(
     };
 
     if parts.len() == 1 {
-        if entry.is_blob() || entry.entry_type == EntryType::Symlink {
+        if entry.is_blob() || entry.entry_type() == EntryType::Symlink || entry.is_gitlink() {
             return Ok(Some(entry.clone()));
         }
     } else if entry.is_tree()
-        && let Some(subtree) = repo.store().get_tree(&entry.hash)?
+        && let Some(hash) = entry.tree_hash()
+        && let Some(subtree) = repo.store().get_tree(&hash)?
     {
         return find_entry_recursive(repo, &subtree, &parts[1..]);
     }
@@ -2448,13 +2459,13 @@ fn change_file_modes(
     let old_side = || {
         from_tree
             .and_then(|tree| find_entry_in_tree(repo, tree, path).ok().flatten())
-            .map(|entry| entry.mode)
+            .map(|entry| entry.mode())
     };
     let new_side = || match to_tree {
         Some(tree) => find_entry_in_tree(repo, tree, path)
             .ok()
             .flatten()
-            .map(|entry| entry.mode),
+            .map(|entry| entry.mode()),
         None => worktree_file_mode(&repo.root().join(path)),
     };
     match kind {

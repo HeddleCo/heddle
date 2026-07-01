@@ -223,12 +223,15 @@ impl Repository {
             return Ok(None);
         };
         if rest.as_os_str().is_empty() {
-            return Ok(entry.is_blob().then_some(entry.hash));
+            return Ok(entry.blob_hash());
         }
         if !entry.is_tree() {
             return Ok(None);
         }
-        self.lookup_context_leaf(&entry.hash, rest)
+        let Some(tree_hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        self.lookup_context_leaf(&tree_hash, rest)
     }
 
     fn insert_leaf_at_path(
@@ -249,7 +252,8 @@ impl Repository {
             let subtree = tree
                 .get(name)
                 .filter(|e| e.is_tree())
-                .and_then(|e| self.store.get_tree(&e.hash).ok().flatten())
+                .and_then(|e| e.tree_hash())
+                .and_then(|hash| self.store.get_tree(&hash).ok().flatten())
                 .unwrap_or_default();
 
             let sub_hash = self.insert_leaf_at_path(&subtree, rest, blob_hash)?;
@@ -278,7 +282,10 @@ impl Repository {
             if !entry.is_tree() {
                 return Ok(Some(*root));
             }
-            match self.remove_leaf_at_path(&entry.hash, rest)? {
+            let Some(tree_hash) = entry.tree_hash() else {
+                return Ok(Some(*root));
+            };
+            match self.remove_leaf_at_path(&tree_hash, rest)? {
                 Some(sub_hash) => {
                     new_tree.insert(TreeEntry::directory(name, sub_hash)?);
                 }
@@ -304,8 +311,8 @@ impl Repository {
         mode: ContextWalkMode,
     ) -> Result<()> {
         for entry in tree.entries() {
-            let entry_path = current_path.join(&entry.name);
-            match entry.entry_type {
+            let entry_path = current_path.join(entry.name());
+            match entry.entry_type() {
                 EntryType::Tree => {
                     if let Some(prefix) = prefix
                         && !prefix.starts_with(&entry_path)
@@ -315,7 +322,9 @@ impl Repository {
                     {
                         continue;
                     }
-                    if let Some(subtree) = self.store.get_tree(&entry.hash)? {
+                    if let Some(tree_hash) = entry.tree_hash()
+                        && let Some(subtree) = self.store.get_tree(&tree_hash)?
+                    {
                         self.walk_context_tree(&subtree, &entry_path, prefix, results, mode)?;
                     }
                 }
@@ -329,13 +338,14 @@ impl Repository {
                     {
                         continue;
                     }
-                    if let Some(blob) = self.store.get_blob(&entry.hash)?
+                    if let Some(blob_hash) = entry.blob_hash()
+                        && let Some(blob) = self.store.get_blob(&blob_hash)?
                         && let Ok(context) = ContextBlob::decode(blob.content())
                     {
                         results.insert(context_entry_key(&target), (target, context));
                     }
                 }
-                EntryType::Symlink => {}
+                EntryType::Symlink | EntryType::Gitlink => {}
             }
         }
         Ok(())

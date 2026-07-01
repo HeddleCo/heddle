@@ -18,10 +18,15 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, ThreadName, Tree},
+    object::{
+        Action, ActionId, Attribution, Blob, ChangeId, ContentHash, Principal, State, ThreadName,
+        Tree, TreeEntry,
+    },
     store::ObjectStore,
+    util::gitlink_placeholder_bytes,
 };
 use repo::Repository;
+use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
 use crate::{
@@ -198,6 +203,29 @@ fn open_mount() -> (TempDir, ContentAddressedMount) {
     (temp, mount)
 }
 
+fn mount_with_gitlink() -> (TempDir, ContentAddressedMount, GitObjectId) {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let target: GitObjectId = "0303030303030303030303030303030303030303"
+        .parse()
+        .expect("git oid");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::gitlink("vendor", target).expect("gitlink entry"),
+    ]);
+    let tree_hash = repo.store().put_tree(&tree).unwrap();
+    let state = State::new(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Gitlink Tester", "gitlink@example.test")),
+    );
+    repo.store().put_state(&state).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state.change_id)
+        .unwrap();
+    let mount = ContentAddressedMount::new(repo, "main").unwrap();
+    (temp, mount, target)
+}
+
 #[test]
 fn lookup_hits_root_entry() {
     let (_temp, mount) = open_mount();
@@ -303,6 +331,24 @@ fn attrs_preserve_executable_bit() {
 }
 
 #[test]
+fn gitlink_reads_as_read_only_placeholder() {
+    let (_temp, mount, target) = mount_with_gitlink();
+    let node = mount.lookup_path("vendor").unwrap();
+    let attrs = mount.attrs(node).unwrap();
+    let placeholder = gitlink_placeholder_bytes(&target);
+
+    assert_eq!(attrs.kind, NodeKind::File);
+    assert_eq!(attrs.size, placeholder.len() as u64);
+
+    let mut buf = vec![0u8; placeholder.len() + 16];
+    let n = mount.read(node, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], placeholder.as_slice());
+
+    let err = mount.write(node, 0, b"not-a-gitlink").unwrap_err();
+    assert!(matches!(err, MountError::ReadOnly));
+}
+
+#[test]
 fn write_to_overlay_then_read_back() {
     // Two-tier write: a write against a captured `File` NodeId
     // mints a hot-tier buffer keyed off the file's path. Subsequent
@@ -362,10 +408,16 @@ fn read_captured_blob(mount: &ContentAddressedMount, change_id: &ChangeId, path:
     for dir in dirs {
         let entry = tree.get(dir).expect("intermediate dir");
         assert!(entry.is_tree());
-        tree = store.get_tree(&entry.hash).unwrap().unwrap();
+        tree = store
+            .get_tree(&entry.tree_hash().expect("dir tree hash"))
+            .unwrap()
+            .unwrap();
     }
     let entry = tree.get(leaf).expect("leaf entry");
-    let blob = store.get_blob(&entry.hash).unwrap().unwrap();
+    let blob = store
+        .get_blob(&entry.leaf_content_hash().expect("leaf content hash"))
+        .unwrap()
+        .unwrap();
     blob.into_content()
 }
 
@@ -971,20 +1023,20 @@ fn capture_builds_state_and_advances_thread() {
         .get_tree(&new_state.tree)
         .unwrap()
         .unwrap();
-    let names: Vec<&str> = new_tree.entries().iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = new_tree.entries().iter().map(|e| e.name()).collect();
     assert!(names.contains(&"alpha.txt"));
     assert!(names.contains(&"beta.txt"));
     assert_eq!(
         new_tree
             .get("alpha.txt")
-            .map(|e| e.hash)
+            .and_then(|e| e.leaf_content_hash())
             .expect("alpha entry"),
         alpha_oid
     );
     assert_eq!(
         new_tree
             .get("beta.txt")
-            .map(|e| e.hash)
+            .and_then(|e| e.leaf_content_hash())
             .expect("beta entry"),
         beta_oid
     );
@@ -1055,12 +1107,22 @@ fn capture_nested_new_file_under_existing_dir() {
     let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
     let nested_entry = root_tree.get("nested").expect("nested dir");
     assert!(nested_entry.is_tree());
-    let nested = store.get_tree(&nested_entry.hash).unwrap().unwrap();
-    let names: Vec<&str> = nested.entries().iter().map(|e| e.name.as_str()).collect();
+    let nested = store
+        .get_tree(&nested_entry.tree_hash().expect("nested tree hash"))
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = nested.entries().iter().map(|e| e.name()).collect();
     assert!(names.contains(&"inner.txt"));
     assert!(names.contains(&"note.md"));
     assert!(names.contains(&"extra.rs"));
-    assert_eq!(nested.get("extra.rs").unwrap().hash, extra_blob);
+    assert_eq!(
+        nested
+            .get("extra.rs")
+            .unwrap()
+            .leaf_content_hash()
+            .expect("extra blob hash"),
+        extra_blob
+    );
 }
 
 #[test]
@@ -1080,9 +1142,12 @@ fn capture_creates_new_intermediate_dirs() {
     let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
     let newdir_entry = root_tree.get("newdir").expect("newdir created");
     assert!(newdir_entry.is_tree());
-    let newdir = store.get_tree(&newdir_entry.hash).unwrap().unwrap();
+    let newdir = store
+        .get_tree(&newdir_entry.tree_hash().expect("newdir tree hash"))
+        .unwrap()
+        .unwrap();
     assert_eq!(newdir.entries().len(), 1);
-    assert_eq!(newdir.entries()[0].name, "bar.rs");
+    assert_eq!(newdir.entries()[0].name(), "bar.rs");
 }
 
 #[test]
@@ -1122,7 +1187,10 @@ fn capture_handles_multiple_files_at_multiple_depths() {
                 let name = name.to_str().unwrap();
                 match current.get(name).cloned() {
                     Some(e) if e.is_tree() => {
-                        current = store.get_tree(&e.hash).unwrap().unwrap();
+                        current = store
+                            .get_tree(&e.tree_hash().expect("tree hash"))
+                            .unwrap()
+                            .unwrap();
                         last = Some(e);
                     }
                     Some(e) => {
@@ -1185,7 +1253,7 @@ fn capture_unlink_prunes_empty_parent_trees() {
         root_tree
             .entries()
             .iter()
-            .map(|e| &e.name)
+            .map(|e| e.name())
             .collect::<Vec<_>>()
     );
 }
@@ -1207,8 +1275,11 @@ fn capture_unlink_drops_only_named_path() {
     let state = store.get_state(&second).unwrap().unwrap();
     let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
     let dir_entry = root_tree.get("dir").expect("dir survives");
-    let dir = store.get_tree(&dir_entry.hash).unwrap().unwrap();
-    let names: Vec<&str> = dir.entries().iter().map(|e| e.name.as_str()).collect();
+    let dir = store
+        .get_tree(&dir_entry.tree_hash().expect("dir tree hash"))
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = dir.entries().iter().map(|e| e.name()).collect();
     assert_eq!(names, vec!["keep.rs"]);
 }
 
@@ -2813,9 +2884,9 @@ mod write_ops {
         let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
         let entry = root_tree.get("hello.txt").expect("recreated file in tree");
         assert!(
-            matches!(entry.mode, objects::object::FileMode::Normal),
+            matches!(entry.mode(), objects::object::FileMode::Normal),
             "chmod on orphan must not leak to recreated file: got mode {:?}",
-            entry.mode,
+            entry.mode(),
         );
     }
 
@@ -4276,7 +4347,7 @@ mod capture_write_ops {
         let root = dump_tree(store, &state.tree);
         let blank = root.get("blank").expect("blank dir survives capture");
         assert!(blank.is_tree());
-        let blank_tree = dump_tree(store, &blank.hash);
+        let blank_tree = dump_tree(store, &blank.tree_hash().expect("blank tree hash"));
         assert_eq!(blank_tree.entries().len(), 0);
     }
 
@@ -4297,7 +4368,7 @@ mod capture_write_ops {
         let state = store.get_state(&id).unwrap().unwrap();
         let root = dump_tree(store, &state.tree);
         let alias = root.get("alias.txt").expect("symlink lands in tree");
-        assert!(matches!(alias.mode, objects::object::FileMode::Symlink));
+        assert!(matches!(alias.mode(), objects::object::FileMode::Symlink));
     }
 
     /// A rmdir tombstone for a captured dir must drop the whole subtree

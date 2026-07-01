@@ -107,13 +107,16 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
         let sub_entry = base_tree
             .entries()
             .iter()
-            .find(|e| e.name == "sub")
+            .find(|e| e.name() == "sub")
             .expect("base tree must contain the `sub` directory");
         assert!(
             sub_entry.is_tree(),
             "`sub` must be a Tree entry, was: {sub_entry:?}"
         );
-        sub_entry.hash.to_hex()
+        sub_entry
+            .tree_hash()
+            .expect("sub entry must carry a tree hash")
+            .to_hex()
     };
 
     // Tamper with the on-disk store. The merge subprocess starts cold

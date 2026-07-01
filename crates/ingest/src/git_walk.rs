@@ -240,6 +240,10 @@ impl GitSource {
         })
     }
 
+    pub fn object_format(&self) -> ObjectFormat {
+        self.repo.object_format()
+    }
+
     /// Whether `refs/notes/heddle` exists in the source repo, resolved once and
     /// memoized. Absence is the common case (most imports have no heddle notes),
     /// and lets [`Self::read_heddle_note_bytes`] skip the per-commit notes walk.

@@ -27,10 +27,7 @@ use objects::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
-    util::{
-        GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name,
-        gitlink_blob_content,
-    },
+    util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
 use oplog::oplog::{OpLog, OpLogBackend};
 use refs::refs::RefBackend;
@@ -645,10 +642,12 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
                 ))
             }
             TreeChildKind::Gitlink => {
-                let hash = self.write_synthetic_blob(gitlink_blob_content(&child.sha))?;
+                let target = sley::ObjectId::from_hex(self.git.object_format(), &child.sha)
+                    .map_err(|err| {
+                        IngestError::Git(format!("parse gitlink {}: {err}", child.sha))
+                    })?;
                 Ok(Some(
-                    TreeEntry::file(name, hash, false)
-                        .map_err(|e| IngestError::Heddle(e.into()))?,
+                    TreeEntry::gitlink(name, target).map_err(|e| IngestError::Heddle(e.into()))?,
                 ))
             }
         }
@@ -1090,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn import_git_into_represents_gitlink_as_submodule_blob() {
+    fn import_git_into_represents_gitlink_as_tree_entry() {
         let gitdir = TempDir::new().unwrap();
         let heddledir = TempDir::new().unwrap();
         seed_gitlink_repo(gitdir.path());
@@ -1120,16 +1119,11 @@ mod tests {
             .expect("root tree");
         let entry = tree.get("vendor").expect("vendor gitlink entry");
 
-        assert_eq!(entry.entry_type, EntryType::Blob);
-        assert_eq!(entry.mode, FileMode::Normal);
-        let blob = repo
-            .store()
-            .get_blob(&entry.hash)
-            .unwrap()
-            .expect("submodule blob");
+        assert_eq!(entry.entry_type(), EntryType::Gitlink);
+        assert_eq!(entry.mode(), FileMode::Gitlink);
         assert_eq!(
-            blob.content(),
-            gitlink_blob_content("0808080808080808080808080808080808080808")
+            entry.gitlink_target().map(|oid| oid.to_string()),
+            Some("0808080808080808080808080808080808080808".to_string())
         );
     }
 

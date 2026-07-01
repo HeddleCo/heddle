@@ -1588,6 +1588,7 @@ impl<'a> GitBridge<'a> {
             entry.mode = match mode {
                 FileMode::Executable => 0o100755,
                 FileMode::Symlink => 0o120000,
+                FileMode::Gitlink => 0o160000,
                 FileMode::Normal => 0o100644,
             };
             changed = true;
@@ -2586,7 +2587,7 @@ fn path_prefix_conflict(a: &str, b: &str) -> bool {
     child_of(a, b) || child_of(b, a)
 }
 
-/// Recursively collect every file path (blob and symlink) in `tree`,
+/// Recursively collect every Git-indexable leaf path in `tree`,
 /// resolving subtrees through `store`. Missing subtree objects are
 /// skipped rather than treated as errors, matching the repo's other
 /// tree walks. Paths use `/` separators, the form Git's index expects.
@@ -2598,16 +2599,18 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
 ) -> GitResult<()> {
     for entry in tree.iter() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(subtree) = store.get_tree(&entry.hash)? {
+            if let Some(hash) = entry.tree_hash()
+                && let Some(subtree) = store.get_tree(&hash)?
+            {
                 collect_capture_paths(store, &subtree, &path, out)?;
             }
         } else {
-            out.push((path, entry.mode));
+            out.push((path, entry.mode()));
         }
     }
     Ok(())

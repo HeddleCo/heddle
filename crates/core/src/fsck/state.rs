@@ -119,8 +119,8 @@ fn check_provenance_tree(
     };
 
     for entry in provenance_tree.entries() {
-        let entry_path = path.join(&entry.name);
-        let Some(data_entry) = data_tree.get(&entry.name) else {
+        let entry_path = path.join(entry.name());
+        let Some(data_entry) = data_tree.get(entry.name()) else {
             errors.push(make_error(
                 "invalid_provenance",
                 &format!(
@@ -132,7 +132,7 @@ fn check_provenance_tree(
             continue;
         };
 
-        match entry.entry_type {
+        match entry.entry_type() {
             objects::object::EntryType::Tree => {
                 if !data_entry.is_tree() {
                     errors.push(make_error(
@@ -145,8 +145,14 @@ fn check_provenance_tree(
                     ));
                     continue;
                 }
-                if let Some(subtree) = repo.store().get_tree(&data_entry.hash)? {
-                    check_provenance_tree(repo, &subtree, &entry.hash, &entry_path, errors)?;
+                let Some(data_hash) = data_entry.tree_hash() else {
+                    continue;
+                };
+                let Some(provenance_hash) = entry.tree_hash() else {
+                    continue;
+                };
+                if let Some(subtree) = repo.store().get_tree(&data_hash)? {
+                    check_provenance_tree(repo, &subtree, &provenance_hash, &entry_path, errors)?;
                 }
             }
             objects::object::EntryType::Blob => {
@@ -161,11 +167,14 @@ fn check_provenance_tree(
                     ));
                     continue;
                 }
-                let Some(provenance_blob) = repo.store().get_blob(&entry.hash)? else {
+                let Some(provenance_hash) = entry.blob_hash() else {
+                    continue;
+                };
+                let Some(provenance_blob) = repo.store().get_blob(&provenance_hash)? else {
                     errors.push(make_error(
                         "invalid_provenance",
                         &format!("Missing provenance blob for '{}'", entry_path.display()),
-                        Some(entry.hash.short()),
+                        Some(provenance_hash.short()),
                     ));
                     continue;
                 };
@@ -180,7 +189,7 @@ fn check_provenance_tree(
                                     entry_path.display(),
                                     error
                                 ),
-                                Some(entry.hash.short()),
+                                Some(provenance_hash.short()),
                             ));
                             continue;
                         }
@@ -193,24 +202,27 @@ fn check_provenance_tree(
                             entry_path.display(),
                             error
                         ),
-                        Some(entry.hash.short()),
+                        Some(provenance_hash.short()),
                     ));
                     continue;
                 }
-                if provenance.file_blob != data_entry.hash {
+                let Some(data_hash) = data_entry.blob_hash() else {
+                    continue;
+                };
+                if provenance.file_blob != data_hash {
                     errors.push(make_error(
                         "invalid_provenance",
                         &format!(
                             "Provenance for '{}' points to blob {} but file uses {}",
                             entry_path.display(),
                             provenance.file_blob.short(),
-                            data_entry.hash.short()
+                            data_hash.short()
                         ),
-                        Some(entry.hash.short()),
+                        Some(provenance_hash.short()),
                     ));
                     continue;
                 }
-                if let Some(blob) = repo.store().get_blob(&data_entry.hash)?
+                if let Some(blob) = repo.store().get_blob(&data_hash)?
                     && let Ok(text) = std::str::from_utf8(blob.content())
                 {
                     let line_count = text.lines().count() as u32;
@@ -223,12 +235,13 @@ fn check_provenance_tree(
                                 provenance.line_count,
                                 line_count
                             ),
-                            Some(entry.hash.short()),
+                            Some(provenance_hash.short()),
                         ));
                     }
                 }
             }
             objects::object::EntryType::Symlink => {}
+            objects::object::EntryType::Gitlink => {}
         }
     }
 

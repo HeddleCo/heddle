@@ -111,13 +111,13 @@ fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Re
     let current_entries: HashMap<&str, &TreeEntry> = current_tree
         .entries()
         .iter()
-        .map(|e| (e.name.as_str(), e))
+        .map(|e| (e.name(), e))
         .collect();
     let current_names: HashSet<&str> = current_entries.keys().copied().collect();
-    let new_names: HashSet<&str> = tree.entries().iter().map(|e| e.name.as_str()).collect();
+    let new_names: HashSet<&str> = tree.entries().iter().map(|e| e.name()).collect();
 
     let source_subtree_for = |entry: &TreeEntry, name: &str| -> Result<Tree> {
-        if entry.entry_type == EntryType::Tree {
+        if entry.entry_type() == EntryType::Tree {
             Ok(repo
                 .resolve_subtree(&current_tree, Path::new(name))?
                 .unwrap_or_default())
@@ -150,14 +150,14 @@ fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Re
 
     // Handle type changes (file→dir or dir→file).
     for entry in tree.entries() {
-        let path = repo.root().join(&entry.name);
+        let path = repo.root().join(entry.name());
         let metadata = match fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
         let is_dir_on_disk = metadata.is_dir();
-        let is_tree_entry = entry.entry_type == EntryType::Tree;
+        let is_tree_entry = entry.entry_type() == EntryType::Tree;
         if is_dir_on_disk != is_tree_entry {
             if is_dir_on_disk {
                 // dir → file/symlink: strip tracked content from the
@@ -168,8 +168,8 @@ fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Re
                 // with a clear message — the alternative is
                 // `materialize_blob` blowing up deep in the materializer
                 // with a bare "Is a directory" I/O error.
-                if let Some(current) = current_entries.get(entry.name.as_str()) {
-                    let source_subtree = source_subtree_for(current, &entry.name)?;
+                if let Some(current) = current_entries.get(entry.name()) {
+                    let source_subtree = source_subtree_for(current, entry.name())?;
                     repo.remove_tracked_descendants_with_source(&path, &source_subtree)?;
                 }
                 if path.exists() {

@@ -2,7 +2,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use objects::{
-    object::{ChangeId, ContentHash, EntryType, State},
+    object::{ChangeId, ContentHash, State, TreeEntryTarget},
     store::ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -252,46 +252,29 @@ fn enumerate_tree_closure_filtered(
     });
 
     for entry in tree.entries() {
-        match entry.entry_type {
-            EntryType::Blob => {
-                if excluded.contains(&entry.hash) {
+        match entry.target() {
+            TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                if excluded.contains(hash) {
                     continue;
                 }
-                if !seen.insert(entry.hash) {
+                if !seen.insert(*hash) {
                     continue;
                 }
                 let blob = store
-                    .get_blob(&entry.hash)?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(entry.hash.to_hex()))?;
+                    .get_blob(hash)?
+                    .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
                 out.push(ObjectInfo {
-                    id: ObjectId::Hash(entry.hash),
+                    id: ObjectId::Hash(*hash),
                     obj_type: ObjectType::Blob,
                     size: blob.size() as u64,
                     delta_base: None,
                 });
-                emit_redaction_info(store, &entry.hash, out)?;
+                emit_redaction_info(store, hash, out)?;
             }
-            EntryType::Tree => {
-                enumerate_tree_closure_filtered(store, entry.hash, excluded, seen, out)?;
+            TreeEntryTarget::Tree { hash } => {
+                enumerate_tree_closure_filtered(store, *hash, excluded, seen, out)?;
             }
-            EntryType::Symlink => {
-                if excluded.contains(&entry.hash) {
-                    continue;
-                }
-                if !seen.insert(entry.hash) {
-                    continue;
-                }
-                let blob = store
-                    .get_blob(&entry.hash)?
-                    .ok_or_else(|| ProtocolError::ObjectNotFound(entry.hash.to_hex()))?;
-                out.push(ObjectInfo {
-                    id: ObjectId::Hash(entry.hash),
-                    obj_type: ObjectType::Blob,
-                    size: blob.size() as u64,
-                    delta_base: None,
-                });
-                emit_redaction_info(store, &entry.hash, out)?;
-            }
+            TreeEntryTarget::Gitlink { .. } => {}
         }
     }
 
@@ -402,23 +385,24 @@ fn enumerate_tree_plan_filtered(
     });
 
     for entry in tree.entries() {
-        match entry.entry_type {
-            EntryType::Blob | EntryType::Symlink => {
-                if excluded.contains(&entry.hash) {
+        match entry.target() {
+            TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                if excluded.contains(hash) {
                     continue;
                 }
-                if !seen.insert(entry.hash) {
+                if !seen.insert(*hash) {
                     continue;
                 }
                 out.push(PlannedObject {
-                    id: ObjectId::Hash(entry.hash),
+                    id: ObjectId::Hash(*hash),
                     obj_type: ObjectType::Blob,
                 });
-                emit_redaction_plan(store, &entry.hash, out)?;
+                emit_redaction_plan(store, hash, out)?;
             }
-            EntryType::Tree => {
-                enumerate_tree_plan_filtered(store, entry.hash, excluded, seen, out)?;
+            TreeEntryTarget::Tree { hash } => {
+                enumerate_tree_plan_filtered(store, *hash, excluded, seen, out)?;
             }
+            TreeEntryTarget::Gitlink { .. } => {}
         }
     }
 
@@ -530,13 +514,14 @@ fn collect_tree_hashes(
     };
 
     for entry in tree.entries() {
-        match entry.entry_type {
-            EntryType::Blob | EntryType::Symlink => {
-                excluded.insert(entry.hash);
+        match entry.target() {
+            TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                excluded.insert(*hash);
             }
-            EntryType::Tree => {
-                collect_tree_hashes(store, entry.hash, excluded)?;
+            TreeEntryTarget::Tree { hash } => {
+                collect_tree_hashes(store, *hash, excluded)?;
             }
+            TreeEntryTarget::Gitlink { .. } => {}
         }
     }
 
@@ -589,6 +574,7 @@ mod tests {
         store::ObjectStore,
     };
     use repo::Repository;
+    use sley::ObjectId as GitObjectId;
     use tempfile::TempDir;
 
     use super::{
@@ -782,6 +768,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn state_closure_skips_gitlink_targets() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let target: GitObjectId = "0303030303030303030303030303030303030303"
+            .parse()
+            .expect("git oid");
+        let root = Tree::from_entries(vec![
+            TreeEntry::gitlink("vendor", target).expect("gitlink entry"),
+        ]);
+        let root_hash = repo.store().put_tree(&root).unwrap();
+        let state = State::new(root_hash, Vec::new(), test_attribution());
+        repo.store().put_state(&state).unwrap();
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(pairs_from_full(&full), pairs_from_plan(&plan));
+        assert!(
+            !full.iter().any(|info| info.obj_type == ObjectType::Blob),
+            "gitlinks carry foreign Git commit ids, not Heddle blob dependencies: {full:?}"
+        );
+        assert!(full.iter().any(|info| {
+            info.id == ObjectId::Hash(root_hash) && info.obj_type == ObjectType::Tree
+        }));
+    }
+
     /// Once a redaction is declared for a blob in a snapshot, the
     /// state closure must include an `ObjectType::Redaction` entry
     /// keyed on that blob's hash — that's the wire-side signal the
@@ -801,9 +824,10 @@ mod tests {
             .expect("tree present");
         let blob_hash = tree
             .iter()
-            .find(|e| e.name == "secret.toml")
+            .find(|e| e.name() == "secret.toml")
             .expect("entry present")
-            .hash;
+            .blob_hash()
+            .expect("secret.toml is a blob");
 
         let redaction = Redaction {
             redacted_blob: blob_hash,

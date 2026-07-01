@@ -8,23 +8,24 @@ round trips, but it made one ordinary file content string semantically special
 and forced import, export, status, diff, and materialization paths to remember a
 magic blob convention.
 
-This ADR records the replacement model for deleting that bridge.
+This ADR records the replacement model that deletes that bridge from runtime
+import/export.
 
-**Status:** proposed
+**Status:** accepted and implemented for runtime paths; hard migration remains.
 
 ## Context
 
-Current live readers and writers are:
+Former live readers and writers were:
 
-- `crates/ingest/src/importer.rs` writes synthetic blobs for Git tree entries
+- `crates/ingest/src/importer.rs` wrote synthetic blobs for Git tree entries
   with mode `160000`.
-- `crates/cli/src/cli/commands/git_adapter.rs` writes the same synthetic blob
+- `crates/cli/src/cli/commands/git_adapter.rs` wrote the same synthetic blob
   representation for staged Git-index gitlinks.
-- `crates/cli/src/bridge/git_export.rs` sniffs ordinary normal-file blobs whose
-  content starts with `heddle-submodule:` and emits Git commit tree entries.
-- `crates/objects/src/object/tree.rs` exposes a flat `TreeEntry { name, mode,
-  entry_type, hash }`, which permits invalid mode/type combinations and has no
-  representation for a foreign Git object target.
+- `crates/cli/src/bridge/git_export.rs` sniffed ordinary normal-file blobs whose
+  content starts with `heddle-submodule:` and emitted Git commit tree entries.
+- `crates/objects/src/object/tree.rs` exposed a flat `TreeEntry { name, mode,
+  entry_type, hash }`, which permitted invalid mode/type combinations and had
+  no representation for a foreign Git object target.
 - `docs/spikes/heddle-451-schema-versioning-policy.md` row 24 identifies the
   magic-blob collision as an unstamped durable-format hole.
 
@@ -111,8 +112,9 @@ Diff and status treat Gitlinks as first-class entries:
 
 ## Migration
 
-Use a hard, registered migration gate, tentatively
-`0006_gitlink_tree_entries`.
+Use a hard, registered migration gate, `0003_canonicalize_tree_entries`, for
+the old unversioned tree shape. A later Sley-proof migration may convert
+proven legacy marker blobs into first-class Gitlinks.
 
 The migration decodes the old unversioned tree shape only inside migration code.
 Normal runtime writes and accepts the V2 tree shape after migration; it does not

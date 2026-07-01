@@ -7,10 +7,7 @@ use std::{collections::HashMap, hint::black_box, sync::RwLock};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use objects::{
-    object::{
-        Action, ActionId, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
-        diff_trees,
-    },
+    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree, TreeEntry, diff_trees},
     store::{ObjectStore, Result},
     sync::RwLockExt,
 };
@@ -132,12 +129,7 @@ fn tree_for(store: &BenchStore, size: usize, shape: DeltaShape, side: usize) -> 
             "entry={i}; side={}; changed={changed}\n",
             side * changed as usize
         );
-        entries.push(TreeEntry {
-            name,
-            mode: FileMode::Normal,
-            entry_type: EntryType::Blob,
-            hash: blob_hash(store, content),
-        });
+        entries.push(TreeEntry::file(name, blob_hash(store, content), false).unwrap());
     }
     let tree = Tree::from_entries(entries);
     store.put_tree(&tree).unwrap()

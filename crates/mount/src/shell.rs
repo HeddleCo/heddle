@@ -321,7 +321,7 @@ pub struct AttrUpdate {
 /// Convert a Heddle [`FileMode`] into a node kind.
 pub(crate) fn kind_for_mode(mode: FileMode) -> NodeKind {
     match mode {
-        FileMode::Normal | FileMode::Executable => NodeKind::File,
+        FileMode::Normal | FileMode::Executable | FileMode::Gitlink => NodeKind::File,
         FileMode::Symlink => NodeKind::Symlink,
     }
 }

@@ -151,7 +151,8 @@ pub(super) fn lookup_tree_entry(repo: &Repository, tree: &Tree, path: &Path) -> 
     if !entry.is_tree() {
         return None;
     }
-    let subtree = repo.store().get_tree(&entry.hash).ok().flatten()?;
+    let subtree_hash = entry.tree_hash()?;
+    let subtree = repo.store().get_tree(&subtree_hash).ok().flatten()?;
     lookup_tree_entry(repo, &subtree, rest)
 }
 

@@ -1044,13 +1044,20 @@ fn switch_output_json_is_byte_clean_of_progress() {
     let stdout = heddle(&["--output", "json", "switch", "HEAD~1"], Some(temp.path()))
         .expect("switch --output json");
 
-    let non_empty: Vec<&str> = stdout.lines().filter(|line| !line.trim().is_empty()).collect();
+    let non_empty: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(
         non_empty.len(),
         1,
         "json stdout must be exactly one line (no progress leak), got: {stdout:?}"
     );
-    let value: Value = serde_json::from_str(non_empty[0])
-        .unwrap_or_else(|err| panic!("switch json stdout not JSON: {err}\n  line: {}", non_empty[0]));
+    let value: Value = serde_json::from_str(non_empty[0]).unwrap_or_else(|err| {
+        panic!(
+            "switch json stdout not JSON: {err}\n  line: {}",
+            non_empty[0]
+        )
+    });
     assert_output_kind(&value, "thread_switch");
 }

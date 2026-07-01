@@ -655,17 +655,19 @@ fn collect_files(
     let mut out = std::collections::HashMap::new();
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(subtree) = repo.store().get_tree(&entry.hash)? {
+            if let Some(hash) = entry.tree_hash()
+                && let Some(subtree) = repo.store().get_tree(&hash)?
+            {
                 let sub = collect_files(repo, &subtree, &path)?;
                 out.extend(sub);
             }
-        } else {
-            out.insert(path, entry.hash);
+        } else if let Some(hash) = entry.content_hash() {
+            out.insert(path, hash);
         }
     }
     Ok(out)

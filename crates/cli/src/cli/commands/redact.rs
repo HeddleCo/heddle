@@ -528,19 +528,22 @@ fn walk_path_to_blob(
         None => return Ok(None),
     };
     if parts.len() == 1 {
-        if entry.is_blob() {
-            return Ok(Some(entry.hash));
+        if let Some(hash) = entry.blob_hash() {
+            return Ok(Some(hash));
         }
         return Ok(None);
     }
     if !entry.is_tree() {
         return Ok(None);
     }
+    let Some(hash) = entry.tree_hash() else {
+        return Ok(None);
+    };
     let subtree = repo
         .store()
-        .get_tree(&entry.hash)
-        .with_context(|| format!("load subtree {}", entry.hash.short()))?
-        .ok_or_else(|| anyhow!("subtree {} missing from store", entry.hash.short()))?;
+        .get_tree(&hash)
+        .with_context(|| format!("load subtree {}", hash.short()))?
+        .ok_or_else(|| anyhow!("subtree {} missing from store", hash.short()))?;
     walk_path_to_blob(repo, &subtree, &parts[1..])
 }
 

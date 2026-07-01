@@ -437,6 +437,7 @@ fn mode_str(mode: Option<FileMode>) -> &'static str {
     match mode {
         Some(FileMode::Executable) => "100755",
         Some(FileMode::Symlink) => "120000",
+        Some(FileMode::Gitlink) => "160000",
         Some(FileMode::Normal) | None => "100644",
     }
 }
@@ -732,6 +733,28 @@ mod tests {
         assert!(
             !rendered.contains("@@") && !rendered.contains("--- a/"),
             "chmod-only is header-only — no hunk body:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_diff_patch_emits_gitlink_mode_without_blob_hunk() {
+        let change = FileChange {
+            path: "vendor".to_string(),
+            kind: "added".to_string(),
+            lines: Some(Vec::new()),
+            mode: Some(FileMode::Gitlink),
+            ..Default::default()
+        };
+
+        let rendered = render_diff_patch(&diff_report_with(vec![change]));
+
+        assert!(
+            rendered.contains("new file mode 160000"),
+            "gitlinks must render their durable mode, not a regular-file mode:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("@@") && !rendered.contains("heddle-submodule:"),
+            "gitlink patch output must not synthesize legacy marker blob content:\n{rendered}"
         );
     }
 

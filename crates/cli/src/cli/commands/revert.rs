@@ -190,7 +190,11 @@ fn apply_inverse_changes(
                     files_affected.push(format!("+ {}", change.path));
                     continue;
                 }
-                let blob = repo.require_blob(&entry.hash)?;
+                let Some(hash) = entry.blob_hash() else {
+                    files_affected.push(format!("+ {}", change.path));
+                    continue;
+                };
+                let blob = repo.require_blob(&hash)?;
 
                 if let Some(parent) = full_path.parent()
                     && !parent.exists()
@@ -209,7 +213,11 @@ fn apply_inverse_changes(
                     files_affected.push(format!("M {}", change.path));
                     continue;
                 }
-                let blob = repo.require_blob(&entry.hash)?;
+                let Some(hash) = entry.blob_hash() else {
+                    files_affected.push(format!("M {}", change.path));
+                    continue;
+                };
+                let blob = repo.require_blob(&hash)?;
                 fs::write(&full_path, blob.content())?;
                 files_affected.push(format!("M {}", change.path));
             }

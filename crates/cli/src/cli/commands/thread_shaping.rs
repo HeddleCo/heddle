@@ -748,7 +748,10 @@ fn restore_one_path(
     if let Some(tree) = baseline_tree
         && let Some(entry) = tree.get(path)
     {
-        let blob = repo.require_blob(&entry.hash)?;
+        let Some(hash) = entry.leaf_content_hash() else {
+            return Ok(());
+        };
+        let blob = repo.require_blob(&hash)?;
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)?;
         }

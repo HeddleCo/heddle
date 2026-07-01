@@ -238,12 +238,14 @@ fn collect_tree_paths(
 ) -> Result<(), HeddleError> {
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(subtree) = repo.store().get_tree(&entry.hash)? {
+            if let Some(tree_hash) = entry.tree_hash()
+                && let Some(subtree) = repo.store().get_tree(&tree_hash)?
+            {
                 collect_tree_paths(repo, &subtree, &path, out)?;
             }
         } else {

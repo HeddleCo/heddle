@@ -30,11 +30,14 @@ impl Repository {
             return Ok(None);
         };
         if rest.as_os_str().is_empty() {
-            return Ok(entry.is_blob().then_some(entry.hash));
+            return Ok(entry.blob_hash());
         }
         if !entry.is_tree() {
             return Ok(None);
         }
-        self.lookup_tree_leaf(&entry.hash, rest)
+        let Some(tree_hash) = entry.tree_hash() else {
+            return Ok(None);
+        };
+        self.lookup_tree_leaf(&tree_hash, rest)
     }
 }

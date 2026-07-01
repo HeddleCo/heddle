@@ -242,8 +242,7 @@ fn kick_writeback(_file: &File) {}
 pub fn stage_temp_files_durable(files: &[(PathBuf, Vec<u8>)]) -> io::Result<()> {
     let mut handles: Vec<File> = Vec::with_capacity(files.len());
     for (temp_path, bytes) in files {
-        let mut file =
-            File::create(temp_path).map_err(|err| enrich_write_error(temp_path, err))?;
+        let mut file = File::create(temp_path).map_err(|err| enrich_write_error(temp_path, err))?;
         file.write_all(bytes)
             .map_err(|err| enrich_write_error(temp_path, err))?;
         kick_writeback(&file);
@@ -771,10 +770,7 @@ mod tests {
         // them via `alloc_temp_path`); a missing parent surfaces as an error
         // rather than silently dropping the write.
         let dir = tempfile::TempDir::new().unwrap();
-        let files = vec![(
-            dir.path().join("does/not/exist/ref.tmp"),
-            b"x".to_vec(),
-        )];
+        let files = vec![(dir.path().join("does/not/exist/ref.tmp"), b"x".to_vec())];
         assert!(stage_temp_files_durable(&files).is_err());
     }
 
