@@ -3,8 +3,8 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{
-        Blob, ContentHash, FileProvenance, LineSpan, Origin, ProvenanceError, State, Tree,
-        TreeEntry,
+        Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State,
+        Tree, TreeEntry, resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -142,25 +142,13 @@ pub(super) fn coalesce_line_spans(line_origin_sets: &[u32]) -> Vec<LineSpan> {
     spans
 }
 
+pub(super) use objects::object::split_path;
+
 pub(super) fn lookup_tree_entry(repo: &Repository, tree: &Tree, path: &Path) -> Option<TreeEntry> {
-    let (name, rest) = split_path(path)?;
-    let entry = tree.get(name)?.clone();
-    if rest.as_os_str().is_empty() {
-        return Some(entry);
-    }
-    if !entry.is_tree() {
-        return None;
-    }
-    let subtree_hash = entry.tree_hash()?;
-    let subtree = repo.store().get_tree(&subtree_hash).ok().flatten()?;
-    lookup_tree_entry(repo, &subtree, rest)
+    resolve_tree_path(repo.store(), &tree.hash(), path, LeafPolicy::Entry)
+        .ok()
+        .flatten()
+        .map(|target| target.entry)
 }
 
-pub(super) fn split_path(path: &Path) -> Option<(&str, &Path)> {
-    let mut components = path.components();
-    let first = components.next()?;
-    let std::path::Component::Normal(name) = first else {
-        return None;
-    };
-    Some((name.to_str()?, components.as_path()))
-}
+

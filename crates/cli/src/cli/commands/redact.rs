@@ -21,8 +21,10 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
 use objects::{
-    object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
-    store::ObjectStore,
+    object::{
+        ChangeId, ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateSignature,
+        TreePathResolveError, resolve_tree_path,
+    },
     worktree::should_ignore,
 };
 use oplog::OpLogRecorder;
@@ -506,45 +508,24 @@ pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> R
             "heddle redact apply <state> --path <path>",
         )));
     }
-    let hash = walk_path_to_blob(repo, &tree, &parts)?
-        .ok_or_else(|| anyhow!("path '{}' not in state {}", path, state.short()))?;
-    Ok(hash)
-}
-
-/// Walk a slash-split path through nested subtrees to the terminal
-/// blob. Returns `Ok(None)` when any path component is missing or
-/// resolves to the wrong entry type; the caller surfaces the
-/// user-facing error so the message can name the original spec.
-fn walk_path_to_blob(
-    repo: &Repository,
-    tree: &objects::object::Tree,
-    parts: &[&str],
-) -> Result<Option<ContentHash>> {
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    let entry = match tree.get(parts[0]) {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-    if parts.len() == 1 {
-        if let Some(hash) = entry.blob_hash() {
-            return Ok(Some(hash));
+    let hash = match resolve_tree_path(
+        repo.store(),
+        &tree.hash(),
+        std::path::Path::new(path),
+        LeafPolicy::BlobOnly,
+    ) {
+        Ok(Some(target)) => target.content_hash,
+        Ok(None) => None,
+        Err(TreePathResolveError::SubtreeMissing(hash)) => {
+            return Err(anyhow!("subtree {} missing from store", hash.short()));
         }
-        return Ok(None);
+        Err(TreePathResolveError::Store { hash, source }) => {
+            return Err(anyhow::Error::from(*source))
+                .context(format!("load subtree {}", hash.short()));
+        }
     }
-    if !entry.is_tree() {
-        return Ok(None);
-    }
-    let Some(hash) = entry.tree_hash() else {
-        return Ok(None);
-    };
-    let subtree = repo
-        .store()
-        .get_tree(&hash)
-        .with_context(|| format!("load subtree {}", hash.short()))?
-        .ok_or_else(|| anyhow!("subtree {} missing from store", hash.short()))?;
-    walk_path_to_blob(repo, &subtree, &parts[1..])
+    .ok_or_else(|| anyhow!("path '{}' not in state {}", path, state.short()))?;
+    Ok(hash)
 }
 
 /// Resolve a `<redaction-id>` CLI argument (short or full) to its
@@ -890,5 +871,86 @@ fn short_key(hex: &str) -> String {
         hex.to_string()
     } else {
         format!("{}…", &hex[..16])
+    }
+}
+
+#[cfg(test)]
+mod tree_path_tests {
+    use objects::{
+        object::{Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry},
+        store::ObjectStore,
+    };
+    use repo::Repository;
+    use tempfile::TempDir;
+
+    use super::blob_at_path;
+
+    fn state_with_tree(repo: &Repository, root_hash: ContentHash) -> objects::object::ChangeId {
+        let state = State::new(
+            root_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("tester".to_string(), "tester@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        state.change_id
+    }
+
+    #[test]
+    fn blob_at_path_characterizes_blob_only_policy() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let store = repo.store();
+
+        let blob_hash = store.put_blob(&Blob::from_slice(b"blob content")).unwrap();
+        let symlink_hash = store.put_blob(&Blob::from_slice(b"target.txt")).unwrap();
+        let nested_blob_hash = store
+            .put_blob(&Blob::from_slice(b"nested content"))
+            .unwrap();
+        let missing_subtree_hash = ContentHash::compute(b"not-in-store");
+
+        let nested_tree = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("inner.txt", nested_blob_hash, false).unwrap(),
+            ]))
+            .unwrap();
+        let missing_parent = store
+            .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
+                "ghost".to_string(),
+                missing_subtree_hash,
+            )
+            .unwrap()]))
+            .unwrap();
+        let root_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt", blob_hash, false).unwrap(),
+                TreeEntry::symlink("link".to_string(), symlink_hash).unwrap(),
+                TreeEntry::directory("dir".to_string(), nested_tree).unwrap(),
+                TreeEntry::directory("missing".to_string(), missing_parent).unwrap(),
+            ]))
+            .unwrap();
+        let state = state_with_tree(&repo, root_hash);
+
+        assert_eq!(
+            blob_at_path(&repo, &state, "file.txt").unwrap(),
+            blob_hash
+        );
+        assert_eq!(
+            blob_at_path(&repo, &state, "dir/inner.txt").unwrap(),
+            nested_blob_hash
+        );
+
+        let symlink_err = blob_at_path(&repo, &state, "link").unwrap_err();
+        assert!(symlink_err.to_string().contains("path 'link' not in state"));
+
+        let missing_err = blob_at_path(&repo, &state, "nope.txt").unwrap_err();
+        assert!(missing_err
+            .to_string()
+            .contains("path 'nope.txt' not in state"));
+
+        let subtree_err = blob_at_path(&repo, &state, "missing/ghost/inner.txt").unwrap_err();
+        assert!(subtree_err
+            .to_string()
+            .contains("subtree")
+            && subtree_err.to_string().contains("missing from store"));
     }
 }

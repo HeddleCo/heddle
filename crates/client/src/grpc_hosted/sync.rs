@@ -1,12 +1,14 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
+
+use tempfile::NamedTempFile;
 
 use grpc::heddle::v1::{
     GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer, GitRefKind,
@@ -82,8 +84,11 @@ struct GitPackPushPlan {
     /// root (the checkpoint commit); the mirror path has one per resolved
     /// ref target. `write_reachable_pack_to_writer` packs the transitive
     /// closure of every root into a single pack.
+    #[cfg_attr(not(test), allow(dead_code))]
     roots: Vec<GitObjectId>,
-    git_repo: SleyRepository,
+    /// Reachable pack bytes written once during planning; streamed on the wire
+    /// without a second ODB traversal. Auto-deleted when the last clone drops.
+    pack_file: Arc<Mutex<NamedTempFile>>,
 }
 
 const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
@@ -1977,17 +1982,15 @@ fn build_git_lane_multi_root_pack_plan(
         ));
     }
     let objects = git_repo.objects();
-    let mut sink = io::sink();
-    // TODO: Replace this metadata-only reachable-pack walk and the later
-    // streaming walk with the Sley reachable-pack facade gate once it can expose
-    // stable size/checksum plus streaming. Do not grow a second planner in
-    // Heddle.
+    let mut pack_file = NamedTempFile::new().map_err(|err| {
+        ProtocolError::InvalidState(format!("create Git pack tempfile: {err}"))
+    })?;
     let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
         git_repo.object_format(),
         roots.iter().copied(),
         &HashSet::new(),
-        &mut sink,
+        &mut pack_file,
     )
     .map_err(|err| ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}")))?
     .ok_or_else(|| {
@@ -2012,7 +2015,7 @@ fn build_git_lane_multi_root_pack_plan(
         pack_id: pack.checksum.as_bytes().to_vec(),
         pack_size: pack.pack_size,
         roots,
-        git_repo: git_repo.clone(),
+        pack_file: Arc::new(Mutex::new(pack_file)),
     })
 }
 
@@ -2038,7 +2041,6 @@ fn stream_git_pack_messages_blocking(
     chunk_size: usize,
     progress: Progress,
 ) -> Result<(), ProtocolError> {
-    let objects = pack.git_repo.objects();
     let mut writer = GitPackPushMessageWriter::new(
         tx,
         pack.transfer_id.clone(),
@@ -2047,31 +2049,24 @@ fn stream_git_pack_messages_blocking(
         chunk_size,
         progress,
     );
-    // TODO: This is the second walk of the same reachable Git closure planned
-    // in build_git_lane_pack_plan. Collapse both walks behind Sley's
-    // reachable-pack facade when available, without changing the protobuf lane.
-    let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
-        objects.as_ref(),
-        pack.git_repo.object_format(),
-        pack.roots.iter().copied(),
-        &HashSet::new(),
-        &mut writer,
-    )
-    .map_err(|err| ProtocolError::InvalidState(format!("stream reachable Git pack: {err}")))?
-    .ok_or_else(|| {
-        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
+    let mut pack_file = pack.pack_file.lock().map_err(|err| {
+        ProtocolError::InvalidState(format!("lock Git pack tempfile: {err}"))
     })?;
-    writer.finish()?;
-    if summary.pack_size != pack.pack_size || summary.checksum.as_bytes() != pack.pack_id.as_slice()
-    {
+    pack_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| ProtocolError::InvalidState(format!("rewind Git pack tempfile: {err}")))?;
+    let streamed = io::copy(&mut pack_file.as_file_mut(), &mut writer).map_err(|err| {
+        ProtocolError::InvalidState(format!("stream Git pack tempfile: {err}"))
+    })?;
+    if streamed != pack.pack_size {
         return Err(ProtocolError::InvalidState(format!(
-            "Git pack stream changed while sending; expected {} bytes/{}, got {} bytes/{}",
+            "Git pack stream changed while sending; expected {} bytes/{}, streamed {} bytes",
             pack.pack_size,
             hex::encode(&pack.pack_id),
-            summary.pack_size,
-            summary.checksum.to_hex()
+            streamed
         )));
     }
+    writer.finish()?;
     Ok(())
 }
 
@@ -2552,6 +2547,15 @@ fn accept_git_lane_pack(
     Ok(())
 }
 
+/// Apply a server-originated Git ref update on the pull stream.
+///
+/// Pull-side ref application is unconditional: we commit the local Git ref with
+/// [`RefPrecondition::Any`] and do not compare against a prior target oid. That
+/// is deliberate and **not** symmetric with push-side compare-and-set, where the
+/// client transmits `expected_target_oid` / `expected_missing` from `ListRefs`.
+/// The pull stream is single-threaded and server-trusted — the client applies
+/// ref updates in the order the server sends them after installing the
+/// accompanying pack, so there is no concurrent local writer racing this path.
 fn accept_git_lane_ref_update(
     repo: &Repository,
     git_repo: &mut Option<SleyRepository>,
@@ -3190,6 +3194,11 @@ mod tests {
                 pack_bytes.extend_from_slice(&pack.pack_chunk);
             }
         }
+        assert_eq!(
+            pack_bytes.len() as u64,
+            plan.pack.pack_size,
+            "streamed pack size must match plan",
+        );
         let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
             .expect("mirror pack indexes");
         let packed: HashSet<Vec<u8>> = indexed
