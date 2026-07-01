@@ -38,6 +38,7 @@ use objects::{
     fs_atomic::write_file_atomic,
     store::ObjectStore,
 };
+use oplog::OpLogBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::{Repository, ResignOutcome, thread_storage::ThreadManager};
@@ -194,6 +195,12 @@ pub static MIGRATIONS: &[Migration] = &[
         applies_to: SchemaTarget::Mixed,
         run: run_resecure_pre_fidelity_signatures,
     },
+    Migration {
+        id: "0005_canonicalize_packed_oplog",
+        description: "Rewrite packed oplog files into the latest container and record schema",
+        applies_to: SchemaTarget::OpLog,
+        run: run_canonicalize_packed_oplog,
+    },
 ];
 
 /// Apply any registered migration not yet present in
@@ -254,7 +261,7 @@ fn run_canonicalize_context_roots(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         }
 
         let prior_hash = state.compute_hash();
-        let prior_pre_fidelity_hash = state.compute_hash_pre_fidelity();
+        let prior_pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
         let mut rewritten = state.with_context(canonical_root);
 
         match ctx
@@ -294,7 +301,7 @@ fn run_resecure_pre_fidelity_signatures(ctx: &mut MigrationCtx<'_>) -> Result<()
         if verify_state_signature_bytes(&signature, &current_hash).is_ok() {
             continue;
         }
-        let pre_fidelity_hash = state.compute_hash_pre_fidelity();
+        let pre_fidelity_hash = state.compute_hash_for_legacy_signature_migration();
         if verify_state_signature_bytes(&signature, &pre_fidelity_hash).is_err() {
             continue;
         }
@@ -313,11 +320,16 @@ fn run_resecure_pre_fidelity_signatures(ctx: &mut MigrationCtx<'_>) -> Result<()
         Ok(())
     } else {
         Err(HeddleError::Conflict(format!(
-            "0004_resecure_pre_fidelity_signatures found {} valid pre-fidelity signature(s) whose key is not owned by this repo; keep compute_hash_pre_fidelity until they are explicitly preserved or re-signed by the owning key",
+            "0004_resecure_pre_fidelity_signatures found {} valid pre-fidelity signature(s) whose key is not owned by this repo; keep the legacy signature migration hash until they are explicitly preserved or re-signed by the owning key",
             blocked.len()
         )))
     }
 }
+
+fn run_canonicalize_packed_oplog(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    ctx.repo.oplog().migrate_to_current_format()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -458,6 +470,7 @@ mod tests {
                 "0002_canonicalize_thread_records",
                 "0003_canonicalize_context_roots",
                 "0004_resecure_pre_fidelity_signatures",
+                "0005_canonicalize_packed_oplog",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );
@@ -550,7 +563,7 @@ updated_at = "2024-01-01T00:00:01Z"
 
             let signer = repo.signing_signer().unwrap();
             let mut state = unsigned_state();
-            let legacy_hash = state.compute_hash_pre_fidelity();
+            let legacy_hash = state.compute_hash_for_legacy_signature_migration();
             state.signature = Some(
                 crypto::state_signature_from_signer(&legacy_hash, &*signer)
                     .expect("sign legacy hash"),
@@ -578,7 +591,7 @@ updated_at = "2024-01-01T00:00:01Z"
         remove_ledger(&repo);
         let foreign = crypto::Ed25519Signer::generate().unwrap();
         let mut state = unsigned_state();
-        let legacy_hash = state.compute_hash_pre_fidelity();
+        let legacy_hash = state.compute_hash_for_legacy_signature_migration();
         state.signature = Some(
             crypto::state_signature_from_signer(&legacy_hash, &foreign)
                 .expect("foreign-sign legacy hash"),

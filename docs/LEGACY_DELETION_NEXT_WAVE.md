@@ -20,6 +20,21 @@ but durable signed data still needs a deletion path that preserves verification.
   accepts only the structured `daemon::local_daemon::PidFileContents` format.
 - The public diff schema title and generated TypeScript interface were renamed
   from `DiffOutput` to `DiffReport`.
+- Legacy direct-path context reads were removed from the normal context API.
+  `Repository::get_context_blob`, `list_context_entries`, `set_context_blob`,
+  and `remove_context_target` now operate on canonical `__files/<path>` /
+  `__states/<id>` entries only. The direct-path reader is private to
+  `0003_canonicalize_context_roots`.
+- Top-level `ThreadRecord` serde defaults were removed from the live durable
+  reader. Old minimal TOML is parsed only by the private `LegacyThreadRecord`
+  used by `0002_canonicalize_thread_records`, then rewritten as current
+  canonical TOML.
+- The pre-fidelity state hash is no longer a normal-looking public API.
+  `State::compute_hash_for_legacy_signature_migration()` is hidden and owned by
+  `0003`/`0004`; ordinary signing tests no longer exercise it as live behavior.
+- `PackedOpLog::load` is current-format only. V2/V3 containers and old
+  OpRecord schemas decode only through `PackedOpLog::ensure_latest`, which is
+  now driven by registered migration `0005_canonicalize_packed_oplog`.
 
 Lane 6 registered the first deletion-prep migrations in
 `crates/repo/src/migration.rs`:
@@ -27,19 +42,20 @@ Lane 6 registered the first deletion-prep migrations in
 - `0002_canonicalize_thread_records`
 - `0003_canonicalize_context_roots`
 - `0004_resecure_pre_fidelity_signatures`
+- `0005_canonicalize_packed_oplog`
 
-These migrations are durable gates, not fallback deletion by themselves. Runtime
-fallback removal still requires a later pass that proves every supported repo has
-either applied the migration cleanly or has no fallback-dependent data left.
+These migrations are durable gates. The current deletion pass moved the
+remaining old readers behind those gates rather than leaving them mixed into
+normal runtime code.
 
-## Blocked On A Deliberate Contract Decision
+## Migration-Gated Compatibility Now Localized
 
 ### Legacy context direct-path fallback
 
-Context file targets now write the canonical `__files/<path>` layout, and writes
-clean up a matching legacy direct-path leaf. The read fallback remains because
-`State.context` participates in `State::compute_hash()`, so rewriting historical
-states from direct-path roots to canonical roots changes author-signature input.
+Context file targets now read and write only the canonical `__files/<path>`
+layout. The direct-path fallback is migration-only because `State.context`
+participates in `State::compute_hash()`, so rewriting historical states from
+direct-path roots to canonical roots changes author-signature input.
 
 Registered migration: `0003_canonicalize_context_roots`.
 
@@ -50,19 +66,22 @@ Current migration behavior:
   new root is attached.
 - Preserves signed states whose key is not owned by this repo and fails the
   migration gate instead of recording the migration as applied.
-- Only after the migration reports zero fallback-dependent states may
-  `lookup_context_leaf_for_target` and `context_target_from_entry_path` drop the
-  direct-path fallback.
+- Normal reads no longer call the direct-path fallback; failed migrations leave
+  old direct-path data intentionally invisible until it is migrated or handled
+  by the owning key.
 
 Deletion-prep tests:
-- `repository_context::tests::legacy_direct_context_cannot_be_canonicalized_without_signature_decision`
+- `repository_context::tests::direct_context_canonicalization_requires_signature_decision`
   signs a state that points at a legacy direct-path context root and proves a
   naive canonical-root rewrite invalidates the signature.
+- `repository_context::tests::legacy_direct_file_context_is_migration_only`
+  proves normal reads ignore direct-path leaves while the migration walker can
+  still canonicalize them.
 - `migration::tests::migration_0003_canonicalizes_owned_signed_context_root_and_resigns`
   proves the registered migration rewrites and re-signs locally owned signed
   context roots.
 
-Verification before deletion:
+Verification:
 - Signed-state fixture with a locally owned legacy context root re-signs and
   verifies after migration.
 - Foreign signed legacy context root is either preserved and reported or rejected
@@ -72,61 +91,52 @@ Verification before deletion:
 
 ### Thread-record serde defaults
 
-Thread metadata still carries serde defaults for fields such as execution mode
-and shared-target metadata. These are durable records, not just CLI aliases.
+Live thread metadata now requires current canonical fields. Missing-field legacy
+records are parsed only by the migration-local `LegacyThreadRecord`.
 
 Registered migration: `0002_canonicalize_thread_records`.
 
 Current migration behavior:
-- Loads every thread record while the defaults still exist, then saves it back
-  through `ThreadManager`.
+- Loads every thread record through the private legacy shape, then saves it back
+  through `FilesystemThreadRecordStore` as a current `ThreadRecord`.
 - The migration must be idempotent and should not invent values for genuinely
   unknown optional metadata; it should persist the current semantic defaults
   (`freshness = unknown`, `auto = false`, empty path/impact vectors, empty
   summaries, `shared_target_dir = None`, etc.).
-- After migration, add or invert an old-record fixture proving `Repository::open`
-  no longer relies on `ThreadRecord`/`Thread` serde defaults.
+- After migration, the live `ThreadRecord` reader rejects the old minimal
+  missing-field fixture.
 
 Deletion-prep tests:
-- `thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable`
-  documents the smallest legacy shape the current reader still accepts until the
-  fallback-removal pass deletes serde defaults.
+- `thread_storage::tests::thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate`
+  documents that the live reader no longer accepts the smallest legacy shape.
 - `migration::tests::migration_0002_rewrites_minimal_thread_record_with_concrete_defaults`
   opens and migrates the legacy shape, then asserts the rewritten file contains
   the current concrete defaults.
 
 Verification:
-- `cargo test -p heddle-repo thread_storage::tests::thread_record_defaults_keep_minimal_legacy_shape_readable -- --nocapture`
+- `cargo test -p heddle-repo thread_storage::tests::thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate -- --nocapture`
 - `cargo test -p heddle-repo migration::tests:: -- --nocapture`
 - `cargo test -p heddle-cli --test multi_agent_worktrees -- --nocapture`
 - `cargo test -p heddle-cli --test cli_integration thread -- --nocapture`
 
 ### Pre-fidelity state-signature compatibility
 
-`State::compute_hash_pre_fidelity()` is still needed to verify states signed
-before the git-fidelity hash bump.
+The legacy pre-fidelity state hash is now a hidden migration-only helper used to
+verify states signed before the git-fidelity hash bump.
 
 Registered migration: `0004_resecure_pre_fidelity_signatures`.
 
 Current migration behavior:
 - Scans signed states, verifies the existing signature against both the current
-  hash and `compute_hash_pre_fidelity()`, and re-signs only when
-  `Repository::resign_if_owned` reports `Resigned`.
+  hash and `compute_hash_for_legacy_signature_migration()`, and re-signs only
+  when `Repository::resign_if_owned` reports `Resigned`.
 - Unsigned states remain unsigned; they do not need compatibility handling.
 - Foreign valid pre-fidelity signatures are preserved and fail the migration
   gate instead of being laundered into this repo's identity.
-- Only after the backfill proves no state needs the pre-fidelity candidate may
-  `State::compute_hash_pre_fidelity()` and the `resign_if_owned` old-hash
-  candidate path be removed.
+- Normal signing tests no longer exercise the pre-fidelity recipe; only the
+  migration and golden-vector tests keep it alive.
 
 Deletion-prep tests:
-- `repository_signing::tests::resign_if_owned_accepts_legacy_pre_fidelity_signature`
-  covers the locally owned re-sign path.
-- `repository_signing::tests::resign_if_owned_refuses_foreign_pre_fidelity_signature`
-  covers the preserve/reject path for valid signatures from keys this repo does
-  not control.
-- `repository_signing::tests::resign_if_owned_refuses_corrupted_pre_fidelity_signature`
-  covers the no-laundering path for owned-key signatures that do not verify.
 - Existing unsigned-state coverage remains
   `repository_signing::tests::resign_if_owned_reports_unsigned`.
 - `migration::tests::migration_0004_resigns_owned_pre_fidelity_signature`
@@ -137,6 +147,18 @@ Deletion-prep tests:
 Verification:
 - `cargo test -p heddle-repo repository_signing::tests:: -- --nocapture`
 - `cargo test -p heddle-cli --test cli_integration verify -- --nocapture`
+
+### Old packed-oplog schemas
+
+Normal packed-oplog loads now accept only latest container + current OpRecord
+schema. Old V2/V3 containers and old per-record schemas remain decodable only
+through `PackedOpLog::ensure_latest`.
+
+Registered migration: `0005_canonicalize_packed_oplog`.
+
+Verification:
+- `cargo test -p heddle-oplog packed_oplog -- --nocapture`
+- `cargo test -p heddle-repo migration::tests:: -- --nocapture`
 
 ## Product Or Sley-Gated Cleanup
 

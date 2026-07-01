@@ -26,6 +26,14 @@ use super::oplog_types::{
 /// `-D warnings` (the `async_fn_in_trait` lint). Sealed interface —
 /// heddle is the sole implementer.
 pub trait OpLogBackend: Send + Sync {
+    /// One-shot local storage migration hook. File-backed oplogs rewrite old
+    /// packed containers and record schemas to the current format; non-file
+    /// backends either have their own migration system or no local file to
+    /// rewrite.
+    fn migrate_to_current_format(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Append a batch of operations atomically. Returns the assigned IDs.
     fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
         self.record_batch_scoped(operations, None)

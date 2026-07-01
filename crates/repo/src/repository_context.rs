@@ -59,22 +59,7 @@ impl Repository {
             None => Tree::new(),
         };
 
-        let mut root_hash =
-            self.insert_leaf_at_path(&current_tree, &target.storage_path(), blob_hash)?;
-
-        if let (Some(existing_root), Some(legacy_path)) =
-            (context_root, target.legacy_storage_path())
-            && legacy_path != target.storage_path()
-            && self
-                .lookup_context_leaf(existing_root, &legacy_path)?
-                .is_some()
-        {
-            root_hash = self
-                .remove_leaf_at_path(&root_hash, &legacy_path)?
-                .unwrap_or(root_hash);
-        }
-
-        Ok(root_hash)
+        self.insert_leaf_at_path(&current_tree, &target.storage_path(), blob_hash)
     }
 
     /// Remove context at a target (optionally filtered by scope).
@@ -106,12 +91,7 @@ impl Repository {
         context_root: &ContentHash,
         target: &ContextTarget,
     ) -> Result<Option<ContentHash>> {
-        let current = self.remove_leaf_at_path(context_root, &target.storage_path())?;
-        let Some(legacy_path) = target.legacy_storage_path() else {
-            return Ok(current);
-        };
-        let legacy_base = current.as_ref().unwrap_or(context_root);
-        self.remove_leaf_at_path(legacy_base, &legacy_path)
+        self.remove_leaf_at_path(context_root, &target.storage_path())
     }
 
     /// List all context entries in the tree, optionally filtered by file prefix.
@@ -125,7 +105,13 @@ impl Repository {
             None => return Ok(Vec::new()),
         };
         let mut results = BTreeMap::new();
-        self.walk_context_tree(&tree, &PathBuf::new(), prefix, &mut results)?;
+        self.walk_context_tree(
+            &tree,
+            &PathBuf::new(),
+            prefix,
+            &mut results,
+            ContextWalkMode::CanonicalOnly,
+        )?;
         Ok(results
             .into_iter()
             .map(|(_, (target, blob))| ContextEntry { target, blob })
@@ -157,8 +143,8 @@ impl Repository {
         let mut root = *context_root;
         let mut changed = false;
 
-        for entry in self.list_context_entries(context_root, None)? {
-            let Some(legacy_path) = entry.target.legacy_storage_path() else {
+        for entry in self.list_context_entries_for_migration(context_root)? {
+            let Some(legacy_path) = legacy_storage_path_for_target(&entry.target) else {
                 continue;
             };
             if legacy_path == entry.target.storage_path() {
@@ -184,11 +170,36 @@ impl Repository {
             };
             let context = ContextBlob::decode(blob.content())
                 .map_err(|e| HeddleError::InvalidObject(format!("invalid context blob: {e}")))?;
-            root = self.set_context_blob(Some(&root), &entry.target, &context)?;
+            let updated = self.set_context_blob(Some(&root), &entry.target, &context)?;
+            root = self
+                .remove_leaf_at_path(&updated, &legacy_path)?
+                .unwrap_or(updated);
             changed = true;
         }
 
         Ok((root, changed))
+    }
+
+    fn list_context_entries_for_migration(
+        &self,
+        context_root: &ContentHash,
+    ) -> Result<Vec<ContextEntry>> {
+        let tree = match self.store.get_tree(context_root)? {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+        let mut results = BTreeMap::new();
+        self.walk_context_tree(
+            &tree,
+            &PathBuf::new(),
+            None,
+            &mut results,
+            ContextWalkMode::IncludeLegacyDirectPaths,
+        )?;
+        Ok(results
+            .into_iter()
+            .map(|(_, (target, blob))| ContextEntry { target, blob })
+            .collect())
     }
 
     // --- private helpers ---
@@ -198,14 +209,7 @@ impl Repository {
         root: &ContentHash,
         target: &ContextTarget,
     ) -> Result<Option<ContentHash>> {
-        let storage_path = target.storage_path();
-        if let Some(hash) = self.lookup_context_leaf(root, &storage_path)? {
-            return Ok(Some(hash));
-        }
-        if let Some(legacy_path) = target.legacy_storage_path() {
-            return self.lookup_context_leaf(root, &legacy_path);
-        }
-        Ok(None)
+        self.lookup_context_leaf(root, &target.storage_path())
     }
 
     fn lookup_context_leaf(&self, root: &ContentHash, path: &Path) -> Result<Option<ContentHash>> {
@@ -297,6 +301,7 @@ impl Repository {
         current_path: &Path,
         prefix: Option<&Path>,
         results: &mut BTreeMap<String, (ContextTarget, ContextBlob)>,
+        mode: ContextWalkMode,
     ) -> Result<()> {
         for entry in tree.entries() {
             let entry_path = current_path.join(&entry.name);
@@ -311,11 +316,11 @@ impl Repository {
                         continue;
                     }
                     if let Some(subtree) = self.store.get_tree(&entry.hash)? {
-                        self.walk_context_tree(&subtree, &entry_path, prefix, results)?;
+                        self.walk_context_tree(&subtree, &entry_path, prefix, results, mode)?;
                     }
                 }
                 EntryType::Blob => {
-                    let Some(target) = context_target_from_entry_path(&entry_path) else {
+                    let Some(target) = context_target_from_entry_path(&entry_path, mode) else {
                         continue;
                     };
                     if let Some(prefix) = prefix
@@ -473,8 +478,17 @@ fn context_entry_key(target: &ContextTarget) -> String {
     }
 }
 
-fn context_target_from_entry_path(path: &Path) -> Option<ContextTarget> {
-    ContextTarget::from_storage_path(path).or_else(|| legacy_context_target_from_path(path))
+#[derive(Clone, Copy)]
+enum ContextWalkMode {
+    CanonicalOnly,
+    IncludeLegacyDirectPaths,
+}
+
+fn context_target_from_entry_path(path: &Path, mode: ContextWalkMode) -> Option<ContextTarget> {
+    ContextTarget::from_storage_path(path).or_else(|| match mode {
+        ContextWalkMode::CanonicalOnly => None,
+        ContextWalkMode::IncludeLegacyDirectPaths => legacy_context_target_from_path(path),
+    })
 }
 
 fn legacy_context_target_from_path(path: &Path) -> Option<ContextTarget> {
@@ -482,6 +496,13 @@ fn legacy_context_target_from_path(path: &Path) -> Option<ContextTarget> {
         Component::Normal(part) if part == "__files" || part == "__states" => None,
         Component::Normal(_) => ContextTarget::file(path.to_string_lossy().to_string()).ok(),
         _ => None,
+    }
+}
+
+fn legacy_storage_path_for_target(target: &ContextTarget) -> Option<PathBuf> {
+    match target {
+        ContextTarget::File { path } => Some(PathBuf::from(path)),
+        ContextTarget::State { .. } => None,
     }
 }
 
@@ -613,21 +634,30 @@ mod tests {
     }
 
     #[test]
-    fn legacy_direct_file_context_remains_readable() {
+    fn legacy_direct_file_context_is_migration_only() {
         let (_dir, repo) = setup();
         let target = ContextTarget::file("src/main.rs").unwrap();
         let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
         let root = legacy_context_root(&repo, "src/main.rs", &blob);
 
-        assert_eq!(repo.get_context_blob(&root, &target).unwrap(), Some(blob));
+        assert_eq!(repo.get_context_blob(&root, &target).unwrap(), None);
 
         let entries = repo.list_context_entries(&root, None).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].target, target);
+        assert!(entries.is_empty());
+
+        let (canonical_root, changed) = repo.canonicalize_context_root(&root).unwrap();
+        assert!(changed);
+        assert_eq!(
+            repo.get_context_blob(&canonical_root, &target).unwrap(),
+            Some(blob)
+        );
+        let tree = repo.store.get_tree(&canonical_root).unwrap().unwrap();
+        assert!(tree.get("src").is_none());
+        assert!(tree.get("__files").is_some());
     }
 
     #[test]
-    fn legacy_direct_context_cannot_be_canonicalized_without_signature_decision() {
+    fn direct_context_canonicalization_requires_signature_decision() {
         let (_dir, repo) = setup();
         let target = ContextTarget::file("src/main.rs").unwrap();
         let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
@@ -636,11 +666,6 @@ mod tests {
         assert_ne!(
             legacy_root, canonical_root,
             "legacy direct-path and canonical context roots must be distinct fixtures",
-        );
-        assert_eq!(
-            repo.get_context_blob(&legacy_root, &target).unwrap(),
-            Some(blob),
-            "the current reader still needs the legacy direct-path fallback",
         );
 
         let signer = Ed25519Signer::generate().expect("generate signer");
@@ -659,39 +684,6 @@ mod tests {
         rewritten
             .verify_signature()
             .expect_err("canonicalizing context root without re-signing invalidates the signature");
-    }
-
-    #[test]
-    fn set_context_blob_cleans_matching_legacy_direct_leaf() {
-        let (_dir, repo) = setup();
-        let target = ContextTarget::file("src/main.rs").unwrap();
-        let legacy_blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
-        let current_blob =
-            ContextBlob::new(vec![make_annotation(AnnotationScope::File, "current")]);
-        let root = legacy_context_root(&repo, "src/main.rs", &legacy_blob);
-
-        let new_root = repo
-            .set_context_blob(Some(&root), &target, &current_blob)
-            .unwrap();
-
-        assert_eq!(
-            repo.get_context_blob(&new_root, &target).unwrap(),
-            Some(current_blob)
-        );
-        let tree = repo.store.get_tree(&new_root).unwrap().unwrap();
-        assert!(tree.get("src").is_none());
-        assert!(tree.get("__files").is_some());
-    }
-
-    #[test]
-    fn remove_context_target_removes_legacy_direct_leaf() {
-        let (_dir, repo) = setup();
-        let target = ContextTarget::file("src/main.rs").unwrap();
-        let blob = ContextBlob::new(vec![make_annotation(AnnotationScope::File, "legacy")]);
-        let root = legacy_context_root(&repo, "src/main.rs", &blob);
-
-        let new_root = repo.remove_context_target(&root, &target).unwrap();
-        assert!(new_root.is_none());
     }
 
     #[test]

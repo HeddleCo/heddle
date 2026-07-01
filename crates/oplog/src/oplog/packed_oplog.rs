@@ -2,8 +2,9 @@
 //! Packed binary oplog.
 //!
 //! The in-memory model is version-agnostic. Format versions are codecs over
-//! that model: v2 is accepted only as a migration source, and v3 is the latest
-//! single-file container with an EOF index footer.
+//! that model: v2/v3 and older record schemas are accepted only through the
+//! migration path; normal loads require the latest single-file container with
+//! an EOF index footer.
 
 use std::{
     cmp::Reverse,
@@ -235,7 +236,7 @@ impl PackedOpLog {
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let data = match load(&bytes) {
+        let data = match load_latest(&bytes) {
             Ok(data) => data,
             Err(err) => {
                 if let Some(data) = recover_truncated_latest(path, &bytes, &err)? {
@@ -271,7 +272,7 @@ impl PackedOpLog {
                     || version == u32::from(Latest::VERSION) =>
             {
                 let bytes = std::fs::read(path)?;
-                let data = load(&bytes)?;
+                let data = load_for_migration(&bytes)?;
                 let mut out = Vec::new();
                 Latest::encode(&data, &mut out)?;
                 write_file_atomic(path, &out)?;
@@ -383,7 +384,7 @@ impl PackedOpLog {
 
     #[cfg(test)]
     fn parse(bytes: &[u8], path: PathBuf) -> Result<Self> {
-        let data = load(bytes)?;
+        let data = load_latest(bytes)?;
         Ok(Self {
             entries: data.entries,
             head_id: data.head_id,
@@ -1126,7 +1127,27 @@ struct BuiltIndexSections {
     tx_dir: Vec<TxDirRecord>,
 }
 
-fn load(bytes: &[u8]) -> Result<OplogData> {
+fn load_latest(bytes: &[u8]) -> Result<OplogData> {
+    let header = parse_header(bytes)?;
+    if header.version != u32::from(Latest::VERSION) {
+        return Err(HeddleError::InvalidObject(format!(
+            "unsupported oplog version {}",
+            header.version
+        )));
+    }
+    if header.record_schema_version != Some(OpRecordSchemaVersion::Current) {
+        let found = header
+            .record_schema_version
+            .map(|version| version.number().to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        return Err(HeddleError::InvalidObject(format!(
+            "unsupported OpRecord schema version {found}"
+        )));
+    }
+    Latest::decode(bytes)
+}
+
+fn load_for_migration(bytes: &[u8]) -> Result<OplogData> {
     let header = parse_header(bytes)?;
     match header.version {
         version if version == u32::from(V2::VERSION) => V2::decode(bytes),
@@ -1299,7 +1320,7 @@ fn recover_truncated_latest(
 /// oplog parses cleanly.
 pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
     let bytes = std::fs::read(path)?;
-    let source_error = match load(&bytes) {
+    let source_error = match load_latest(&bytes) {
         Ok(_) => {
             // Healthy this run. If an earlier recovery (e.g. the silent
             // auto-fallback) already salvaged it, surface that sidecar's detail
@@ -2767,6 +2788,16 @@ mod tests {
         (offsets, footer)
     }
 
+    fn load_for_migration_path(path: &Path) -> PackedOpLog {
+        let bytes = std::fs::read(path).unwrap();
+        let data = load_for_migration(&bytes).unwrap();
+        PackedOpLog {
+            entries: data.entries,
+            head_id: data.head_id,
+            path: path.to_path_buf(),
+        }
+    }
+
     #[test]
     fn round_trip_empty() {
         let tmp = TempDir::new().unwrap();
@@ -2843,7 +2874,8 @@ mod tests {
         write_v2(&path, entries.clone(), 2);
 
         assert!(PackedOpLog::read_head_id(&path).is_err());
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert_eq!(loaded.entries.len(), 2);
         assert_eq!(
             PackedOpLog::on_disk_version(&path).unwrap(),
@@ -2955,7 +2987,8 @@ mod tests {
         write_pre_atomic_v2(&path, &entries, 8);
         assert!(PackedOpLog::read_head_id(&path).is_err());
 
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert_eq!(loaded.entries.len(), entries.len());
         assert!(matches!(
             &loaded.entries[0].operation,
@@ -3062,7 +3095,8 @@ mod tests {
 
         write_atomic_no_head_v2(&path, &entries, 6);
 
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert!(matches!(
             &loaded.entries[0].operation,
             OpRecord::Snapshot { new_state, head: Some(head), thread: None, .. }
@@ -3111,7 +3145,8 @@ mod tests {
             None,
             "v3 is intentionally unversioned"
         );
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert!(matches!(
             &loaded.entries[0].operation,
             OpRecord::Snapshot { head: None, thread: Some(thread), .. } if thread == "main"
@@ -3169,7 +3204,8 @@ mod tests {
         ];
         write_mixed_schema_v3(&path, &entries, 3);
 
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert_eq!(loaded.entries.len(), 3);
         assert!(matches!(
             &loaded.entries[0].operation,
@@ -3236,8 +3272,8 @@ mod tests {
         );
         corrupt_payload_first_byte(&path, 1);
 
-        let err = match PackedOpLog::load(&path) {
-            Ok(_) => panic!("expected load to fail on a corrupted unversioned entry"),
+        let err = match PackedOpLog::ensure_latest(&path) {
+            Ok(_) => panic!("expected migration to fail on a corrupted unversioned entry"),
             Err(err) => err,
         };
         assert!(
@@ -3336,7 +3372,8 @@ mod tests {
         entries.push(undo);
 
         write_current_v3(&path, &entries, 9);
-        let before = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let before = load_for_migration_path(&path);
         let before_entries = before
             .entries
             .iter()
@@ -3378,7 +3415,8 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert_eq!(loaded.entries.len(), 6);
         assert!(matches!(
             &loaded.entries[0].operation,
@@ -3424,7 +3462,8 @@ mod tests {
         write_v2(&path, vec![make_entry(1, Some("lane"))], 1);
         std::fs::write(temp_path(&path), b"partial v3").unwrap();
 
-        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(PackedOpLog::load(&path).is_err());
+        let loaded = load_for_migration_path(&path);
         assert_eq!(loaded.head_id, 1);
         assert_eq!(
             PackedOpLog::on_disk_version(&path).unwrap(),
@@ -3780,7 +3819,7 @@ mod tests {
 
         let mut torn = original.clone();
         torn.push(0x00); // trailing tear after intact footer
-        let err = match load(&torn) {
+        let err = match load_latest(&torn) {
             Ok(_) => panic!("trailing tear after footer should fail the standard parse"),
             Err(err) => err,
         };
