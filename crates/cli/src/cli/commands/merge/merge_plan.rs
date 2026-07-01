@@ -2,18 +2,19 @@
 //! Shared merge planning seam for preview and apply flows.
 
 use anyhow::{Result, anyhow};
+use ::merge::{ConflictLabels, TreeMergeResult, merge_trees};
 use objects::{object::ChangeId, store::ObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{
-    merge_algo::{ConflictLabels, MergeResult, three_way_merge_with_labels},
     merge_relation::{MergeRelation, MergeRelationKind},
+    tree_merge_options,
 };
 use crate::cli::commands::RecoveryAdvice;
 
 pub(crate) struct MergePlan {
     relation: MergeRelation,
-    merge_result: Option<MergeResult>,
+    merge_result: Option<TreeMergeResult>,
 }
 
 impl MergePlan {
@@ -55,7 +56,7 @@ impl MergePlan {
         &self.relation
     }
 
-    pub(crate) fn merge_result(&self) -> Option<&MergeResult> {
+    pub(crate) fn merge_result(&self) -> Option<&TreeMergeResult> {
         self.merge_result.as_ref()
     }
 
@@ -104,8 +105,13 @@ impl MergePlan {
         let base_tree = load_tree(repo, &merge_base_id)?;
         let current_tree = load_tree(repo, current_change_id)?;
         let target_tree = load_tree(repo, target_change_id)?;
-        let merge_result =
-            three_way_merge_with_labels(repo, &base_tree, &current_tree, &target_tree, labels)?;
+        let merge_result = merge_trees(
+            repo.store(),
+            &base_tree,
+            &current_tree,
+            &target_tree,
+            tree_merge_options(labels),
+        )?;
         let relation_kind = if merge_result.conflicts.is_empty() {
             MergeRelationKind::CleanApply
         } else {

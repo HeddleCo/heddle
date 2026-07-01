@@ -1017,9 +1017,9 @@ fn preflight_three_way_refresh_conflict(
     thread: &Thread,
     target_thread_name: &str,
 ) -> Result<Option<ThreeWayMergeRefresh>> {
-    use super::merge::{
-        ConflictLabels, MergeStrategy, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
-    };
+    use ::merge::{ConflictLabels, MergeStrategy};
+
+    use super::merge::{ThreeWayMergeOutcome, try_three_way_merge_between_tips};
 
     let target_tip = parent_repo
         .refs()
@@ -1088,9 +1088,9 @@ fn try_three_way_merge_refresh(
 ) -> Result<ThreeWayMergeRefresh> {
     use objects::object::Attribution;
 
-    use super::merge::{
-        ConflictLabels, MergeStrategy, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
-    };
+    use ::merge::{ConflictLabels, MergeStrategy};
+
+    use super::merge::{ThreeWayMergeOutcome, try_three_way_merge_between_tips};
 
     let target_tip = parent_repo
         .refs()

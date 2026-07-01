@@ -42,15 +42,16 @@ use crate::{
 };
 
 mod git_commit;
-pub(crate) mod merge_algo;
+mod merge_algo;
 mod merge_plan;
 mod merge_relation;
-mod merge_renames;
-mod rename_matcher;
 
 use git_commit::{GitCommitInfo, GitCommitPreview};
-pub(crate) use merge_algo::{ConflictLabels, MergeStrategy};
-use merge_algo::{apply_merged_tree, three_way_merge};
+use ::merge::{
+    ConflictLabels, MergeOptions, MergeStrategy, RenameMatcherStats, RenameOptions,
+    SemanticMergeFn, SemanticSimilarityFn, detect_renames_between_trees, merge_trees,
+};
+use merge_algo::apply_merged_tree;
 use merge_plan::MergePlan;
 use merge_relation::MergeRelationKind;
 use repo::{CommitGraphIndex, find_merge_base};
@@ -333,6 +334,66 @@ fn merge_strategy_for(use_semantic: bool) -> MergeStrategy {
     } else {
         MergeStrategy::HunkOnly
     }
+}
+
+pub(super) fn tree_merge_options(labels: ConflictLabels<'_>) -> MergeOptions<'_> {
+    MergeOptions {
+        labels,
+        rename_options: RenameOptions {
+            semantic_similarity: semantic_similarity_hook(),
+            ..RenameOptions::default()
+        },
+        semantic_merge: semantic_merge_hook(),
+    }
+}
+
+#[cfg(feature = "semantic")]
+fn semantic_merge_hook() -> Option<SemanticMergeFn> {
+    Some(semantic::merge_driver::semantic_three_way_merge)
+}
+
+#[cfg(not(feature = "semantic"))]
+fn semantic_merge_hook() -> Option<SemanticMergeFn> {
+    None
+}
+
+#[cfg(feature = "semantic")]
+fn semantic_similarity_hook() -> Option<SemanticSimilarityFn> {
+    Some(compute_semantic_similarity)
+}
+
+#[cfg(not(feature = "semantic"))]
+fn semantic_similarity_hook() -> Option<SemanticSimilarityFn> {
+    None
+}
+
+#[cfg(feature = "semantic")]
+fn compute_semantic_similarity(
+    from_path: &str,
+    to_path: &str,
+    from_content: &[u8],
+    to_content: &[u8],
+) -> f64 {
+    let Ok(from_str) = std::str::from_utf8(from_content) else {
+        return 0.0;
+    };
+    let Ok(to_str) = std::str::from_utf8(to_content) else {
+        return 0.0;
+    };
+
+    let language = semantic::parser::Language::from_path(std::path::Path::new(from_path));
+    let language = if language == semantic::parser::Language::Unknown {
+        semantic::parser::Language::from_path(std::path::Path::new(to_path))
+    } else {
+        language
+    };
+
+    semantic::analysis::analysis_similarity::compute_similarity_with_language(
+        from_str,
+        to_str,
+        semantic::analysis::analysis_similarity::SimilarityMethod::Ast,
+        language,
+    )
 }
 
 /// Strategy + target decided **once per merge attempt** and reused by
@@ -901,18 +962,18 @@ pub(crate) fn merge_thread_into_current(
     let rename_entries: Vec<RenameEntry> = merge_result
         .renames
         .iter()
-        .map(|(from, to, score)| RenameEntry {
-            from: from.clone(),
-            to: to.clone(),
-            score: *score,
+        .map(|rename| RenameEntry {
+            from: rename.from.clone(),
+            to: rename.to.clone(),
+            score: rename.score,
         })
         .collect();
     let dir_rename_entries: Vec<RenameEntry> = merge_result
         .directory_renames
         .iter()
-        .map(|(from, to)| RenameEntry {
-            from: from.clone(),
-            to: to.clone(),
+        .map(|rename| RenameEntry {
+            from: rename.from.clone(),
+            to: rename.to.clone(),
             score: 1.0,
         })
         .collect();
@@ -1751,7 +1812,13 @@ pub(crate) fn bench_three_way_merge(
     our_tree: &Tree,
     their_tree: &Tree,
 ) -> Result<(Tree, usize, usize, usize)> {
-    let result = three_way_merge(repo, base_tree, our_tree, their_tree)?;
+    let result = merge_trees(
+        repo.store(),
+        base_tree,
+        our_tree,
+        their_tree,
+        tree_merge_options(ConflictLabels::DEFAULT),
+    )?;
     Ok((
         result.tree,
         result.conflicts.len(),
@@ -1764,14 +1831,10 @@ pub(crate) fn bench_detect_renames(
     store: &impl ObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
-) -> Result<(usize, rename_matcher::RenameMatcherStats)> {
-    let detection = rename_matcher::detect_renames_with_stats(
-        store,
-        &rename_matcher::flatten_tree(store, base_tree, "")?,
-        &rename_matcher::flatten_tree(store, branch_tree, "")?,
-        rename_matcher::RenameMatcherConfig::default(),
-    )?;
-    Ok((detection.matches.len(), detection.stats))
+) -> Result<(usize, RenameMatcherStats)> {
+    let detection =
+        detect_renames_between_trees(store, base_tree, branch_tree, rename_options())?;
+    Ok((detection.renames.len(), detection.stats))
 }
 
 fn fast_forward_renames(
@@ -1781,37 +1844,41 @@ fn fast_forward_renames(
 ) -> Result<(Vec<RenameEntry>, Vec<RenameEntry>)> {
     let from_tree = load_state_tree(repo, from)?;
     let to_tree = load_state_tree(repo, to)?;
-    let from_flat = rename_matcher::flatten_tree(repo.store(), &from_tree, "")?;
-    let to_flat = rename_matcher::flatten_tree(repo.store(), &to_tree, "")?;
-    let matches = rename_matcher::detect_renames(
+    let detection = detect_renames_between_trees(
         repo.store(),
-        &from_flat,
-        &to_flat,
-        rename_matcher::RenameMatcherConfig::default(),
+        &from_tree,
+        &to_tree,
+        rename_options(),
     )?;
 
-    let mut renames: Vec<RenameEntry> = matches
-        .values()
+    let renames: Vec<RenameEntry> = detection
+        .renames
+        .into_iter()
         .map(|rename| RenameEntry {
-            from: rename.from_path.clone(),
-            to: rename.to_path.clone(),
+            from: rename.from,
+            to: rename.to,
             score: rename.score,
         })
         .collect();
-    renames.sort_by(|left, right| left.from.cmp(&right.from).then(left.to.cmp(&right.to)));
 
-    let mut directory_renames: Vec<RenameEntry> = rename_matcher::infer_directory_renames(&matches)
+    let directory_renames: Vec<RenameEntry> = detection
+        .directory_renames
         .into_iter()
-        .map(|(from, to)| RenameEntry {
-            from,
-            to,
+        .map(|rename| RenameEntry {
+            from: rename.from,
+            to: rename.to,
             score: 1.0,
         })
         .collect();
-    directory_renames
-        .sort_by(|left, right| left.from.cmp(&right.from).then(left.to.cmp(&right.to)));
 
     Ok((renames, directory_renames))
+}
+
+fn rename_options() -> RenameOptions {
+    RenameOptions {
+        semantic_similarity: semantic_similarity_hook(),
+        ..RenameOptions::default()
+    }
 }
 
 fn load_state_tree(repo: &Repository, change_id: &ChangeId) -> Result<Tree> {

@@ -14,4 +14,8 @@ path = "src/lib.rs"
 name = "merge"
 
 [dependencies]
+anyhow.workspace = true
+heddle-format = { path = "../format", version = "0.6" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
 similar.workspace = true
+tracing.workspace = true

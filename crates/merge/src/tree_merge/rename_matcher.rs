@@ -11,6 +11,8 @@ use objects::{
 };
 use tracing::debug;
 
+use super::SemanticSimilarityFn;
+
 #[derive(Debug, Clone)]
 pub(crate) struct RenameMatch {
     pub from_path: String,
@@ -21,7 +23,7 @@ pub(crate) struct RenameMatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RenameMatcherStats {
+pub struct RenameMatcherStats {
     pub deleted_files: usize,
     pub added_files: usize,
     pub exact_hash_matches: usize,
@@ -57,12 +59,14 @@ const MAX_SIZE_RATIO_USIZE: usize = 3;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RenameMatcherConfig {
     pub threshold: f64,
+    pub semantic_similarity: Option<SemanticSimilarityFn>,
 }
 
 impl Default for RenameMatcherConfig {
     fn default() -> Self {
         Self {
             threshold: DEFAULT_THRESHOLD,
+            semantic_similarity: None,
         }
     }
 }
@@ -228,6 +232,7 @@ pub(crate) fn detect_renames_with_stats(
                         from_content,
                         to_content,
                         path_score,
+                        config.semantic_similarity,
                         &mut stats,
                     ),
                     _ => path_score * WEIGHT_PATH,
@@ -520,6 +525,7 @@ fn composite_score(
     from_content: &[u8],
     to_content: &[u8],
     path_score: f64,
+    semantic_similarity: Option<SemanticSimilarityFn>,
     stats: &mut RenameMatcherStats,
 ) -> f64 {
     let delta_score = delta_similarity(from_content, to_content);
@@ -532,7 +538,9 @@ fn composite_score(
         0.0
     } else {
         stats.semantic_scored_pairs += 1;
-        compute_semantic_similarity(from_path, to_path, from_content, to_content)
+        semantic_similarity
+            .map(|similarity| similarity(from_path, to_path, from_content, to_content))
+            .unwrap_or(0.0)
     };
 
     // When the semantic component contributes nothing — either the
@@ -566,42 +574,6 @@ pub(crate) fn delta_similarity(base: &[u8], target: &[u8]) -> f64 {
     let delta_size = DeltaEncoder::estimate_delta_size(base, target);
     let ratio = delta_size as f64 / target.len() as f64;
     (1.0 - ratio).max(0.0)
-}
-
-fn compute_semantic_similarity(
-    from_path: &str,
-    to_path: &str,
-    from_content: &[u8],
-    to_content: &[u8],
-) -> f64 {
-    #[cfg(not(feature = "semantic"))]
-    {
-        let _ = (from_path, to_path, from_content, to_content);
-        0.0
-    }
-    #[cfg(feature = "semantic")]
-    {
-        let Ok(from_str) = std::str::from_utf8(from_content) else {
-            return 0.0;
-        };
-        let Ok(to_str) = std::str::from_utf8(to_content) else {
-            return 0.0;
-        };
-
-        let language = semantic::parser::Language::from_path(std::path::Path::new(from_path));
-        let language = if language == semantic::parser::Language::Unknown {
-            semantic::parser::Language::from_path(std::path::Path::new(to_path))
-        } else {
-            language
-        };
-
-        semantic::analysis::analysis_similarity::compute_similarity_with_language(
-            from_str,
-            to_str,
-            semantic::analysis::analysis_similarity::SimilarityMethod::Ast,
-            language,
-        )
-    }
 }
 
 pub(crate) fn path_similarity(left: &str, right: &str) -> f64 {
