@@ -17,6 +17,7 @@ use grpc::heddle::v1::{
     git_lane_transfer, pull_message, push_message,
 };
 use objects::{
+    Progress,
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::{AnyStore, ObjectStore, PackObjectId},
 };
@@ -496,8 +497,13 @@ impl HostedGrpcClient {
             // One multi-root pack, then N checkpoint-less ref updates (native
             // path: N == 1 with a checkpoint; mirror path: N refs, no
             // checkpoint).
-            send_git_pack_streaming_messages(&tx, &git_lane.pack, self.transport.chunk_size.max(1))
-                .await?;
+            send_git_pack_streaming_messages(
+                &tx,
+                &git_lane.pack,
+                self.transport.chunk_size.max(1),
+                &Progress::null(),
+            )
+            .await?;
             for ref_update in git_lane.ref_updates {
                 tx.send(ref_update).await.map_err(|_| {
                     ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
@@ -2070,20 +2076,23 @@ async fn send_git_pack_streaming_messages(
     tx: &mpsc::Sender<PushMessage>,
     pack: &GitPackPushPlan,
     chunk_size: usize,
+    progress: &Progress,
 ) -> Result<(), ProtocolError> {
     let tx = tx.clone();
     let pack = pack.clone();
-    tokio::task::spawn_blocking(move || stream_git_pack_messages_blocking(tx, pack, chunk_size))
-        .await
-        .map_err(|err| {
-            ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}"))
-        })?
+    let progress = progress.clone();
+    tokio::task::spawn_blocking(move || {
+        stream_git_pack_messages_blocking(tx, pack, chunk_size, progress)
+    })
+    .await
+    .map_err(|err| ProtocolError::InvalidState(format!("Git pack streaming task failed: {err}")))?
 }
 
 fn stream_git_pack_messages_blocking(
     tx: mpsc::Sender<PushMessage>,
     pack: GitPackPushPlan,
     chunk_size: usize,
+    progress: Progress,
 ) -> Result<(), ProtocolError> {
     let objects = pack.git_repo.objects();
     let mut writer = GitPackPushMessageWriter::new(
@@ -2092,6 +2101,7 @@ fn stream_git_pack_messages_blocking(
         pack.pack_id.clone(),
         pack.pack_size,
         chunk_size,
+        progress,
     );
     let summary = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
         objects.as_ref(),
@@ -2131,6 +2141,13 @@ struct GitPackPushMessageWriter {
     buffer: Vec<u8>,
     offset: u64,
     chunk_index: u32,
+    /// Live "uploading N/M bytes" progress, driven per flushed chunk. A null
+    /// handle (`--output json` / non-TTY) makes every update a no-op.
+    progress: Progress,
+    /// Last integer percent painted, so the "uploading" phase line repaints at
+    /// most ~101 times regardless of chunk count. `u64::MAX` forces the first
+    /// chunk to paint.
+    last_progress_pct: u64,
 }
 
 impl GitPackPushMessageWriter {
@@ -2140,6 +2157,7 @@ impl GitPackPushMessageWriter {
         pack_id: Vec<u8>,
         pack_size: u64,
         chunk_size: usize,
+        progress: Progress,
     ) -> Self {
         let chunk_size = chunk_size.max(1);
         Self {
@@ -2151,6 +2169,8 @@ impl GitPackPushMessageWriter {
             buffer: Vec::with_capacity(chunk_size),
             offset: 0,
             chunk_index: 0,
+            progress,
+            last_progress_pct: u64::MAX,
         }
     }
 
@@ -2191,6 +2211,8 @@ impl GitPackPushMessageWriter {
         self.chunk_index = self.chunk_index.checked_add(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk index overflow")
         })?;
+        // Progress driving wired in the next commit.
+        let _ = (&self.progress, self.last_progress_pct);
         Ok(())
     }
 
@@ -3015,7 +3037,7 @@ mod tests {
             .expect("build git lane pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
-        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024)
+        stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024, Progress::null())
             .expect("stream git lane pack");
         let mut pack_bytes = Vec::new();
         let mut chunks = Vec::new();
@@ -3204,7 +3226,7 @@ mod tests {
         // The single pack must actually contain the whole closure: main,
         // feature, tag object + tagged commit, plus their trees/blobs.
         let (tx, mut rx) = mpsc::channel(64);
-        stream_git_pack_messages_blocking(tx, plan.pack.clone(), 64 * 1024)
+        stream_git_pack_messages_blocking(tx, plan.pack.clone(), 64 * 1024, Progress::null())
             .expect("stream mirror pack");
         let mut pack_bytes = Vec::new();
         while let Some(message) = rx.blocking_recv() {
@@ -3373,8 +3395,14 @@ mod tests {
     #[test]
     fn git_pack_stream_writer_emits_ordered_chunks() {
         let (tx, mut rx) = mpsc::channel(4);
-        let mut writer =
-            GitPackPushMessageWriter::new(tx, "git-pack:test".to_string(), vec![0x42; 20], 10, 4);
+        let mut writer = GitPackPushMessageWriter::new(
+            tx,
+            "git-pack:test".to_string(),
+            vec![0x42; 20],
+            10,
+            4,
+            Progress::null(),
+        );
         writer.write_all(b"abcdefghij").expect("write pack bytes");
         writer.finish().expect("finish pack stream");
 
@@ -3406,6 +3434,70 @@ mod tests {
             chunks
                 .iter()
                 .all(|chunk| chunk.pack_id.as_ref() == &[0x42; 20][..])
+        );
+    }
+
+    /// A `Sink` that records the phase label of every rendered snapshot, so a
+    /// test can assert on the human progress line the push seam drives.
+    #[derive(Default)]
+    struct PhaseCapturingSink {
+        phases: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PhaseCapturingSink {
+        fn phases(&self) -> Vec<String> {
+            self.phases.lock().unwrap().clone()
+        }
+    }
+
+    impl objects::Sink for PhaseCapturingSink {
+        fn render(&self, snap: objects::ProgressSnapshot) {
+            self.phases.lock().unwrap().push(snap.phase);
+        }
+    }
+
+    /// Streaming the Git pack must drive the generic progress substrate with a
+    /// live "uploading N/M bytes" phase, ending at the full pack size. This is
+    /// the DoD "live progress line" for the default git-overlay mirror push.
+    #[test]
+    fn git_pack_stream_reports_upload_progress() {
+        let dir = TempDir::new().expect("tempdir");
+        let git = sley::Repository::init(dir.path()).expect("init git");
+        let commit_oid = write_commit(&git, "progress");
+        // Small chunk size so the pack streams over several chunks.
+        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64)
+            .expect("build pack plan");
+
+        let sink = std::sync::Arc::new(PhaseCapturingSink::default());
+        struct Forward(std::sync::Arc<PhaseCapturingSink>);
+        impl objects::Sink for Forward {
+            fn render(&self, snap: objects::ProgressSnapshot) {
+                self.0.render(snap);
+            }
+        }
+        let progress = Progress::with_sink(Box::new(Forward(std::sync::Arc::clone(&sink))));
+
+        let (tx, mut rx) = mpsc::channel(1024);
+        stream_git_pack_messages_blocking(tx, pack.clone(), 64, progress.clone())
+            .expect("stream pack");
+        while rx.blocking_recv().is_some() {}
+
+        let phases = sink.phases();
+        assert!(
+            phases.iter().any(|phase| phase.contains("uploading")),
+            "pack streamer must drive an 'uploading' progress phase; saw {phases:?}",
+        );
+        let last_uploading = phases
+            .iter()
+            .rev()
+            .find(|phase| phase.contains("uploading"))
+            .cloned();
+        assert!(
+            last_uploading
+                .as_deref()
+                .is_some_and(|phase| phase.contains(&pack.pack_size.to_string())),
+            "final uploading phase must show the full pack size ({} bytes); saw {last_uploading:?}",
+            pack.pack_size,
         );
     }
 
