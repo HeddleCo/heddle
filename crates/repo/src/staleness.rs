@@ -13,11 +13,13 @@ pub use objects::object::{
 use objects::store::AsyncObjectSource;
 use objects::{
     object::{
-        Annotation, Blob, ContextTarget, State, Tree,
-        annotation_status_for_source_with_symbol_resolver,
+        Annotation, Blob, ContextTarget, LeafPolicy, State, Tree,
+        annotation_status_for_source_with_symbol_resolver, resolve_tree_path,
     },
     store::ObjectSource,
 };
+#[cfg(feature = "async-source")]
+use objects::object::resolve_tree_path_async;
 
 use crate::Repository;
 
@@ -157,41 +159,14 @@ fn get_blob_at_path(
     tree: &Tree,
     path: &str,
 ) -> Result<Option<Blob>, anyhow::Error> {
-    let parts: Vec<&str> = path.split('/').collect();
-    get_blob_recursive(store, tree, &parts)
-}
-
-fn get_blob_recursive(
-    store: &impl ObjectSource,
-    tree: &Tree,
-    parts: &[&str],
-) -> Result<Option<Blob>, anyhow::Error> {
-    if parts.is_empty() {
-        return Ok(None);
-    }
-
-    let name = parts[0];
-    let entry = match tree.get(name) {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-
-    if parts.len() == 1 {
-        // Serve symlink entries too: a symlink's object is a blob whose bytes
-        // are the target path. We return that target-path content (git
-        // semantics), NOT the content of the file it points at — following the
-        // link is a higher-level fs concern. `is_symlink()` lets such callers
-        // opt into following it themselves.
-        if let Some(blob_hash) = entry.leaf_content_hash() {
-            return Ok(store.get_blob(&blob_hash)?);
-        }
-    } else if let Some(tree_hash) = entry.tree_hash()
-        && let Some(subtree) = store.get_tree(&tree_hash)?
-    {
-        return get_blob_recursive(store, &subtree, &parts[1..]);
-    }
-
-    Ok(None)
+    let resolved = resolve_tree_path(
+        store,
+        &tree.hash(),
+        Path::new(path),
+        LeafPolicy::LeafContentBlob,
+    )
+    .map_err(anyhow::Error::from)?;
+    Ok(resolved.and_then(|target| target.blob))
 }
 
 /// Resolve a blob at a file path within a tree by walking the tree hierarchy.
@@ -204,42 +179,15 @@ pub async fn get_blob_at_path_async<S>(
 where
     S: AsyncObjectSource + Sync + ?Sized,
 {
-    let parts: Vec<&str> = path.split('/').collect();
-    get_blob_recursive_async(store, tree, &parts).await
-}
-
-#[cfg(feature = "async-source")]
-async fn get_blob_recursive_async<S>(
-    store: &S,
-    tree: &Tree,
-    parts: &[&str],
-) -> Result<Option<Blob>, anyhow::Error>
-where
-    S: AsyncObjectSource + Sync + ?Sized,
-{
-    if parts.is_empty() {
-        return Ok(None);
-    }
-
-    let name = parts[0];
-    let entry = match tree.get(name) {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-
-    if parts.len() == 1 {
-        // See `get_blob_recursive`: symlink entries resolve to their blob
-        // (the target-path bytes), git-style; we do not follow the link.
-        if let Some(blob_hash) = entry.leaf_content_hash() {
-            return Ok(store.get_blob(&blob_hash).await?);
-        }
-    } else if let Some(tree_hash) = entry.tree_hash()
-        && let Some(subtree) = store.get_tree(&tree_hash).await?
-    {
-        return Box::pin(get_blob_recursive_async(store, &subtree, &parts[1..])).await;
-    }
-
-    Ok(None)
+    let resolved = resolve_tree_path_async(
+        store,
+        &tree.hash(),
+        Path::new(path),
+        LeafPolicy::LeafContentBlob,
+    )
+    .await
+    .map_err(anyhow::Error::from)?;
+    Ok(resolved.and_then(|target| target.blob))
 }
 
 #[cfg(test)]
