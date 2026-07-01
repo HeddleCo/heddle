@@ -177,7 +177,12 @@ fn get_blob_recursive(
     };
 
     if parts.len() == 1 {
-        if entry.is_blob() {
+        // Serve symlink entries too: a symlink's object is a blob whose bytes
+        // are the target path. We return that target-path content (git
+        // semantics), NOT the content of the file it points at — following the
+        // link is a higher-level fs concern. `is_symlink()` lets such callers
+        // opt into following it themselves.
+        if entry.is_blob() || entry.is_symlink() {
             return Ok(store.get_blob(&entry.hash)?);
         }
     } else if entry.is_tree()
@@ -223,7 +228,9 @@ where
     };
 
     if parts.len() == 1 {
-        if entry.is_blob() {
+        // See `get_blob_recursive`: symlink entries resolve to their blob
+        // (the target-path bytes), git-style; we do not follow the link.
+        if entry.is_blob() || entry.is_symlink() {
             return Ok(store.get_blob(&entry.hash).await?);
         }
     } else if entry.is_tree()
@@ -403,6 +410,54 @@ mod tests {
             assert_eq!(async_blob, expected_blob, "async path {path}");
             assert_eq!(async_blob, sync_blob, "dual path {path}");
         }
+    }
+
+    #[cfg(feature = "async-source")]
+    #[test]
+    fn symlink_entry_resolves_to_target_path_bytes() {
+        let store = InMemoryStore::new();
+        let async_store = AsyncInMemorySource(&store);
+
+        // A symlink's object *is* a blob whose bytes are the target path.
+        let link_target = create_blob(&store, b"AGENTS.md");
+        let real_file = create_blob(&store, b"the real content");
+        let subdir_file = create_blob(&store, b"nested content");
+
+        let subdir = create_tree(&store, vec![("inner.txt", subdir_file, EntryType::Blob)]);
+
+        let root_hash = create_tree(
+            &store,
+            vec![
+                ("AGENTS.md", real_file, EntryType::Blob),
+                ("CLAUDE.md", link_target, EntryType::Symlink),
+                ("dir", subdir, EntryType::Tree),
+            ],
+        );
+        let root = ObjectStore::get_tree(&store, &root_hash).unwrap().unwrap();
+
+        // The symlink resolves to its blob (the target-path bytes), NOT followed
+        // to the target file's content, and NOT dropped as not-found.
+        let sync_symlink = blob_content(get_blob_at_path(&store, &root, "CLAUDE.md").unwrap());
+        let async_symlink = blob_content(
+            block_on(get_blob_at_path_async(&async_store, &root, "CLAUDE.md")).unwrap(),
+        );
+        assert_eq!(sync_symlink, Some(b"AGENTS.md".to_vec()), "sync symlink");
+        assert_eq!(async_symlink, Some(b"AGENTS.md".to_vec()), "async symlink");
+
+        // Regression: a regular blob still resolves to its own content.
+        let sync_blob = blob_content(get_blob_at_path(&store, &root, "AGENTS.md").unwrap());
+        let async_blob = blob_content(
+            block_on(get_blob_at_path_async(&async_store, &root, "AGENTS.md")).unwrap(),
+        );
+        assert_eq!(sync_blob, Some(b"the real content".to_vec()), "sync blob");
+        assert_eq!(async_blob, Some(b"the real content".to_vec()), "async blob");
+
+        // Regression: a directory does not resolve as a blob.
+        let sync_dir = blob_content(get_blob_at_path(&store, &root, "dir").unwrap());
+        let async_dir =
+            blob_content(block_on(get_blob_at_path_async(&async_store, &root, "dir")).unwrap());
+        assert_eq!(sync_dir, None, "sync dir");
+        assert_eq!(async_dir, None, "async dir");
     }
 
     #[test]

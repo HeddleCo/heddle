@@ -179,6 +179,10 @@ impl TreeEntry {
         self.entry_type == EntryType::Blob
     }
 
+    pub fn is_symlink(&self) -> bool {
+        self.entry_type == EntryType::Symlink
+    }
+
     pub fn is_executable(&self) -> bool {
         self.mode == FileMode::Executable
     }
