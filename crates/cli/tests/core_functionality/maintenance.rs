@@ -128,7 +128,7 @@ fn known_state_sidecars(path: &Path) -> Vec<&'static str> {
 }
 
 #[test]
-fn test_release_help_surfaces_keep_low_level_maintenance_hidden() {
+fn test_release_help_surfaces_keep_maintenance_tools_under_maintenance() {
     let temp = TempDir::new().unwrap();
     let top_level = heddle(&["--help"], Some(temp.path())).unwrap();
     assert!(
@@ -150,12 +150,12 @@ fn test_release_help_surfaces_keep_low_level_maintenance_hidden() {
         "maintenance help should expose garbage collection: {maintenance}"
     );
     assert!(
-        !maintenance.contains("index"),
-        "maintenance help should keep index as an internal helper: {maintenance}"
+        maintenance.contains("index"),
+        "maintenance help should expose index inspection as an admin maintenance tool: {maintenance}"
     );
     assert!(
-        !maintenance.contains("monitor"),
-        "maintenance help should keep monitor as an internal helper: {maintenance}"
+        maintenance.contains("monitor"),
+        "maintenance help should expose monitor inspection as an admin maintenance tool: {maintenance}"
     );
 }
 

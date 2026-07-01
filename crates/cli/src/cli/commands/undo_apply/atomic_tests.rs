@@ -151,8 +151,7 @@ fn atomic_undo_success_reverts_and_records_recovery() {
     let generation = repo.oplog().head_id().unwrap();
     let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
     let updated =
-        repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid.clone()))
-            .unwrap();
+        repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid.clone())).unwrap();
 
     assert_eq!(updated.len(), 1);
     assert!(updated[0].entries.iter().all(|e| e.undone));
@@ -1115,9 +1114,8 @@ fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
     r1.current_state = Some("current-B".to_string());
     r1.materialized_path = Some(PathBuf::from("/work/B"));
 
-    let result = with_nonatomic_forward_fault(0, || {
-        repo::atomic::execute(&repo, SaveOnly { record: r1 })
-    });
+    let result =
+        with_nonatomic_forward_fault(0, || repo::atomic::execute(&repo, SaveOnly { record: r1 }));
     assert!(result.is_err(), "the injected save fault must fail the op");
 
     let restored = manager.find_by_thread("main").unwrap().unwrap();
@@ -1159,9 +1157,8 @@ fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
     r1.current_state = Some("current-B".to_string());
     r1.updated_at = r0.updated_at + chrono::Duration::seconds(60);
 
-    let result = with_nonatomic_forward_fault(0, || {
-        repo::atomic::execute(&repo, SaveOnly { record: r1 })
-    });
+    let result =
+        with_nonatomic_forward_fault(0, || repo::atomic::execute(&repo, SaveOnly { record: r1 }));
     assert!(result.is_err(), "the injected save fault must fail the op");
 
     assert!(

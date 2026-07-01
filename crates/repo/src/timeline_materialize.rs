@@ -627,29 +627,28 @@ fn diff_tree_paths_inner(
 
     while from_index < from_entries.len() || to_index < to_entries.len() {
         match (from_entries.get(from_index), to_entries.get(to_index)) {
-            (Some(from_entry), Some(to_entry)) => match from_entry.name.cmp(&to_entry.name) {
+            (Some(from_entry), Some(to_entry)) => match from_entry.name().cmp(to_entry.name()) {
                 std::cmp::Ordering::Less => {
-                    collect_entry_paths(repo, &rel_path.join(&from_entry.name), from_entry, out)?;
+                    collect_entry_paths(repo, &rel_path.join(from_entry.name()), from_entry, out)?;
                     from_index += 1;
                 }
                 std::cmp::Ordering::Greater => {
-                    collect_entry_paths(repo, &rel_path.join(&to_entry.name), to_entry, out)?;
+                    collect_entry_paths(repo, &rel_path.join(to_entry.name()), to_entry, out)?;
                     to_index += 1;
                 }
                 std::cmp::Ordering::Equal => {
-                    let child_path = rel_path.join(&from_entry.name);
-                    if from_entry.entry_type == objects::object::EntryType::Tree
-                        && to_entry.entry_type == objects::object::EntryType::Tree
+                    let child_path = rel_path.join(from_entry.name());
+                    if let (Some(from_hash), Some(to_hash)) =
+                        (from_entry.tree_hash(), to_entry.tree_hash())
                     {
-                        if from_entry.hash != to_entry.hash {
+                        if from_hash != to_hash {
                             let from_subtree =
-                                repo.store().get_tree(&from_entry.hash)?.ok_or_else(|| {
-                                    HeddleError::NotFound(format!("tree {}", from_entry.hash))
+                                repo.store().get_tree(&from_hash)?.ok_or_else(|| {
+                                    HeddleError::NotFound(format!("tree {}", from_hash))
                                 })?;
-                            let to_subtree =
-                                repo.store().get_tree(&to_entry.hash)?.ok_or_else(|| {
-                                    HeddleError::NotFound(format!("tree {}", to_entry.hash))
-                                })?;
+                            let to_subtree = repo.store().get_tree(&to_hash)?.ok_or_else(|| {
+                                HeddleError::NotFound(format!("tree {}", to_hash))
+                            })?;
                             diff_tree_paths_inner(
                                 repo,
                                 &child_path,
@@ -658,10 +657,7 @@ fn diff_tree_paths_inner(
                                 out,
                             )?;
                         }
-                    } else if from_entry.entry_type != to_entry.entry_type
-                        || from_entry.hash != to_entry.hash
-                        || from_entry.mode != to_entry.mode
-                    {
+                    } else if from_entry.target() != to_entry.target() {
                         out.insert(display_path(&child_path));
                     }
                     from_index += 1;
@@ -669,11 +665,11 @@ fn diff_tree_paths_inner(
                 }
             },
             (Some(from_entry), None) => {
-                collect_entry_paths(repo, &rel_path.join(&from_entry.name), from_entry, out)?;
+                collect_entry_paths(repo, &rel_path.join(from_entry.name()), from_entry, out)?;
                 from_index += 1;
             }
             (None, Some(to_entry)) => {
-                collect_entry_paths(repo, &rel_path.join(&to_entry.name), to_entry, out)?;
+                collect_entry_paths(repo, &rel_path.join(to_entry.name()), to_entry, out)?;
                 to_index += 1;
             }
             (None, None) => break,
@@ -688,13 +684,13 @@ fn collect_entry_paths(
     entry: &objects::object::TreeEntry,
     out: &mut BTreeSet<String>,
 ) -> Result<()> {
-    if entry.entry_type == objects::object::EntryType::Tree {
+    if let Some(tree_hash) = entry.tree_hash() {
         let tree = repo
             .store()
-            .get_tree(&entry.hash)?
-            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", entry.hash)))?;
+            .get_tree(&tree_hash)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
         for child in tree.entries() {
-            collect_entry_paths(repo, &rel_path.join(&child.name), child, out)?;
+            collect_entry_paths(repo, &rel_path.join(child.name()), child, out)?;
         }
     } else {
         out.insert(display_path(&rel_path.to_path_buf()));

@@ -5,14 +5,13 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
+    object::{ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, TreeEntryTarget},
     store::ObjectStore,
-    util::SUBMODULE_PREFIX,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use sley::{
-    CommitObject, EntryKind, GitObjectType, ObjectFormat, ObjectId, RefPrecondition,
-    ReferenceTarget, Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
+    CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
 
 use crate::bridge::{
@@ -230,12 +229,7 @@ pub fn export_tree(
     let mut editor = repo.edit_tree(&empty_tree).map_err(git_err)?;
 
     for entry in tree.entries() {
-        let (kind, id) = if entry.is_tree() {
-            (
-                EntryKind::Tree,
-                export_tree(heddle_repo, repo, &entry.hash)?,
-            )
-        } else {
+        let write_blob_entry = |hash: &ContentHash| -> GitResult<ObjectId> {
             // Redaction safety: if the blob carries an active redaction
             // record, export the stub instead of the bytes. This is the
             // single chokepoint between Heddle-side redactions and any
@@ -247,42 +241,37 @@ pub fn export_tree(
             // directly (we never touch the materialize path) and writes
             // the raw bytes through `repo.write_blob`.
             let stub = heddle_repo
-                .redaction_stub_for_blob(&entry.hash)
+                .redaction_stub_for_blob(hash)
                 .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?;
 
             if let Some(stub_text) = stub {
-                // Stubs are text-only; ASCII safe across newline/BOM
-                // quirks and submodule-pointer detection.
-                let kind = match entry.mode {
-                    FileMode::Symlink => EntryKind::Symlink,
-                    FileMode::Executable => EntryKind::BlobExecutable,
-                    _ => EntryKind::Blob,
-                };
-                let oid = repo.write_blob(stub_text.as_bytes()).map_err(git_err)?;
-                (kind, oid)
-            } else {
-                let blob = heddle_repo
-                    .store()
-                    .get_blob(&entry.hash)?
-                    .ok_or_else(|| HeddleError::NotFound(format!("blob {}", entry.hash)))?;
-
-                if entry.mode == FileMode::Normal
-                    && let Some(oid) = submodule_oid_from_blob(blob.content())
-                {
-                    (EntryKind::Commit, oid)
-                } else {
-                    let kind = match entry.mode {
-                        FileMode::Normal => EntryKind::Blob,
-                        FileMode::Executable => EntryKind::BlobExecutable,
-                        FileMode::Symlink => EntryKind::Symlink,
-                    };
-                    let oid = repo.write_blob(blob.content()).map_err(git_err)?;
-                    (kind, oid)
-                }
+                // Stubs are text-only and ASCII safe across newline/BOM quirks.
+                return repo.write_blob(stub_text.as_bytes()).map_err(git_err);
             }
+
+            let blob = heddle_repo
+                .store()
+                .get_blob(hash)?
+                .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
+            repo.write_blob(blob.content()).map_err(git_err)
+        };
+        let (kind, id) = match entry.target() {
+            TreeEntryTarget::Tree { hash } => {
+                (EntryKind::Tree, export_tree(heddle_repo, repo, hash)?)
+            }
+            TreeEntryTarget::Blob { hash, executable } => {
+                let kind = if *executable {
+                    EntryKind::BlobExecutable
+                } else {
+                    EntryKind::Blob
+                };
+                (kind, write_blob_entry(hash)?)
+            }
+            TreeEntryTarget::Symlink { hash } => (EntryKind::Symlink, write_blob_entry(hash)?),
+            TreeEntryTarget::Gitlink { target } => (EntryKind::Commit, *target),
         };
 
-        editor.upsert(entry.name.as_str(), kind, id);
+        editor.upsert(entry.name(), kind, id);
     }
 
     repo.write_tree(editor).map_err(git_err)
@@ -1189,14 +1178,6 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
         time: sley::GitTime::new(seconds, 0),
         raw,
     }
-}
-
-fn submodule_oid_from_blob(content: &[u8]) -> Option<ObjectId> {
-    let text = std::str::from_utf8(content).ok()?;
-    let text = text.trim();
-    let trimmed = text.strip_prefix(SUBMODULE_PREFIX)?.trim();
-
-    ObjectId::from_hex(ObjectFormat::Sha1, trimmed).ok()
 }
 
 #[cfg(test)]

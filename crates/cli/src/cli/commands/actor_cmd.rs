@@ -378,6 +378,7 @@ pub async fn cmd_actor_spawn(
             } else {
                 format!("actor {session_id} was spawned explicitly on thread {thread_name}")
             }),
+            task_assignment_id: None,
             attach_precedence: vec![
                 if attach_thread.is_some() {
                     "no-thread-attach".to_string()

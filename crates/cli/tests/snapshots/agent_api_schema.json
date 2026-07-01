@@ -1,4 +1,842 @@
 {
+  "AgentFanoutCommandOutput": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "argv": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "command": {
+        "type": "string"
+      },
+      "lane_thread": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "lane_thread",
+      "command",
+      "argv"
+    ],
+    "title": "AgentFanoutCommandOutput",
+    "type": "object"
+  },
+  "AgentFanoutLaneOutput": {
+    "$defs": {
+      "AgentTaskOutput": {
+        "properties": {
+          "allow_offline": {
+            "type": "boolean"
+          },
+          "base_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coordination_discussion_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "delegated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_thread": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "title",
+          "body",
+          "status",
+          "target_thread",
+          "allow_offline",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "type": "string"
+      },
+      "task": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AgentTaskOutput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "thread": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "thread",
+      "path",
+      "title",
+      "status"
+    ],
+    "title": "AgentFanoutLaneOutput",
+    "type": "object"
+  },
+  "AgentFanoutOutput": {
+    "$defs": {
+      "ActionTemplate": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent_may_fill": {
+            "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
+            "type": "boolean"
+          },
+          "argv_template": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "argv_template",
+          "required_inputs",
+          "agent_may_fill"
+        ],
+        "type": "object"
+      },
+      "AgentFanoutCommandOutput": {
+        "properties": {
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "type": "string"
+          },
+          "lane_thread": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane_thread",
+          "command",
+          "argv"
+        ],
+        "type": "object"
+      },
+      "AgentFanoutLaneOutput": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AgentTaskOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thread": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread",
+          "path",
+          "title",
+          "status"
+        ],
+        "type": "object"
+      },
+      "AgentTaskOutput": {
+        "properties": {
+          "allow_offline": {
+            "type": "boolean"
+          },
+          "base_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coordination_discussion_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "delegated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_thread": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "title",
+          "body",
+          "status",
+          "target_thread",
+          "allow_offline",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "MachineContractCoverage": {
+        "properties": {
+          "accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "accepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope": {
+            "type": "string"
+          },
+          "advanced_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "advanced_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jsonl_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing_mutating_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "supports_op_id_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unaccepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unaccepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "undocumented_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "undocumented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope": {
+            "type": "string"
+          },
+          "verified_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "verified_scope",
+          "advanced_scope",
+          "summary",
+          "catalog_commands_total",
+          "catalog_mutating_commands_total",
+          "json_commands_total",
+          "json_mutating_commands_total",
+          "json_commands_with_schema",
+          "json_commands_with_accepted_opaque_schema",
+          "json_commands_without_schema",
+          "verified_scope_json_commands_total",
+          "verified_scope_json_commands_with_schema",
+          "verified_scope_json_commands_with_accepted_opaque_schema",
+          "verified_scope_json_commands_without_schema",
+          "advanced_scope_json_commands_total",
+          "advanced_scope_json_commands_with_accepted_opaque_schema",
+          "mutating_commands_total",
+          "mutating_commands_with_schema",
+          "mutating_commands_with_accepted_opaque_schema",
+          "mutating_commands_without_schema",
+          "verified_scope_mutating_commands_total",
+          "verified_scope_mutating_commands_with_schema",
+          "verified_scope_mutating_commands_with_accepted_opaque_schema",
+          "verified_scope_mutating_commands_without_schema",
+          "advanced_scope_mutating_commands_total",
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "schema_verbs_total",
+          "documented_schema_verbs_total",
+          "undocumented_schema_verbs_total",
+          "opaque_schema_verbs_total",
+          "accepted_opaque_schema_verbs_total",
+          "unaccepted_opaque_schema_verbs_total",
+          "supports_op_id_total",
+          "jsonl_commands_total",
+          "missing_schema_examples",
+          "missing_mutating_schema_examples",
+          "verified_scope_missing_schema_examples",
+          "verified_scope_accepted_opaque_schema_examples",
+          "advanced_scope_accepted_opaque_schema_examples",
+          "accepted_opaque_schema_examples",
+          "unaccepted_opaque_schema_examples",
+          "undocumented_schema_examples"
+        ],
+        "type": "object"
+      },
+      "RepositoryVerificationState": {
+        "properties": {
+          "active_operation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/$defs/VerificationCheck"
+            },
+            "type": "array"
+          },
+          "clone_verification": {
+            "type": "string"
+          },
+          "default_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "heddle_initialized": {
+            "type": "boolean"
+          },
+          "heddle_thread": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "import_state": {
+            "type": "string"
+          },
+          "machine_contract": {
+            "type": "string"
+          },
+          "machine_contract_coverage": {
+            "$ref": "#/$defs/MachineContractCoverage"
+          },
+          "mapping_state": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "remote_drift": {
+            "type": "string"
+          },
+          "repository_mode": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "workflow_status": {
+            "type": "string"
+          },
+          "workflow_summary": {
+            "type": "string"
+          },
+          "worktree_dirty": {
+            "type": "boolean"
+          },
+          "worktree_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verified",
+          "status",
+          "repository_mode",
+          "heddle_initialized",
+          "worktree_dirty",
+          "worktree_state",
+          "import_state",
+          "mapping_state",
+          "remote_drift",
+          "clone_verification",
+          "machine_contract",
+          "machine_contract_coverage",
+          "workflow_status",
+          "workflow_summary",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates",
+          "checks"
+        ],
+        "type": "object"
+      },
+      "VerificationCheck": {
+        "properties": {
+          "clean": {
+            "type": "boolean"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "clean",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "base_root": {
+        "type": "string"
+      },
+      "base_state": {
+        "type": "string"
+      },
+      "commands": {
+        "items": {
+          "$ref": "#/$defs/AgentFanoutCommandOutput"
+        },
+        "type": "array"
+      },
+      "coordination_discussion_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "lanes": {
+        "items": {
+          "$ref": "#/$defs/AgentFanoutLaneOutput"
+        },
+        "type": "array"
+      },
+      "output_kind": {
+        "type": "string"
+      },
+      "parent_task": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AgentTaskOutput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "parent_thread": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "verification": {
+        "$ref": "#/$defs/RepositoryVerificationState"
+      }
+    },
+    "required": [
+      "output_kind",
+      "title",
+      "parent_thread",
+      "base_state",
+      "base_root",
+      "lanes",
+      "commands",
+      "verification"
+    ],
+    "title": "AgentFanoutOutput",
+    "type": "object"
+  },
   "AgentReservationEnvelope": {
     "$defs": {
       "ActionTemplate": {
@@ -96,6 +934,12 @@
             "type": "string"
           },
           "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_assignment_id": {
             "type": [
               "string",
               "null"
@@ -691,6 +1535,12 @@
               "null"
             ]
           },
+          "task_assignment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "thinking_level": {
             "type": [
               "string",
@@ -1262,6 +2112,12 @@
           "null"
         ]
       },
+      "task_assignment_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "thinking_level": {
         "type": [
           "string",
@@ -1278,6 +2134,1278 @@
       "status"
     ],
     "title": "AgentReservationOutput",
+    "type": "object"
+  },
+  "AgentTaskEnvelope": {
+    "$defs": {
+      "ActionTemplate": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent_may_fill": {
+            "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
+            "type": "boolean"
+          },
+          "argv_template": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "argv_template",
+          "required_inputs",
+          "agent_may_fill"
+        ],
+        "type": "object"
+      },
+      "AgentTaskOutput": {
+        "properties": {
+          "allow_offline": {
+            "type": "boolean"
+          },
+          "base_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coordination_discussion_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "delegated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_thread": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "title",
+          "body",
+          "status",
+          "target_thread",
+          "allow_offline",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "MachineContractCoverage": {
+        "properties": {
+          "accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "accepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope": {
+            "type": "string"
+          },
+          "advanced_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "advanced_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jsonl_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing_mutating_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "supports_op_id_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unaccepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unaccepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "undocumented_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "undocumented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope": {
+            "type": "string"
+          },
+          "verified_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "verified_scope",
+          "advanced_scope",
+          "summary",
+          "catalog_commands_total",
+          "catalog_mutating_commands_total",
+          "json_commands_total",
+          "json_mutating_commands_total",
+          "json_commands_with_schema",
+          "json_commands_with_accepted_opaque_schema",
+          "json_commands_without_schema",
+          "verified_scope_json_commands_total",
+          "verified_scope_json_commands_with_schema",
+          "verified_scope_json_commands_with_accepted_opaque_schema",
+          "verified_scope_json_commands_without_schema",
+          "advanced_scope_json_commands_total",
+          "advanced_scope_json_commands_with_accepted_opaque_schema",
+          "mutating_commands_total",
+          "mutating_commands_with_schema",
+          "mutating_commands_with_accepted_opaque_schema",
+          "mutating_commands_without_schema",
+          "verified_scope_mutating_commands_total",
+          "verified_scope_mutating_commands_with_schema",
+          "verified_scope_mutating_commands_with_accepted_opaque_schema",
+          "verified_scope_mutating_commands_without_schema",
+          "advanced_scope_mutating_commands_total",
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "schema_verbs_total",
+          "documented_schema_verbs_total",
+          "undocumented_schema_verbs_total",
+          "opaque_schema_verbs_total",
+          "accepted_opaque_schema_verbs_total",
+          "unaccepted_opaque_schema_verbs_total",
+          "supports_op_id_total",
+          "jsonl_commands_total",
+          "missing_schema_examples",
+          "missing_mutating_schema_examples",
+          "verified_scope_missing_schema_examples",
+          "verified_scope_accepted_opaque_schema_examples",
+          "advanced_scope_accepted_opaque_schema_examples",
+          "accepted_opaque_schema_examples",
+          "unaccepted_opaque_schema_examples",
+          "undocumented_schema_examples"
+        ],
+        "type": "object"
+      },
+      "RepositoryVerificationState": {
+        "properties": {
+          "active_operation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/$defs/VerificationCheck"
+            },
+            "type": "array"
+          },
+          "clone_verification": {
+            "type": "string"
+          },
+          "default_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "heddle_initialized": {
+            "type": "boolean"
+          },
+          "heddle_thread": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "import_state": {
+            "type": "string"
+          },
+          "machine_contract": {
+            "type": "string"
+          },
+          "machine_contract_coverage": {
+            "$ref": "#/$defs/MachineContractCoverage"
+          },
+          "mapping_state": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "remote_drift": {
+            "type": "string"
+          },
+          "repository_mode": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "workflow_status": {
+            "type": "string"
+          },
+          "workflow_summary": {
+            "type": "string"
+          },
+          "worktree_dirty": {
+            "type": "boolean"
+          },
+          "worktree_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verified",
+          "status",
+          "repository_mode",
+          "heddle_initialized",
+          "worktree_dirty",
+          "worktree_state",
+          "import_state",
+          "mapping_state",
+          "remote_drift",
+          "clone_verification",
+          "machine_contract",
+          "machine_contract_coverage",
+          "workflow_status",
+          "workflow_summary",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates",
+          "checks"
+        ],
+        "type": "object"
+      },
+      "VerificationCheck": {
+        "properties": {
+          "clean": {
+            "type": "boolean"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "clean",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "output_kind": {
+        "type": "string"
+      },
+      "task": {
+        "$ref": "#/$defs/AgentTaskOutput"
+      },
+      "verification": {
+        "$ref": "#/$defs/RepositoryVerificationState"
+      }
+    },
+    "required": [
+      "output_kind",
+      "task",
+      "verification"
+    ],
+    "title": "AgentTaskEnvelope",
+    "type": "object"
+  },
+  "AgentTaskListOutput": {
+    "$defs": {
+      "ActionTemplate": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent_may_fill": {
+            "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
+            "type": "boolean"
+          },
+          "argv_template": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "argv_template",
+          "required_inputs",
+          "agent_may_fill"
+        ],
+        "type": "object"
+      },
+      "AgentTaskOutput": {
+        "properties": {
+          "allow_offline": {
+            "type": "boolean"
+          },
+          "base_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "coordination_discussion_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "delegated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_thread": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "task_id",
+          "title",
+          "body",
+          "status",
+          "target_thread",
+          "allow_offline",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "MachineContractCoverage": {
+        "properties": {
+          "accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "accepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope": {
+            "type": "string"
+          },
+          "advanced_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "advanced_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "catalog_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "json_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "jsonl_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing_mutating_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "supports_op_id_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unaccepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unaccepted_opaque_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "undocumented_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "undocumented_schema_verbs_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope": {
+            "type": "string"
+          },
+          "verified_scope_accepted_opaque_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_json_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_json_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_missing_schema_examples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "verified_scope_mutating_commands_total": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_accepted_opaque_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_with_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_scope_mutating_commands_without_schema": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "verified_scope",
+          "advanced_scope",
+          "summary",
+          "catalog_commands_total",
+          "catalog_mutating_commands_total",
+          "json_commands_total",
+          "json_mutating_commands_total",
+          "json_commands_with_schema",
+          "json_commands_with_accepted_opaque_schema",
+          "json_commands_without_schema",
+          "verified_scope_json_commands_total",
+          "verified_scope_json_commands_with_schema",
+          "verified_scope_json_commands_with_accepted_opaque_schema",
+          "verified_scope_json_commands_without_schema",
+          "advanced_scope_json_commands_total",
+          "advanced_scope_json_commands_with_accepted_opaque_schema",
+          "mutating_commands_total",
+          "mutating_commands_with_schema",
+          "mutating_commands_with_accepted_opaque_schema",
+          "mutating_commands_without_schema",
+          "verified_scope_mutating_commands_total",
+          "verified_scope_mutating_commands_with_schema",
+          "verified_scope_mutating_commands_with_accepted_opaque_schema",
+          "verified_scope_mutating_commands_without_schema",
+          "advanced_scope_mutating_commands_total",
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "schema_verbs_total",
+          "documented_schema_verbs_total",
+          "undocumented_schema_verbs_total",
+          "opaque_schema_verbs_total",
+          "accepted_opaque_schema_verbs_total",
+          "unaccepted_opaque_schema_verbs_total",
+          "supports_op_id_total",
+          "jsonl_commands_total",
+          "missing_schema_examples",
+          "missing_mutating_schema_examples",
+          "verified_scope_missing_schema_examples",
+          "verified_scope_accepted_opaque_schema_examples",
+          "advanced_scope_accepted_opaque_schema_examples",
+          "accepted_opaque_schema_examples",
+          "unaccepted_opaque_schema_examples",
+          "undocumented_schema_examples"
+        ],
+        "type": "object"
+      },
+      "RepositoryVerificationState": {
+        "properties": {
+          "active_operation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/$defs/VerificationCheck"
+            },
+            "type": "array"
+          },
+          "clone_verification": {
+            "type": "string"
+          },
+          "default_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "heddle_initialized": {
+            "type": "boolean"
+          },
+          "heddle_thread": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "import_state": {
+            "type": "string"
+          },
+          "machine_contract": {
+            "type": "string"
+          },
+          "machine_contract_coverage": {
+            "$ref": "#/$defs/MachineContractCoverage"
+          },
+          "mapping_state": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "remote_drift": {
+            "type": "string"
+          },
+          "repository_mode": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "workflow_status": {
+            "type": "string"
+          },
+          "workflow_summary": {
+            "type": "string"
+          },
+          "worktree_dirty": {
+            "type": "boolean"
+          },
+          "worktree_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verified",
+          "status",
+          "repository_mode",
+          "heddle_initialized",
+          "worktree_dirty",
+          "worktree_state",
+          "import_state",
+          "mapping_state",
+          "remote_drift",
+          "clone_verification",
+          "machine_contract",
+          "machine_contract_coverage",
+          "workflow_status",
+          "workflow_summary",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates",
+          "checks"
+        ],
+        "type": "object"
+      },
+      "VerificationCheck": {
+        "properties": {
+          "clean": {
+            "type": "boolean"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recommended_action_template": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_action_templates": {
+            "items": {
+              "$ref": "#/$defs/ActionTemplate"
+            },
+            "type": "array"
+          },
+          "recovery_commands": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "clean",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "output_kind": {
+        "type": "string"
+      },
+      "status": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "tasks": {
+        "items": {
+          "$ref": "#/$defs/AgentTaskOutput"
+        },
+        "type": "array"
+      },
+      "thread": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "verification": {
+        "$ref": "#/$defs/RepositoryVerificationState"
+      }
+    },
+    "required": [
+      "output_kind",
+      "tasks",
+      "verification"
+    ],
+    "title": "AgentTaskListOutput",
+    "type": "object"
+  },
+  "AgentTaskOutput": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "allow_offline": {
+        "type": "boolean"
+      },
+      "base_root": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "base_state": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "body": {
+        "type": "string"
+      },
+      "completed_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "coordination_discussion_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "created_at": {
+        "type": "string"
+      },
+      "delegated_by": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "parent_task_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "status": {
+        "type": "string"
+      },
+      "target_thread": {
+        "type": "string"
+      },
+      "task_id": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "updated_at": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "schema_version",
+      "task_id",
+      "title",
+      "body",
+      "status",
+      "target_thread",
+      "allow_offline",
+      "created_at",
+      "updated_at"
+    ],
+    "title": "AgentTaskOutput",
     "type": "object"
   }
 }

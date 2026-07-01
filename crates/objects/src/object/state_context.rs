@@ -343,13 +343,6 @@ impl ContextTarget {
         }
     }
 
-    pub fn legacy_storage_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::File { path } => Some(PathBuf::from(path)),
-            Self::State { .. } => None,
-        }
-    }
-
     pub fn from_storage_path(path: &Path) -> Option<Self> {
         let mut components = path.components();
         match components.next()? {
@@ -376,9 +369,7 @@ impl ContextTarget {
                     .ok()
                     .map(|change_id| Self::State { change_id })
             }
-            _ => Some(Self::File {
-                path: path.to_string_lossy().to_string(),
-            }),
+            _ => None,
         }
     }
 
@@ -677,6 +668,14 @@ mod tests {
         assert_eq!(
             ContextTarget::from_storage_path(&state.storage_path()),
             Some(state)
+        );
+    }
+
+    #[test]
+    fn context_target_storage_rejects_legacy_direct_paths() {
+        assert_eq!(
+            ContextTarget::from_storage_path(Path::new("src/main.rs")),
+            None
         );
     }
 }

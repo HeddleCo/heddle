@@ -430,8 +430,7 @@ mod tests {
     #[cfg(feature = "async-source")]
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State, Tree,
-            TreeEntry,
+            Attribution, Blob, ChangeId, ContentHash, EntryType, Principal, State, Tree, TreeEntry,
         },
         store::{AsyncObjectSource, InMemoryStore, ObjectStore},
     };
@@ -604,13 +603,16 @@ mod tests {
     fn tree(store: &InMemoryStore, entries: Vec<(&str, ContentHash, EntryType)>) -> ContentHash {
         let entries = entries
             .into_iter()
-            .map(|(name, hash, entry_type)| TreeEntry {
-                name: name.to_string(),
-                mode: FileMode::Normal,
-                hash,
-                entry_type,
+            .map(|(name, hash, entry_type)| match entry_type {
+                EntryType::Blob => TreeEntry::file(name.to_string(), hash, false),
+                EntryType::Tree => TreeEntry::directory(name.to_string(), hash),
+                EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
+                EntryType::Gitlink => {
+                    unreachable!("repository history tests do not build gitlinks")
+                }
             })
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
         ObjectStore::put_tree(store, &Tree::from_entries(entries)).unwrap()
     }
 

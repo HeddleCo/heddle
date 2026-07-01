@@ -2,7 +2,6 @@
 //! Status command.
 
 use std::{
-    collections::BTreeSet,
     io::{self, IsTerminal, Write},
     path::Path,
     time::Instant,
@@ -11,19 +10,21 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
-use objects::worktree::WorktreeStatus;
+use heddle_core::{
+    ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusReport,
+    GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
+    MaterializedThreadInfo, StatusAdapters, StatusDetail, StatusOptions,
+    StatusReport as StatusOutput, StatusThreadSummary, changes_from_worktree_status, changes_paths,
+    fast_short_status_report, status as core_status,
+};
 use repo::{
-    AgentUsageSummary, GitRemoteTrackingStatus, RepoConfig, Repository, RepositoryCapability,
-    RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory, ThreadMode,
-    ThreadState, WorktreeCompareProfile, describe_thread_advice_with_initial, is_synthetic_root,
+    RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
+    is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
 use serde::Serialize;
-use sley::{
-    Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
-    StreamControl,
-};
+use sley::Repository as SleyRepository;
 use tokio::time::{Duration, sleep};
 #[cfg(feature = "client")]
 use tokio_tungstenite::{
@@ -35,196 +36,23 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     command_catalog::ActionFields,
-    git_compat::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
+    git_adapter::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
     git_overlay_health::{
-        GitOverlayHealth, RepositoryVerificationState,
-        build_git_overlay_health_with_worktree_status, build_plain_git_verification_probe,
-        override_trust_recommended_action, remote_tracking_with_verification_action,
-        repository_setup_guidance, serialize_empty_action_as_null,
+        RepositoryVerificationState, build_git_overlay_health_with_worktree_status,
+        build_plain_git_verification_probe, repository_setup_guidance,
+        repository_verification_state_from_health_with_worktree_status,
+        serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
-    operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
-    thread::{
-        CoordinationStatus, collect_thread_summaries, contextual_thread_action,
-        current_thread_next_action_with_verification, find_thread_summary_single,
-        thread_recovery_action_is_primary,
-    },
+    thread::{collect_thread_summaries, contextual_thread_action, find_thread_summary_single},
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-
-#[derive(Serialize)]
-pub(crate) struct StatusOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    storage_model: String,
-    hosted_enabled: bool,
-    #[serde(skip)]
-    render_json: bool,
-    #[serde(skip)]
-    validation_capability: RepositoryCapability,
-    operation: Option<RepositoryOperationStatus>,
-    remote_tracking: Option<GitRemoteTrackingStatus>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    git_index: Option<GitIndexPlan>,
-    /// Carried for the human-readable renderer only. Not part of the
-    /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --output json` instead, which is the
-    /// command whose subject is the bridge.
-    #[serde(skip)]
-    git_overlay_import_hint: Option<GitOverlayImportHintOutput>,
-    git_overlay_health: GitOverlayHealth,
-    thread: Option<String>,
-    base_state: Option<String>,
-    base_root: Option<String>,
-    current_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    heddle_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<ActorInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage_summary: Option<AgentUsageSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_progress_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    report_flush_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attach_reason: Option<String>,
-    thread_mode: Option<ThreadMode>,
-    thread_state: Option<ThreadState>,
-    freshness: Option<ThreadFreshness>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    target_thread: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_thread: Option<String>,
-    child_threads: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<String>,
-    promotion_suggested: bool,
-    impact_categories: Vec<ThreadImpactCategory>,
-    heavy_impact_paths: Vec<String>,
-    #[serde(skip)]
-    changed_paths: Vec<String>,
-    changed_path_count: usize,
-    worktree_changed_path_count: usize,
-    thread_changed_path_count: usize,
-    blockers: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    identity_notice: Option<String>,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
-    thread_health: String,
-    coordination_status: CoordinationStatus,
-    /// Provenance of a `coordination_status == Blocked`: `true` when the
-    /// Blocked is the trust/health re-encoding (the status builder forces
-    /// `coordination_status = Blocked` to surface a dirty / uncaptured /
-    /// unverified *health* blocker via the coordination field — sites
-    /// ~571 short-path, ~956 trust override), `false` when it is a
-    /// genuine inter-thread block from `build_thread_view`
-    /// (`ThreadState::Blocked` or concurrent actives). Carried so the
-    /// effective-coordination mask keys on *why* the axis is Blocked
-    /// rather than guessing from `thread_health` cleanliness — a genuine
-    /// inter-thread block can co-exist with a dirty worktree and must
-    /// still surface. Render-only; excluded from the JSON contract.
-    #[serde(skip)]
-    coordination_blocked_by_trust: bool,
-    is_isolated: bool,
-    parallel_threads: Vec<ParallelThreadInfo>,
-    state: Option<StateInfo>,
-    git_checkpoint: Option<GitCheckpointInfo>,
-    changes: ChangesInfo,
-    /// Inventory of clonefile-backed thread worktrees discovered on
-    /// disk. Read-only diagnostic. Included in JSON always (as `[]`
-    /// when no threads are materialized — the JSON contract is "the
-    /// field is always an array", which lets consumers index into
-    /// it without a null-guard) and in verbose text; the default
-    /// short text only prints a one-line advisory when at least one
-    /// thread is stale (manifest's recorded state lags the thread's
-    /// actual head), because that's the case where the user may
-    /// want to act (re-materialize or re-capture). Healthy
-    /// materialized threads stay invisible.
-    #[serde(default)]
-    materialized_threads: Vec<MaterializedThreadInfo>,
-}
-
-#[derive(Serialize, Default)]
-struct MaterializedThreadInfo {
-    name: String,
-    state_id: String,
-    tree_hash_short: String,
-    file_count: usize,
-    /// `true` when the thread ref has advanced beyond what the
-    /// manifest recorded. The on-disk worktree may not reflect the
-    /// thread's latest content; users may want `heddle thread
-    /// switch <name>` to re-materialize or `heddle capture` to
-    /// fast-forward the manifest.
-    stale: bool,
-}
-
-#[derive(Serialize)]
-struct ActorInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ParallelThreadInfo {
-    name: String,
-    coordination_status: CoordinationStatus,
-    current_state: Option<String>,
-}
-
-#[derive(Serialize)]
-struct StateInfo {
-    change_id: String,
-    content_hash: String,
-    intent: Option<String>,
-}
-
-#[derive(Serialize)]
-struct GitCheckpointInfo {
-    git_commit: String,
-    committed_at: String,
-}
-
-#[derive(Serialize, Default)]
-struct ChangesInfo {
-    modified: Vec<String>,
-    added: Vec<String>,
-    deleted: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct GitOverlayImportHintOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
-}
 
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
@@ -246,90 +74,51 @@ struct PlainGitStatusOutput {
     thread_health: String,
     changed_path_count: usize,
     changes: ChangesInfo,
-    git_index: Option<GitIndexPlan>,
-}
-
-/// Recommend the first save when a native Heddle repository has been
-/// initialized but has no user-visible history yet (the log shows only
-/// the filtered synthetic root) and the worktree is clean — i.e. there
-/// is genuinely nothing to act on yet. The repo is already initialized,
-/// so recommending another init shape here read as "you initialized wrong"
-/// (heddle#644); point at the first save instead.
-/// A dirty worktree already has its own advice, and
-/// Git-overlay repos have their own onboarding (import/adopt), so both
-/// are left alone.
-fn first_save_recommendation(
-    repo: &Repository,
-    current_state: Option<&objects::object::State>,
-    worktree_clean: bool,
-) -> Option<String> {
-    if !worktree_clean || repo.capability() != RepositoryCapability::NativeHeddle {
-        return None;
-    }
-    let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
-    empty_log.then(|| "heddle commit -m \"...\"".to_string())
-}
-
-fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
-    ChangesInfo {
-        modified: status
-            .modified
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
-        added: status
-            .added
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
-        deleted: status
-            .deleted
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
-    }
+    git_index: Option<CoreGitIndexPlan>,
 }
 
 fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
     let Some(profile) = profile else {
         return;
     };
-    emit_profile(
-        "status worktree",
-        &[
-            ProfileField::millis("index_load_ms", profile.index_load_ms),
-            ProfileField::millis("index_snapshot_load_ms", profile.index_snapshot_load_ms),
-            ProfileField::millis("index_journal_replay_ms", profile.index_journal_replay_ms),
-            ProfileField::millis("monitor_prepare_ms", profile.monitor_prepare_ms),
-            ProfileField::millis("compare_ms", profile.compare_ms),
-            ProfileField::millis("tracked_refresh_ms", profile.tracked_refresh_ms),
-            ProfileField::millis("untracked_scan_ms", profile.untracked_scan_ms),
-            ProfileField::millis("hashing_ms", profile.hashing_ms),
-            ProfileField::millis(
-                "directory_cache_compare_ms",
-                profile.directory_cache_compare_ms,
-            ),
-            ProfileField::millis("index_save_ms", profile.index_save_ms),
-            ProfileField::millis("monitor_persist_ms", profile.monitor_persist_ms),
-            ProfileField::millis("untracked_flatten_ms", profile.untracked_flatten_ms),
-            ProfileField::count(
-                "untracked_flattened_paths",
-                profile.untracked_flattened_paths as u128,
-            ),
-            ProfileField::count("directories_scanned", profile.directories_scanned as u128),
-            ProfileField::count("directories_skipped", profile.directories_skipped as u128),
-            ProfileField::count("files_hashed", profile.files_hashed as u128),
-            ProfileField::count("cache_hits", profile.cache_hits as u128),
-            ProfileField::count(
-                "monitor_changed_paths",
-                profile.monitor_changed_paths as u128,
-            ),
-            ProfileField::count(
-                "monitor_skipped_directories",
-                profile.monitor_skipped_directories as u128,
-            ),
-        ],
-    );
+    let fields = [
+        ProfileField::millis("index_load_ms", profile.index_load_ms),
+        ProfileField::millis("index_snapshot_load_ms", profile.index_snapshot_load_ms),
+        ProfileField::millis("index_journal_replay_ms", profile.index_journal_replay_ms),
+        ProfileField::millis("monitor_prepare_ms", profile.monitor_prepare_ms),
+        ProfileField::millis("compare_ms", profile.compare_ms),
+        ProfileField::millis("tracked_refresh_ms", profile.tracked_refresh_ms),
+        ProfileField::millis("untracked_scan_ms", profile.untracked_scan_ms),
+        ProfileField::millis("hashing_ms", profile.hashing_ms),
+        ProfileField::millis(
+            "directory_cache_compare_ms",
+            profile.directory_cache_compare_ms,
+        ),
+        ProfileField::millis("index_save_ms", profile.index_save_ms),
+        ProfileField::millis("monitor_persist_ms", profile.monitor_persist_ms),
+        ProfileField::millis("untracked_flatten_ms", profile.untracked_flatten_ms),
+        ProfileField::count(
+            "untracked_flattened_paths",
+            profile.untracked_flattened_paths as u128,
+        ),
+        ProfileField::count("directories_scanned", profile.directories_scanned as u128),
+        ProfileField::count("directories_skipped", profile.directories_skipped as u128),
+        ProfileField::count("files_hashed", profile.files_hashed as u128),
+        ProfileField::count("cache_hits", profile.cache_hits as u128),
+        ProfileField::count(
+            "monitor_changed_paths",
+            profile.monitor_changed_paths as u128,
+        ),
+        ProfileField::count(
+            "monitor_skipped_directories",
+            profile.monitor_skipped_directories as u128,
+        ),
+    ];
+    match profile_mode() {
+        ProfileMode::Off => {}
+        ProfileMode::Human => emit_profile("status worktree", &fields),
+        ProfileMode::Jsonl => emit_profile("status worktree detail", &fields),
+    }
 }
 
 pub async fn cmd_status(
@@ -342,255 +131,73 @@ pub async fn cmd_status(
     if watch {
         return watch_status(cli, short, watch_iterations, watch_interval_ms).await;
     }
-    if short && cli.verbose == 0 && try_render_fast_short_status(cli)? {
+    if short
+        && cli.verbose == 0
+        && let Some(output) = try_fast_short_status_report(cli)?
+    {
+        render_fast_short_status(&output);
+        emit_fast_short_status_profile(&output);
         return Ok(());
     }
     if let Some(output) = build_plain_git_status_probe(cli)? {
         render_plain_git_status(cli, &output, short)?;
         return Ok(());
     }
-    let output = build_status_output(cli, short)?;
-    render_status(cli, &output, short)?;
+    let output = build_status_command_output(cli, short)?;
+    render_status(cli, &output.report, short, output.render_json)?;
     Ok(())
 }
 
-fn try_render_fast_short_status(cli: &Cli) -> Result<bool> {
-    let total_start = Instant::now();
+fn try_fast_short_status_report(cli: &Cli) -> Result<Option<FastShortStatusReport>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
+    let repo_config = fast_short_repo_config(start)?;
+    if should_output_json(cli, repo_config.as_ref()) {
+        return Ok(None);
+    }
+    Ok(fast_short_status_report(start)?)
+}
 
-    let discover_start = Instant::now();
-    let git = match SleyRepository::discover(start) {
-        Ok(git) => git,
-        Err(_) => return Ok(false),
+fn fast_short_repo_config(start: &Path) -> Result<Option<RepoConfig>> {
+    let Ok(git) = SleyRepository::discover(start) else {
+        return Ok(None);
     };
     let Some(workdir) = git.workdir() else {
-        return Ok(false);
+        return Ok(None);
     };
-    let discover_ms = discover_start.elapsed().as_millis();
-
-    let config_start = Instant::now();
-    let fast_repo = match fast_short_repo_kind(&workdir)? {
-        FastShortRepoKind::PlainGit => FastShortRepoKind::PlainGit,
-        FastShortRepoKind::GitOverlay { config } => {
-            if should_output_json(cli, Some(&config)) {
-                return Ok(false);
-            }
-            FastShortRepoKind::GitOverlay { config }
-        }
-        FastShortRepoKind::Fallback => return Ok(false),
-    };
-    if matches!(fast_repo, FastShortRepoKind::PlainGit) && should_output_json(cli, None) {
-        return Ok(false);
+    let config_path = workdir.join(".heddle").join("config.toml");
+    if config_path.is_file() {
+        Ok(Some(RepoConfig::load(&config_path)?))
+    } else {
+        Ok(None)
     }
-    let config_ms = config_start.elapsed().as_millis();
+}
 
-    let status_start = Instant::now();
-    let changes = fast_sley_changes(&git)?;
-    let status_ms = status_start.elapsed().as_millis();
-
-    let branch_start = Instant::now();
-    let branch = fast_git_branch(&git)?;
-    let subject = branch.as_deref().unwrap_or("detached");
-    let branch_ms = branch_start.elapsed().as_millis();
-
-    let remote_start = Instant::now();
-    let remote_health = match &fast_repo {
-        FastShortRepoKind::PlainGit | FastShortRepoKind::Fallback => None,
-        FastShortRepoKind::GitOverlay { .. } => branch
-            .as_deref()
-            .map(|branch| fast_remote_health(&git, branch))
-            .transpose()?
-            .flatten(),
-    };
-    let remote_ms = remote_start.elapsed().as_millis();
-
-    render_short_changes(&changes);
-    if changes.is_empty() {
-        let health = match fast_repo {
-            FastShortRepoKind::PlainGit => "setup needed",
-            FastShortRepoKind::GitOverlay { .. } | FastShortRepoKind::Fallback => {
-                remote_health.unwrap_or("clean")
-            }
-        };
-        println!("{} {}", style::bold(subject), style::thread_state(health));
+fn render_fast_short_status(output: &FastShortStatusReport) {
+    render_short_changes(&output.changes);
+    if output.changes.is_empty() {
+        println!(
+            "{} {}",
+            style::bold(&output.subject),
+            style::thread_state(&output.health)
+        );
     }
+}
 
+fn emit_fast_short_status_profile(output: &FastShortStatusReport) {
     if profile_enabled() {
         emit_profile(
             "status fast short",
             &[
-                ProfileField::millis("git_discover_ms", discover_ms),
-                ProfileField::millis("config_ms", config_ms),
-                ProfileField::millis("sley_status_ms", status_ms),
-                ProfileField::millis("branch_ms", branch_ms),
-                ProfileField::millis("remote_ms", remote_ms),
-                ProfileField::duration("total_ms", total_start.elapsed()),
+                ProfileField::millis("git_discover_ms", output.profile.git_discover_ms),
+                ProfileField::millis("config_ms", output.profile.config_ms),
+                ProfileField::millis("sley_status_ms", output.profile.sley_status_ms),
+                ProfileField::millis("branch_ms", output.profile.branch_ms),
+                ProfileField::millis("remote_ms", output.profile.remote_ms),
+                ProfileField::millis("total_ms", output.profile.total_ms),
             ],
         );
     }
-
-    Ok(true)
-}
-
-enum FastShortRepoKind {
-    PlainGit,
-    GitOverlay { config: Box<RepoConfig> },
-    Fallback,
-}
-
-fn fast_short_repo_kind(workdir: &Path) -> Result<FastShortRepoKind> {
-    let heddle_dir = workdir.join(".heddle");
-    if !heddle_dir.exists() {
-        return Ok(FastShortRepoKind::PlainGit);
-    }
-    if heddle_dir.join("objectstore").is_file() {
-        return Ok(FastShortRepoKind::Fallback);
-    }
-    let config_path = heddle_dir.join("config.toml");
-    if !config_path.is_file() {
-        return Ok(FastShortRepoKind::Fallback);
-    }
-    let config = RepoConfig::load(&config_path)?;
-    Ok(FastShortRepoKind::GitOverlay {
-        config: Box::new(config),
-    })
-}
-
-fn fast_sley_changes(git: &SleyRepository) -> Result<ChangesInfo> {
-    let mut changes = ChangesInfo::default();
-    git.stream_short_status_with_options(
-        ShortStatusOptions {
-            untracked_mode: StatusUntrackedMode::All,
-            ..ShortStatusOptions::default()
-        },
-        |entry| {
-            append_fast_status_row(&mut changes, entry);
-            Ok(StreamControl::Continue)
-        },
-    )?;
-    Ok(changes)
-}
-
-fn append_fast_status_row(changes: &mut ChangesInfo, entry: ShortStatusRow<'_>) {
-    let path = String::from_utf8_lossy(entry.path).into_owned();
-    if path.is_empty() || ignored_git_overlay_status_path(&path) {
-        return;
-    }
-    // Mirror the slow path's classification (Repository::git_overlay_worktree_status)
-    // exactly, branch-for-branch, so the fast short-status output never diverges
-    // from a full `heddle status`. The branch ORDER is load-bearing:
-    //   - the D check precedes the A check, so an `AD` row (staged add, then
-    //     deleted in the worktree) classifies as deleted — matching `git status -s`
-    //     and the slow path — rather than as added.
-    //   - renames (`R`) and copies (`C`) classify as added (a new path appeared),
-    //     not modified.
-    //   - `head_oid.is_none()` (path absent from HEAD) is added even when the
-    //     porcelain columns don't otherwise signal it.
-    if entry.index == b'?' && entry.worktree == b'?' {
-        changes.added.push(path);
-    } else if entry.index == b'D' || entry.worktree == b'D' {
-        changes.deleted.push(path);
-    } else if entry.index == b'A'
-        || entry.index == b'R'
-        || entry.index == b'C'
-        || entry.head_oid.is_none()
-    {
-        changes.added.push(path);
-    } else {
-        changes.modified.push(path);
-    }
-}
-
-fn ignored_git_overlay_status_path(path: &str) -> bool {
-    path == ".heddle" || path.starts_with(".heddle/")
-}
-
-fn fast_git_branch(git: &SleyRepository) -> Result<Option<String>> {
-    Ok(git
-        .head()
-        .ok()
-        .and_then(|head| head.branch_name().map(str::to_string)))
-}
-
-fn fast_remote_health(git: &SleyRepository, branch: &str) -> Result<Option<&'static str>> {
-    let Some(head) = git.head().ok().and_then(|head| head.oid) else {
-        return Ok(None);
-    };
-    if git
-        .find_reference(&format!("refs/heads/{branch}"))?
-        .is_some()
-        && let Some(tracking_ref) = fast_configured_tracking_ref(git, branch)?
-        && let Some(upstream) = fast_rev_parse(git, &tracking_ref)
-    {
-        return fast_remote_health_for_pair(git, head, upstream);
-    }
-
-    let remotes = git.remote_names()?;
-    for remote in &remotes {
-        if remote.trim().is_empty() {
-            continue;
-        }
-        let remote_ref = format!("refs/remotes/{remote}/{branch}");
-        let Some(upstream) = fast_rev_parse(git, &remote_ref) else {
-            continue;
-        };
-        if upstream == head {
-            return Ok(None);
-        }
-        return fast_remote_health_for_pair(git, head, upstream);
-    }
-
-    if remotes.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some("ready to push"))
-    }
-}
-
-fn fast_configured_tracking_ref(git: &SleyRepository, branch: &str) -> Result<Option<String>> {
-    let config = git.config_snapshot()?;
-    let Some(remote) = config.get("branch", Some(branch), "remote") else {
-        return Ok(None);
-    };
-    let Some(merge) = config.get("branch", Some(branch), "merge") else {
-        return Ok(None);
-    };
-    if remote == "." {
-        return Ok(Some(merge.to_string()));
-    }
-    let Some(short) = merge.strip_prefix("refs/heads/") else {
-        return Ok(None);
-    };
-    Ok(Some(format!("refs/remotes/{remote}/{short}")))
-}
-
-fn fast_rev_parse(git: &SleyRepository, rev: &str) -> Option<sley::ObjectId> {
-    git.rev_parse(rev).ok()
-}
-
-fn fast_remote_health_for_pair(
-    git: &SleyRepository,
-    head: sley::ObjectId,
-    upstream: sley::ObjectId,
-) -> Result<Option<&'static str>> {
-    if head == upstream {
-        return Ok(None);
-    }
-    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
-    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
-        git.git_dir(),
-        git.object_format(),
-        &db,
-        &head,
-        &upstream,
-    )?;
-    Ok(match (ahead, behind) {
-        (0, 0) => None,
-        (_, 0) => Some("ready to push"),
-        (0, _) => Some("behind upstream"),
-        _ => Some("remote_diverged"),
-    })
 }
 
 pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
@@ -632,7 +239,7 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
     let Some(probe) = build_plain_git_verification_probe(start)? else {
         return Ok(None);
     };
-    let changes = changes_from_status(&probe.changes);
+    let changes = changes_from_worktree_status(&probe.changes);
     let changed_path_count = probe.changes.change_count();
     let git_overlay_health = GitOverlayHealth {
         status: probe.trust.status.clone(),
@@ -643,7 +250,7 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
             .trust
             .checks
             .iter()
-            .map(|check| super::git_overlay_health::GitOverlayHealthCheck {
+            .map(|check| GitOverlayHealthCheck {
                 name: check.name.clone(),
                 status: check.status.clone(),
                 summary: check.summary.clone(),
@@ -652,7 +259,7 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
             .collect(),
     };
     let trust = probe.trust;
-    let git_index = git_index_plan_for_root(&probe.root)?;
+    let git_index = git_index_plan_for_root(&probe.root)?.map(core_git_index_plan);
     Ok(Some(PlainGitStatusOutput {
         output_kind: "status",
         repository_capability: "plain-git".to_string(),
@@ -721,718 +328,340 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
 }
 
 pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput> {
-    let repo_open_start = Instant::now();
-    let repo = cli.open_repo()?;
-    let repo_open_ms = repo_open_start.elapsed().as_millis();
-    let body_start = Instant::now();
-    let as_json = should_output_json(cli, Some(repo.config()));
+    Ok(build_status_command_output(cli, short)?.report)
+}
+
+struct StatusCommandOutput {
+    report: StatusOutput,
+    render_json: bool,
+}
+
+fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOutput> {
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
+    let repo = Repository::open(&start)?;
+    let repo_config = repo.config().clone();
+    let as_json = should_output_json(cli, Some(&repo_config));
     let compact_json = as_json && output_is_compact(cli);
-    let short_text = short && !as_json;
-    let short_path = short_text || compact_json;
-
-    let current_state_start = Instant::now();
-    let current_state = repo.current_state()?;
-    let current_state_ms = current_state_start.elapsed().as_millis();
-
-    let operation_start = Instant::now();
-    let operation = repo.operation_status()?;
-    let operation_ms = operation_start.elapsed().as_millis();
-    // Single gating predicate for the slower "walk every thread /
-    // inspect remote tracking / populate cross-thread relations" path.
-    // Full JSON and `-v` text display thread topology and cross-thread
-    // relations. Compact JSON is the lightweight decision surface and uses
-    // the same construction path as short text.
-    let needs_full_walk = cli.verbose > 0 || (as_json && !compact_json);
-    let needs_remote_tracking = needs_full_walk || short_text;
-    let remote_tracking_start = Instant::now();
-    let remote_tracking = if needs_remote_tracking {
-        repo.git_remote_tracking_status().unwrap_or(None)
+    let detail = if short && !as_json {
+        StatusDetail::ShortText
+    } else if compact_json {
+        StatusDetail::CompactMachine
+    } else if cli.verbose > 0 || as_json {
+        StatusDetail::Full
     } else {
-        None
+        StatusDetail::DefaultText
     };
-    let remote_tracking_ms = remote_tracking_start.elapsed().as_millis();
-
-    let import_hint_start = Instant::now();
-    let import_hint = if short_path {
-        None
-    } else {
-        repo.git_overlay_import_hint().unwrap_or(None)
-    };
-    let import_hint_ms = import_hint_start.elapsed().as_millis();
-    // Compute the git-overlay worktree status ONCE and thread it through both
-    // consumers (the health build below + the changes computation here). It
-    // re-reads + SHA-1s every tracked file (~950ms on a 10k-file worktree);
-    // previously `status` paid that twice.
-    let git_overlay_status_start = Instant::now();
-    let git_worktree_status_result = repo.git_overlay_worktree_status();
-    let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
-    let git_overlay_health_start = Instant::now();
-    let git_overlay_health =
-        build_git_overlay_health_with_worktree_status(&repo, &git_worktree_status_result);
-    let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
-    let verification_start = Instant::now();
-    // Reuse the worktree status already computed above (line ~767) instead of
-    // re-walking inside `from_health`. Behaviour-identical; just one fewer pass.
-    let trust = RepositoryVerificationState::from_health_with_worktree_status(
-        &repo,
-        git_overlay_health.clone(),
-        &git_worktree_status_result,
-    );
-    let verification_ms = verification_start.elapsed().as_millis();
-    let remote_tracking =
-        remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
-    let status_options = worktree_status_options(Some(repo.config()));
-    let git_worktree_status = git_worktree_status_result.unwrap_or(None);
-    let git_index_start = Instant::now();
-    let git_index = git_index_plan_for_repo(&repo)?;
-    let git_index_ms = git_index_start.elapsed().as_millis();
-    let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
-    let git_clean_mapping_blocker = matches!(
-        trust.status.as_str(),
-        "needs_import" | "needs_reconcile" | "git_branch_advanced"
-    ) && git_worktree_status
-        .as_ref()
-        .is_some_and(WorktreeStatus::is_clean);
-    let git_backed_mapping = trust.mapping_state == "git_backed";
-
-    // Get worktree status
-    let worktree_status_start = Instant::now();
-    let (changes, worktree_profile) = if git_clean_mapping_blocker {
-        (ChangesInfo::default(), None)
-    } else if let Some(status) = git_worktree_status.as_ref()
-        && !status.is_clean()
-        && trust.status != "needs_checkpoint"
-    {
-        (changes_from_status(status), None)
-    } else if git_backed_mapping {
-        (
-            git_worktree_status
-                .as_ref()
-                .map(changes_from_status)
-                .unwrap_or_default(),
-            None,
-        )
-    } else if let Some(ref state) = current_state {
-        let tree = repo.require_tree(&state.tree)?;
-        let (status, profile) =
-            repo.compare_worktree_cached_profiled_with_options(&tree, &status_options)?;
-        (changes_from_status(&status), Some(profile))
-    } else if let Some(status) = git_worktree_status {
-        (changes_from_status(&status), None)
-    } else {
-        let tree = objects::object::Tree::new();
-        let (status, profile) =
-            repo.compare_worktree_cached_profiled_with_options(&tree, &status_options)?;
-        let mut changes = changes_from_status(&status);
-        changes.modified.clear();
-        changes.deleted.clear();
-        (changes, Some(profile))
-    };
-    let worktree_status_ms = worktree_status_start.elapsed().as_millis();
-
-    if short_path {
-        let recommended_action = if trust.verified {
-            primary_next_action_with_verification(
-                operation.as_ref(),
-                remote_tracking.as_ref(),
-                None,
-                None,
-                &trust,
-            )
-        } else {
-            trust.recommended_action.clone()
-        };
-        let worktree_clean =
-            changes.modified.is_empty() && changes.added.is_empty() && changes.deleted.is_empty();
-        let recommended_action =
-            first_save_recommendation(&repo, current_state.as_ref(), worktree_clean)
-                .unwrap_or(recommended_action);
-        debug!(
-            repo_open_ms,
-            body_ms = body_start.elapsed().as_millis(),
-            total_ms = repo_open_ms + body_start.elapsed().as_millis(),
-            "Status command complete"
-        );
-        if profile_enabled() {
-            emit_status_worktree_profile(worktree_profile.as_ref());
-            emit_profile(
-                "status phases",
-                &[
-                    ProfileField::millis("repo_open_ms", repo_open_ms),
-                    ProfileField::millis("current_state_ms", current_state_ms),
-                    ProfileField::millis("operation_ms", operation_ms),
-                    ProfileField::millis("remote_tracking_ms", remote_tracking_ms),
-                    ProfileField::millis("import_hint_ms", import_hint_ms),
-                    ProfileField::millis("git_overlay_status_ms", git_overlay_status_ms),
-                    ProfileField::millis("git_overlay_health_ms", git_overlay_health_ms),
-                    ProfileField::millis("verification_ms", verification_ms),
-                    ProfileField::millis("git_index_ms", git_index_ms),
-                    ProfileField::millis("worktree_status_ms", worktree_status_ms),
-                    ProfileField::duration("build_total_ms", body_start.elapsed()),
-                ],
-            );
-        }
-        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
-        let recommended_action_fields = ActionFields::from_action(&recommended_action);
-        return Ok(StatusOutput {
-            output_kind: "status",
-            repository_capability: repo.capability_label().to_string(),
-            repository_label: presentation.label,
-            repository_context: presentation.context,
-            storage_model: repo.storage_model_label().to_string(),
-            hosted_enabled: repo.hosted_enabled(),
-            render_json: as_json,
-            validation_capability: repo.capability(),
-            git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
-                current_branch: hint.current_branch,
-                missing_branch_count: hint.missing_branch_count,
-                missing_branches: hint.missing_branches,
-                recommended_command: hint.recommended_command,
-            }),
-            git_overlay_health,
-            trust: trust.clone(),
-            operation,
-            remote_tracking,
-            git_index,
-            thread: None,
-            base_state: None,
-            base_root: None,
-            current_state: None,
-            path: None,
-            execution_path: None,
-            session_id: None,
-            heddle_session_id: None,
-            actor: None,
-            harness: None,
-            thinking_level: None,
-            usage_summary: None,
-            last_progress_at: None,
-            report_flush_state: None,
-            attach_reason: None,
-            thread_mode: None,
-            thread_state: None,
-            freshness: None,
-            target_thread: None,
-            parent_thread: None,
-            child_threads: Vec::new(),
-            task: None,
-            promotion_suggested: false,
-            impact_categories: Vec::new(),
-            heavy_impact_paths: Vec::new(),
-            changed_paths: changes_paths(&changes).into_iter().collect(),
-            changed_path_count: changes_path_count(&changes),
-            worktree_changed_path_count: changes_path_count(&changes),
-            thread_changed_path_count: 0,
-            blockers: if trust.verified {
-                Vec::new()
-            } else {
-                trust
-                    .checks
-                    .iter()
-                    .filter(|check| {
-                        !check.clean
-                            && check.status != "not_checked"
-                            && !check
-                                .summary
-                                .contains("checked after the primary verification blocker")
-                    })
-                    .map(|check| format!("{}: {}", check.name, check.summary))
-                    .collect()
-            },
-            identity_notice: identity_notice.clone(),
-            recommended_action_template: recommended_action_fields.template,
-            recommended_action,
-            recovery_commands: trust.recovery_commands.clone(),
-            recovery_action_templates: trust.recovery_action_templates.clone(),
-            thread_health: trust.status.clone(),
-            coordination_status: if trust.verified {
-                CoordinationStatus::Clean
-            } else {
-                CoordinationStatus::Blocked
-            },
-            // This short-path Blocked is purely the unverified-trust
-            // re-encoding (the only non-Clean branch above is the
-            // `!trust.verified` one), so it is trust-derived.
-            coordination_blocked_by_trust: !trust.verified,
-            is_isolated: false,
-            parallel_threads: Vec::new(),
-            state: None,
-            git_checkpoint: None,
-            changes,
-            // Short text still renders the materialized-thread advisory
-            // (see `render_short_status` → `render_materialized_advisory`).
-            // The check is cheap (one ref lookup per manifest), so keep
-            // the fast path honest and let stale threads surface.
-            materialized_threads: assess_materialized_threads(&repo),
-        });
-    }
-
-    let thread_summary_start = Instant::now();
-    let track_name = repo.current_lane()?;
-    // Use the fast single-thread path when default text won't display
-    // the child/sibling fields anyway. JSON and -v go through the full
-    // walk (`find_thread_summary` → `collect_thread_summaries`) which
-    // populates the cross-thread relationships. Saves ~45ms on the
-    // common path.
-    let full_thread_summaries = if needs_full_walk {
-        Some(collect_thread_summaries(&repo)?)
-    } else {
-        None
-    };
-    let thread_summary = match (track_name.as_deref(), full_thread_summaries.as_ref()) {
-        (Some(thread), Some(summaries)) => summaries
-            .iter()
-            .find(|summary| summary.name == thread)
-            .cloned(),
-        (Some(thread), None) => find_thread_summary_single(&repo, thread)?,
-        (None, _) => None,
-    };
-    let thread_summary_ms = thread_summary_start.elapsed().as_millis();
-    // `collect_thread_summaries` walks every thread record in the repo
-    // (60ms on a 69-thread sibling worktree). The result is then filtered
-    // to threads that are Ahead/Blocked/Diverged/MergeReady — frequently
-    // an empty list, so the work is wasted. Skip the walk when the
-    // default text renderer will discard the field anyway. JSON and -v
-    // still pay the cost because they actually display it.
-    let parallel_threads_start = Instant::now();
-    let parallel_threads = if let Some(summaries) = full_thread_summaries {
-        summaries
-            .into_iter()
-            .filter(|thread| !thread.is_current)
-            .filter(|thread| {
-                matches!(
-                    thread.coordination_status,
-                    CoordinationStatus::Ahead
-                        | CoordinationStatus::Blocked
-                        | CoordinationStatus::Diverged
-                        | CoordinationStatus::MergeReady
-                )
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let parallel_threads_ms = parallel_threads_start.elapsed().as_millis();
-
-    let late_state_start = Instant::now();
-
-    let state_info = current_state.as_ref().map(|s| StateInfo {
-        change_id: s.change_id.short(),
-        content_hash: s.compute_hash().short(),
-        intent: s.intent.clone(),
-    });
-    let current_state_short = current_state.as_ref().map(|state| state.change_id.short());
-    let git_checkpoint = if trust.status == "needs_checkpoint" {
-        None
-    } else {
-        current_state
-            .as_ref()
-            .and_then(|state| {
-                repo.latest_git_checkpoint_for_change(&state.change_id)
-                    .ok()
-                    .flatten()
-            })
-            .map(|record| GitCheckpointInfo {
-                git_commit: record.git_commit,
-                committed_at: record.committed_at,
-            })
-    };
-
-    let materialized_start = Instant::now();
-    let materialized_threads = assess_materialized_threads(&repo);
-    let materialized_ms = materialized_start.elapsed().as_millis();
-    let target_thread = thread_summary
-        .as_ref()
-        .and_then(|thread| thread.target_thread.clone());
-    let parent_thread = thread_summary
-        .as_ref()
-        .and_then(|thread| thread.parent_thread.clone());
-    let presentation = crate::cli::render::repository_presentation(
-        &repo,
-        target_thread.as_deref(),
-        parent_thread.as_deref(),
-    );
-
-    let output = StatusOutput {
-        output_kind: "status",
-        repository_capability: repo.capability_label().to_string(),
-        repository_label: presentation.label,
-        repository_context: presentation.context,
-        storage_model: repo.storage_model_label().to_string(),
-        hosted_enabled: repo.hosted_enabled(),
-        render_json: as_json,
-        validation_capability: repo.capability(),
-        git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
-            current_branch: hint.current_branch,
-            missing_branch_count: hint.missing_branch_count,
-            missing_branches: hint.missing_branches,
-            recommended_command: hint.recommended_command,
-        }),
-        git_overlay_health: git_overlay_health.clone(),
-        trust: trust.clone(),
-        operation,
-        remote_tracking,
-        git_index,
-        thread: track_name.clone(),
-        base_state: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.base_state.clone())
-            .or_else(|| current_state_short.clone()),
-        base_root: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.base_root.clone()),
-        current_state: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.current_state.clone())
-            .or_else(|| current_state_short.clone()),
-        path: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.path.clone()),
-        execution_path: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.execution_path.clone()),
-        session_id: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.session_id.clone()),
-        heddle_session_id: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.heddle_session_id.clone()),
-        actor: thread_summary.as_ref().and_then(|thread| {
-            thread.actor.as_ref().map(|actor| ActorInfo {
-                provider: actor.provider.clone(),
-                model: actor.model.clone(),
-            })
-        }),
-        harness: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.harness.clone()),
-        thinking_level: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.thinking_level.clone()),
-        usage_summary: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.usage_summary.clone()),
-        last_progress_at: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.last_progress_at.clone()),
-        report_flush_state: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.report_flush_state.clone()),
-        attach_reason: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.attach_reason.clone()),
-        thread_mode: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.thread_mode.clone()),
-        thread_state: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.thread_state.clone()),
-        freshness: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.freshness.clone()),
-        target_thread,
-        parent_thread,
-        child_threads: thread_summary
-            .as_ref()
-            .map(|thread| thread.child_threads.clone())
-            .unwrap_or_default(),
-        task: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.task.clone()),
-        promotion_suggested: thread_summary
-            .as_ref()
-            .map(|thread| thread.promotion_suggested)
-            .unwrap_or(false),
-        impact_categories: thread_summary
-            .as_ref()
-            .map(|thread| thread.impact_categories.clone())
-            .unwrap_or_default(),
-        heavy_impact_paths: thread_summary
-            .as_ref()
-            .map(|thread| thread.heavy_impact_paths.clone())
-            .unwrap_or_default(),
-        changed_paths: Vec::new(),
-        changed_path_count: thread_summary
-            .as_ref()
-            .map(|thread| thread.changed_paths.len())
-            .unwrap_or_default(),
-        worktree_changed_path_count: changes_path_count(&changes),
-        thread_changed_path_count: captured_thread_path_count(thread_summary.as_ref(), &changes),
-        blockers: Vec::new(),
-        identity_notice,
-        recommended_action: String::new(),
-        recommended_action_template: None,
-        recovery_commands: trust.recovery_commands.clone(),
-        recovery_action_templates: trust.recovery_action_templates.clone(),
-        thread_health: "clean".to_string(),
-        coordination_status: thread_summary
-            .as_ref()
-            .map(|thread| thread.coordination_status.clone())
-            .unwrap_or(CoordinationStatus::Clean),
-        // This coordination_status comes straight from `build_thread_view`
-        // (genuine inter-thread state). The trust re-encoding, if any, is
-        // applied in the rebuild below; here it is never trust-derived.
-        coordination_blocked_by_trust: false,
-        is_isolated: thread_summary
-            .as_ref()
-            .map(|thread| thread.is_isolated)
-            .unwrap_or(false),
-        parallel_threads: parallel_threads
-            .into_iter()
-            .map(|thread| ParallelThreadInfo {
-                name: thread.name,
-                coordination_status: thread.coordination_status,
-                current_state: thread.current_state,
-            })
-            .collect(),
-        state: state_info,
-        git_checkpoint,
-        changes,
-        materialized_threads,
-    };
-    let late_state_ms = late_state_start.elapsed().as_millis();
-    let advice_start = Instant::now();
-    let has_changes = !output.changes.modified.is_empty()
-        || !output.changes.added.is_empty()
-        || !output.changes.deleted.is_empty();
-    let git_backed_current_thread = git_backed_mapping;
-    let checkpointed_clean = output.git_checkpoint.is_some() && !has_changes;
-    let thread_stub = output.thread.as_ref().map(|thread| Thread {
-        id: thread.clone(),
-        thread: thread.clone(),
-        target_thread: output.target_thread.clone(),
-        parent_thread: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.parent_thread.clone()),
-        mode: output
-            .thread_mode
-            .clone()
-            .unwrap_or(ThreadMode::Materialized),
-        state: output.thread_state.clone().unwrap_or(ThreadState::Active),
-        base_state: output.base_state.clone().unwrap_or_default(),
-        base_root: output.base_root.clone().unwrap_or_default(),
-        current_state: output.current_state.clone(),
-        merged_state: None,
-        task: output.task.clone(),
-        execution_path: output
-            .execution_path
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| repo.root().to_path_buf()),
-        materialized_path: output.path.as_ref().map(std::path::PathBuf::from),
-        changed_paths: thread_summary
-            .as_ref()
-            .map(|thread| thread.changed_paths.clone())
-            .unwrap_or_default(),
-        impact_categories: output.impact_categories.clone(),
-        heavy_impact_paths: output.heavy_impact_paths.clone(),
-        promotion_suggested: output.promotion_suggested && !checkpointed_clean,
-        freshness: match output.freshness.clone().unwrap_or(ThreadFreshness::Unknown) {
-            ThreadFreshness::Unknown if checkpointed_clean => ThreadFreshness::Current,
-            freshness => freshness,
-        },
-        verification_summary: thread_summary
-            .as_ref()
-            .map(|thread| thread.verification_summary.clone())
-            .unwrap_or_default(),
-        confidence_summary: thread_summary
-            .as_ref()
-            .map(|thread| thread.confidence_summary.clone())
-            .unwrap_or_default(),
-        integration_policy_result: thread_summary
-            .as_ref()
-            .map(|thread| thread.integration_policy_result.clone())
-            .unwrap_or_default(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        ephemeral: None,
-        auto: false,
-        shared_target_dir: None,
-    });
-    let initial_state = current_state
-        .as_ref()
-        .map(is_synthetic_root)
-        .unwrap_or(true);
-    let advice = thread_stub.as_ref().map(|thread| {
-        describe_thread_advice_with_initial(thread, has_changes, 0, false, initial_state)
-    });
-    let mut trust = output.trust.clone();
-    if let Some(thread) = output.thread.as_deref()
-        && !trust.recommended_action.is_empty()
-    {
-        let contextual = contextual_thread_action(
-            &repo,
-            thread,
-            output.target_thread.as_deref(),
-            &trust.recommended_action,
-        );
-        if contextual != trust.recommended_action {
-            override_trust_recommended_action(&mut trust, contextual);
-        }
-    }
-    let thread_health = advice.as_ref().map(|advice| advice.thread_health.as_str());
-    let thread_action = advice
-        .as_ref()
-        .map(|advice| advice.recommended_action.as_str());
-    let recommended_action = current_thread_next_action_with_verification(
-        output.operation.as_ref(),
-        output.remote_tracking.as_ref(),
-        import_hint.as_ref(),
-        thread_health,
-        thread_action,
-        &trust,
-    );
-    let recommended_action = if let Some(thread) = output.thread.as_deref() {
-        contextual_thread_action(
-            &repo,
-            thread,
-            output.target_thread.as_deref(),
-            &recommended_action,
-        )
-    } else {
-        recommended_action
-    };
-    if trust.verified
-        && !recommended_action.is_empty()
-        && trust.recommended_action != recommended_action
-        && thread_recovery_action_is_primary(thread_health, &recommended_action)
-    {
-        override_trust_recommended_action(&mut trust, recommended_action.clone());
-    }
-    let recommended_action = if git_backed_current_thread {
-        if has_changes {
-            "heddle commit -m \"...\"".to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        // A freshly-`init`'d native repo whose log is still empty (only the
-        // synthetic root) and whose worktree is clean has nothing to act on
-        // yet — point the user at the first save.
-        first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
-            .unwrap_or(recommended_action)
-    };
-    let recommended_action_fields = ActionFields::from_action(&recommended_action);
-    let thread_health = if trust.verified {
-        if git_backed_current_thread {
-            if has_changes {
-                "dirty_worktree".to_string()
-            } else {
-                "clean".to_string()
-            }
-        } else {
-            advice
-                .as_ref()
-                .map(|advice| advice.thread_health.clone())
-                .unwrap_or_else(|| "clean".to_string())
-        }
-    } else {
-        trust.status.clone()
-    };
-    let needs_checkpoint = trust.status == "needs_checkpoint";
-    let mut trust_blockers = trust
-        .checks
-        .iter()
-        .filter(|check| {
-            !check.clean
-                && check.status != "not_checked"
-                && (check.name != "Clone" || check.status != "blocked")
-                && !check
-                    .summary
-                    .contains("checked after the primary verification blocker")
-        })
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
-    let blocked_by_trust = !trust.verified;
-    if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
-        trust_blockers.push(format!("Verification: {}", trust.summary));
-    }
-    let display_thread_summary = (!git_backed_current_thread)
-        .then_some(thread_summary.as_ref())
-        .flatten();
-    let worktree_changed_path_count = changes_path_count(&output.changes);
-    let thread_changed_path_count =
-        captured_thread_path_count(display_thread_summary, &output.changes);
-    // Resolve the trust/health override against the PRE-override (genuine,
-    // from `build_thread_view`) coordination status. A genuine inter-thread
-    // `Blocked` captured here must survive the override and stay surfaceable.
-    let (coordination_status, coordination_blocked_by_trust) = resolve_coordination_with_trust(
-        output.coordination_status.clone(),
-        blocked_by_trust,
-        needs_checkpoint,
-    );
-    let output = StatusOutput {
-        blockers: if blocked_by_trust {
-            trust_blockers
-        } else {
-            advice
-                .as_ref()
-                .map(|advice| advice.blockers.clone())
-                .unwrap_or_default()
-        },
-        identity_notice: output.identity_notice,
-        recommended_action: recommended_action.clone(),
-        recommended_action_template: recommended_action_fields.template,
-        recovery_commands: trust.recovery_commands.clone(),
-        recovery_action_templates: trust.recovery_action_templates.clone(),
-        thread_health,
-        coordination_status,
-        // `coordination_blocked_by_trust` is true ONLY when the resulting
-        // `Blocked`'s SOLE source is the trust/health override; a genuine
-        // inter-thread `Blocked` captured before the override keeps it false
-        // so the mask never hides it (even with a dirty worktree). See
-        // `resolve_coordination_with_trust`.
-        coordination_blocked_by_trust,
-        // `thread_state` is lifecycle-only and must match `thread list` for the
-        // same thread/instant (heddle#306). The verification/dirty-worktree
-        // blocker is a health signal, surfaced via `coordination_status` above.
-        thread_state: output.thread_state,
-        changed_paths: changed_paths(display_thread_summary, &output.changes),
-        changed_path_count: if trust.verified {
-            changed_path_count(display_thread_summary, &output.changes)
-        } else {
-            changes_path_count(&output.changes)
-        },
-        worktree_changed_path_count,
-        thread_changed_path_count,
-        trust,
-        ..output
-    };
-    let advice_ms = advice_start.elapsed().as_millis();
-
+    let status_options = worktree_status_options(Some(&repo_config));
+    let ctx = heddle_core::ExecutionContext::builder()
+        .start_path(start.clone())
+        .repo(repo)
+        .build();
+    let output = core_status(
+        &ctx,
+        StatusOptions::new(detail, status_options, status_adapters()).with_start_path(start),
+    )?;
     debug!(
-        repo_open_ms,
-        body_ms = body_start.elapsed().as_millis(),
-        total_ms = repo_open_ms + body_start.elapsed().as_millis(),
+        repo_open_ms = output.profile.repo_open_ms,
+        body_ms = output.profile.build_total_ms,
+        total_ms = output.profile.repo_open_ms + output.profile.build_total_ms,
         "Status command complete"
     );
+    emit_status_profile(&output);
+    Ok(StatusCommandOutput {
+        report: output,
+        render_json: as_json,
+    })
+}
 
-    if profile_enabled() {
-        emit_status_worktree_profile(worktree_profile.as_ref());
-        emit_profile(
-            "status phases",
-            &[
-                ProfileField::millis("repo_open_ms", repo_open_ms),
-                ProfileField::millis("current_state_ms", current_state_ms),
-                ProfileField::millis("operation_ms", operation_ms),
-                ProfileField::millis("remote_tracking_ms", remote_tracking_ms),
-                ProfileField::millis("import_hint_ms", import_hint_ms),
-                ProfileField::millis("git_overlay_status_ms", git_overlay_status_ms),
-                ProfileField::millis("git_overlay_health_ms", git_overlay_health_ms),
-                ProfileField::millis("verification_ms", verification_ms),
-                ProfileField::millis("git_index_ms", git_index_ms),
-                ProfileField::millis("worktree_status_ms", worktree_status_ms),
-                ProfileField::millis("thread_summary_ms", thread_summary_ms),
-                ProfileField::millis("parallel_threads_ms", parallel_threads_ms),
-                ProfileField::millis("late_state_ms", late_state_ms),
-                ProfileField::millis("materialized_threads_ms", materialized_ms),
-                ProfileField::millis("advice_ms", advice_ms),
-                ProfileField::duration("build_total_ms", body_start.elapsed()),
-            ],
-        );
+fn status_adapters() -> StatusAdapters {
+    StatusAdapters {
+        git_overlay_health: core_git_overlay_health,
+        repository_trust_with_worktree: core_repository_trust_with_worktree,
+        git_index_for_repo: core_git_index_plan_for_repo,
+        identity_notice: core_first_capture_identity_notice,
+        collect_thread_summaries: core_collect_thread_summaries,
+        find_thread_summary: core_find_thread_summary_single,
+        contextual_thread_action,
+        action_template: core_recommended_action_template,
     }
+}
 
-    Ok(output)
+fn core_git_overlay_health(
+    repo: &Repository,
+    worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
+) -> GitOverlayHealth {
+    build_git_overlay_health_with_worktree_status(repo, worktree_status)
+}
+
+fn core_repository_trust_with_worktree(
+    repo: &Repository,
+    health: GitOverlayHealth,
+    worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
+) -> heddle_core::RepositoryVerificationState {
+    repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
+}
+
+fn core_git_index_plan_for_repo(
+    repo: &Repository,
+) -> objects::error::Result<Option<CoreGitIndexPlan>> {
+    git_index_plan_for_repo(repo)
+        .map(|plan| plan.map(core_git_index_plan))
+        .map_err(|err| objects::HeddleError::Config(err.to_string()))
+}
+
+fn core_first_capture_identity_notice(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+) -> objects::error::Result<Option<String>> {
+    first_capture_identity_notice(repo, current_state)
+        .map_err(|err| objects::HeddleError::Config(err.to_string()))
+}
+
+fn core_collect_thread_summaries(
+    repo: &Repository,
+) -> objects::error::Result<Vec<StatusThreadSummary>> {
+    collect_thread_summaries(repo)
+        .map(|summaries| summaries.into_iter().map(core_thread_summary).collect())
+        .map_err(|err| objects::HeddleError::Config(err.to_string()))
+}
+
+fn core_find_thread_summary_single(
+    repo: &Repository,
+    thread: &str,
+) -> objects::error::Result<Option<StatusThreadSummary>> {
+    find_thread_summary_single(repo, thread)
+        .map(|summary| summary.map(core_thread_summary))
+        .map_err(|err| objects::HeddleError::Config(err.to_string()))
+}
+
+fn core_recommended_action_template(
+    action: &str,
+) -> Option<super::command_catalog::ActionTemplate> {
+    ActionFields::from_action(action).template
+}
+
+fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
+    CoreGitIndexPlan {
+        commit_mode: plan.commit_mode,
+        has_staged_changes: plan.has_staged_changes,
+        staged_paths: plan.staged_paths,
+        unstaged_paths: plan.unstaged_paths,
+        untracked_paths: plan.untracked_paths,
+        will_commit: plan.will_commit,
+        preserved_after_commit: plan.preserved_after_commit,
+    }
+}
+
+fn core_thread_summary(summary: super::thread::ThreadSummary) -> StatusThreadSummary {
+    StatusThreadSummary {
+        name: summary.name,
+        base_state: summary.base_state,
+        base_root: summary.base_root,
+        current_state: summary.current_state,
+        path: summary.path,
+        execution_path: summary.execution_path,
+        session_id: summary.session_id,
+        heddle_session_id: summary.heddle_session_id,
+        actor: summary.actor.map(|actor| ActorInfo {
+            provider: actor.provider,
+            model: actor.model,
+        }),
+        harness: summary.harness,
+        thinking_level: summary.thinking_level,
+        usage_summary: summary.usage_summary,
+        last_progress_at: summary.last_progress_at,
+        report_flush_state: summary.report_flush_state,
+        attach_reason: summary.attach_reason,
+        thread_mode: summary.thread_mode,
+        thread_state: summary.thread_state,
+        freshness: summary.freshness,
+        target_thread: summary.target_thread,
+        parent_thread: summary.parent_thread,
+        child_threads: summary.child_threads,
+        task: summary.task,
+        promotion_suggested: summary.promotion_suggested,
+        impact_categories: summary.impact_categories,
+        heavy_impact_paths: summary.heavy_impact_paths,
+        changed_paths: summary.changed_paths,
+        verification_summary: summary.verification_summary,
+        confidence_summary: summary.confidence_summary,
+        integration_policy_result: summary.integration_policy_result,
+        coordination_status: core_coordination_status(summary.coordination_status),
+        is_current: summary.is_current,
+        is_isolated: summary.is_isolated,
+    }
+}
+
+fn core_coordination_status(status: super::thread::CoordinationStatus) -> CoordinationStatus {
+    match status {
+        super::thread::CoordinationStatus::Clean => CoordinationStatus::Clean,
+        super::thread::CoordinationStatus::Ahead => CoordinationStatus::Ahead,
+        super::thread::CoordinationStatus::Diverged => CoordinationStatus::Diverged,
+        super::thread::CoordinationStatus::Blocked => CoordinationStatus::Blocked,
+        super::thread::CoordinationStatus::MergeReady => CoordinationStatus::MergeReady,
+    }
+}
+
+fn cli_coordination_status(status: CoordinationStatus) -> super::thread::CoordinationStatus {
+    match status {
+        CoordinationStatus::Clean => super::thread::CoordinationStatus::Clean,
+        CoordinationStatus::Ahead => super::thread::CoordinationStatus::Ahead,
+        CoordinationStatus::Diverged => super::thread::CoordinationStatus::Diverged,
+        CoordinationStatus::Blocked => super::thread::CoordinationStatus::Blocked,
+        CoordinationStatus::MergeReady => super::thread::CoordinationStatus::MergeReady,
+    }
+}
+
+fn emit_status_profile(output: &StatusOutput) {
+    if !profile_enabled() {
+        return;
+    }
+    emit_status_worktree_profile(output.profile.worktree_profile.as_ref());
+    let fields = [
+        ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+        ProfileField::millis("current_state_ms", output.profile.current_state_ms),
+        ProfileField::millis("operation_ms", output.profile.operation_ms),
+        ProfileField::millis("remote_tracking_ms", output.profile.remote_tracking_ms),
+        ProfileField::millis("import_hint_ms", output.profile.import_hint_ms),
+        ProfileField::millis(
+            "git_overlay_status_ms",
+            output.profile.git_overlay_status_ms,
+        ),
+        ProfileField::millis(
+            "git_overlay_health_ms",
+            output.profile.git_overlay_health_ms,
+        ),
+        ProfileField::millis("verification_ms", output.profile.verification_ms),
+        ProfileField::millis("git_index_ms", output.profile.git_index_ms),
+        ProfileField::millis("worktree_status_ms", output.profile.worktree_status_ms),
+        ProfileField::millis("thread_summary_ms", output.profile.thread_summary_ms),
+        ProfileField::millis("parallel_threads_ms", output.profile.parallel_threads_ms),
+        ProfileField::millis("late_state_ms", output.profile.late_state_ms),
+        ProfileField::millis(
+            "materialized_threads_ms",
+            output.profile.materialized_threads_ms,
+        ),
+        ProfileField::millis("advice_ms", output.profile.advice_ms),
+        ProfileField::millis("build_total_ms", output.profile.build_total_ms),
+    ];
+    match profile_mode() {
+        ProfileMode::Off => {}
+        ProfileMode::Human => emit_profile("status phases", &fields),
+        ProfileMode::Jsonl => emit_profile_status_jsonl_phases(output),
+    }
+}
+
+fn emit_profile_status_jsonl_phases(output: &StatusOutput) {
+    emit_profile(
+        "status repo open",
+        &[ProfileField::millis(
+            "repo_open_ms",
+            output.profile.repo_open_ms,
+        )],
+    );
+    emit_profile(
+        "status current state",
+        &[ProfileField::millis(
+            "current_state_ms",
+            output.profile.current_state_ms,
+        )],
+    );
+    emit_profile(
+        "status operation",
+        &[ProfileField::millis(
+            "operation_ms",
+            output.profile.operation_ms,
+        )],
+    );
+    emit_profile(
+        "status remote tracking",
+        &[ProfileField::millis(
+            "remote_tracking_ms",
+            output.profile.remote_tracking_ms,
+        )],
+    );
+    emit_profile(
+        "status import hint",
+        &[ProfileField::millis(
+            "import_hint_ms",
+            output.profile.import_hint_ms,
+        )],
+    );
+    emit_profile(
+        "status git overlay status",
+        &[ProfileField::millis(
+            "git_overlay_status_ms",
+            output.profile.git_overlay_status_ms,
+        )],
+    );
+    emit_profile(
+        "status git overlay health",
+        &[ProfileField::millis(
+            "git_overlay_health_ms",
+            output.profile.git_overlay_health_ms,
+        )],
+    );
+    emit_profile(
+        "status verification",
+        &[ProfileField::millis(
+            "verification_ms",
+            output.profile.verification_ms,
+        )],
+    );
+    emit_profile(
+        "status git index",
+        &[ProfileField::millis(
+            "git_index_ms",
+            output.profile.git_index_ms,
+        )],
+    );
+    emit_profile(
+        "status worktree status",
+        &[ProfileField::millis(
+            "worktree_status_ms",
+            output.profile.worktree_status_ms,
+        )],
+    );
+    emit_profile(
+        "status thread summary",
+        &[ProfileField::millis(
+            "thread_summary_ms",
+            output.profile.thread_summary_ms,
+        )],
+    );
+    emit_profile(
+        "status parallel threads",
+        &[ProfileField::millis(
+            "parallel_threads_ms",
+            output.profile.parallel_threads_ms,
+        )],
+    );
+    emit_profile(
+        "status late state",
+        &[ProfileField::millis(
+            "late_state_ms",
+            output.profile.late_state_ms,
+        )],
+    );
+    emit_profile(
+        "status materialized threads",
+        &[ProfileField::millis(
+            "materialized_threads_ms",
+            output.profile.materialized_threads_ms,
+        )],
+    );
+    emit_profile(
+        "status advice",
+        &[ProfileField::millis("advice_ms", output.profile.advice_ms)],
+    );
+    emit_profile(
+        "status build total",
+        &[ProfileField::millis(
+            "build_total_ms",
+            output.profile.build_total_ms,
+        )],
+    );
 }
 
 /// Project a `recommended_action` String into the compact
@@ -1457,7 +686,7 @@ impl super::compact::CompactProjection for StatusOutput {
         let (next_action, next_action_template) =
             compact_next_action(&self.recommended_action, &self.recommended_action_template);
         let mut compact = super::compact::CompactOutput::new(self.output_kind);
-        compact.coordination_status = Some(self.coordination_status.clone());
+        compact.coordination_status = Some(cli_coordination_status(self.coordination_status));
         compact.blockers = self.blockers.clone();
         compact.next_action = next_action;
         compact.next_action_template = next_action_template;
@@ -1481,9 +710,14 @@ impl super::compact::CompactProjection for PlainGitStatusOutput {
     }
 }
 
-pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) -> Result<()> {
+pub(crate) fn render_status(
+    cli: &Cli,
+    output: &StatusOutput,
+    short: bool,
+    render_json: bool,
+) -> Result<()> {
     let render_start = Instant::now();
-    if output.render_json {
+    if render_json {
         write_command_json(
             output,
             output_is_compact(cli),
@@ -1516,7 +750,7 @@ async fn watch_status(
     let mut hosted_watch = HostedPresenceWatch::connect_if_configured(cli).await;
 
     loop {
-        let output = build_status_output(cli, short)?;
+        let output = build_status_command_output(cli, short)?;
         let redraw = watch_iterations.is_none() && io::stdout().is_terminal();
         if !output.render_json && redraw {
             print!("\x1B[2J\x1B[H");
@@ -1539,7 +773,7 @@ async fn watch_status(
                 ))
             );
         }
-        render_status(cli, &output, short)?;
+        render_status(cli, &output.report, short, output.render_json)?;
         iterations += 1;
         if watch_iterations.is_some_and(|limit| iterations >= limit) {
             break;
@@ -1622,12 +856,6 @@ fn render_status_changes_plain(changes: &ChangesInfo) {
     }
     for path in &changes.deleted {
         println!("  {}:  {}", style::error("deleted"), path);
-    }
-}
-
-impl ChangesInfo {
-    fn is_empty(&self) -> bool {
-        self.modified.is_empty() && self.added.is_empty() && self.deleted.is_empty()
     }
 }
 
@@ -2259,43 +1487,64 @@ fn human_status_blocker_text(blocker: &str) -> String {
 }
 
 fn git_setup_line(output: &StatusOutput) -> Option<String> {
-    repository_setup_guidance(&output.trust).map(|setup| setup.setup_line)
+    status_repository_setup_guidance(&output.trust).map(|setup| setup.setup_line)
 }
 
-/// Walk `<heddle_dir>/threads/` and decorate each manifest with a
-/// staleness bit by comparing the manifest's recorded `state_id` to
-/// the current thread head in the ref backend.
-///
-/// Best-effort and read-only. Errors from `list_thread_manifests` or
-/// `get_thread` collapse to "nothing to advise" — the renderer must
-/// not nag the user about a probe that didn't run cleanly. The cost
-/// here is one `read_dir` + one `read_to_string` per thread, plus one
-/// ref lookup; well within `status`'s existing budget.
-fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
-    let summaries = match repo::thread_manifest::list_thread_manifests(repo.heddle_dir()) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+struct StatusRepositorySetupGuidance {
+    setup_line: String,
+}
+
+fn status_repository_setup_guidance(
+    trust: &heddle_core::RepositoryVerificationState,
+) -> Option<StatusRepositorySetupGuidance> {
+    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
+        return None;
+    }
+    let action = trust.recommended_action.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let kind = status_repository_setup_action_kind(action);
+    let setup_line = match kind {
+        StatusRepositorySetupActionKind::Init => {
+            format!("Git repo detected; initialize Heddle with {action}")
+        }
+        StatusRepositorySetupActionKind::Adopt => {
+            format!("Git repo detected; connect this branch with {action}")
+        }
+        StatusRepositorySetupActionKind::BridgeImport => {
+            format!("Git history not imported; import it with {action}")
+        }
+        StatusRepositorySetupActionKind::Other => {
+            format!("Run {action} to clear the primary setup blocker")
+        }
     };
-    summaries
-        .into_iter()
-        .map(|summary| {
-            let stale = match repo
-                .refs()
-                .get_thread(&objects::object::ThreadName::new(&summary.thread))
-            {
-                Ok(Some(head)) => head != summary.state_id,
-                _ => false,
-            };
-            let tree_hash = summary.tree_hash.to_string();
-            MaterializedThreadInfo {
-                name: summary.thread,
-                state_id: summary.state_id.short(),
-                tree_hash_short: tree_hash[..std::cmp::min(12, tree_hash.len())].to_string(),
-                file_count: summary.file_count,
-                stale,
-            }
-        })
-        .collect()
+    Some(StatusRepositorySetupGuidance { setup_line })
+}
+
+#[derive(Clone, Copy)]
+enum StatusRepositorySetupActionKind {
+    Init,
+    Adopt,
+    BridgeImport,
+    Other,
+}
+
+fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupActionKind {
+    if action == "heddle init" {
+        StatusRepositorySetupActionKind::Init
+    } else if action.starts_with("heddle adopt") {
+        StatusRepositorySetupActionKind::Adopt
+    } else if action.starts_with("heddle bridge git import") {
+        StatusRepositorySetupActionKind::BridgeImport
+    } else {
+        StatusRepositorySetupActionKind::Other
+    }
+}
+
+#[cfg(test)]
+fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
+    heddle_core::assess_materialized_threads(repo)
 }
 
 fn first_capture_identity_notice(
@@ -2313,61 +1562,6 @@ fn first_capture_identity_notice(
         ));
     }
     Ok(None)
-}
-
-fn changed_path_count(
-    thread: Option<&super::thread::ThreadSummary>,
-    changes: &ChangesInfo,
-) -> usize {
-    let mut paths = BTreeSet::new();
-    if let Some(thread) = thread {
-        paths.extend(thread.changed_paths.iter().cloned());
-    }
-    paths.extend(changes.modified.iter().cloned());
-    paths.extend(changes.added.iter().cloned());
-    paths.extend(changes.deleted.iter().cloned());
-    paths.len()
-}
-
-fn changed_paths(
-    thread: Option<&super::thread::ThreadSummary>,
-    changes: &ChangesInfo,
-) -> Vec<String> {
-    let mut paths = BTreeSet::new();
-    if let Some(thread) = thread {
-        paths.extend(thread.changed_paths.iter().cloned());
-    }
-    paths.extend(changes.modified.iter().cloned());
-    paths.extend(changes.added.iter().cloned());
-    paths.extend(changes.deleted.iter().cloned());
-    paths.into_iter().collect()
-}
-
-fn changes_path_count(changes: &ChangesInfo) -> usize {
-    changes_paths(changes).len()
-}
-
-fn captured_thread_path_count(
-    thread: Option<&super::thread::ThreadSummary>,
-    changes: &ChangesInfo,
-) -> usize {
-    let Some(thread) = thread else {
-        return 0;
-    };
-    let dirty_paths = changes_paths(changes);
-    thread
-        .changed_paths
-        .iter()
-        .filter(|path| !dirty_paths.contains(*path))
-        .count()
-}
-
-fn changes_paths(changes: &ChangesInfo) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    paths.extend(changes.modified.iter().cloned());
-    paths.extend(changes.added.iter().cloned());
-    paths.extend(changes.deleted.iter().cloned());
-    paths
 }
 
 fn render_status_changes(output: &StatusOutput) {
@@ -2415,13 +1609,13 @@ fn render_status_changes(output: &StatusOutput) {
     }
 }
 
-fn git_index_has_paths(index: &GitIndexPlan) -> bool {
+fn git_index_has_paths(index: &CoreGitIndexPlan) -> bool {
     !index.staged_paths.is_empty()
         || !index.unstaged_paths.is_empty()
         || !index.untracked_paths.is_empty()
 }
 
-fn render_git_index_status(index: &GitIndexPlan) {
+fn render_git_index_status(index: &CoreGitIndexPlan) {
     println!("{}", style::bold("Git index and worktree"));
     if !index.staged_paths.is_empty() {
         println!("  will commit staged paths:");
@@ -2450,7 +1644,7 @@ fn render_git_index_status(index: &GitIndexPlan) {
     }
 }
 
-fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> String {
+fn git_index_extra_path_label(index: &CoreGitIndexPlan, kind: &'static str) -> String {
     if index.commit_mode == "staged_index" {
         format!("will leave {kind} paths")
     } else {
@@ -2458,7 +1652,7 @@ fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> Strin
     }
 }
 
-fn git_index_commit_scope_text(index: &GitIndexPlan) -> &'static str {
+fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
     match index.commit_mode {
         "staged_index" => "plain `heddle commit` checkpoints staged paths only",
         "worktree_all" => "plain `heddle commit` captures and checkpoints all current paths",
@@ -2525,6 +1719,7 @@ fn coordination_severity(status: &CoordinationStatus) -> u8 {
 /// NOT a hardcoded state list — is what closes the masking class: a new
 /// `CoordinationStatus` variant is covered automatically and can never be
 /// silently re-stamped as trust-derived (cid 3328810941).
+#[cfg(test)]
 fn resolve_coordination_with_trust(
     pre_override: CoordinationStatus,
     blocked_by_trust: bool,
@@ -2804,10 +1999,9 @@ mod tests {
 
     use super::{
         ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, ShortStatusRow, append_fast_status_row,
-        assess_materialized_threads, build_status_output, combined_verdict_axes,
-        coordination_axis_clean, coordination_label, render_status_materialized,
-        resolve_coordination_with_trust,
+        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
+        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
+        render_status_materialized, resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -3182,7 +2376,7 @@ mod tests {
                 // worktree (trust_verified == false) drives the override.
                 let blocked_by_trust = !trust_verified;
                 let (coordination, blocked_by_trust_only) =
-                    resolve_coordination_with_trust(pre_override.clone(), blocked_by_trust, false);
+                    resolve_coordination_with_trust(pre_override, blocked_by_trust, false);
                 let health = if trust_verified {
                     "clean"
                 } else {
@@ -3353,92 +2547,5 @@ mod tests {
         let value = serde_json::to_value(&output).unwrap();
         assert!(value["recommended_action"].is_null());
         assert!(value["verification"]["recommended_action"].is_null());
-    }
-
-    /// Bucket a porcelain status row the way the *slow* path does.
-    ///
-    /// This is a faithful, branch-for-branch mirror of the classification in
-    /// `repo::Repository::git_overlay_worktree_status`
-    /// (crates/repo/src/repository.rs). If that function's branch order or
-    /// conditions change, this mirror — and the agreement test below — must be
-    /// updated in lockstep. It exists so the test can compare the fast path
-    /// against the slow path's logic without standing up a full GitOverlay repo
-    /// with staged index states.
-    fn slow_path_bucket(row: &ShortStatusRow<'_>) -> &'static str {
-        if row.index == b'?' && row.worktree == b'?' {
-            "added"
-        } else if row.index == b'D' || row.worktree == b'D' {
-            "deleted"
-        } else if row.index == b'A'
-            || row.index == b'R'
-            || row.index == b'C'
-            || row.head_oid.is_none()
-        {
-            "added"
-        } else {
-            "modified"
-        }
-    }
-
-    fn fast_path_bucket(row: ShortStatusRow<'_>) -> &'static str {
-        let mut changes = ChangesInfo::default();
-        append_fast_status_row(&mut changes, row);
-        match (
-            changes.added.len(),
-            changes.deleted.len(),
-            changes.modified.len(),
-        ) {
-            (1, 0, 0) => "added",
-            (0, 1, 0) => "deleted",
-            (0, 0, 1) => "modified",
-            other => panic!("fast path produced unexpected bucket counts: {other:?}"),
-        }
-    }
-
-    fn status_row<'a>(
-        index: u8,
-        worktree: u8,
-        path: &'a [u8],
-        in_head: bool,
-    ) -> ShortStatusRow<'a> {
-        ShortStatusRow {
-            index,
-            worktree,
-            path,
-            head_mode: None,
-            index_mode: None,
-            worktree_mode: None,
-            head_oid: in_head.then(|| sley::ObjectId::null(sley::ObjectFormat::Sha1)),
-            index_oid: None,
-            submodule: None,
-        }
-    }
-
-    #[test]
-    fn fast_short_status_agrees_with_slow_path_on_ad_rename_copy() {
-        // index, worktree, present-in-HEAD, what `git status -s` reports.
-        // `AD` = staged add then deleted in the worktree → git shows it as a
-        // deletion; `R`/`C` = rename/copy → git shows the new path as added.
-        let cases: &[(u8, u8, bool, &str)] = &[
-            (b'A', b'D', false, "AD: staged-add then worktree-deleted"),
-            (b'R', b' ', true, "R: renamed"),
-            (b'C', b' ', true, "C: copied"),
-            // Spot-check the unambiguous buckets stay aligned too.
-            (b'A', b' ', false, "A: staged add"),
-            (b'M', b' ', true, "M: modified"),
-            (b' ', b'M', true, "worktree-modified"),
-            (b'D', b' ', true, "D: staged delete"),
-            (b' ', b'D', true, "worktree delete"),
-            (b'?', b'?', false, "untracked"),
-        ];
-        for &(index, worktree, in_head, label) in cases {
-            let path = label.as_bytes();
-            let fast = fast_path_bucket(status_row(index, worktree, path, in_head));
-            let slow = slow_path_bucket(&status_row(index, worktree, path, in_head));
-            assert_eq!(
-                fast, slow,
-                "fast and slow short-status classification disagree for {label}",
-            );
-        }
     }
 }

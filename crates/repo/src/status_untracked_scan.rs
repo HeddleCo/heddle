@@ -128,14 +128,14 @@ fn scan_directory(
         }
 
         while next_tree_entry < tree_entries.len()
-            && tree_entries[next_tree_entry].name.as_str() < entry.name.as_str()
+            && tree_entries[next_tree_entry].name() < entry.name.as_str()
         {
             next_tree_entry += 1;
         }
 
         let tree_entry = tree_entries
             .get(next_tree_entry)
-            .filter(|tree_entry| tree_entry.name == entry.name);
+            .filter(|tree_entry| tree_entry.name() == entry.name);
         if tree_entry.is_some() {
             next_tree_entry += 1;
         }
@@ -147,17 +147,12 @@ fn scan_directory(
             crate::worktree_walk::ListedDirEntryKind::Directory => {
                 ctx.index.remove(&child_key);
                 let child_tree = match tree_entry {
-                    Some(tree_entry) if tree_entry.entry_type == EntryType::Tree => Some(
-                        ctx.repo
-                            .store()
-                            .get_tree(&tree_entry.hash)?
-                            .ok_or_else(|| {
-                                objects::error::HeddleError::NotFound(format!(
-                                    "tree {}",
-                                    tree_entry.hash
-                                ))
-                            })?,
-                    ),
+                    Some(tree_entry) if tree_entry.entry_type() == EntryType::Tree => {
+                        let tree_hash = tree_entry.require_content_hash();
+                        Some(ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
+                            objects::error::HeddleError::NotFound(format!("tree {}", tree_hash))
+                        })?)
+                    }
                     _ => None,
                 };
                 if child_tree.is_some() {

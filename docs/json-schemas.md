@@ -198,37 +198,30 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 203,
-      "catalog_mutating_commands_total": 106,
-      "json_commands_total": 167,
-      "json_mutating_commands_total": 103,
-      "json_commands_with_schema": 120,
+      "catalog_commands_total": 214,
+      "json_commands_total": 176,
+      "json_commands_with_schema": 129,
       "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
-      "verified_scope_json_commands_total": 37,
-      "verified_scope_json_commands_with_schema": 37,
+      "verified_scope_json_commands_total": 43,
+      "verified_scope_json_commands_with_schema": 43,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 130,
+      "advanced_scope_json_commands_total": 133,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-      "mutating_commands_total": 103,
-      "mutating_commands_with_schema": 76,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
-      "verified_scope_mutating_commands_total": 23,
-      "verified_scope_mutating_commands_with_schema": 23,
+      "verified_scope_mutating_commands_total": 26,
+      "verified_scope_mutating_commands_with_schema": 26,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 80,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 173,
-      "documented_schema_verbs_total": 173,
+      "schema_verbs_total": 182,
+      "documented_schema_verbs_total": 182,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 47,
       "accepted_opaque_schema_verbs_total": 47,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 94,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -258,7 +251,7 @@ in-progress operation.
       "undocumented_schema_examples": []
     },
     "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   },
@@ -469,6 +462,7 @@ surface; the native first-run loop should prefer `commit`.
   "content_hash": "deadbeef",
   "intent": "tighten parser validation",
   "confidence": 0.86,
+  "task_assignment_id": "task-parser-validation",
   "principal": {"name": "Ada Agent", "email": "ada-agent@example.com"},
   "agent": {
     "provider": "codex",
@@ -1060,6 +1054,16 @@ verification.
   "stack_depth": 1,
   "stale_from_parent": false,
   "task": null,
+  "task_assignment_id": "task-parser-fast",
+  "task_summary": {
+    "task_id": "task-parser-fast",
+    "title": "Tighten parser validation",
+    "status": "in_progress",
+    "target_thread": "parser-fast",
+    "updated_at": "2026-01-01T00:00:00Z",
+    "completed_at": null,
+    "coordination_discussion_id": null
+  },
   "changed_paths": [],
   "promotion_suggested": false,
   "impact_categories": [],
@@ -1096,7 +1100,7 @@ verification.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   },
@@ -1117,6 +1121,7 @@ verification.
 | `actor`, `harness`, `thinking_level` | object/string \| null | required | Attribution and execution context. |
 | `thread_mode`, `thread_state`, `freshness` | enum \| null | required | Thread lifecycle and freshness. |
 | `visibility`, `target_thread`, `parent_thread` | string \| null | required | Thread relationship metadata. |
+| `task_assignment_id`, `task_summary` | string/object \| null | required | Local agent task provenance for the active reservation, when present. `task_summary` carries title/status/thread metadata only. |
 | `child_threads`, `sibling_threads`, `changed_paths`, `blockers` | array<string> | required | Empty arrays when none. |
 | `stack_depth`, `stale_from_parent`, `is_current`, `is_isolated`, `history_imported`, `auto` | number/bool | required | Coordination metadata. |
 | `verification_summary`, `confidence_summary`, `integration_policy_result` | object | required | Structured readiness/coordination summaries. |
@@ -1292,7 +1297,7 @@ array.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   }
@@ -1354,7 +1359,7 @@ array.
     "clone_verification": "not_applicable",
     "machine_contract": "available",
     "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
+    "recommended_action": null,
     "recovery_commands": [],
     "checks": []
   }
@@ -1507,6 +1512,352 @@ the same ready envelope.
   "reservations": [],
   "alive_only": false,
   "thread": null,
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task create --output json`
+
+```json
+{
+  "output_kind": "agent_task_create",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind",
+    "body": "Persist task provenance locally.",
+    "status": "open",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task list --output json`
+
+```json
+{
+  "output_kind": "agent_task_list",
+  "tasks": [
+    {
+      "schema_version": 1,
+      "task_id": "task-output-kind",
+      "title": "Output kind",
+      "body": "Persist task provenance locally.",
+      "status": "open",
+      "target_thread": "feature/task",
+      "base_state": null,
+      "base_root": null,
+      "parent_task_id": null,
+      "coordination_discussion_id": null,
+      "allow_offline": true,
+      "delegated_by": "coordinator",
+      "created_at": "2026-06-30T12:00:00Z",
+      "updated_at": "2026-06-30T12:00:00Z",
+      "completed_at": null
+    }
+  ],
+  "thread": "feature/task",
+  "status": null,
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task show --output json`
+
+```json
+{
+  "output_kind": "agent_task_show",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind",
+    "body": "Persist task provenance locally.",
+    "status": "open",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent task update --output json`
+
+```json
+{
+  "output_kind": "agent_task_update",
+  "task": {
+    "schema_version": 1,
+    "task_id": "task-output-kind",
+    "title": "Output kind complete",
+    "body": "Persist task provenance locally.",
+    "status": "complete",
+    "target_thread": "feature/task",
+    "base_state": null,
+    "base_root": null,
+    "parent_task_id": null,
+    "coordination_discussion_id": null,
+    "allow_offline": true,
+    "delegated_by": "coordinator",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:05:00Z",
+    "completed_at": "2026-06-30T12:05:00Z"
+  },
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent fanout plan --output json`
+
+```json
+{
+  "output_kind": "agent_fanout_plan",
+  "title": "Coordinate Wave 4 lanes",
+  "parent_thread": "main",
+  "base_state": "hd-base123",
+  "base_root": "tr-root123",
+  "coordination_discussion_id": "discussion-123",
+  "parent_task": null,
+  "lanes": [
+    {
+      "thread": "feature/lane-d4",
+      "path": "../lane-d4",
+      "title": "Implement native fan-out UX",
+      "task": null,
+      "session_id": null,
+      "status": "planned"
+    }
+  ],
+  "commands": [
+    {
+      "lane_thread": "feature/lane-d4",
+      "command": "heddle start feature/lane-d4 --path ../lane-d4 --task 'Implement native fan-out UX'",
+      "argv": [
+        "heddle",
+        "start",
+        "feature/lane-d4",
+        "--path",
+        "../lane-d4",
+        "--task",
+        "Implement native fan-out UX"
+      ]
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "heddle-native",
+    "heddle_initialized": true,
+    "git_branch": null,
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "summary": "Repository is not using the Git overlay",
+    "recommended_action": "",
+    "recovery_commands": [],
+    "checks": []
+  }
+}
+```
+
+---
+
+## `heddle agent fanout start --output json`
+
+```json
+{
+  "output_kind": "agent_fanout_start",
+  "title": "Coordinate Wave 4 lanes",
+  "parent_thread": "main",
+  "base_state": "hd-base123",
+  "base_root": "tr-root123",
+  "coordination_discussion_id": "discussion-123",
+  "parent_task": {
+    "schema_version": 1,
+    "task_id": "task-parent",
+    "title": "Coordinate Wave 4 lanes",
+    "body": "- feature/lane-d4 -> ../lane-d4: Implement native fan-out UX",
+    "status": "in_progress",
+    "target_thread": "main",
+    "base_state": "hd-base123",
+    "base_root": "tr-root123",
+    "parent_task_id": null,
+    "coordination_discussion_id": "discussion-123",
+    "allow_offline": true,
+    "delegated_by": "heddle agent fanout start",
+    "created_at": "2026-06-30T12:00:00Z",
+    "updated_at": "2026-06-30T12:00:00Z",
+    "completed_at": null
+  },
+  "lanes": [
+    {
+      "thread": "feature/lane-d4",
+      "path": "../lane-d4",
+      "title": "Implement native fan-out UX",
+      "task": {
+        "schema_version": 1,
+        "task_id": "task-child",
+        "title": "Implement native fan-out UX",
+        "body": "Fan-out child lane for parent task task-parent",
+        "status": "in_progress",
+        "target_thread": "feature/lane-d4",
+        "base_state": "hd-base123",
+        "base_root": "tr-root123",
+        "parent_task_id": "task-parent",
+        "coordination_discussion_id": "discussion-123",
+        "allow_offline": true,
+        "delegated_by": "task-parent",
+        "created_at": "2026-06-30T12:00:00Z",
+        "updated_at": "2026-06-30T12:00:00Z",
+        "completed_at": null
+      },
+      "session_id": "agent-123",
+      "status": "started"
+    }
+  ],
+  "commands": [
+    {
+      "lane_thread": "feature/lane-d4",
+      "command": "heddle start feature/lane-d4 --path ../lane-d4 --task 'Implement native fan-out UX'",
+      "argv": [
+        "heddle",
+        "start",
+        "feature/lane-d4",
+        "--path",
+        "../lane-d4",
+        "--task",
+        "Implement native fan-out UX"
+      ]
+    }
+  ],
   "verification": {
     "verified": true,
     "status": "clean",
@@ -2037,6 +2388,94 @@ tool-call navigation state:
 }
 ```
 
+`heddle timeline status --output json` emits a scrubbed status envelope for
+the selected timeline thread. It reports cursor and summary metadata only; it
+does not include raw tool payloads, transcripts, stdout, stderr, environment
+values, argv, or filename lists.
+
+```json
+{
+  "output_kind": "timeline_status",
+  "status": "ok",
+  "thread": "main",
+  "cursor_branch_id": "tlb-main",
+  "cursor_step_id": "tls-1",
+  "cursor_state": "hd-0123456789abcdefghijklmnop",
+  "current_step": {
+    "step_id": "tls-1",
+    "branch_id": "tlb-main",
+    "parent_step_id": null,
+    "tool_name": "read",
+    "tool_status": "succeeded",
+    "changed": false,
+    "payload_summary": "Read project metadata",
+    "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "labels": ["external-side-effects-unknown"],
+    "started_at_ms": 1710000000000,
+    "finished_at_ms": 1710000001000,
+    "can_seek": true,
+    "can_fork": true,
+    "can_reset": true,
+    "can_materialize": true,
+    "has_boundary_warning": false
+  },
+  "active_branch_path": ["tlb-main"],
+  "can_undo": false,
+  "can_redo": false,
+  "branch_count": 1,
+  "step_count": 1,
+  "recovery": null
+}
+```
+
+`heddle timeline record-start --output json` emits the scrubbed append
+result after appending a versioned tool-call-start operation body:
+
+```json
+{
+  "output_kind": "timeline_record_start",
+  "status": "ok",
+  "action": "record-start",
+  "thread": "main",
+  "step_id": "tls-1",
+  "branch_id": "tlb-main",
+  "parent_step_id": null,
+  "operation_id": "tl-0123456789abcdefghijklmnopqrstuv",
+  "before_state": "hd-0123456789abcdefghijklmnop",
+  "after_state": null,
+  "changed": null,
+  "tool_status": null,
+  "payload_summary": "Read project metadata",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "branch_count": 1,
+  "step_count": 1
+}
+```
+
+`heddle timeline record-finish --output json` emits the scrubbed append
+result after appending a versioned tool-call-finish operation body:
+
+```json
+{
+  "output_kind": "timeline_record_finish",
+  "status": "ok",
+  "action": "record-finish",
+  "thread": "main",
+  "step_id": "tls-1",
+  "branch_id": "tlb-main",
+  "parent_step_id": null,
+  "operation_id": "tl-1123456789abcdefghijklmnopqrstuv",
+  "before_state": "hd-0123456789abcdefghijklmnop",
+  "after_state": "hd-1123456789abcdefghijklmnop",
+  "changed": true,
+  "tool_status": "succeeded",
+  "payload_summary": "Read project metadata",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "branch_count": 1,
+  "step_count": 1
+}
+```
+
 `heddle timeline fork|reset|recover --output json` emit timeline
 action results:
 
@@ -2128,6 +2567,16 @@ State detail view, pretty-printed.
       "freshness": "current",
       "blockers": [],
       "child_threads": [],
+      "task_assignment_id": "task-parser-fast",
+      "task_summary": {
+        "task_id": "task-parser-fast",
+        "title": "Tighten parser validation",
+        "status": "in_progress",
+        "target_thread": "feature/parser-fast",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "completed_at": null,
+        "coordination_discussion_id": null
+      },
       "shared_target_dir": null
     }
   ],
@@ -2662,40 +3111,34 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 130,
+    "advanced_scope_json_commands_total": 133,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 80,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 203,
-    "catalog_mutating_commands_total": 106,
-    "json_commands_total": 167,
+    "catalog_commands_total": 214,
+    "json_commands_total": 176,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 120,
+    "json_commands_with_schema": 129,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 103,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 103,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 76,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 37,
+    "verified_scope_json_commands_total": 43,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 37,
+    "verified_scope_json_commands_with_schema": 43,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 23,
+    "verified_scope_mutating_commands_total": 26,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 23,
+    "verified_scope_mutating_commands_with_schema": 26,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -2719,7 +3162,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "203 command(s), 167 JSON command(s), 106 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "214 command(s), 176 JSON command(s), 111 mutating command(s), 108 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3031,13 +3474,13 @@ nothing to stop — both exit 0):
 `discuss_append`):
 
 ```json
-{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
 ```
 
 `heddle discuss list --output json` emits:
 
 ```json
-{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "change_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
 `heddle fsck --output json` emits:
@@ -3188,10 +3631,12 @@ no record exists — public-by-absence):
 {"output_kind": "resolve", "message": "Resolved src/lib.rs; completed merge", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle merge", "next_action": "heddle land --thread feature/auth --no-push", "recommended_action": "heddle land --thread feature/auth --no-push"}
 ```
 
-`heddle retro --output json` emits:
+`heddle retro --output json` emits the same shape with bounded session data;
+`timeline_steps` is `[]` unless expanded with `--full`. `heddle retro
+--full --output json` emits expanded timeline summaries:
 
 ```json
-{"since": "hd-base123", "until": "hd-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hd-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "markers_created": [{"name": "verified-parser", "state": "hd-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
+{"since": "hd-base123", "until": "hd-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hd-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hd-base123", "after_state": "hd-head456", "capture_state": "hd-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hd-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
 ```
 
 `heddle semantic hot --output json` emits:
@@ -3284,7 +3729,7 @@ ones do not change meaning.
 | `permission_denied`     | An underlying `io::Error` matching `objects::fs_atomic::is_permission_denied`.                       |
 | `read_only_filesystem`  | An underlying `io::Error` matching `objects::fs_atomic::is_read_only_filesystem`.                    |
 | `path_not_found`       | A missing explicit filesystem path, such as `--repo /tmp/missing`.                                  |
-| `operation_not_in_progress` | A continue/resolve/abort-style command was requested when no matching operation is active.    |
+| `no_merge_in_progress` | A merge continue/resolve/abort-style command was requested when no merge operation is active. |
 | `no_conflicts_to_resolve` | `heddle resolve --all` found no unresolved conflicts.                                             |
 | `verify_failed`         | `heddle verify` found a blocked repository verification state. The envelope includes nested `verification`. |
 

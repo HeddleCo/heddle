@@ -35,7 +35,6 @@ use objects::{
         Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
     },
     store::ObjectStore,
-    util::gitlink_blob_content,
 };
 use repo::Repository;
 use sley::{
@@ -850,7 +849,7 @@ fn sync_track_to_branch_advances_branch_to_thread_tip() {
 }
 
 #[test]
-fn export_tree_writes_submodule_entries() {
+fn export_tree_writes_gitlink_entries() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
@@ -858,15 +857,9 @@ fn export_tree_writes_submodule_entries() {
     let submodule_oid: ObjectId = "0303030303030303030303030303030303030303"
         .parse()
         .expect("oid");
-    let blob = Blob::new(gitlink_blob_content(submodule_oid));
-    let blob_hash = repo.store().put_blob(&blob).expect("blob");
-
-    let tree = Tree::from_entries(vec![TreeEntry {
-        name: "vendor".to_string(),
-        mode: FileMode::Normal,
-        entry_type: EntryType::Blob,
-        hash: blob_hash,
-    }]);
+    let tree = Tree::from_entries(vec![
+        TreeEntry::gitlink("vendor".to_string(), submodule_oid).expect("gitlink entry"),
+    ]);
     let tree_hash = repo.store().put_tree(&tree).expect("tree");
 
     let tree_oid = export_tree(&repo, &git_repo, &tree_hash).expect("export");
@@ -875,6 +868,35 @@ fn export_tree_writes_submodule_entries() {
 
     assert_eq!(entry.mode().kind(), EntryKind::Commit);
     assert_eq!(entry.object_id(), submodule_oid);
+}
+
+#[test]
+fn export_tree_keeps_legacy_gitlink_marker_blob_as_blob() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let marker = b"heddle-submodule: 0303030303030303030303030303030303030303\n";
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::new(marker.to_vec()))
+        .expect("blob");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("vendor".to_string(), blob_hash, false).expect("blob entry"),
+    ]);
+    let tree_hash = repo.store().put_tree(&tree).expect("tree");
+
+    let tree_oid = export_tree(&repo, &git_repo, &tree_hash).expect("export");
+    let git_tree = git_repo.find_tree(tree_oid).expect("git tree");
+    let entry = git_tree.find_entry("vendor").expect("entry");
+
+    assert_eq!(
+        entry.mode().kind(),
+        EntryKind::Blob,
+        "ordinary blob bytes must not be sniffed into a gitlink"
+    );
+    let exported_blob = git_repo.find_blob(entry.object_id()).expect("blob");
+    assert_eq!(exported_blob.data.as_slice(), marker);
 }
 
 #[test]
@@ -903,12 +925,9 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
     let blob = Blob::new(secret_bytes.to_vec());
     let blob_hash = repo.store().put_blob(&blob).expect("blob");
 
-    let tree = Tree::from_entries(vec![TreeEntry {
-        name: "secrets.env".to_string(),
-        mode: FileMode::Normal,
-        entry_type: EntryType::Blob,
-        hash: blob_hash,
-    }]);
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("secrets.env".to_string(), blob_hash, false).expect("blob entry"),
+    ]);
     let tree_hash = repo.store().put_tree(&tree).expect("tree");
 
     // Declare a redaction on the blob. The redaction's `state` doesn't
@@ -1655,7 +1674,9 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
     let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
     let put_state = |contents: &[u8], name: &str, parents: Vec<ChangeId>| -> State {
         let store = test_support::heddle_repo(&bridge).store();
-        let blob_hash = store.put_blob(&Blob::from_slice(contents)).expect("put blob");
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(contents))
+            .expect("put blob");
         let tree_hash = store
             .put_tree(&Tree::from_entries(vec![
                 TreeEntry::file(name.to_string(), blob_hash, false).expect("tree entry"),
@@ -1791,10 +1812,9 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
 ///
 /// The fix skips `EntryKind::Commit` entries during the reachability
 /// walk: by Git's design, gitlink commits live in the submodule's own
-/// repo and are not stored locally. The bridge import path
-/// (`import_gitlink`) records the foreign OID as a `heddle-submodule:`
-/// blob, which is what round-trips on export — so dropping it from the
-/// walk loses no information.
+/// repo and are not stored locally. Heddle records the foreign OID as
+/// a first-class Gitlink tree target, so dropping it from this walk
+/// loses no Heddle object dependency.
 #[test]
 fn copy_local_repo_to_bare_handles_gitlink_entries() {
     let (_src_temp, source) = init_bare_git_repo();
@@ -3632,15 +3652,15 @@ fn round_trip_preserves_symlinks() {
     let link_entry = imported_tree
         .entries()
         .iter()
-        .find(|e| e.name == "link")
+        .find(|e| e.name() == "link")
         .expect("link entry exists");
     assert_eq!(
-        link_entry.entry_type,
+        link_entry.entry_type(),
         EntryType::Symlink,
         "Phase E: imported symlinks must have EntryType::Symlink (was Blob \
          pre-Phase-E, which broke goto-time materialization)"
     );
-    assert_eq!(link_entry.mode, FileMode::Symlink);
+    assert_eq!(link_entry.mode(), FileMode::Symlink);
 
     // Export back to a fresh git destination and confirm the link entry
     // round-trips as a Link, not a Blob.

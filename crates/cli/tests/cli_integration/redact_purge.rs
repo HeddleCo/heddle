@@ -372,39 +372,14 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
 }
 
 #[test]
-fn purge_alias_routes_to_redact_purge_apply_output() {
-    let (temp, state) = setup_repo_with_secret();
-    heddle(
-        &[
-            "redact",
-            "apply",
-            &state,
-            "--path",
-            "config/secrets.toml",
-            "--reason",
-            "leaked credential",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    let raw = heddle(
-        &[
-            "--output",
-            "json",
-            "purge",
-            "apply",
-            &state,
-            "--path",
-            "config/secrets.toml",
-            "--force",
-        ],
-        Some(temp.path()),
-    )
-    .expect("purge alias should route through redact purge apply");
-    let value: Value = serde_json::from_str(&raw).expect("purge alias should emit JSON");
-    assert_eq!(value["output_kind"], "purge_apply");
-    assert_eq!(value["redactions_marked"].as_u64().unwrap(), 1);
+fn purge_root_alias_is_rejected() {
+    let err = heddle(&["purge", "apply"], None)
+        .expect_err("removed purge root alias should fail through clap");
+    assert!(
+        err.contains("unrecognized subcommand 'purge'")
+            || err.contains("unexpected argument 'purge'"),
+        "clap should reject the removed purge alias: {err}"
+    );
 }
 
 #[test]

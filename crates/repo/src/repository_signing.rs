@@ -126,13 +126,11 @@ impl Repository {
     /// hash-bearing fields) keeps a valid signature instead of shipping one
     /// that no longer verifies.
     ///
-    /// Multiple candidates are accepted because the #565 format bump changed
-    /// how `compute_hash` folds the git-fidelity fields: a state signed BEFORE
-    /// the bump was signed over its pre-fidelity hash
-    /// ([`State::compute_hash_pre_fidelity`]), while one signed after was signed
-    /// over the current hash. The backfill passes BOTH so a valid legacy
-    /// signature isn't misread as unreproducible just because the new hash
-    /// doesn't match (heddle#570).
+    /// Multiple candidates are accepted because migrations and authorized
+    /// rewrites can know more than one possible prior identity for a state.
+    /// The current operation only decides whether the existing signature was
+    /// valid over one of those old identities before it writes a new signature
+    /// over the current hash.
     ///
     /// Ownership is decided by [`Self::owning_signer_for`], which tries both the
     /// active signer and the per-repo local key — a repo that signed states
@@ -161,9 +159,7 @@ impl Repository {
         // Verify the EXISTING signature against the OLD hash(es) before
         // re-signing. Without this an owned-but-invalid signature (corrupted, or
         // made over different content) would be silently replaced with a valid
-        // signature over the new content — laundering a bad signature. A legacy
-        // (pre-#565) signature verifies against the pre-fidelity candidate, not
-        // the post-bump one, so we accept ANY candidate.
+        // signature over the new content — laundering a bad signature.
         let verifies = prior_hashes
             .iter()
             .any(|hash| verify_state_signature_bytes(&existing, hash).is_ok());
@@ -685,60 +681,6 @@ mod tests {
             state
                 .verify_signature()
                 .expect("re-signed state verifies over the new hash");
-        });
-    }
-
-    /// A state adopted+signed BEFORE the #565 format bump carries a signature
-    /// made over its PRE-fidelity hash, not the post-bump `compute_hash()`. The
-    /// #570 backfill must verify against that legacy hash (passed alongside the
-    /// current one) and re-sign over the new hash — verifying only the post-bump
-    /// hash would wrongly reject a valid legacy signature as unreproducible.
-    #[test]
-    fn resign_if_owned_accepts_legacy_pre_fidelity_signature() {
-        let home = TempDir::new().expect("home temp");
-        with_signing_home(home.path(), || {
-            let (_temp, repo) = setup_repo();
-            let signer = repo.signing_signer().expect("local signer resolves");
-
-            // Simulate a pre-bump signature: sign the PRE-fidelity hash directly
-            // (what the old code's `compute_hash` produced before #565 appended
-            // the git-fidelity block).
-            let mut state = unsigned_state();
-            let legacy_hash = state.compute_hash_pre_fidelity();
-            let post_bump_hash = state.compute_hash();
-            assert_ne!(
-                legacy_hash, post_bump_hash,
-                "pre-fidelity hash differs from the post-bump hash",
-            );
-            state.signature = Some(
-                crypto::state_signature_from_signer(&legacy_hash, &*signer)
-                    .expect("sign legacy hash"),
-            );
-
-            // The backfill re-derives a fidelity field (here raw_message),
-            // changing `compute_hash()`. The pre-fidelity hash is unchanged.
-            let before = state.compute_hash();
-            let before_pre_fidelity = state.compute_hash_pre_fidelity();
-            assert_eq!(before_pre_fidelity, legacy_hash);
-            let mut updated = state.clone().with_raw_message(b"legacy commit message\n");
-
-            // Passing the legacy candidate recognises + re-signs the signature.
-            assert_eq!(
-                repo.resign_if_owned(&mut updated, &[before, before_pre_fidelity]),
-                ResignOutcome::Resigned,
-            );
-            updated
-                .verify_signature()
-                .expect("re-signed legacy state verifies over the new hash");
-
-            // Regression guard: verifying against ONLY the post-bump hash (the
-            // pre-fix behaviour) rejects the valid legacy signature.
-            let mut rejected = state.with_raw_message(b"legacy commit message\n");
-            assert_eq!(
-                repo.resign_if_owned(&mut rejected, &[before]),
-                ResignOutcome::Unreproducible,
-                "the post-bump hash alone does not verify a legacy signature",
-            );
         });
     }
 

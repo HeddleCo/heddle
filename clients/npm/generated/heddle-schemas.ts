@@ -22,6 +22,14 @@ export interface AbortSchema {
   warnings: string[];
 }
 
+export interface ActionTemplate {
+  action: string;
+  /** Whether an agent may replace placeholders in `argv_template`. When `agent_may_fill` is false, treat `action` and `argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders. Surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. */
+  agent_may_fill: boolean;
+  argv_template: string[];
+  required_inputs: string[];
+}
+
 export interface ActionTemplateSchema {
   action: string;
   /** Whether an agent may replace placeholders in `argv_template`. When `agent_may_fill` is false, treat `action` and `argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders. Surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. */
@@ -109,6 +117,11 @@ export interface ActorExplainSchema {
   winning_rule?: string | null;
 }
 
+export interface ActorInfo {
+  model?: string | null;
+  provider?: string | null;
+}
+
 export interface ActorInfoSchema {
   model?: string | null;
   provider?: string | null;
@@ -182,6 +195,7 @@ export interface AgentCaptureSchema {
   replayed?: boolean | null;
   signed: boolean;
   status: string;
+  task_assignment_id?: string | null;
 }
 
 export interface AgentDaemonStatusSchema {
@@ -190,6 +204,51 @@ export interface AgentDaemonStatusSchema {
   pid_path: string;
   running: boolean;
   socket_path: string;
+  verification: RepositoryVerificationStateSchema;
+}
+
+export interface AgentFanoutCommandSchema {
+  argv: string[];
+  command: string;
+  lane_thread: string;
+}
+
+export interface AgentFanoutLaneSchema {
+  path: string;
+  session_id?: string | null;
+  status: string;
+  task?: AgentTaskSchema | null;
+  thread: string;
+  title: string;
+}
+
+export interface AgentFanoutPlanSchema {
+  base_root: string;
+  base_state: string;
+  commands: AgentFanoutCommandSchema[];
+  coordination_discussion_id?: string | null;
+  lanes: AgentFanoutLaneSchema[];
+  output_kind: "agent_fanout_plan";
+  parent_task?: AgentTaskSchema | null;
+  parent_thread: string;
+  title: string;
+  verification: RepositoryVerificationStateSchema;
+}
+
+export interface AgentFanoutStartSchema {
+  base_root: string;
+  base_state: string;
+  commands: AgentFanoutCommandSchema[];
+  coordination_discussion_id?: string | null;
+  idempotency_status?: string | null;
+  lanes: AgentFanoutLaneSchema[];
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "agent_fanout_start";
+  parent_task?: AgentTaskSchema | null;
+  parent_thread: string;
+  replayed?: boolean | null;
+  title: string;
   verification: RepositoryVerificationStateSchema;
 }
 
@@ -252,6 +311,7 @@ export interface AgentReservationSchema {
   session_id: string;
   status: string;
   task?: string | null;
+  task_assignment_id?: string | null;
   thinking_level?: string | null;
   thread: string;
 }
@@ -277,6 +337,58 @@ export interface AgentStopSchema {
   reason?: string | null;
   stopped: boolean;
   swept_stale: boolean;
+}
+
+export interface AgentTaskCreateSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "agent_task_create";
+  replayed?: boolean | null;
+  task: AgentTaskSchema;
+  verification: RepositoryVerificationStateSchema;
+}
+
+export interface AgentTaskListSchema {
+  output_kind: "agent_task_list";
+  status?: string | null;
+  tasks: AgentTaskSchema[];
+  thread?: string | null;
+  verification: RepositoryVerificationStateSchema;
+}
+
+export interface AgentTaskSchema {
+  allow_offline: boolean;
+  base_root?: string | null;
+  base_state?: string | null;
+  body: string;
+  completed_at?: string | null;
+  coordination_discussion_id?: string | null;
+  created_at: string;
+  delegated_by?: string | null;
+  parent_task_id?: string | null;
+  schema_version: number;
+  status: string;
+  target_thread: string;
+  task_id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface AgentTaskShowSchema {
+  output_kind: "agent_task_show";
+  task: AgentTaskSchema;
+  verification: RepositoryVerificationStateSchema;
+}
+
+export interface AgentTaskUpdateSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "agent_task_update";
+  replayed?: boolean | null;
+  task: AgentTaskSchema;
+  verification: RepositoryVerificationStateSchema;
 }
 
 export type Array_of_ThreadApprovalSchema = ThreadApprovalSchema[];
@@ -515,9 +627,10 @@ export interface CaptureSchema {
   replayed?: boolean | null;
   signed: boolean;
   status: string;
+  task_assignment_id?: string | null;
 }
 
-export interface ChangesInfoSchema {
+export interface ChangesInfo {
   added: string[];
   deleted: string[];
   modified: string[];
@@ -726,6 +839,13 @@ export interface ContextSetSchema {
   [key: string]: unknown;
 }
 
+export interface ContextSnippet {
+  annotation_id: string;
+  content: string;
+  kind: string;
+  revision_count: number;
+}
+
 export interface ContextSuggestSchema {
   output_kind: "context_suggest";
   [key: string]: unknown;
@@ -756,6 +876,8 @@ export interface ContinueSchema {
   status: string;
   warnings: string[];
 }
+
+export type CoordinationStatus = "clean" | "ahead" | "diverged" | "blocked" | "merge-ready";
 
 export type CoordinationStatusSchema = "clean" | "ahead" | "diverged" | "blocked" | "merge-ready";
 
@@ -791,31 +913,28 @@ export interface DiagnoseSchema {
 }
 
 export interface DiffChangesGroupedSchema {
-  added: unknown[];
-  deleted: unknown[];
-  modified: unknown[];
+  added: FileChange[];
+  deleted: FileChange[];
+  modified: FileChange[];
 }
 
-/** `changes` admits the two documented shapes the `diff` command emits: worktree mode (`heddle diff` with no revision args) groups entries into `{modified, added, deleted}` category arrays; a state-to-state diff (`heddle diff <a> <b>`) emits a flat `array<object>`. The schema is a union of both so either documented output validates. */
-export type DiffChangesSchema = DiffChangesGroupedSchema | unknown[];
+export type DiffChangesSchema = DiffChangesGroupedSchema | FileChange[];
 
-export interface DiffSchema {
-  broader_guidance?: unknown[] | null;
+export interface DiffReport {
+  broader_guidance?: ContextSnippet[] | null;
   changed_path_count: number;
-  /** Worktree-mode diff (`heddle diff` with no revision args) groups the per-file changes into `{modified, added, deleted}` category arrays, mirroring the `status` command's `changes` shape so a UI can derive add/modify/delete badges from `diff` alone. A state-to-state diff (`heddle diff <a> <b>`) instead emits a flat `array<object>` here. */
   changes: DiffChangesSchema;
-  context?: unknown[] | null;
+  context?: FileContextEntry[] | null;
   from_state?: string | null;
   output_kind: "diff";
-  /** Rendered unified-diff text, suitable for `patch(1)` / `git apply`. Present whenever line-level hunks exist, regardless of the `--patch` CLI flag — JSON consumers always get a parseable diff. */
   patch?: string | null;
-  semantic_changes?: unknown[] | null;
-  stats: DiffStatsSchema;
-  status?: string | null;
+  semantic_changes?: SemanticChangeEntry[] | null;
+  stats: DiffStats;
+  status: string;
   to_state?: string | null;
 }
 
-export interface DiffStatsSchema {
+export interface DiffStats {
   additions: number;
   deletions: number;
   files_changed: number;
@@ -906,9 +1025,9 @@ export interface DiscussionListSchema {
 
 export interface DiscussionResolutionSchema {
   annotation_id?: string | null;
+  change_id?: string | null;
   kind: string;
   reason?: string | null;
-  state_id?: string | null;
 }
 
 export interface DiscussionSchema {
@@ -1037,6 +1156,20 @@ export interface FetchSchema {
   tags_included?: boolean | null;
 }
 
+export interface FileChange {
+  kind: string;
+  lines?: LineDiff[] | null;
+  old_path?: string | null;
+  path: string;
+  /** Rename-detector score (0.0–1.0) for `kind == "renamed"` entries. The patch renderer emits this as `similarity index N%` in the extended diff header; without it `git apply` rejects rename patches because there's no signal that `b/new` shouldn't already exist on the target side. */
+  similarity_score?: number | null;
+}
+
+export interface FileContextEntry {
+  annotations: ContextSnippet[];
+  path: string;
+}
+
 export interface FsKitReadinessSchema {
   action: string;
   backend: string;
@@ -1044,25 +1177,21 @@ export interface FsKitReadinessSchema {
   state: string;
 }
 
-export interface FsckErrorSchema {
+export interface FsckError {
   kind: string;
   message: string;
   object?: string | null;
 }
 
-export interface FsckSchema {
+export interface FsckReport {
   bridge_checked: boolean;
-  errors: FsckErrorSchema[];
-  idempotency_status?: string | null;
+  errors: FsckError[];
   objects_checked: number;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
   valid: boolean;
   warnings: string[];
 }
 
-export interface GitCheckpointInfoSchema {
+export interface GitCheckpointInfo {
   committed_at: string;
   git_commit: string;
 }
@@ -1077,10 +1206,35 @@ export interface GitIndexInfoSchema {
   will_commit: string[];
 }
 
+export interface GitIndexPlan {
+  commit_mode: string;
+  has_staged_changes: boolean;
+  preserved_after_commit: string[];
+  staged_paths: string[];
+  unstaged_paths: string[];
+  untracked_paths: string[];
+  will_commit: string[];
+}
+
 export interface GitOverlayGuideSchema {
   steps: string[];
   summary: string;
   topic: string;
+}
+
+export interface GitOverlayHealth {
+  checks: GitOverlayHealthCheck[];
+  clean: boolean;
+  recovery_commands: string[];
+  status: string;
+  summary: string;
+}
+
+export interface GitOverlayHealthCheck {
+  details?: Record<string, string>;
+  name: string;
+  status: string;
+  summary: string;
 }
 
 export interface GitOverlayHealthCheckSchema {
@@ -1259,6 +1413,13 @@ export interface LandSchema {
   warnings?: string[] | null;
 }
 
+export interface LineDiff {
+  content: string;
+  new_line?: number | null;
+  old_line?: number | null;
+  prefix: string;
+}
+
 export interface LogReflogSchema {
   entries: ReflogEntrySchema[];
   output_kind: "log_reflog";
@@ -1280,6 +1441,52 @@ export interface LossyImportEntrySchema {
   git_object?: string | null;
   path: string;
   reason: string;
+}
+
+export interface MachineContractCoverage {
+  accepted_opaque_schema_examples: string[];
+  accepted_opaque_schema_verbs_total: number;
+  advanced_scope: string;
+  advanced_scope_accepted_opaque_schema_examples: string[];
+  advanced_scope_json_commands_total: number;
+  advanced_scope_json_commands_with_accepted_opaque_schema: number;
+  advanced_scope_mutating_commands_total: number;
+  advanced_scope_mutating_commands_with_accepted_opaque_schema: number;
+  catalog_commands_total: number;
+  catalog_mutating_commands_total: number;
+  documented_schema_verbs_total: number;
+  json_commands_total: number;
+  json_commands_with_accepted_opaque_schema: number;
+  json_commands_with_schema: number;
+  json_commands_without_schema: number;
+  json_mutating_commands_total: number;
+  jsonl_commands_total: number;
+  missing_mutating_schema_examples: string[];
+  missing_schema_examples: string[];
+  mutating_commands_total: number;
+  mutating_commands_with_accepted_opaque_schema: number;
+  mutating_commands_with_schema: number;
+  mutating_commands_without_schema: number;
+  opaque_schema_verbs_total: number;
+  schema_verbs_total: number;
+  status: string;
+  summary: string;
+  supports_op_id_total: number;
+  unaccepted_opaque_schema_examples: string[];
+  unaccepted_opaque_schema_verbs_total: number;
+  undocumented_schema_examples: string[];
+  undocumented_schema_verbs_total: number;
+  verified_scope: string;
+  verified_scope_accepted_opaque_schema_examples: string[];
+  verified_scope_json_commands_total: number;
+  verified_scope_json_commands_with_accepted_opaque_schema: number;
+  verified_scope_json_commands_with_schema: number;
+  verified_scope_json_commands_without_schema: number;
+  verified_scope_missing_schema_examples: string[];
+  verified_scope_mutating_commands_total: number;
+  verified_scope_mutating_commands_with_accepted_opaque_schema: number;
+  verified_scope_mutating_commands_with_schema: number;
+  verified_scope_mutating_commands_without_schema: number;
 }
 
 export interface MachineContractCoverageSchema {
@@ -1349,6 +1556,14 @@ export interface MaintenanceRunSchema {
   [key: string]: unknown;
 }
 
+export interface MaterializedThreadInfo {
+  file_count: number;
+  name: string;
+  stale: boolean;
+  state_id: string;
+  tree_hash_short: string;
+}
+
 export interface MergePreviewSchema {
   action?: string | null;
   applied: boolean;
@@ -1400,8 +1615,8 @@ export interface OplogRecoverSchema {
   [key: string]: unknown;
 }
 
-export interface ParallelThreadInfoSchema {
-  coordination_status: CoordinationStatusSchema;
+export interface ParallelThreadInfo {
+  coordination_status: CoordinationStatus;
   current_state?: string | null;
   name: string;
 }
@@ -1470,7 +1685,7 @@ export interface PushSchema {
   transport: string;
 }
 
-export interface QueryHitSchema {
+export interface QueryHit {
   actor_email: string;
   change_id?: string | null;
   operation_id?: string | null;
@@ -1482,8 +1697,8 @@ export interface QueryHitSchema {
   verb: string;
 }
 
-export interface QuerySchema {
-  hits: QueryHitSchema[];
+export interface QueryReport {
+  hits: QueryHit[];
   output_kind: "query";
 }
 
@@ -1670,11 +1885,45 @@ export interface RemoteSetDefaultSchema {
   url?: string | null;
 }
 
+export interface RepositoryContextInfo {
+  kind: string;
+  parent_repository?: string | null;
+  parent_thread?: string | null;
+  target_thread?: string | null;
+}
+
 export interface RepositoryContextInfoSchema {
   kind: string;
   parent_repository?: string | null;
   parent_thread?: string | null;
   target_thread?: string | null;
+}
+
+export interface RepositoryVerificationState {
+  active_operation?: string | null;
+  checks: VerificationCheck[];
+  clone_verification: string;
+  default_remote?: string | null;
+  git_branch?: string | null;
+  heddle_initialized: boolean;
+  heddle_thread?: string | null;
+  import_state: string;
+  machine_contract: string;
+  machine_contract_coverage: MachineContractCoverage;
+  mapping_state: string;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
+  recovery_commands: string[];
+  remote_drift: string;
+  repository_mode: string;
+  status: string;
+  summary: string;
+  verified: boolean;
+  workflow_status: string;
+  workflow_summary: string;
+  worktree_dirty: boolean;
+  worktree_state: string;
 }
 
 export interface RepositoryVerificationStateSchema {
@@ -1687,7 +1936,7 @@ export interface RepositoryVerificationStateSchema {
   heddle_thread?: string | null;
   import_state: string;
   machine_contract: string;
-  machine_contract_coverage?: MachineContractCoverageSchema | null;
+  machine_contract_coverage: MachineContractCoverageSchema;
   mapping_state: string;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -1733,6 +1982,16 @@ export interface RetroAgentEntrySchema {
   tokens: RetroAgentTokensSchema;
 }
 
+export interface RetroAgentTaskEntrySchema {
+  completed_at?: string | null;
+  coordination_discussion_id?: string | null;
+  status: string;
+  target_thread: string;
+  task_id: string;
+  title: string;
+  updated_at: string;
+}
+
 export interface RetroAgentTokensSchema {
   input?: number | null;
   output?: number | null;
@@ -1761,6 +2020,7 @@ export interface RetroOperationEntrySchema {
 }
 
 export interface RetroSchema {
+  agent_tasks: RetroAgentTaskEntrySchema[];
   agents_active: RetroAgentEntrySchema[];
   context_annotations: RetroContextAnnotationEntrySchema[];
   duration_secs?: number | null;
@@ -1768,6 +2028,7 @@ export interface RetroSchema {
   merges: RetroOperationEntrySchema[];
   since?: string | null;
   states_captured: RetroStateEntrySchema[];
+  timeline_steps: RetroTimelineStepEntrySchema[];
   undos: RetroOperationEntrySchema[];
   until?: string | null;
   verify_signals: RetroVerifySignalSchema[];
@@ -1780,6 +2041,23 @@ export interface RetroStateEntrySchema {
   intent?: string | null;
   principal: string;
   timestamp: string;
+}
+
+export interface RetroTimelineStepEntrySchema {
+  after_state?: string | null;
+  before_state?: string | null;
+  branch_id: string;
+  capture_state?: string | null;
+  changed?: boolean | null;
+  finished_at_ms?: number | null;
+  parent_step_id?: string | null;
+  payload_hash?: string | null;
+  payload_summary?: string | null;
+  started_at_ms?: number | null;
+  step_id: string;
+  thread: string;
+  tool_name?: string | null;
+  tool_status?: string | null;
 }
 
 export interface RetroVerifySignalSchema {
@@ -1856,6 +2134,17 @@ export interface SchemasListSchema {
   output_kind: "schemas";
   schema_verbs: string[];
   status?: string | null;
+}
+
+export interface SemanticChangeEntry {
+  change_type: string;
+  description: string;
+  from_path?: string | null;
+  importance?: string | null;
+  new_name?: string | null;
+  old_name?: string | null;
+  path?: string | null;
+  to_path?: string | null;
 }
 
 export type SemanticHotSchema = Record<string, unknown>;
@@ -2038,52 +2327,54 @@ export interface StateEntrySchema {
   principal: string;
 }
 
-export interface StateInfoSchema {
+export interface StateInfo {
   change_id: string;
   content_hash: string;
   intent?: string | null;
 }
 
 export interface StatusSchema {
-  actor?: ActorInfoSchema | null;
+  actor?: ActorInfo | null;
   attach_reason?: string | null;
   base_root?: string | null;
   base_state?: string | null;
   blockers: string[];
   changed_path_count: number;
-  changes: ChangesInfoSchema;
+  changes: ChangesInfo;
   child_threads: string[];
-  coordination_status: CoordinationStatusSchema;
+  coordination_status: CoordinationStatus;
   current_state?: string | null;
   execution_path?: string | null;
-  freshness?: ThreadFreshnessSchema | null;
-  git_checkpoint?: GitCheckpointInfoSchema | null;
-  git_index?: GitIndexInfoSchema | null;
-  git_overlay_health: GitOverlayHealthSchema;
+  freshness?: string | null;
+  git_checkpoint?: GitCheckpointInfo | null;
+  git_index?: GitIndexPlan | null;
+  git_overlay_health: GitOverlayHealth;
   harness?: string | null;
   heavy_impact_paths: string[];
   heddle_session_id?: string | null;
   hosted_enabled: boolean;
-  impact_categories: ThreadImpactCategorySchema[];
+  identity_notice?: string | null;
+  impact_categories: string[];
   is_isolated: boolean;
   last_progress_at?: string | null;
+  materialized_threads?: MaterializedThreadInfo[];
   operation?: unknown;
   output_kind: "status";
-  parallel_threads: ParallelThreadInfoSchema[];
+  parallel_threads: ParallelThreadInfo[];
   parent_thread?: string | null;
   path?: string | null;
   promotion_suggested: boolean;
-  recommended_action: NullableStringSchema;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_action_templates: ActionTemplateSchema[];
+  recommended_action: string | null;
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
   recovery_commands: string[];
   remote_tracking?: unknown;
   report_flush_state?: string | null;
   repository_capability: string;
-  repository_context?: RepositoryContextInfoSchema | null;
+  repository_context?: RepositoryContextInfo | null;
   repository_label: string;
   session_id?: string | null;
-  state?: StateInfoSchema | null;
+  state?: StateInfo | null;
   storage_model: string;
   target_thread?: string | null;
   task?: string | null;
@@ -2091,10 +2382,10 @@ export interface StatusSchema {
   thread?: string | null;
   thread_changed_path_count: number;
   thread_health: string;
-  thread_mode?: ThreadModeSchema | null;
-  thread_state?: ThreadStateSchema | null;
+  thread_mode?: "materialized" | "virtualized" | "solid" | null;
+  thread_state?: string | null;
   usage_summary?: unknown;
-  verification: RepositoryVerificationStateSchema;
+  verification: RepositoryVerificationState;
   worktree_changed_path_count: number;
 }
 
@@ -2552,6 +2843,8 @@ export interface ThreadShowSchema {
   stale_from_parent: boolean;
   target_thread?: string | null;
   task?: string | null;
+  task_assignment_id?: string | null;
+  task_summary?: ThreadTaskSummarySchema | null;
   thinking_level?: string | null;
   thread_health: string;
   thread_mode?: ThreadModeSchema | null;
@@ -2609,6 +2902,8 @@ export interface ThreadSummarySchema {
   stale_from_parent: boolean;
   target_thread?: string | null;
   task?: string | null;
+  task_assignment_id?: string | null;
+  task_summary?: ThreadTaskSummarySchema | null;
   thinking_level?: string | null;
   thread_health: string;
   thread_mode?: ThreadModeSchema | null;
@@ -2636,6 +2931,16 @@ export interface ThreadSwitchSchema {
   replayed?: boolean | null;
   status?: string | null;
   thread?: ThreadSummarySchema | null;
+}
+
+export interface ThreadTaskSummarySchema {
+  completed_at?: string | null;
+  coordination_discussion_id?: string | null;
+  status: string;
+  target_thread: string;
+  task_id: string;
+  title: string;
+  updated_at: string;
 }
 
 export interface TimelineActionsSchema {
@@ -2707,6 +3012,52 @@ export interface TimelineNativeSchema {
   tool_call_id: string;
 }
 
+export interface TimelineRecordFinishSchema {
+  action: string;
+  after_state?: string | null;
+  before_state?: string | null;
+  branch_count: number;
+  branch_id: string;
+  changed?: boolean | null;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_id: string;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "timeline_record_finish";
+  parent_step_id?: string | null;
+  payload_hash?: string | null;
+  payload_summary?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  step_count: number;
+  step_id: string;
+  thread: string;
+  tool_status?: string | null;
+}
+
+export interface TimelineRecordStartSchema {
+  action: string;
+  after_state?: string | null;
+  before_state?: string | null;
+  branch_count: number;
+  branch_id: string;
+  changed?: boolean | null;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_id: string;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "timeline_record_start";
+  parent_step_id?: string | null;
+  payload_hash?: string | null;
+  payload_summary?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  step_count: number;
+  step_id: string;
+  thread: string;
+  tool_status?: string | null;
+}
+
 export interface TimelineRecoverSchema {
   action: string;
   blocker_count: number;
@@ -2765,6 +3116,53 @@ export interface TimelineResetSchema {
   status: string;
   step_count: number;
   thread: string;
+}
+
+export interface TimelineStatusRecoverySchema {
+  branch_id: string;
+  checkout_state?: string | null;
+  from_state: string;
+  from_step_id?: string | null;
+  moved_at_ms: number;
+  reason: string;
+  status: string;
+  to_state: string;
+  to_step_id?: string | null;
+}
+
+export interface TimelineStatusSchema {
+  active_branch_path: string[];
+  branch_count: number;
+  can_redo: boolean;
+  can_undo: boolean;
+  current_step?: TimelineStatusStepSchema | null;
+  cursor_branch_id?: string | null;
+  cursor_state?: string | null;
+  cursor_step_id?: string | null;
+  output_kind: "timeline_status";
+  recovery?: TimelineStatusRecoverySchema | null;
+  status: string;
+  step_count: number;
+  thread: string;
+}
+
+export interface TimelineStatusStepSchema {
+  branch_id: string;
+  can_fork: boolean;
+  can_materialize: boolean;
+  can_reset: boolean;
+  can_seek: boolean;
+  changed?: boolean | null;
+  finished_at_ms?: number | null;
+  has_boundary_warning: boolean;
+  labels: string[];
+  parent_step_id?: string | null;
+  payload_hash?: string | null;
+  payload_summary?: string | null;
+  started_at_ms?: number | null;
+  step_id: string;
+  tool_name?: string | null;
+  tool_status?: string | null;
 }
 
 export interface TimelineStepSchema {
@@ -2895,6 +3293,18 @@ export interface UndoSchema {
   status?: string | null;
 }
 
+export interface VerificationCheck {
+  clean: boolean;
+  details?: Record<string, string>;
+  name: string;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
+  recovery_commands: string[];
+  status: string;
+  summary: string;
+}
+
 export interface VerificationCheckSchema {
   clean: boolean;
   details: Record<string, string>;
@@ -2907,9 +3317,9 @@ export interface VerificationCheckSchema {
   summary: string;
 }
 
-export interface VerifySchema {
+export interface VerifyReport {
   active_operation?: string | null;
-  checks: VerificationCheckSchema[];
+  checks: VerificationCheck[];
   clean: boolean;
   clone_verification: string;
   default_remote?: string | null;
@@ -2918,15 +3328,15 @@ export interface VerifySchema {
   heddle_thread?: string | null;
   import_state: string;
   machine_contract: string;
-  machine_contract_coverage?: MachineContractCoverageSchema | null;
+  machine_contract_coverage: MachineContractCoverage;
   mapping_state: string;
   output_kind: "verify";
   recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_action_templates: ActionTemplateSchema[];
+  recommended_action_template?: ActionTemplate | null;
+  recovery_action_templates: ActionTemplate[];
   recovery_commands: string[];
   remote_drift: string;
-  repository_context?: RepositoryContextInfoSchema | null;
+  repository_context?: RepositoryContextInfo | null;
   repository_label: string;
   repository_mode: string;
   status: string;
@@ -2987,6 +3397,8 @@ export interface HeddleVerbOutputs {
   "actor spawn": ActorSpawnSchema;
   adopt: AdoptSchema;
   "agent capture": AgentCaptureSchema;
+  "agent fanout plan": AgentFanoutPlanSchema;
+  "agent fanout start": AgentFanoutStartSchema;
   "agent heartbeat": AgentHeartbeatSchema;
   "agent list": AgentReservationListSchema;
   "agent ready": AgentReadySchema;
@@ -2995,6 +3407,10 @@ export interface HeddleVerbOutputs {
   "agent serve": AgentServeSchema;
   "agent status": AgentDaemonStatusSchema;
   "agent stop": AgentStopSchema;
+  "agent task create": AgentTaskCreateSchema;
+  "agent task list": AgentTaskListSchema;
+  "agent task show": AgentTaskShowSchema;
+  "agent task update": AgentTaskUpdateSchema;
   "auth create-service-token": AuthCreateServiceTokenSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
@@ -3028,7 +3444,7 @@ export interface HeddleVerbOutputs {
   "daemon serve": DaemonServeSchema;
   "daemon status": DaemonStatusSchema;
   "daemon stop": DaemonStopSchema;
-  diff: DiffSchema;
+  diff: DiffReport;
   "discuss append": DiscussAppendSchema;
   "discuss list": DiscussionListSchema;
   "discuss open": DiscussOpenSchema;
@@ -3040,7 +3456,7 @@ export interface HeddleVerbOutputs {
   error: ErrorEnvelopeSchema;
   expand: ExpandSchema;
   fetch: FetchSchema;
-  fsck: FsckSchema;
+  fsck: FsckReport;
   "git-overlay": GitOverlayGuideSchema;
   help: HelpSchema;
   "hook events": HookEventsSchema;
@@ -3067,7 +3483,7 @@ export interface HeddleVerbOutputs {
   "oplog recover": OplogRecoverSchema;
   pull: PullSchema;
   push: PushSchema;
-  query: QuerySchema;
+  query: QueryReport;
   "query --attribution": BlameSchema;
   ready: ReadySchema;
   rebase: RebaseSchema;
@@ -3136,8 +3552,11 @@ export interface HeddleVerbOutputs {
   "thread show": ThreadShowSchema;
   "thread switch": ThreadSwitchSchema;
   "timeline fork": TimelineForkSchema;
+  "timeline record-finish": TimelineRecordFinishSchema;
+  "timeline record-start": TimelineRecordStartSchema;
   "timeline recover": TimelineRecoverSchema;
   "timeline reset": TimelineResetSchema;
+  "timeline status": TimelineStatusSchema;
   "transaction abort": TransactionAbortSchema;
   "transaction begin": TransactionBeginSchema;
   "transaction commit": TransactionCommitSchema;
@@ -3146,7 +3565,7 @@ export interface HeddleVerbOutputs {
   undo: UndoSchema;
   "undo --list": UndoListSchema;
   "undo --redo": UndoRedoSchema;
-  verify: VerifySchema;
+  verify: VerifyReport;
   "visibility list": VisibilityListSchema;
   "visibility promote": VisibilityPromoteSchema;
   "visibility set": VisibilitySetSchema;
@@ -3166,6 +3585,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "actor spawn",
   "adopt",
   "agent capture",
+  "agent fanout plan",
+  "agent fanout start",
   "agent heartbeat",
   "agent list",
   "agent ready",
@@ -3174,6 +3595,10 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent serve",
   "agent status",
   "agent stop",
+  "agent task create",
+  "agent task list",
+  "agent task show",
+  "agent task update",
   "auth create-service-token",
   "auth logout",
   "auth status",
@@ -3315,8 +3740,11 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "thread show",
   "thread switch",
   "timeline fork",
+  "timeline record-finish",
+  "timeline record-start",
   "timeline recover",
   "timeline reset",
+  "timeline status",
   "transaction abort",
   "transaction begin",
   "transaction commit",

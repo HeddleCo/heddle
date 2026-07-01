@@ -69,9 +69,11 @@ use std::{
 use objects::{
     object::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
+        TreeEntryTarget,
     },
     store::{AnyStore, ObjectStore},
     sync::{LockExt, RwLockExt},
+    util::gitlink_placeholder_bytes,
 };
 use oplog::OpLog;
 use refs::RefManager;
@@ -153,6 +155,10 @@ enum NodeRecord {
         mode: FileMode,
         path: PathBuf,
     },
+    Gitlink {
+        placeholder: Vec<u8>,
+        path: PathBuf,
+    },
     Symlink {
         blob: ContentHash,
     },
@@ -180,6 +186,7 @@ impl NodeRecord {
             NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
                 kind_for_mode(*mode)
             }
+            NodeRecord::Gitlink { .. } => NodeKind::File,
             NodeRecord::Symlink { .. } | NodeRecord::PendingSymlink { .. } => NodeKind::Symlink,
         }
     }
@@ -192,6 +199,7 @@ impl NodeRecord {
             NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
                 mode.to_unix_mode()
             }
+            NodeRecord::Gitlink { .. } => FileMode::Normal.to_unix_mode(),
             NodeRecord::Symlink { .. } | NodeRecord::PendingSymlink { .. } => {
                 FileMode::Symlink.to_unix_mode()
             }
@@ -282,6 +290,7 @@ impl Inodes {
                 NodeId(id)
             }
             NodeRecord::File { path, .. }
+            | NodeRecord::Gitlink { path, .. }
             | NodeRecord::PendingFile { path, .. }
             | NodeRecord::PendingSymlink { path } => {
                 if let Some(&id) = self.by_path.get(path) {
@@ -342,6 +351,7 @@ impl Inodes {
                     }
                 }
                 NodeRecord::File { path, .. }
+                | NodeRecord::Gitlink { path, .. }
                 | NodeRecord::PendingFile { path, .. }
                 | NodeRecord::PendingSymlink { path } => {
                     if self.by_path.get(&path) == Some(&id.0) {
@@ -914,12 +924,19 @@ fn prewarm_run<S: ObjectStore + 'static>(
             continue;
         };
         for entry in tree.entries() {
-            match entry.entry_type {
-                EntryType::Tree => queue.push_back(entry.hash),
+            match entry.entry_type() {
+                EntryType::Tree => {
+                    if let Some(hash) = entry.tree_hash() {
+                        queue.push_back(hash);
+                    }
+                }
                 EntryType::Blob | EntryType::Symlink => {
-                    hashes.push(entry.hash);
+                    if let Some(hash) = entry.content_hash() {
+                        hashes.push(hash);
+                    }
                     stats.hashes_discovered += 1;
                 }
+                EntryType::Gitlink => {}
             }
         }
     }
@@ -1246,45 +1263,60 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     }
 
     fn entry_from_tree_entry(&self, parent_path: &Path, tree_entry: &TreeEntry) -> Result<Entry> {
-        let entry_path = join_child(parent_path, &tree_entry.name);
-        let (kind, size, unix_mode, record) = match tree_entry.entry_type {
-            EntryType::Tree => {
+        let entry_path = join_child(parent_path, tree_entry.name());
+        let (kind, size, unix_mode, record) = match tree_entry.target() {
+            TreeEntryTarget::Tree { hash } => {
                 // We deliberately load the subtree here so the entry
                 // count (the conventional "size" for a directory)
                 // matches what userspace expects from `stat`.
-                let subtree = self.load_tree(&tree_entry.hash)?;
+                let subtree = self.load_tree(hash)?;
                 (
                     NodeKind::Directory,
                     subtree.entries().len() as u64,
                     DIR_UNIX_MODE,
                     NodeRecord::Dir {
-                        tree: tree_entry.hash,
+                        tree: *hash,
                         path: entry_path,
                     },
                 )
             }
-            EntryType::Blob => {
-                let size = self.blob_size(&tree_entry.hash)?;
-                let mode = tree_entry.mode;
+            TreeEntryTarget::Blob { hash, executable } => {
+                let size = self.blob_size(hash)?;
+                let mode = if *executable {
+                    FileMode::Executable
+                } else {
+                    FileMode::Normal
+                };
                 (
                     kind_for_mode(mode),
                     size,
                     mode.to_unix_mode(),
                     NodeRecord::File {
-                        blob: tree_entry.hash,
+                        blob: *hash,
                         mode,
                         path: entry_path,
                     },
                 )
             }
-            EntryType::Symlink => {
-                let size = self.blob_size(&tree_entry.hash)?;
+            TreeEntryTarget::Symlink { hash } => {
+                let size = self.blob_size(hash)?;
                 (
                     NodeKind::Symlink,
                     size,
                     FileMode::Symlink.to_unix_mode(),
-                    NodeRecord::Symlink {
-                        blob: tree_entry.hash,
+                    NodeRecord::Symlink { blob: *hash },
+                )
+            }
+            TreeEntryTarget::Gitlink { target } => {
+                let placeholder = gitlink_placeholder_bytes(target);
+                let size = placeholder.len() as u64;
+                (
+                    NodeKind::File,
+                    size,
+                    FileMode::Normal.to_unix_mode(),
+                    NodeRecord::Gitlink {
+                        placeholder,
+                        path: entry_path,
                     },
                 )
             }
@@ -1292,7 +1324,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         let node = self.intern(record);
         Ok(Entry {
             node,
-            name: OsString::from(&tree_entry.name),
+            name: OsString::from(tree_entry.name()),
             kind,
             size,
             unix_mode,
@@ -1372,9 +1404,9 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// for the root or for nodes that don't carry a path identity.
     fn path_of(&self, record: &NodeRecord) -> Option<PathBuf> {
         match record {
-            NodeRecord::PendingFile { path, .. } | NodeRecord::File { path, .. } => {
-                Some(path.clone())
-            }
+            NodeRecord::PendingFile { path, .. }
+            | NodeRecord::File { path, .. }
+            | NodeRecord::Gitlink { path, .. } => Some(path.clone()),
             NodeRecord::Dir { path, .. } | NodeRecord::PendingDir { path } => Some(path.clone()),
             NodeRecord::PendingSymlink { path } => Some(path.clone()),
             _ => None,
@@ -1851,6 +1883,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                 if let Some(
                     NodeRecord::PendingFile { path, .. }
                     | NodeRecord::File { path, .. }
+                    | NodeRecord::Gitlink { path, .. }
                     | NodeRecord::PendingSymlink { path }
                     | NodeRecord::Dir { path, .. }
                     | NodeRecord::PendingDir { path },
@@ -1885,6 +1918,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                         if let Some(
                             NodeRecord::PendingFile { path, .. }
                             | NodeRecord::File { path, .. }
+                            | NodeRecord::Gitlink { path, .. }
                             | NodeRecord::PendingSymlink { path }
                             | NodeRecord::Dir { path, .. }
                             | NodeRecord::PendingDir { path },
@@ -2173,20 +2207,26 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// entry exists.
     fn captured_file_at(&self, path: &Path) -> Result<(ContentHash, FileMode, u64)> {
         let entry = self.captured_tree_entry(path)?;
-        let mode = entry.mode;
-        let size = self.blob_size(&entry.hash)?;
-        Ok((entry.hash, mode, size))
+        let Some(hash) = entry.blob_hash() else {
+            return Err(MountError::InvalidArgument(format!(
+                "{} is not a mutable file in the captured tree",
+                path.display()
+            )));
+        };
+        let mode = entry.mode();
+        let size = self.blob_size(&hash)?;
+        Ok((hash, mode, size))
     }
 
     fn captured_symlink_at(&self, path: &Path) -> Result<ContentHash> {
         let entry = self.captured_tree_entry(path)?;
-        if !matches!(entry.entry_type, objects::object::EntryType::Symlink) {
+        let Some(hash) = entry.symlink_hash() else {
             return Err(MountError::InvalidArgument(format!(
                 "{} is not a symlink in the captured tree",
                 path.display()
             )));
-        }
-        Ok(entry.hash)
+        };
+        Ok(hash)
     }
 
     fn captured_tree_entry(&self, path: &Path) -> Result<TreeEntry> {
@@ -2209,7 +2249,10 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             if !e.is_tree() {
                 return Err(MountError::NotADirectory(d.to_string()));
             }
-            tree = self.load_tree(&e.hash)?;
+            let Some(hash) = e.tree_hash() else {
+                return Err(MountError::NotADirectory(d.to_string()));
+            };
+            tree = self.load_tree(&hash)?;
         }
         let entry = tree
             .get(leaf)
@@ -3330,6 +3373,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     }
                 }
             }
+            NodeRecord::Gitlink { placeholder, .. } => Ok(copy_into(placeholder, offset, buf)),
             NodeRecord::Symlink { blob } => {
                 let bytes = self.load_blob_bytes(blob)?;
                 Ok(copy_into(&bytes, offset, buf))
@@ -3531,7 +3575,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
 
         // Pass 1: captured-tree entries, with pending overlay.
         for tree_entry in tree.entries() {
-            let entry_path = join_child(&parent_path, &tree_entry.name);
+            let entry_path = join_child(&parent_path, tree_entry.name());
             // Whole-subtree rmdir on a captured dir entry.
             {
                 let pending = self.inner.pending.lock_or_poisoned();
@@ -3543,16 +3587,16 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                 Some(PendingHit::Tombstone) => continue,
                 Some(hit) => {
                     if let Some(entry) =
-                        self.entry_from_pending_hit(hit, &entry_path, OsStr::new(&tree_entry.name))
+                        self.entry_from_pending_hit(hit, &entry_path, OsStr::new(tree_entry.name()))
                     {
-                        by_name.insert(tree_entry.name.clone(), entry);
+                        by_name.insert(tree_entry.name().to_string(), entry);
                     }
                     continue;
                 }
                 None => {}
             }
             let entry = self.entry_from_tree_entry(&parent_path, tree_entry)?;
-            by_name.insert(tree_entry.name.clone(), entry);
+            by_name.insert(tree_entry.name().to_string(), entry);
         }
 
         // Pass 2: pending-only children of `parent_path` (mount-only
@@ -3697,6 +3741,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     None => (self.blob_size(blob)?, 1),
                 }
             }
+            NodeRecord::Gitlink { placeholder, .. } => (placeholder.len() as u64, 1),
             NodeRecord::Symlink { blob } => (self.blob_size(blob)?, 1),
             NodeRecord::PendingFile { path, .. } => {
                 // Orphan branch: a rename-displaced or
@@ -4256,7 +4301,7 @@ fn apply_pending_to_tree(
         let mut entries: BTreeMap<String, TreeEntry> = captured
             .entries()
             .iter()
-            .map(|e| (e.name.clone(), e.clone()))
+            .map(|e| (e.name().to_string(), e.clone()))
             .collect();
 
         // Tombstones first so deletions don't get re-added by other
@@ -4299,15 +4344,23 @@ fn apply_pending_to_tree(
             // subdir under this name, load it; otherwise start from
             // an empty tree.
             let child_captured = match captured.get(name) {
-                Some(e) if e.is_tree() => store
-                    .get_tree(&e.hash)
-                    .map_err(MountError::Store)?
-                    .ok_or_else(|| {
+                Some(e) if e.is_tree() => {
+                    let hash = e.tree_hash().ok_or_else(|| {
                         MountError::Store(objects::error::HeddleError::MissingObject {
                             object_type: "tree".to_string(),
-                            id: e.hash.to_string(),
+                            id: "<non-tree>".to_string(),
                         })
-                    })?,
+                    })?;
+                    store
+                        .get_tree(&hash)
+                        .map_err(MountError::Store)?
+                        .ok_or_else(|| {
+                            MountError::Store(objects::error::HeddleError::MissingObject {
+                                object_type: "tree".to_string(),
+                                id: hash.to_string(),
+                            })
+                        })?
+                }
                 _ => Tree::new(),
             };
             let force_empty = v.explicit_empty.contains(name);

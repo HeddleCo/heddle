@@ -389,41 +389,47 @@ fn apply_commit(
                     updated_entries.push(merged);
                     continue;
                 }
-                if existing.entry_type == new.entry_type
-                    && existing.hash == new.hash
+                if existing.entry_type() == new.entry_type()
+                    && existing.content_hash().is_some()
+                    && existing.content_hash() == new.content_hash()
                     && let Some(mode) = merge_file_mode(&parent, &existing, &new)
                 {
-                    let mut merged = new;
-                    merged.mode = mode;
+                    let merged = new.with_mode(mode)?;
                     updated_entries.push(merged);
                     continue;
                 }
-                if parent.is_blob()
-                    && existing.is_blob()
-                    && new.is_blob()
-                    && existing.hash != parent.hash
-                    && new.hash != parent.hash
-                    && existing.hash != new.hash
+                let blob_hashes = match (parent.blob_hash(), existing.blob_hash(), new.blob_hash())
                 {
+                    (Some(parent_hash), Some(existing_hash), Some(new_hash))
+                        if existing_hash != parent_hash
+                            && new_hash != parent_hash
+                            && existing_hash != new_hash =>
+                    {
+                        Some((parent_hash, existing_hash, new_hash))
+                    }
+                    _ => None,
+                };
+                if let Some((parent_hash, existing_hash, new_hash)) = blob_hashes {
                     if let Some(merged_hash) = try_auto_merge_textual_change(
                         repo,
-                        &parent.hash,
-                        &existing.hash,
-                        &new.hash,
+                        &parent_hash,
+                        &existing_hash,
+                        &new_hash,
                         &path,
                     )? && let Some(mode) = merge_file_mode(&parent, &existing, &new)
                     {
-                        let mut merged = new;
-                        merged.hash = merged_hash;
-                        merged.mode = mode;
+                        let merged = TreeEntry::file(
+                            new.name().to_string(),
+                            merged_hash,
+                            mode == FileMode::Executable,
+                        )?;
                         updated_entries.push(merged);
                         continue;
                     }
-                    if blob_contains_both(repo, &new.hash, &existing.hash, &parent.hash)?
+                    if blob_contains_both(repo, &new_hash, &existing_hash, &parent_hash)?
                         && let Some(mode) = merge_file_mode(&parent, &existing, &new)
                     {
-                        let mut merged = new;
-                        merged.mode = mode;
+                        let merged = new.with_mode(mode)?;
                         updated_entries.push(merged);
                         continue;
                     }
@@ -686,13 +692,13 @@ fn compute_tree_diff(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for entry in new_tree.entries() {
-        seen.insert(entry.name.clone());
-        let old_entry = old_tree.entries().iter().find(|e| e.name == entry.name);
+        seen.insert(entry.name().to_string());
+        let old_entry = old_tree.entries().iter().find(|e| e.name() == entry.name());
         match old_entry {
             Some(old) => {
                 if !same_tree_entry(old, entry) {
                     changes.push((
-                        entry.name.clone(),
+                        entry.name().to_string(),
                         TreeChange::Modified {
                             old: old.clone(),
                             new: entry.clone(),
@@ -701,14 +707,14 @@ fn compute_tree_diff(
                 }
             }
             None => {
-                changes.push((entry.name.clone(), TreeChange::Added(entry.clone())));
+                changes.push((entry.name().to_string(), TreeChange::Added(entry.clone())));
             }
         }
     }
 
     for entry in old_tree.entries() {
-        if !seen.contains(&entry.name) {
-            changes.push((entry.name.clone(), TreeChange::Deleted));
+        if !seen.contains(entry.name()) {
+            changes.push((entry.name().to_string(), TreeChange::Deleted));
         }
     }
 
@@ -717,7 +723,7 @@ fn compute_tree_diff(
 
 fn find_entry_in_tree(tree: &objects::object::Tree, name: &str) -> Option<TreeEntry> {
     for entry in tree.entries() {
-        if entry.name == name {
+        if entry.name() == name {
             return Some(entry.clone());
         }
     }
@@ -725,7 +731,7 @@ fn find_entry_in_tree(tree: &objects::object::Tree, name: &str) -> Option<TreeEn
 }
 
 fn same_tree_entry(left: &TreeEntry, right: &TreeEntry) -> bool {
-    left.entry_type == right.entry_type && left.mode == right.mode && left.hash == right.hash
+    left.name() == right.name() && left.target() == right.target()
 }
 
 fn merge_mode_content_orthogonal_change(
@@ -737,19 +743,15 @@ fn merge_mode_content_orthogonal_change(
         return None;
     }
 
-    let current_content_unchanged = current.hash == parent.hash;
-    let incoming_content_unchanged = incoming.hash == parent.hash;
-    let current_mode_unchanged = current.mode == parent.mode;
-    let incoming_mode_unchanged = incoming.mode == parent.mode;
+    let current_content_unchanged = current.blob_hash() == parent.blob_hash();
+    let incoming_content_unchanged = incoming.blob_hash() == parent.blob_hash();
+    let current_mode_unchanged = current.mode() == parent.mode();
+    let incoming_mode_unchanged = incoming.mode() == parent.mode();
 
     if current_content_unchanged && incoming_mode_unchanged {
-        let mut entry = incoming.clone();
-        entry.mode = current.mode;
-        Some(entry)
+        incoming.with_mode(current.mode()).ok()
     } else if incoming_content_unchanged && current_mode_unchanged {
-        let mut entry = current.clone();
-        entry.mode = incoming.mode;
-        Some(entry)
+        current.with_mode(incoming.mode()).ok()
     } else {
         None
     }
@@ -760,12 +762,12 @@ fn merge_file_mode(
     current: &TreeEntry,
     incoming: &TreeEntry,
 ) -> Option<FileMode> {
-    if current.mode == incoming.mode {
-        Some(current.mode)
-    } else if current.mode == parent.mode {
-        Some(incoming.mode)
-    } else if incoming.mode == parent.mode {
-        Some(current.mode)
+    if current.mode() == incoming.mode() {
+        Some(current.mode())
+    } else if current.mode() == parent.mode() {
+        Some(incoming.mode())
+    } else if incoming.mode() == parent.mode() {
+        Some(current.mode())
     } else {
         None
     }
@@ -779,15 +781,15 @@ fn apply_changes_to_tree(
     let mut entries: Vec<objects::object::TreeEntry> = base_tree.entries().to_vec();
 
     for name in deletions {
-        entries.retain(|e| &e.name != name);
+        entries.retain(|e| e.name() != name);
     }
 
     for update in updates {
-        entries.retain(|e| e.name != update.name);
+        entries.retain(|e| e.name() != update.name());
         entries.push(update.clone());
     }
 
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries.sort_by(|a, b| a.name().cmp(b.name()));
 
     Ok(objects::object::Tree::from_entries(entries))
 }

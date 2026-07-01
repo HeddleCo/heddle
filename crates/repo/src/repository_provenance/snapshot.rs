@@ -86,10 +86,13 @@ impl Repository {
         let mut entries = Vec::new();
 
         for entry in current_tree.entries() {
-            let entry_path = path.join(&entry.name);
-            match entry.entry_type {
+            let entry_path = path.join(entry.name());
+            match entry.entry_type() {
                 EntryType::Tree => {
-                    let Some(subtree) = self.store.get_tree(&entry.hash)? else {
+                    let Some(tree_hash) = entry.tree_hash() else {
+                        continue;
+                    };
+                    let Some(subtree) = self.store.get_tree(&tree_hash)? else {
                         continue;
                     };
                     // For each parent, descend into the same-name
@@ -98,13 +101,16 @@ impl Repository {
                     // of the recursion.
                     let mut parent_subtrees: Vec<ParentRef<'_>> = Vec::new();
                     for parent in parents {
-                        let Some(child_entry) = parent.tree.get(&entry.name) else {
+                        let Some(child_entry) = parent.tree.get(entry.name()) else {
                             continue;
                         };
                         if !child_entry.is_tree() {
                             continue;
                         }
-                        let Some(subtree_obj) = self.store.get_tree(&child_entry.hash)? else {
+                        let Some(child_tree_hash) = child_entry.tree_hash() else {
+                            continue;
+                        };
+                        let Some(subtree_obj) = self.store.get_tree(&child_tree_hash)? else {
                             continue;
                         };
                         parent_subtrees.push(ParentRef {
@@ -119,7 +125,7 @@ impl Repository {
                         &parent_subtrees,
                         current_state,
                     )? {
-                        entries.push(TreeEntry::directory(entry.name.clone(), sub_hash)?);
+                        entries.push(TreeEntry::directory(entry.name(), sub_hash)?);
                     }
                 }
                 EntryType::Blob => {
@@ -129,10 +135,10 @@ impl Repository {
                         parents,
                         current_state,
                     )? {
-                        entries.push(TreeEntry::file(entry.name.clone(), hash, false)?);
+                        entries.push(TreeEntry::file(entry.name(), hash, false)?);
                     }
                 }
-                EntryType::Symlink => {}
+                EntryType::Symlink | EntryType::Gitlink => {}
             }
         }
 
@@ -152,7 +158,10 @@ impl Repository {
         parents: &[ParentRef<'_>],
         current_state: &State,
     ) -> Result<Option<ContentHash>> {
-        let Some(current_blob) = self.store.get_blob(&current_entry.hash)? else {
+        let Some(current_hash) = current_entry.blob_hash() else {
+            return Ok(None);
+        };
+        let Some(current_blob) = self.store.get_blob(&current_hash)? else {
             return Ok(None);
         };
         let Some(current_lines) = split_text_lines(current_blob.content()) else {
@@ -171,7 +180,10 @@ impl Repository {
             if !parent_entry.is_blob() {
                 continue;
             }
-            let parent_blob = self.store.get_blob(&parent_entry.hash)?;
+            let Some(parent_hash) = parent_entry.blob_hash() else {
+                continue;
+            };
+            let parent_blob = self.store.get_blob(&parent_hash)?;
 
             // Pull from the parent's stored provenance root if we have
             // one, otherwise synthesize a single-origin record for the
@@ -186,7 +198,7 @@ impl Repository {
                 None => synthesize_file_provenance_from_blob(parent_blob.as_ref(), parent.state),
             };
             if let Some(p) = provenance {
-                parent_blob_hashes.push(parent_entry.hash);
+                parent_blob_hashes.push(parent_hash);
                 parent_provenances.push(p);
             }
         }
@@ -196,7 +208,7 @@ impl Repository {
         // provenance is also the answer for this file at this state.
         // First match wins (deterministic order = parent order).
         for (i, parent_blob_hash) in parent_blob_hashes.iter().enumerate() {
-            if *parent_blob_hash == current_entry.hash {
+            if *parent_blob_hash == current_hash {
                 return Ok(Some(self.put_file_provenance(&parent_provenances[i])?));
             }
         }
@@ -206,7 +218,7 @@ impl Repository {
         if parent_provenances.is_empty() {
             let current_origin = self.state_origin(current_state);
             let provenance =
-                build_single_origin_provenance(current_entry.hash, &current_lines, current_origin);
+                build_single_origin_provenance(current_hash, &current_lines, current_origin);
             return Ok(Some(self.put_file_provenance(&provenance)?));
         }
 
@@ -214,7 +226,7 @@ impl Repository {
         // through cleanly to the 1-parent case (one source means
         // standard snapshot diff) and the 2+-parent case (union).
         let merged = self.merge_line_provenance_n_parents(
-            current_entry.hash,
+            current_hash,
             &current_lines,
             &parent_provenances,
             self.state_origin(current_state),

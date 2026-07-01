@@ -64,6 +64,8 @@ use std::{
     path::PathBuf,
 };
 
+use heddle_format::compression::CompressionConfig;
+
 use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
 
 /// How many bytes to reserve for the compressed-size varint in the
@@ -75,7 +77,7 @@ use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_cont
 const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{Result, StoreError},
 };
 
 /// Number of buckets per id variant. 256 = one bucket per first byte

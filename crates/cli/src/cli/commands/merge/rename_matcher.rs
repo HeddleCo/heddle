@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use heddle_format::delta::DeltaEncoder;
 use objects::{
-    delta::DeltaEncoder,
     object::{ContentHash, EntryType, Tree},
     store::ObjectStore,
 };
@@ -101,20 +101,25 @@ pub(crate) fn flatten_tree(
 
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
 
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Blob | EntryType::Symlink => {
-                result.insert(path, (entry.hash, entry.entry_type));
+                if let Some(hash) = entry.leaf_content_hash() {
+                    result.insert(path, (hash, entry.entry_type()));
+                }
             }
             EntryType::Tree => {
-                if let Some(subtree) = store.get_tree(&entry.hash)? {
+                if let Some(hash) = entry.tree_hash()
+                    && let Some(subtree) = store.get_tree(&hash)?
+                {
                     result.extend(flatten_tree(store, &subtree, &path)?);
                 }
             }
+            EntryType::Gitlink => {}
         }
     }
 

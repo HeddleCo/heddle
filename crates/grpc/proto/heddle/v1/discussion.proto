@@ -21,7 +21,7 @@ message OpenDiscussionRequest {
   bytes state_id = 2;
   PathSymbolRef anchor = 3;
   string body = 4;
-  // Optional override; server defaults to the namespace policy.
+  // Optional override; empty uses the configured discussion visibility policy.
   string visibility = 5;
   string thread_ref = 6;
   string client_operation_id = 15;

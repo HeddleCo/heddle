@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use oplog::{OpLogBackend, OpRecord};
 
-use super::*;
+use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
 /// but the operation-status layer still detects a lingering `BISECT_STATE`
@@ -1344,27 +1344,23 @@ fn git_overlay_matrix_adopt_initializes_imports_and_verifies() {
 
 #[test]
 fn git_overlay_matrix_verify_reads_git_tags_created_after_adoption() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    let fixture = GitOverlayFixture::adopted_main();
 
-    git(&["tag", "v2.0.0"], temp.path());
+    fixture.git(&["tag", "v2.0.0"]);
 
-    let verify = json(temp.path(), &["verify", "--output", "json"]);
+    let verify = json(fixture.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["verified"], true);
     assert_eq!(verify["status"], "clean");
     assert_eq!(verify["mapping_state"], "clean");
     assert_eq!(verify["import_state"], "clean");
     assert_eq!(verify["recommended_action"], Value::Null);
 
-    let status = json(temp.path(), &["status", "--output", "json"]);
+    let status = json(fixture.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["status"], "clean");
     assert_eq!(status["recommended_action"], Value::Null);
 
     let adopted = json(
-        temp.path(),
+        fixture.path(),
         &["adopt", "--ref", "v2.0.0", "--output", "json"],
     );
     assert_eq!(adopted["tags_synced"], 1);
@@ -1427,21 +1423,17 @@ fn git_overlay_matrix_selective_branch_adopt_surfaces_remaining_tag_import() {
 
 #[test]
 fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
+    let fixture = GitOverlayFixture::adopted_main();
 
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-    let adopted = json(temp.path(), &["show", "HEAD", "--output", "json"]);
+    let adopted = json(fixture.path(), &["show", "HEAD", "--output", "json"]);
     let adopted_change = adopted["change_id"]
         .as_str()
         .expect("adopted state should have short change id")
         .to_string();
 
-    git(&["checkout", "-b", "scratch"], temp.path());
+    fixture.git(&["checkout", "-b", "scratch"]);
 
-    let status = json(temp.path(), &["status", "--output", "json"]);
+    let status = json(fixture.path(), &["status", "--output", "json"]);
     assert_eq!(status["thread"], "scratch");
     assert_eq!(status["verification"]["verified"], true);
     assert_eq!(status["verification"]["status"], "clean");
@@ -1455,7 +1447,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
     assert!(status["state"]["change_id"].as_str().is_some());
     assert!(status["current_state"].as_str().is_some());
 
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = fixture.heddle(&["status", "--output", "text"]).unwrap();
     assert!(
         status_text.contains("Heddle status for scratch")
             && status_text.contains("Checkout: Git branch checkout")
@@ -1466,16 +1458,16 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
     );
 
     let bridge = json(
-        temp.path(),
+        fixture.path(),
         &["bridge", "git", "status", "--output", "json"],
     );
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
 
-    std::fs::write(temp.path().join("scratch.txt"), "scratch\n").unwrap();
-    heddle(&["capture", "-m", "scratch work"], Some(temp.path())).unwrap();
-    let captured = json(temp.path(), &["show", "HEAD", "--output", "json"]);
+    std::fs::write(fixture.path().join("scratch.txt"), "scratch\n").unwrap();
+    fixture.heddle(&["capture", "-m", "scratch work"]).unwrap();
+    let captured = json(fixture.path(), &["show", "HEAD", "--output", "json"]);
     assert!(
         captured["parents"]
             .as_array()
@@ -1488,15 +1480,13 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 
 #[test]
 fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-    git_commit_all(temp.path(), "seed");
+    let fixture = GitOverlayFixture::adopted_main();
+    std::fs::write(fixture.path().join("README.md"), "changed\n").unwrap();
 
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("base.txt"), "changed\n").unwrap();
-
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
+    let commit = json(
+        fixture.path(),
+        &["--output", "json", "commit", "-m", "change"],
+    );
     assert_eq!(commit["output_kind"], "commit");
     assert!(commit["change_id"].as_str().is_some());
     assert!(commit["git_commit"].as_str().is_some());
@@ -1507,9 +1497,9 @@ fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
         Value::Null,
         "commit after single-ref adoption should checkpoint instead of falling into needs_import: {commit}"
     );
-    assert_eq!(git_status_short(temp.path()), "");
+    assert_eq!(git_status_short(fixture.path()), "");
 
-    let verify = json(temp.path(), &["verify", "--output", "json"]);
+    let verify = json(fixture.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["verified"], true);
     assert_eq!(verify["status"], "clean");
     assert_eq!(verify["recommended_action"], Value::Null);
@@ -1539,32 +1529,16 @@ fn git_overlay_matrix_ready_is_clean_after_direct_backed_init() {
 
 #[test]
 fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actionable() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle_adopt(temp.path());
-
-    let started = json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/ready-verify",
-            "--workspace",
-            "materialized",
-        ],
-    );
-    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread_path.join("feature.txt"), "ready work\n").unwrap();
+    let fixture =
+        GitOverlayFixture::adopted_main().with_ready_materialized_thread("feature/ready-verify");
+    let thread_path = fixture.ready_thread_path().to_path_buf();
 
     let ready = json(
         &thread_path,
         &["--output", "json", "ready", "-m", "ready thread work"],
     );
     assert_eq!(ready["status"], "completed");
-    let repo_path = canonical_path_string(temp.path());
+    let repo_path = canonical_path_string(fixture.path());
     let parent_land_action = format!(
         "heddle --repo {} land --thread feature/ready-verify --no-push",
         repo_path
@@ -1599,13 +1573,13 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     );
     assert_verify_check_rows(&ready["verification"]);
 
-    let parent_status_before_preview = json(temp.path(), &["--output", "json", "status"]);
+    let parent_status_before_preview = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
         parent_status_before_preview["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
         "parent status should keep ready workflow actionable: {parent_status_before_preview}"
     );
-    let thread_list_before_preview = json(temp.path(), &["--output", "json", "thread", "list"]);
+    let thread_list_before_preview = json(fixture.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
         thread_list_before_preview["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
@@ -1616,7 +1590,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list top-level action should be directly executable: {thread_list_before_preview}"
     );
-    let workspace_before_preview = json(temp.path(), &["--output", "json", "status"]);
+    let workspace_before_preview = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
         workspace_before_preview["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
@@ -1649,7 +1623,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     );
 
     let thread_show_before_preview = json(
-        temp.path(),
+        fixture.path(),
         &["--output", "json", "thread", "show", "feature/ready-verify"],
     );
     assert_eq!(
@@ -1658,7 +1632,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "thread show should follow the canonical land path after ready: {thread_show_before_preview}"
     );
     let preview = json(
-        temp.path(),
+        fixture.path(),
         &[
             "--output",
             "json",
@@ -1672,7 +1646,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "heddle land --thread feature/ready-verify --no-push"
     );
     let thread_show_after_preview = json(
-        temp.path(),
+        fixture.path(),
         &["--output", "json", "thread", "show", "feature/ready-verify"],
     );
     assert_eq!(
@@ -1696,7 +1670,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "Workflow check should match the established land path: {thread_show_after_preview}"
     );
     let ready_after_preview = json(&thread_path, &["--output", "json", "ready"]);
-    let repo_path = canonical_path_string(temp.path());
+    let repo_path = canonical_path_string(fixture.path());
     let parent_land_action = format!(
         "heddle --repo {} land --thread feature/ready-verify --no-push",
         repo_path
@@ -1710,13 +1684,13 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     // its recommendation lacks the parent --repo prefix the original
     // ready built. The top-level assertion above already proves the
     // land path is preserved end-to-end.
-    let parent_status_after_preview = json(temp.path(), &["--output", "json", "status"]);
+    let parent_status_after_preview = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
         parent_status_after_preview["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
         "parent status should keep previewed workflow actionable: {parent_status_after_preview}"
     );
-    let thread_list = json(temp.path(), &["--output", "json", "thread", "list"]);
+    let thread_list = json(fixture.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
         thread_list["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "thread list top-level action should match verify after preview: {thread_list}"
@@ -1736,7 +1710,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list item actions should be directly executable: {thread_list}"
     );
-    let workspace = json(temp.path(), &["--output", "json", "status"]);
+    let workspace = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
         workspace["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "workspace top-level action should match verify after preview: {workspace}"
@@ -2632,7 +2606,7 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     assert_eq!(
         logical_operations.len(),
         2,
-        "compat commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
+        "git-adapter commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
     );
     assert!(
         logical_operations.iter().any(|op| op["description"]
@@ -4932,7 +4906,11 @@ fn git_overlay_matrix_import_marks_branch_tip_history_as_imported() {
     );
     assert_eq!(before["history_imported"], false);
 
-    heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let after = json(
         temp.path(),
@@ -5218,7 +5196,11 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     assert_eq!(before["git_overlay_import_hint"], Value::Null);
     assert_eq!(before["verification"]["status"], "needs_init");
 
-    let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "bridge import should report branch sync activity: {import_output}"
@@ -7191,81 +7173,32 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
 
 #[test]
 fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let local = temp.path().join("local");
-    let peer = temp.path().join("peer");
-    std::fs::create_dir_all(&local).unwrap();
-    let status = Command::new("git")
-        .args([
-            "init",
-            "--bare",
-            "--initial-branch=main",
-            origin.to_str().unwrap(),
-        ])
-        .status()
-        .expect("git init --bare should run");
-    assert!(status.success());
-    init_git_repo_with_branch(&local, "main");
-    std::fs::write(local.join("README.md"), "base\n").unwrap();
-    git_commit_all(&local, "base");
-    git(
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-        &local,
-    );
-    git(&["push", "-u", "origin", "main"], &local);
-    heddle(&["adopt", "--ref", "main"], Some(&local)).expect("adopt local");
-
-    git(
-        &["clone", origin.to_str().unwrap(), peer.to_str().unwrap()],
-        temp.path(),
-    );
-    git(&["config", "user.name", "Peer"], &peer);
-    git(&["config", "user.email", "peer@example.com"], &peer);
-    std::fs::write(peer.join("README.md"), "base\npeer\n").unwrap();
-    git_commit_all(&peer, "peer");
-    git(&["push", "origin", "main"], &peer);
-    heddle(&["fetch", "origin"], Some(&local)).expect("fetch upstream drift");
-
-    let feature_path = temp.path().join("isolated");
-    json(
-        &local,
-        &[
-            "--output",
-            "json",
-            "start",
-            "isolated",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("LOCAL.md"), "local thread\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &["--output", "json", "ready", "-m", "isolated ready"],
-    );
+    let fixture = GitOverlayFixture::adopted_main()
+        .with_bare_origin()
+        .with_remote_behind()
+        .with_ready_materialized_thread("isolated");
+    let feature_path = fixture.ready_thread_path().to_path_buf();
+    let ready = json(&feature_path, &["--output", "json", "ready"]);
     assert_eq!(ready["status"], "completed");
-    let before_status = json(&local, &["--output", "json", "status"]);
+    let before_status = json(fixture.path(), &["--output", "json", "status"]);
     assert_eq!(
         before_status["verification"]["remote_drift"],
         "remote_behind"
     );
     let before_state = before_status["current_state"].clone();
-    let before_git = git_stdout(&local, &["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(&local);
+    let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);
+    let before_refs = git_ref_snapshot(fixture.path());
 
-    let land = heddle_output(
-        &[
+    let land = fixture
+        .heddle_output(&[
             "--output",
             "json",
             "land",
             "--thread",
             "isolated",
             "--no-push",
-        ],
-        Some(&local),
-    )
-    .expect("invoke land --no-push with known upstream drift");
+        ])
+        .expect("invoke land --no-push with known upstream drift");
     assert!(
         land.status.success(),
         "land should pull upstream, refresh the thread, and land: stdout={} stderr={}",
@@ -7287,14 +7220,14 @@ fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
         "land should report the automatic remote/thread sync step: {land}"
     );
 
-    let after_status = json(&local, &["--output", "json", "status"]);
+    let after_status = json(fixture.path(), &["--output", "json", "status"]);
     assert_ne!(
         after_status["current_state"], before_state,
         "successful land should advance the parent Heddle thread"
     );
-    assert_ne!(git_stdout(&local, &["rev-parse", "HEAD"]), before_git);
+    assert_ne!(fixture.git_stdout(&["rev-parse", "HEAD"]), before_git);
     assert!(
-        git_ref_snapshot(&local) != before_refs,
+        git_ref_snapshot(fixture.path()) != before_refs,
         "successful land should move visible Git refs"
     );
     assert_eq!(
@@ -7305,47 +7238,24 @@ fn git_overlay_matrix_land_no_push_syncs_remote_behind_before_landing() {
 
 #[test]
 fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
-    git_commit_all(temp.path(), "base");
-    heddle_adopt(temp.path());
+    let fixture =
+        GitOverlayFixture::adopted_main().with_ready_materialized_thread("feature/index-lock");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);
+    let before_refs = git_ref_snapshot(fixture.path());
+    let fixture = fixture.with_index_lock();
 
-    let feature_path = temp.path().with_extension("feature-index-lock");
-    json(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "start",
-            "feature/index-lock",
-            "--path",
-            feature_path.to_str().unwrap(),
-        ],
-    );
-    std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
-    let ready = json(
-        &feature_path,
-        &["--output", "json", "ready", "-m", "feature index lock"],
-    );
-    assert_eq!(ready["status"], "completed");
-    let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
-    let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let before_refs = git_ref_snapshot(temp.path());
-    std::fs::write(temp.path().join(".git/index.lock"), "stale lock").unwrap();
-
-    let land = heddle_output(
-        &[
+    let land = fixture
+        .heddle_output(&[
             "--output",
             "json",
             "land",
             "--thread",
             "feature/index-lock",
             "--no-push",
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke land with index lock");
+        ])
+        .expect("invoke land with index lock");
     assert!(
         !land.status.success(),
         "land should fail before landing when checkpoint preflight sees index lock"
@@ -7357,12 +7267,12 @@ fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
     assert_eq!(envelope["kind"], "land_checkpoint_preflight_blocked");
     assert_eq!(envelope["primary_command"], "heddle status");
     assert_eq!(
-        json(temp.path(), &["--output", "json", "status"])["current_state"],
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
         before_state,
         "failed land must not fast-forward Heddle state"
     );
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
-    assert_eq!(git_ref_snapshot(temp.path()), before_refs);
+    assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), before_git);
+    assert_eq!(git_ref_snapshot(fixture.path()), before_refs);
 }
 
 #[test]
@@ -7579,7 +7489,11 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     git_commit_all(temp.path(), "alpha one");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "bridge import should report branch sync activity: {import_output}"
@@ -7625,7 +7539,11 @@ fn git_overlay_matrix_imported_branch_delete_and_recreate_same_name_reappears_in
     git_commit_all(temp.path(), "first reborn");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["branch", "-D", "support/reborn"], temp.path());
     git(&["checkout", "-b", "support/reborn"], temp.path());
@@ -8198,7 +8116,11 @@ fn git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint() {
     git_commit_all(temp.path(), "support base");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["checkout", "support/merge-drift"], temp.path());
     git(&["checkout", "-b", "support/merge-drift-side"], temp.path());

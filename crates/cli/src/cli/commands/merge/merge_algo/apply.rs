@@ -49,13 +49,10 @@ pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     let current_entries: HashMap<&str, &TreeEntry> = current_tree
         .entries()
         .iter()
-        .map(|e| (e.name.as_str(), e))
+        .map(|e| (e.name(), e))
         .collect();
-    let merged_entries: HashMap<&str, &TreeEntry> = tree
-        .entries()
-        .iter()
-        .map(|e| (e.name.as_str(), e))
-        .collect();
+    let merged_entries: HashMap<&str, &TreeEntry> =
+        tree.entries().iter().map(|e| (e.name(), e)).collect();
 
     // Drop tree-entries that don't survive into the merged tree.
     for (name, current) in &current_entries {
@@ -72,7 +69,7 @@ pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     // `fs::write` after `remove_file` no-ops on the dir).
     for (name, merged) in &merged_entries {
         if let Some(current) = current_entries.get(name)
-            && current.entry_type != merged.entry_type
+            && current.entry_type() != merged.entry_type()
         {
             let path = repo.root().join(name);
             remove_path_for_type_change(repo, &path, current, merged, &current_tree)?;
@@ -109,7 +106,7 @@ fn remove_path_for_drop(
     // that drops a tracked top-level directory; a recursive nuke
     // would otherwise destroy the user's local build/dependency
     // state alongside the tracked content.
-    let source_subtree = source_subtree_for(repo, current, current_tree, &current.name)?;
+    let source_subtree = source_subtree_for(repo, current, current_tree, current.name())?;
     repo.remove_tracked_descendants_with_source(path, &source_subtree)?;
     Ok(())
 }
@@ -148,7 +145,7 @@ fn remove_path_for_type_change(
     // — the alternative is `materialize_blob` blowing up with a bare
     // "Is a directory" deep in the materializer.
     let _ = merged; // current type vs. merged type — currently both branches treat this the same.
-    let source_subtree = source_subtree_for(repo, current, current_tree, &current.name)?;
+    let source_subtree = source_subtree_for(repo, current, current_tree, current.name())?;
     repo.remove_tracked_descendants_with_source(path, &source_subtree)?;
     if path.exists() {
         prepare_dir_for_file_replacement(path)?;
@@ -179,9 +176,12 @@ fn source_subtree_for(
     current_tree: &Tree,
     name: &str,
 ) -> Result<Tree> {
-    if entry.entry_type != objects::object::EntryType::Tree {
+    if entry.entry_type() != objects::object::EntryType::Tree {
         return Ok(Tree::default());
     }
+    let Some(hash) = entry.tree_hash() else {
+        return Ok(Tree::default());
+    };
     repo.resolve_subtree(current_tree, Path::new(name))?
         .ok_or_else(|| {
             anyhow!(RecoveryAdvice::merge_integrity_refusal(
@@ -190,12 +190,12 @@ fn source_subtree_for(
                      resolve it; aborting merge application to avoid leaving the subtree's tracked \
                      descendants orphaned on disk",
                     name,
-                    entry.hash,
+                    hash,
                 ),
                 format!(
                     "current tree records subtree {:?} with missing hash {} in the object store",
                     name,
-                    entry.hash,
+                    hash,
                 ),
                 "merge application would drop the directory entry without a source subtree and could leave its tracked descendants orphaned on disk as untracked additions",
                 "repository HEAD, refs, and object store were left unchanged; merge application stopped before removing this subtree's tracked descendants or writing the final merged tree",

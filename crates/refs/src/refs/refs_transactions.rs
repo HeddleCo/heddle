@@ -15,8 +15,8 @@ use super::{
     RefManager, RefUpdate, format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
-    ref_summary_index::SummaryDelta,
     reconcile::{LoadRequest, Loaded},
+    ref_summary_index::SummaryDelta,
     refs_storage::RefsLock,
     refs_types::{
         describe_change_id, describe_expectation_change_id, describe_expectation_head,

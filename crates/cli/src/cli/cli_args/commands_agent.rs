@@ -16,8 +16,9 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use super::commands_args::{
-    AgentApiListArgs, AgentCaptureArgs, AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs,
-    AgentReserveArgs,
+    AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+    AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs, AgentReserveArgs, AgentTaskCreateArgs,
+    AgentTaskListArgs, AgentTaskShowArgs, AgentTaskUpdateArgs,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -57,6 +58,38 @@ pub enum AgentCommands {
 
     /// List agent reservations (optionally filtered to alive ones).
     List(AgentApiListArgs),
+
+    /// Manage local agent task assignments.
+    #[command(subcommand)]
+    Task(AgentTaskCommands),
+
+    /// Plan and start native fan-out lanes.
+    #[command(subcommand)]
+    Fanout(AgentFanoutCommands),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AgentTaskCommands {
+    /// Create a local agent task assignment.
+    Create(AgentTaskCreateArgs),
+
+    /// List local agent task assignments.
+    List(AgentTaskListArgs),
+
+    /// Show one local agent task assignment.
+    Show(AgentTaskShowArgs),
+
+    /// Update one local agent task assignment.
+    Update(AgentTaskUpdateArgs),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AgentFanoutCommands {
+    /// Preview fan-out lane setup and return commands without writing.
+    Plan(AgentFanoutPlanArgs),
+
+    /// Create task assignments and materialized child lanes.
+    Start(AgentFanoutStartArgs),
 }
 
 #[derive(Clone, Debug, clap::Args)]

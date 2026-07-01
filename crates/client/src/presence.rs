@@ -616,6 +616,7 @@ mod tests {
             last_progress_at: None,
             report_flush_state: None,
             attach_reason: None,
+            task_assignment_id: None,
             attach_precedence: vec![],
             winning_attach_rule: None,
             probe_source: None,

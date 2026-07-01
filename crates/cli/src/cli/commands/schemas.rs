@@ -17,6 +17,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
+use heddle_core::{DiffReport, FsckReport, QueryReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -42,7 +43,7 @@ macro_rules! schema_registry {
 
         #[cfg(test)]
         fn schema_implementation_verbs() -> Vec<&'static str> {
-            let mut verbs = Vec::new();
+            let mut verbs = report_contract_schema_verbs().to_vec();
             $(
                 for verb in $verbs {
                     if !verbs.contains(verb) {
@@ -55,10 +56,19 @@ macro_rules! schema_registry {
     };
 }
 
+#[cfg(test)]
+fn report_contract_schema_verbs() -> &'static [&'static str] {
+    &[
+        QueryReport::CONTRACT.schema_name,
+        DiffReport::CONTRACT.schema_name,
+        FsckReport::CONTRACT.schema_name,
+        StatusReport::CONTRACT.schema_name,
+        VerifyReport::CONTRACT.schema_name,
+    ]
+}
+
 schema_registry! {
     (&["init"], InitSchema),
-    (&["status"], StatusSchema),
-    (&["verify"], VerifySchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
@@ -66,7 +76,6 @@ schema_registry! {
     (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
-    (&["diff"], DiffSchema),
     (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
@@ -102,6 +111,8 @@ schema_registry! {
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["log --timeline"], TimelineLogSchema),
+    (&["timeline status"], TimelineStatusSchema),
+    (&["timeline record-start", "timeline record-finish"], TimelineRecordingSchema),
     (&["timeline fork", "timeline reset", "timeline recover"], TimelineActionSchema),
     (&["show"], ShowSchema),
     (&["thread list"], ThreadListSchema),
@@ -113,7 +124,6 @@ schema_registry! {
     (&["retro"], RetroSchema),
     (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
-    (&["query"], QuerySchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
     (&["bridge git init"], BridgeInitSchema),
@@ -141,6 +151,9 @@ schema_registry! {
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
     (&["agent list"], AgentReservationListSchema),
+    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
+    (&["agent task list"], AgentTaskListSchema),
+    (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
@@ -154,7 +167,6 @@ schema_registry! {
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
-    (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
     (&["maintenance index"], IndexSchema),
     (&["error"], ErrorEnvelopeSchema),
@@ -187,36 +199,35 @@ pub(crate) fn opaque_schema_verbs() -> &'static [&'static str] {
 
 /// Generate the schema for `verb`. Returns `None` if no schema is registered.
 pub fn schema_for_verb(verb: &str) -> Option<Value> {
-    let verb = resolve_schema_verb(verb)?;
+    let verb = verb.trim();
     if !schema_verbs().contains(&verb) {
         return None;
     }
-    let mut schema = schema_for_registered_verb(verb).or_else(|| {
-        opaque_schema_verbs()
-            .contains(&verb)
-            .then(|| serde_json::to_value(schema_for!(GenericJsonObjectSchema)).ok())
-            .flatten()
-    })?;
+    let mut schema = schema_for_registered_verb(verb)
+        .or_else(|| schema_for_report_contract_verb(verb))
+        .or_else(|| {
+            opaque_schema_verbs()
+                .contains(&verb)
+                .then(|| serde_json::to_value(schema_for!(GenericJsonObjectSchema)).ok())
+                .flatten()
+        })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
     add_json_discriminator_if_advertised(verb, &mut schema);
     Some(schema)
 }
 
-fn resolve_schema_verb(verb: &str) -> Option<&'static str> {
-    let verb = verb.trim();
-    if let Some(registered) = schema_verbs()
-        .iter()
-        .copied()
-        .find(|registered| *registered == verb)
-    {
-        return Some(registered);
-    }
-
-    let matches = matching_schema_verbs(verb, schema_verbs());
-    if matches.len() == 1 {
-        matches.first().copied()
-    } else {
-        None
+fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
+    match verb {
+        verb if verb == QueryReport::CONTRACT.schema_name => Some((QueryReport::CONTRACT.schema)()),
+        verb if verb == DiffReport::CONTRACT.schema_name => Some((DiffReport::CONTRACT.schema)()),
+        verb if verb == FsckReport::CONTRACT.schema_name => Some((FsckReport::CONTRACT.schema)()),
+        verb if verb == StatusReport::CONTRACT.schema_name => {
+            Some((StatusReport::CONTRACT.schema)())
+        }
+        verb if verb == VerifyReport::CONTRACT.schema_name => {
+            Some((VerifyReport::CONTRACT.schema)())
+        }
+        _ => None,
     }
 }
 
@@ -646,26 +657,6 @@ pub struct ActorInfoSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct StateInfoSchema {
-    pub change_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitCheckpointInfoSchema {
-    pub git_commit: String,
-    pub committed_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ChangesInfoSchema {
-    pub modified: Vec<String>,
-    pub added: Vec<String>,
-    pub deleted: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct GitIndexInfoSchema {
     pub commit_mode: String,
     pub has_staged_changes: bool,
@@ -840,22 +831,6 @@ pub struct BlameContextSnippetSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct FsckSchema {
-    pub valid: bool,
-    pub errors: Vec<FsckErrorSchema>,
-    pub warnings: Vec<String>,
-    pub objects_checked: usize,
-    pub bridge_checked: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FsckErrorSchema {
-    pub kind: String,
-    pub message: String,
-    pub object: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct ResolveSchema {
     pub output_kind: String,
     pub message: Option<String>,
@@ -886,6 +861,8 @@ pub struct RetroSchema {
     pub duration_secs: Option<i64>,
     pub states_captured: Vec<RetroStateEntrySchema>,
     pub agents_active: Vec<RetroAgentEntrySchema>,
+    pub agent_tasks: Vec<RetroAgentTaskEntrySchema>,
+    pub timeline_steps: Vec<RetroTimelineStepEntrySchema>,
     pub markers_created: Vec<RetroMarkerEntrySchema>,
     pub context_annotations: Vec<RetroContextAnnotationEntrySchema>,
     pub verify_signals: Vec<RetroVerifySignalSchema>,
@@ -920,6 +897,35 @@ pub struct RetroAgentTokensSchema {
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
     pub tool_calls: Option<u32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RetroAgentTaskEntrySchema {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub target_thread: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RetroTimelineStepEntrySchema {
+    pub thread: String,
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
+    pub changed: Option<bool>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub capture_state: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -985,7 +991,7 @@ pub struct DiscussionEnvelopeSchema {
 pub struct DiscussionResolutionSchema {
     pub kind: String,
     pub annotation_id: Option<String>,
-    pub state_id: Option<String>,
+    pub change_id: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -1001,25 +1007,6 @@ pub struct DiscussionTurnSchema {
 pub struct DiscussionListSchema {
     pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct QuerySchema {
-    pub output_kind: String,
-    pub hits: Vec<QueryHitSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct QueryHitSchema {
-    pub seq: u64,
-    pub timestamp_secs: i64,
-    pub verb: String,
-    pub actor_email: String,
-    pub operation_id: Option<String>,
-    pub thread: Option<String>,
-    pub symbols: Vec<String>,
-    pub signal_kinds: Vec<String>,
-    pub change_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1068,6 +1055,7 @@ pub struct CaptureSchema {
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
+    pub task_assignment_id: Option<String>,
     pub principal: CommitPrincipalSchema,
     pub agent: Option<CommitAgentSchema>,
     pub promotion_suggested: bool,
@@ -1187,64 +1175,6 @@ pub struct CleanSchema {
     pub output_kind: String,
     pub removed: Vec<String>,
     pub dry_run: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub from_state: Option<String>,
-    pub to_state: Option<String>,
-    pub changed_path_count: usize,
-    pub stats: DiffStatsSchema,
-    /// Worktree-mode diff (`heddle diff` with no revision args) groups the
-    /// per-file changes into `{modified, added, deleted}` category arrays,
-    /// mirroring the `status` command's `changes` shape so a UI can derive
-    /// add/modify/delete badges from `diff` alone. A state-to-state diff
-    /// (`heddle diff <a> <b>`) instead emits a flat `array<object>` here.
-    pub changes: DiffChangesSchema,
-    pub semantic_changes: Option<Vec<Value>>,
-    pub context: Option<Vec<Value>>,
-    pub broader_guidance: Option<Vec<Value>>,
-    /// Rendered unified-diff text, suitable for `patch(1)` / `git apply`.
-    /// Present whenever line-level hunks exist, regardless of the
-    /// `--patch` CLI flag — JSON consumers always get a parseable diff.
-    pub patch: Option<String>,
-}
-
-/// `changes` admits the two documented shapes the `diff` command emits:
-/// worktree mode (`heddle diff` with no revision args) groups entries into
-/// `{modified, added, deleted}` category arrays; a state-to-state diff
-/// (`heddle diff <a> <b>`) emits a flat `array<object>`. The schema is a
-/// union of both so either documented output validates.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum DiffChangesSchema {
-    /// Worktree-mode: per-file diff entries bucketed by category, mirroring
-    /// the `status` command's `{modified, added, deleted}` field names. Each
-    /// entry carries its path plus the per-file diff fields (`kind`,
-    /// `old_path`, `lines`, …). A `renamed` entry buckets under `modified`
-    /// (its `kind`/`old_path` identify the rename).
-    Grouped(DiffChangesGroupedSchema),
-    /// State-to-state: a flat array of per-file diff entries.
-    Flat(Vec<Value>),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffChangesGroupedSchema {
-    pub modified: Vec<Value>,
-    pub added: Vec<Value>,
-    pub deleted: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffStatsSchema {
-    pub files_changed: usize,
-    pub additions: usize,
-    pub modifications: usize,
-    pub deletions: usize,
-    pub renames: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1624,6 +1554,8 @@ pub struct ThreadSummarySchema {
     pub stack_depth: usize,
     pub stale_from_parent: bool,
     pub task: Option<String>,
+    pub task_assignment_id: Option<String>,
+    pub task_summary: Option<ThreadTaskSummarySchema>,
     pub changed_paths: Vec<String>,
     pub promotion_suggested: bool,
     pub impact_categories: Vec<ThreadImpactCategorySchema>,
@@ -1645,6 +1577,17 @@ pub struct ThreadSummarySchema {
     pub history_imported: bool,
     pub auto: bool,
     pub shared_target_dir: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadTaskSummarySchema {
+    pub task_id: String,
+    pub title: String,
+    pub status: String,
+    pub target_thread: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub coordination_discussion_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1904,6 +1847,7 @@ pub struct AgentReservationSchema {
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
+    pub task_assignment_id: Option<String>,
     pub status: String,
     pub path: Option<String>,
     pub task: Option<String>,
@@ -1913,6 +1857,75 @@ pub struct AgentReservationSchema {
     pub thinking_level: Option<String>,
     pub probe_source: Option<String>,
     pub probe_confidence: Option<f32>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskEnvelopeSchema {
+    pub output_kind: String,
+    pub task: AgentTaskSchema,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskListSchema {
+    pub output_kind: String,
+    pub tasks: Vec<AgentTaskSchema>,
+    pub thread: Option<String>,
+    pub status: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentTaskSchema {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub target_thread: String,
+    pub base_state: Option<String>,
+    pub base_root: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub coordination_discussion_id: Option<String>,
+    pub allow_offline: bool,
+    pub delegated_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutSchema {
+    pub output_kind: String,
+    pub title: String,
+    pub parent_thread: String,
+    pub base_state: String,
+    pub base_root: String,
+    pub coordination_discussion_id: Option<String>,
+    pub parent_task: Option<AgentTaskSchema>,
+    pub lanes: Vec<AgentFanoutLaneSchema>,
+    pub commands: Vec<AgentFanoutCommandSchema>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutLaneSchema {
+    pub thread: String,
+    pub path: String,
+    pub title: String,
+    pub task: Option<AgentTaskSchema>,
+    pub session_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AgentFanoutCommandSchema {
+    pub lane_thread: String,
+    pub command: String,
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2064,13 +2077,6 @@ pub struct GitUpstreamConfiguredSchema {
     pub remote: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ParallelThreadInfoSchema {
-    pub name: String,
-    pub coordination_status: CoordinationStatusSchema,
-    pub current_state: Option<String>,
-}
-
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
 /// shape is internal. `Value` here means "any JSON object or null".
@@ -2084,87 +2090,7 @@ pub struct RepositoryContextInfoSchema {
     pub parent_thread: Option<String>,
 }
 
-// ---- status ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StatusSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    pub git_overlay_health: GitOverlayHealthSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub thread: Option<String>,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub current_state: Option<String>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<ActorInfoSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_summary: OpaqueObject,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_progress_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_flush_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    pub thread_mode: Option<ThreadModeSchema>,
-    pub thread_state: Option<ThreadStateSchema>,
-    pub freshness: Option<ThreadFreshnessSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_thread: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_thread: Option<String>,
-    pub child_threads: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    pub promotion_suggested: bool,
-    pub impact_categories: Vec<ThreadImpactCategorySchema>,
-    pub heavy_impact_paths: Vec<String>,
-    pub changed_path_count: usize,
-    pub worktree_changed_path_count: usize,
-    pub thread_changed_path_count: usize,
-    pub blockers: Vec<String>,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub thread_health: String,
-    pub coordination_status: CoordinationStatusSchema,
-    pub is_isolated: bool,
-    pub parallel_threads: Vec<ParallelThreadInfoSchema>,
-    pub state: Option<StateInfoSchema>,
-    pub git_checkpoint: Option<GitCheckpointInfoSchema>,
-    pub changes: ChangesInfoSchema,
-    pub git_index: Option<GitIndexInfoSchema>,
-}
-
 // ---- verify ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VerifySchema {
-    pub output_kind: String,
-    pub clean: bool,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    #[serde(flatten)]
-    pub verification: RepositoryVerificationStateSchema,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RepositoryVerificationStateSchema {
@@ -2184,8 +2110,7 @@ pub struct RepositoryVerificationStateSchema {
     pub default_remote: Option<String>,
     pub clone_verification: String,
     pub machine_contract: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_contract_coverage: Option<MachineContractCoverageSchema>,
+    pub machine_contract_coverage: MachineContractCoverageSchema,
     pub workflow_status: String,
     pub workflow_summary: String,
     pub summary: String,
@@ -2446,6 +2371,76 @@ pub struct TimelineRecoverySchema {
     pub reason: String,
     pub moved_at_ms: i64,
     pub checkout_state: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub thread: String,
+    pub cursor_branch_id: Option<String>,
+    pub cursor_step_id: Option<String>,
+    pub cursor_state: Option<String>,
+    pub current_step: Option<TimelineStatusStepSchema>,
+    pub active_branch_path: Vec<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub branch_count: usize,
+    pub step_count: usize,
+    pub recovery: Option<TimelineStatusRecoverySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusStepSchema {
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<String>,
+    pub changed: Option<bool>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub labels: Vec<String>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub can_seek: bool,
+    pub can_fork: bool,
+    pub can_reset: bool,
+    pub can_materialize: bool,
+    pub has_boundary_warning: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStatusRecoverySchema {
+    pub status: String,
+    pub branch_id: String,
+    pub from_step_id: Option<String>,
+    pub to_step_id: Option<String>,
+    pub from_state: String,
+    pub to_state: String,
+    pub reason: String,
+    pub moved_at_ms: i64,
+    pub checkout_state: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineRecordingSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub action: String,
+    pub thread: String,
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub operation_id: String,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub changed: Option<bool>,
+    pub tool_status: Option<String>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub branch_count: usize,
+    pub step_count: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3307,7 +3302,8 @@ mod tests {
             if discriminator.field != "output_kind" {
                 continue;
             }
-            let bare = schema_for_registered_verb(verb)
+            let bare = schema_for_report_contract_verb(verb)
+                .or_else(|| schema_for_registered_verb(verb))
                 .unwrap_or_else(|| panic!("documented verb `{verb}` has no registered schema"));
             let declares = schema_declares_property(&bare, &bare, "output_kind");
             if !declares {
@@ -3461,7 +3457,10 @@ mod tests {
         let action_template = schema
             .get("$defs")
             .or_else(|| schema.get("definitions"))
-            .and_then(|defs| defs.get("ActionTemplateSchema"))
+            .and_then(|defs| {
+                defs.get("ActionTemplate")
+                    .or_else(|| defs.get("ActionTemplateSchema"))
+            })
             .expect("verify schema includes ActionTemplateSchema definition");
         let description = property_schema(action_template, "agent_may_fill")
             .get("description")

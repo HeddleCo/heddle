@@ -12,6 +12,18 @@ _Avoid_: hosted-only Heddle, web app, hosted backend
 Version control designed around durable agent workflows as first-class behavior: isolated work, explicit attribution, retryable operations, disposable attempts, provenance, and machine-readable contracts.
 _Avoid_: AI-native version control
 
+**Gitlink**:
+A source tree entry representing a Git submodule pointer to a commit in another repository. Its durable meaning is the entry path and format-aware target Git object ID, not ordinary file bytes.
+_Avoid_: submodule blob, heddle-submodule blob, submodule file
+
+**Gitlink Placeholder**:
+A filesystem presentation of a Gitlink in a native Heddle worktree. It is not source history content; unchanged placeholder bytes preserve the Gitlink during capture, while edited placeholder bytes become an ordinary file replacement.
+_Avoid_: submodule file, synthetic source file, magic blob
+
+**Sley**:
+Heddle's native Git-format engine. Sley owns Git object identity semantics and Git operation behavior, while Heddle owns the stable durable encoding of Heddle source history objects.
+_Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
+
 **CRDT Collaboration Record**:
 A concurrently editable collaboration artifact, such as a discussion or context annotation, that can merge independent local edits without replacing Heddle's immutable source history model.
 _Avoid_: CRDT state model, CRDT source history

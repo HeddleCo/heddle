@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::ObjectStore,
+    util::gitlink_placeholder_bytes,
 };
 use repo::Repository;
 
@@ -456,17 +457,17 @@ fn three_way_merge_recursive(
     let base_entries: HashMap<&str, &TreeEntry> = base_tree
         .entries()
         .iter()
-        .map(|entry| (entry.name.as_str(), entry))
+        .map(|entry| (entry.name(), entry))
         .collect();
     let our_entries: HashMap<&str, &TreeEntry> = our_tree
         .entries()
         .iter()
-        .map(|entry| (entry.name.as_str(), entry))
+        .map(|entry| (entry.name(), entry))
         .collect();
     let their_entries: HashMap<&str, &TreeEntry> = their_tree
         .entries()
         .iter()
-        .map(|entry| (entry.name.as_str(), entry))
+        .map(|entry| (entry.name(), entry))
         .collect();
     let mut merged_entries = Vec::new();
     let mut conflicts = Vec::new();
@@ -555,7 +556,7 @@ fn merge_delete_changed_entry(
     let kept_content = conflict_entry_content(repo, kept_entry)?;
     let blob = Blob::new(format_conflict_content(&kept_content, &[], labels));
     let hash = repo.store().put_blob(&blob)?;
-    merged_entries.push(TreeEntry::file(kept_entry.name.clone(), hash, false)?);
+    merged_entries.push(TreeEntry::file(kept_entry.name().to_string(), hash, false)?);
     conflicts.push(conflict_path.to_string());
     Ok(())
 }
@@ -586,7 +587,7 @@ fn merge_added_entries(
         let conflict_content = generate_conflict_content(repo, our_entry, their_entry, labels)?;
         let blob = Blob::new(conflict_content);
         let hash = repo.store().put_blob(&blob)?;
-        merged_entries.push(TreeEntry::file(our_entry.name.clone(), hash, false)?);
+        merged_entries.push(TreeEntry::file(our_entry.name().to_string(), hash, false)?);
         conflicts.push(conflict_path.to_string());
     }
 
@@ -615,9 +616,18 @@ fn merge_changed_entries(
         merged_entries.push(entry);
     } else if our_entry.is_tree() && their_entry.is_tree() {
         let base_subtree = if base_entry.is_tree() {
+            let Some(hash) = base_entry.tree_hash() else {
+                return Err(RecoveryAdvice::merge_integrity_refusal(
+                    format!("merge base entry at {conflict_path:?} has tree type but no tree hash"),
+                    format!("merge base path {conflict_path:?} records a tree entry without a tree object hash"),
+                    "the recursive merge cannot load a trustworthy base subtree and could silently erase or mis-merge descendants",
+                    "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed subtree",
+                )
+                .into());
+            };
             require_subtree(
                 repo.store(),
-                &base_entry.hash,
+                &hash,
                 &format!("base subtree at {conflict_path:?}"),
             )?
         } else {
@@ -634,17 +644,30 @@ fn merge_changed_entries(
         merged_entries.push(entry);
         conflicts.extend(sub_conflicts);
     } else if base_entry.is_blob() && our_entry.is_blob() && their_entry.is_blob() {
+        let (Some(base_hash), Some(our_hash), Some(their_hash)) = (
+            base_entry.blob_hash(),
+            our_entry.blob_hash(),
+            their_entry.blob_hash(),
+        ) else {
+            return Err(RecoveryAdvice::merge_integrity_refusal(
+                format!("blob merge entry at {conflict_path:?} did not carry blob hashes"),
+                format!("merge path {conflict_path:?} records blob entries without all required blob object hashes"),
+                "the content merge cannot load all three inputs and could otherwise merge against empty bytes",
+                "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed blob entries",
+            )
+            .into());
+        };
         let merged_hash = three_way_content_merge(
             repo.store(),
-            &base_entry.hash,
-            &our_entry.hash,
-            &their_entry.hash,
+            &base_hash,
+            &our_hash,
+            &their_hash,
             conflict_path,
             conflicts,
             labels,
         )?;
         merged_entries.push(TreeEntry::file(
-            our_entry.name.clone(),
+            our_entry.name().to_string(),
             merged_hash,
             our_entry.is_executable(),
         )?);
@@ -652,7 +675,7 @@ fn merge_changed_entries(
         let conflict_content = generate_conflict_content(repo, our_entry, their_entry, labels)?;
         let blob = Blob::new(conflict_content);
         let hash = repo.store().put_blob(&blob)?;
-        merged_entries.push(TreeEntry::file(our_entry.name.clone(), hash, false)?);
+        merged_entries.push(TreeEntry::file(our_entry.name().to_string(), hash, false)?);
         conflicts.push(conflict_path.to_string());
     }
 
@@ -667,23 +690,19 @@ fn merge_mode_content_orthogonal_change(
     if !base_entry.is_blob() || !our_entry.is_blob() || !their_entry.is_blob() {
         return None;
     }
-    if our_entry.name != their_entry.name || our_entry.name != base_entry.name {
+    if our_entry.name() != their_entry.name() || our_entry.name() != base_entry.name() {
         return None;
     }
 
-    let our_content_unchanged = our_entry.hash == base_entry.hash;
-    let their_content_unchanged = their_entry.hash == base_entry.hash;
-    let our_mode_unchanged = our_entry.mode == base_entry.mode;
-    let their_mode_unchanged = their_entry.mode == base_entry.mode;
+    let our_content_unchanged = our_entry.blob_hash() == base_entry.blob_hash();
+    let their_content_unchanged = their_entry.blob_hash() == base_entry.blob_hash();
+    let our_mode_unchanged = our_entry.mode() == base_entry.mode();
+    let their_mode_unchanged = their_entry.mode() == base_entry.mode();
 
     if our_content_unchanged && their_mode_unchanged {
-        let mut entry = (*their_entry).clone();
-        entry.mode = our_entry.mode;
-        Some(entry)
+        their_entry.with_mode(our_entry.mode()).ok()
     } else if their_content_unchanged && our_mode_unchanged {
-        let mut entry = (*our_entry).clone();
-        entry.mode = their_entry.mode;
-        Some(entry)
+        our_entry.with_mode(their_entry.mode()).ok()
     } else {
         None
     }
@@ -697,15 +716,49 @@ fn merge_subtrees(
     prefix: &str,
     labels: ConflictLabels<'_>,
 ) -> Result<(TreeEntry, Vec<String>)> {
+    let Some(our_hash) = our_entry.tree_hash() else {
+        return Err(RecoveryAdvice::merge_integrity_refusal(
+            format!(
+                "merge entry {:?}/{} has tree type but no tree hash",
+                prefix,
+                our_entry.name()
+            ),
+            format!(
+                "our merge path {:?}/{} records a tree entry without a tree object hash",
+                prefix,
+                our_entry.name()
+            ),
+            "the recursive merge cannot load our subtree and could silently drop or overwrite descendants",
+            "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed subtree",
+        )
+        .into());
+    };
+    let Some(their_hash) = their_entry.tree_hash() else {
+        return Err(RecoveryAdvice::merge_integrity_refusal(
+            format!(
+                "merge entry {:?}/{} has tree type but no tree hash",
+                prefix,
+                their_entry.name()
+            ),
+            format!(
+                "their merge path {:?}/{} records a tree entry without a tree object hash",
+                prefix,
+                their_entry.name()
+            ),
+            "the recursive merge cannot load their subtree and could silently drop or overwrite descendants",
+            "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed subtree",
+        )
+        .into());
+    };
     let our_subtree = require_subtree(
         repo.store(),
-        &our_entry.hash,
-        &format!("our subtree at {prefix:?}/{}", our_entry.name),
+        &our_hash,
+        &format!("our subtree at {prefix:?}/{}", our_entry.name()),
     )?;
     let their_subtree = require_subtree(
         repo.store(),
-        &their_entry.hash,
-        &format!("their subtree at {prefix:?}/{}", their_entry.name),
+        &their_hash,
+        &format!("their subtree at {prefix:?}/{}", their_entry.name()),
     )?;
     let (merged_subtree, conflicts) = three_way_merge_recursive(
         repo,
@@ -717,7 +770,7 @@ fn merge_subtrees(
     )?;
     let merged_hash = repo.store().put_tree(&merged_subtree)?;
     Ok((
-        TreeEntry::directory(our_entry.name.clone(), merged_hash)?,
+        TreeEntry::directory(our_entry.name().to_string(), merged_hash)?,
         conflicts,
     ))
 }
@@ -739,16 +792,27 @@ fn generate_conflict_content(
 
 fn conflict_entry_content(repo: &Repository, entry: &TreeEntry) -> Result<Vec<u8>> {
     if entry.is_tree() {
+        let Some(hash) = entry.tree_hash() else {
+            return Err(RecoveryAdvice::merge_integrity_refusal(
+                format!(
+                    "conflict entry {:?} has tree type but no tree hash",
+                    entry.name()
+                ),
+                format!(
+                    "conflict path {:?} records a tree entry without a tree object hash",
+                    entry.name()
+                ),
+                "the conflict renderer cannot describe the subtree and could otherwise hide a malformed tree entry",
+                "HEAD, refs, and worktree were left unchanged; merge stopped before writing conflict content for the malformed entry",
+            )
+            .into());
+        };
         let tree = require_subtree(
             repo.store(),
-            &entry.hash,
-            &format!("conflict-entry subtree {:?}", entry.name),
+            &hash,
+            &format!("conflict-entry subtree {:?}", entry.name()),
         )?;
-        let mut names: Vec<&str> = tree
-            .entries()
-            .iter()
-            .map(|child| child.name.as_str())
-            .collect();
+        let mut names: Vec<&str> = tree.entries().iter().map(|child| child.name()).collect();
         names.sort_unstable();
         let listing = if names.is_empty() {
             String::from("<empty directory>")
@@ -756,8 +820,12 @@ fn conflict_entry_content(repo: &Repository, entry: &TreeEntry) -> Result<Vec<u8
             format!("<directory>\n{}", names.join("\n"))
         };
         Ok(listing.into_bytes())
+    } else if let Some(hash) = entry.leaf_content_hash() {
+        Ok(repo.require_blob(&hash)?.content().to_vec())
+    } else if let Some(target) = entry.gitlink_target() {
+        Ok(gitlink_placeholder_bytes(&target))
     } else {
-        Ok(repo.require_blob(&entry.hash)?.content().to_vec())
+        Ok(Vec::new())
     }
 }
 
@@ -910,6 +978,6 @@ mod tests {
 
         let loaded = require_subtree(&store, &hash, "src/sub").expect("subtree present in store");
         assert_eq!(loaded.entries().len(), 1);
-        assert_eq!(loaded.entries()[0].name, "inner.rs");
+        assert_eq!(loaded.entries()[0].name(), "inner.rs");
     }
 }

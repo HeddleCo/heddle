@@ -6,6 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) use heddle_core::{
+    ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
+    RepositoryVerificationState, VerificationCheck, verify::serialize_empty_action_as_null,
+};
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
@@ -13,154 +17,16 @@ use repo::{
     GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager, ThreadState,
     describe_thread_advice, git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
 };
-use schemars::JsonSchema;
-use serde::{Serialize, Serializer};
 use sley::{BString as GitBString, Index, Repository as SleyRepository};
 
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{
-        ActionFields, ActionTemplate, build_command_catalog, heddle_action,
-        recommended_action_template,
+        ActionFields, build_command_catalog, heddle_action, recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
 use crate::{cli::worktree_status_options, remote::RemoteConfig};
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(crate) struct GitOverlayHealth {
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recovery_commands: Vec<String>,
-    pub checks: Vec<GitOverlayHealthCheck>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(crate) struct GitOverlayHealthCheck {
-    pub name: String,
-    pub status: String,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub details: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(crate) struct RepositoryVerificationState {
-    #[serde(rename = "verified")]
-    pub verified: bool,
-    pub status: String,
-    pub repository_mode: String,
-    pub heddle_initialized: bool,
-    pub git_branch: Option<String>,
-    pub heddle_thread: Option<String>,
-    pub worktree_dirty: bool,
-    pub worktree_state: String,
-    pub import_state: String,
-    pub mapping_state: String,
-    pub remote_drift: String,
-    pub active_operation: Option<String>,
-    pub default_remote: Option<String>,
-    pub clone_verification: String,
-    pub machine_contract: String,
-    pub machine_contract_coverage: MachineContractCoverage,
-    pub workflow_status: String,
-    pub workflow_summary: String,
-    pub summary: String,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    #[schemars(with = "Option<String>")]
-    pub recommended_action: String,
-    pub recommended_action_template: Option<ActionTemplate>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplate>,
-    pub checks: Vec<VerificationCheck>,
-}
-
-pub(crate) fn serialize_empty_action_as_null<S>(
-    action: &String,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if action.is_empty() {
-        serializer.serialize_none()
-    } else {
-        serializer.serialize_some(action)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(crate) struct MachineContractCoverage {
-    pub status: String,
-    #[serde(rename = "verified_scope")]
-    pub verified_scope: String,
-    pub advanced_scope: String,
-    pub summary: String,
-    pub catalog_commands_total: usize,
-    pub catalog_mutating_commands_total: usize,
-    pub json_commands_total: usize,
-    pub json_mutating_commands_total: usize,
-    pub json_commands_with_schema: usize,
-    pub json_commands_with_accepted_opaque_schema: usize,
-    pub json_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_total")]
-    pub verified_scope_json_commands_total: usize,
-    #[serde(rename = "verified_scope_json_commands_with_schema")]
-    pub verified_scope_json_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
-    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_without_schema")]
-    pub verified_scope_json_commands_without_schema: usize,
-    pub advanced_scope_json_commands_total: usize,
-    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_total: usize,
-    pub mutating_commands_with_schema: usize,
-    pub mutating_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_total")]
-    pub verified_scope_mutating_commands_total: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
-    pub verified_scope_mutating_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
-    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
-    pub verified_scope_mutating_commands_without_schema: usize,
-    pub advanced_scope_mutating_commands_total: usize,
-    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    pub schema_verbs_total: usize,
-    pub documented_schema_verbs_total: usize,
-    pub undocumented_schema_verbs_total: usize,
-    pub opaque_schema_verbs_total: usize,
-    pub accepted_opaque_schema_verbs_total: usize,
-    pub unaccepted_opaque_schema_verbs_total: usize,
-    pub supports_op_id_total: usize,
-    pub jsonl_commands_total: usize,
-    pub missing_schema_examples: Vec<String>,
-    pub missing_mutating_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_missing_schema_examples")]
-    pub verified_scope_missing_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
-    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub accepted_opaque_schema_examples: Vec<String>,
-    pub unaccepted_opaque_schema_examples: Vec<String>,
-    pub undocumented_schema_examples: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(crate) struct VerificationCheck {
-    pub name: String,
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplate>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplate>,
-    #[serde(default)]
-    pub details: BTreeMap<String, String>,
-}
 
 #[derive(Debug)]
 pub(crate) struct PlainGitVerificationProbe {
@@ -208,219 +74,221 @@ struct VerificationActionPlan {
     machine_contract_action: Option<String>,
 }
 
-impl GitOverlayHealth {
-    pub(crate) fn clean(summary: impl Into<String>, checks: Vec<GitOverlayHealthCheck>) -> Self {
-        Self {
-            status: "clean".to_string(),
-            clean: true,
-            summary: summary.into(),
-            recovery_commands: Vec::new(),
-            checks,
-        }
-    }
-
-    pub(crate) fn primary_recovery_command(&self) -> Option<&str> {
-        self.recovery_commands.first().map(String::as_str)
+pub(crate) fn clean_health(
+    summary: impl Into<String>,
+    checks: Vec<GitOverlayHealthCheck>,
+) -> GitOverlayHealth {
+    GitOverlayHealth {
+        status: "clean".to_string(),
+        clean: true,
+        summary: summary.into(),
+        recovery_commands: Vec::new(),
+        checks,
     }
 }
 
-impl RepositoryVerificationState {
-    pub(crate) fn from_health(repo: &Repository, health: GitOverlayHealth) -> Self {
-        Self::from_health_inner(repo, health, None)
-    }
+pub(crate) fn primary_recovery_command(health: &GitOverlayHealth) -> Option<&str> {
+    health.recovery_commands.first().map(String::as_str)
+}
 
-    /// Verification-state build that reuses an already-computed git-overlay
-    /// worktree status instead of re-walking + re-SHA-1ing every tracked file.
-    /// `worktree_status` must be the exact `Result` from
-    /// `git_overlay_worktree_status()` so the dirty/clean classification stays
-    /// byte-identical to [`from_health`]. Callers that already hold the status
-    /// (e.g. the `status`/`verify`/`thread list` read paths, which compute it to
-    /// build `health`) thread it through here to avoid a second full walk.
-    pub(crate) fn from_health_with_worktree_status(
-        repo: &Repository,
-        health: GitOverlayHealth,
-        worktree_status: &repo::Result<Option<WorktreeStatus>>,
-    ) -> Self {
-        Self::from_health_inner(repo, health, Some(worktree_status))
-    }
+pub(crate) fn repository_verification_state_from_health(
+    repo: &Repository,
+    health: GitOverlayHealth,
+) -> RepositoryVerificationState {
+    repository_verification_state_from_health_inner(repo, health, None)
+}
 
-    fn from_health_inner(
-        repo: &Repository,
-        health: GitOverlayHealth,
-        precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
-    ) -> Self {
-        let git_branch = repo.git_overlay_current_branch().ok().flatten();
-        let heddle_thread = repo.current_lane().ok().flatten();
-        let active_operation = repo.operation_status().ok().flatten().map(|operation| {
-            format!(
-                "{} {} ({})",
-                operation.scope, operation.kind, operation.state
-            )
-        });
-        let remote_drift = repo
-            .git_remote_tracking_status()
-            .ok()
-            .flatten()
-            .map(|remote| remote_tracking_status(&remote).to_string())
-            .unwrap_or_else(|| "clean".to_string());
-        let import_state = health
-            .checks
-            .iter()
-            .find(|check| {
-                matches!(check.name.as_str(), "import" | "tag_mapping") && check.status != "clean"
-            })
-            .or_else(|| health.checks.iter().find(|check| check.name == "import"))
-            .map(|check| check.status.clone())
-            .unwrap_or_else(|| "clean".to_string());
-        let mapping_state = health
-            .checks
-            .iter()
-            .find(|check| {
-                matches!(check.name.as_str(), "head_mapping" | "tag_mapping")
-                    && git_overlay_mapping_status_blocks(&check.status)
-            })
-            .or_else(|| {
-                health
-                    .checks
-                    .iter()
-                    .find(|check| check.name == "head_mapping")
-            })
-            .map(|check| check.status.clone())
-            .unwrap_or_else(|| "clean".to_string());
-        let health_worktree_dirty = health.checks.iter().any(|check| {
-            matches!(check.name.as_str(), "worktree" | "heddle_worktree") && check.status != "clean"
-        });
-        // Reuse the caller's already-computed status when threaded; otherwise
-        // fall back to a fresh walk. Hold a borrow (`WorktreeStatus` is not
-        // `Clone`) so the dirty/clean classification stays byte-identical.
-        let computed_worktree_status;
-        let worktree_status_ref: &repo::Result<Option<WorktreeStatus>> =
-            match precomputed_worktree_status {
-                Some(result) => result,
-                None => {
-                    computed_worktree_status = repo.git_overlay_worktree_status();
-                    &computed_worktree_status
-                }
-            };
-        let git_worktree_dirty = matches!(
-            worktree_status_ref,
-            Ok(Some(status)) if !status.is_clean()
-        );
-        let worktree_dirty = health_worktree_dirty || git_worktree_dirty;
-        let ready_threads = ready_thread_actions(repo);
-        let actionable_ready_threads = ready_threads
-            .iter()
-            .filter(|thread| thread.actionable_from_current_thread)
-            .collect::<Vec<_>>();
-        let workflow_action = actionable_ready_threads
-            .first()
-            .map(|thread| thread.recommended_action.clone());
-        let machine_contract_coverage = machine_contract_coverage();
-        let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
-        let machine_contract_action =
-            (!machine_contract_clean).then(|| "heddle doctor schemas --output json".to_string());
-        let action_plan = VerificationActionPlan::from_parts(
-            &health,
-            remote_sync_action(&health),
-            workflow_action,
-            machine_contract_action,
-        );
-        let is_git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
-        let checks = verification_checks_from_health(
-            &health,
-            &action_plan,
-            is_git_overlay,
-            &ready_threads,
-            &machine_contract_coverage,
-        );
-        let clone_verification = if is_git_overlay {
-            if health.clean {
-                "verified"
-            } else if clone_verification_waits_for_primary_blocker(&health) {
-                "not_checked"
-            } else {
-                "blocked"
+/// Verification-state build that reuses an already-computed git-overlay
+/// worktree status instead of re-walking + re-SHA-1ing every tracked file.
+/// `worktree_status` must be the exact `Result` from
+/// `git_overlay_worktree_status()` so the dirty/clean classification stays
+/// byte-identical to [`repository_verification_state_from_health`]. Callers
+/// that already hold the status thread it through here to avoid a second full
+/// walk.
+pub(crate) fn repository_verification_state_from_health_with_worktree_status(
+    repo: &Repository,
+    health: GitOverlayHealth,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> RepositoryVerificationState {
+    repository_verification_state_from_health_inner(repo, health, Some(worktree_status))
+}
+
+fn repository_verification_state_from_health_inner(
+    repo: &Repository,
+    health: GitOverlayHealth,
+    precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
+) -> RepositoryVerificationState {
+    let git_branch = repo.git_overlay_current_branch().ok().flatten();
+    let heddle_thread = repo.current_lane().ok().flatten();
+    let active_operation = repo.operation_status().ok().flatten().map(|operation| {
+        format!(
+            "{} {} ({})",
+            operation.scope, operation.kind, operation.state
+        )
+    });
+    let remote_drift = repo
+        .git_remote_tracking_status()
+        .ok()
+        .flatten()
+        .map(|remote| remote_tracking_status(&remote).to_string())
+        .unwrap_or_else(|| "clean".to_string());
+    let import_state = health
+        .checks
+        .iter()
+        .find(|check| {
+            matches!(check.name.as_str(), "import" | "tag_mapping") && check.status != "clean"
+        })
+        .or_else(|| health.checks.iter().find(|check| check.name == "import"))
+        .map(|check| check.status.clone())
+        .unwrap_or_else(|| "clean".to_string());
+    let mapping_state = health
+        .checks
+        .iter()
+        .find(|check| {
+            matches!(check.name.as_str(), "head_mapping" | "tag_mapping")
+                && git_overlay_mapping_status_blocks(&check.status)
+        })
+        .or_else(|| {
+            health
+                .checks
+                .iter()
+                .find(|check| check.name == "head_mapping")
+        })
+        .map(|check| check.status.clone())
+        .unwrap_or_else(|| "clean".to_string());
+    let health_worktree_dirty = health.checks.iter().any(|check| {
+        matches!(check.name.as_str(), "worktree" | "heddle_worktree") && check.status != "clean"
+    });
+    // Reuse the caller's already-computed status when threaded; otherwise
+    // fall back to a fresh walk. Hold a borrow (`WorktreeStatus` is not
+    // `Clone`) so the dirty/clean classification stays byte-identical.
+    let computed_worktree_status;
+    let worktree_status_ref: &repo::Result<Option<WorktreeStatus>> =
+        match precomputed_worktree_status {
+            Some(result) => result,
+            None => {
+                computed_worktree_status = repo.git_overlay_worktree_status();
+                &computed_worktree_status
             }
-        } else {
-            "not_applicable"
-        }
-        .to_string();
-        let workflow_status = if !health.clean && ready_threads.is_empty() {
-            "not_checked".to_string()
-        } else if !health.clean {
-            "blocked".to_string()
-        } else if !actionable_ready_threads.is_empty() {
-            "ready".to_string()
-        } else {
-            "clean".to_string()
         };
-        let workflow_summary = if !health.clean && ready_threads.is_empty() {
-            "workflow readiness is checked after the primary verification blocker is resolved"
-                .to_string()
-        } else if !health.clean {
-            format!(
-                "{} ready thread(s) are waiting, but merge preview is blocked until repository verification is restored",
-                ready_threads.len()
-            )
-        } else if !actionable_ready_threads.is_empty() {
-            format!(
-                "{} ready thread(s) are waiting for the next workflow action",
-                actionable_ready_threads.len()
-            )
-        } else if !ready_threads.is_empty() {
-            format!(
-                "{} ready thread(s) target another thread; switch to the target thread or inspect `heddle thread list` before merging",
-                ready_threads.len()
-            )
-        } else {
-            "no ready threads are waiting to land".to_string()
-        };
-        let worktree_state = if health_worktree_dirty || git_worktree_dirty {
-            "dirty"
-        } else if !health.clean && find_health_check(&health, "worktree").is_none() {
+    let git_worktree_dirty = matches!(
+        worktree_status_ref,
+        Ok(Some(status)) if !status.is_clean()
+    );
+    let worktree_dirty = health_worktree_dirty || git_worktree_dirty;
+    let ready_threads = ready_thread_actions(repo);
+    let actionable_ready_threads = ready_threads
+        .iter()
+        .filter(|thread| thread.actionable_from_current_thread)
+        .collect::<Vec<_>>();
+    let workflow_action = actionable_ready_threads
+        .first()
+        .map(|thread| thread.recommended_action.clone());
+    let machine_contract_coverage = machine_contract_coverage();
+    let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
+    let machine_contract_action =
+        (!machine_contract_clean).then(|| "heddle doctor schemas --output json".to_string());
+    let action_plan = VerificationActionPlan::from_parts(
+        &health,
+        remote_sync_action(&health),
+        workflow_action,
+        machine_contract_action,
+    );
+    let is_git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
+    let checks = verification_checks_from_health(
+        &health,
+        &action_plan,
+        is_git_overlay,
+        &ready_threads,
+        &machine_contract_coverage,
+    );
+    let clone_verification = if is_git_overlay {
+        if health.clean {
+            "verified"
+        } else if clone_verification_waits_for_primary_blocker(&health) {
             "not_checked"
         } else {
-            "clean"
+            "blocked"
         }
-        .to_string();
-        let verified = health.clean && machine_contract_clean;
-        let status = if health.clean && !machine_contract_clean {
-            "machine_contract_gaps".to_string()
-        } else {
-            health.status.clone()
-        };
-        let summary = if health.clean && !machine_contract_clean {
-            machine_contract_summary(&machine_contract_coverage)
-        } else {
-            health.summary.clone()
-        };
-        let recommended_action_fields = ActionFields::from_action(&action_plan.primary_action);
-        Self {
-            verified,
-            status,
-            repository_mode: repo.capability_label().to_string(),
-            heddle_initialized: true,
-            git_branch,
-            heddle_thread,
-            worktree_dirty,
-            worktree_state,
-            import_state,
-            mapping_state,
-            remote_drift,
-            active_operation,
-            default_remote: default_remote_name(repo),
-            clone_verification,
-            machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
-            machine_contract_coverage,
-            workflow_status,
-            workflow_summary,
-            summary,
-            recommended_action_template: recommended_action_fields.template,
-            recovery_action_templates: action_templates(&action_plan.recovery_commands),
-            recommended_action: action_plan.primary_action,
-            recovery_commands: action_plan.recovery_commands,
-            checks,
-        }
+    } else {
+        "not_applicable"
+    }
+    .to_string();
+    let workflow_status = if !health.clean && ready_threads.is_empty() {
+        "not_checked".to_string()
+    } else if !health.clean {
+        "blocked".to_string()
+    } else if !actionable_ready_threads.is_empty() {
+        "ready".to_string()
+    } else {
+        "clean".to_string()
+    };
+    let workflow_summary = if !health.clean && ready_threads.is_empty() {
+        "workflow readiness is checked after the primary verification blocker is resolved"
+            .to_string()
+    } else if !health.clean {
+        format!(
+            "{} ready thread(s) are waiting, but merge preview is blocked until repository verification is restored",
+            ready_threads.len()
+        )
+    } else if !actionable_ready_threads.is_empty() {
+        format!(
+            "{} ready thread(s) are waiting for the next workflow action",
+            actionable_ready_threads.len()
+        )
+    } else if !ready_threads.is_empty() {
+        format!(
+            "{} ready thread(s) target another thread; switch to the target thread or inspect `heddle thread list` before merging",
+            ready_threads.len()
+        )
+    } else {
+        "no ready threads are waiting to land".to_string()
+    };
+    let worktree_state = if health_worktree_dirty || git_worktree_dirty {
+        "dirty"
+    } else if !health.clean && find_health_check(&health, "worktree").is_none() {
+        "not_checked"
+    } else {
+        "clean"
+    }
+    .to_string();
+    let verified = health.clean && machine_contract_clean;
+    let status = if health.clean && !machine_contract_clean {
+        "machine_contract_gaps".to_string()
+    } else {
+        health.status.clone()
+    };
+    let summary = if health.clean && !machine_contract_clean {
+        machine_contract_summary(&machine_contract_coverage)
+    } else {
+        health.summary.clone()
+    };
+    let recommended_action_fields = ActionFields::from_action(&action_plan.primary_action);
+    RepositoryVerificationState {
+        verified,
+        status,
+        repository_mode: repo.capability_label().to_string(),
+        heddle_initialized: true,
+        git_branch,
+        heddle_thread,
+        worktree_dirty,
+        worktree_state,
+        import_state,
+        mapping_state,
+        remote_drift,
+        active_operation,
+        default_remote: default_remote_name(repo),
+        clone_verification,
+        machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
+        machine_contract_coverage,
+        workflow_status,
+        workflow_summary,
+        summary,
+        recommended_action_template: recommended_action_fields.template,
+        recovery_action_templates: action_templates(&action_plan.recovery_commands),
+        recommended_action: action_plan.primary_action,
+        recovery_commands: action_plan.recovery_commands,
+        checks,
     }
 }
 
@@ -432,8 +300,7 @@ impl VerificationActionPlan {
         machine_contract_action: Option<String>,
     ) -> Self {
         if !health.clean {
-            let primary_action = health
-                .primary_recovery_command()
+            let primary_action = primary_recovery_command(health)
                 .unwrap_or("heddle doctor")
                 .to_string();
             return Self {
@@ -1172,7 +1039,7 @@ pub(crate) fn build_repository_verification_state(
         Ok(None)
     };
     let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
-    RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status)
+    repository_verification_state_from_health_with_worktree_status(repo, health, &worktree_status)
 }
 
 /// Sub-phase timings for [`build_repository_verification_state_profiled`], in
@@ -1204,8 +1071,11 @@ pub(crate) fn build_repository_verification_state_profiled(
     let health_ms = health_start.elapsed().as_millis();
 
     let from_health_start = std::time::Instant::now();
-    let state =
-        RepositoryVerificationState::from_health_with_worktree_status(repo, health, &worktree_status);
+    let state = repository_verification_state_from_health_with_worktree_status(
+        repo,
+        health,
+        &worktree_status,
+    );
     let from_health_ms = from_health_start.elapsed().as_millis();
 
     (
@@ -1229,7 +1099,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
     let health = build_git_overlay_health_with_worktree_status(repo, worktree_status);
-    RepositoryVerificationState::from_health_with_worktree_status(repo, health, worktree_status)
+    repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
 }
 
 pub(crate) fn unimported_git_history_advice(
@@ -2669,7 +2539,7 @@ fn build_git_overlay_health_inner(
         return build_native_heddle_health(repo);
     }
     if repo.root().join(".heddle/objectstore").is_file() && !repo.root().join(".git").exists() {
-        return GitOverlayHealth::clean(
+        return clean_health(
             "Heddle-managed isolated checkout; Git verification belongs to the parent checkout",
             vec![GitOverlayHealthCheck {
                 name: "worktree".to_string(),
@@ -3099,7 +2969,7 @@ fn build_git_overlay_health_inner(
         }
     }
 
-    GitOverlayHealth::clean("Git overlay and Heddle agree", checks)
+    clean_health("Git overlay and Heddle agree", checks)
 }
 
 fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealthCheck>> {
@@ -3312,7 +3182,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                 summary: "Heddle worktree matches the current state".to_string(),
                 details: BTreeMap::new(),
             });
-            GitOverlayHealth::clean(
+            clean_health(
                 "Heddle-native repository is verified in non-overlay mode",
                 checks,
             )

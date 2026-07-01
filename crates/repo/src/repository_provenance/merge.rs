@@ -86,24 +86,30 @@ impl Repository {
         let mut entries = Vec::new();
 
         for entry in final_tree.entries() {
-            let entry_path = path.join(&entry.name);
-            match entry.entry_type {
+            let entry_path = path.join(entry.name());
+            match entry.entry_type() {
                 EntryType::Tree => {
-                    let Some(subtree) = self.store.get_tree(&entry.hash)? else {
+                    let Some(tree_hash) = entry.tree_hash() else {
+                        continue;
+                    };
+                    let Some(subtree) = self.store.get_tree(&tree_hash)? else {
                         continue;
                     };
                     let ours_subtree = ours_tree
-                        .and_then(|tree| tree.get(&entry.name))
+                        .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
-                        .and_then(|te| self.store.get_tree(&te.hash).ok().flatten());
+                        .and_then(|te| te.tree_hash())
+                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
                     let theirs_subtree = theirs_tree
-                        .and_then(|tree| tree.get(&entry.name))
+                        .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
-                        .and_then(|te| self.store.get_tree(&te.hash).ok().flatten());
+                        .and_then(|te| te.tree_hash())
+                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
                     let base_subtree = base_tree
-                        .and_then(|tree| tree.get(&entry.name))
+                        .and_then(|tree| tree.get(entry.name()))
                         .filter(|te| te.is_tree())
-                        .and_then(|te| self.store.get_tree(&te.hash).ok().flatten());
+                        .and_then(|te| te.tree_hash())
+                        .and_then(|hash| self.store.get_tree(&hash).ok().flatten());
                     if let Some(sub_hash) = self.build_merge_provenance_tree_recursive(
                         &entry_path,
                         &subtree,
@@ -118,7 +124,7 @@ impl Repository {
                         base,
                         final_state,
                     )? {
-                        entries.push(TreeEntry::directory(entry.name.clone(), sub_hash)?);
+                        entries.push(TreeEntry::directory(entry.name(), sub_hash)?);
                     }
                 }
                 EntryType::Blob => {
@@ -136,10 +142,10 @@ impl Repository {
                         base,
                         final_state,
                     )? {
-                        entries.push(TreeEntry::file(entry.name.clone(), hash, false)?);
+                        entries.push(TreeEntry::file(entry.name(), hash, false)?);
                     }
                 }
-                EntryType::Symlink => {}
+                EntryType::Symlink | EntryType::Gitlink => {}
             }
         }
 
@@ -166,7 +172,10 @@ impl Repository {
         base: Option<&State>,
         final_state: &State,
     ) -> Result<Option<ContentHash>> {
-        let Some(final_blob) = self.store.get_blob(&final_entry.hash)? else {
+        let Some(final_hash) = final_entry.blob_hash() else {
+            return Ok(None);
+        };
+        let Some(final_blob) = self.store.get_blob(&final_hash)? else {
             return Ok(None);
         };
         let Some(final_lines) = split_text_lines(final_blob.content()) else {
@@ -180,59 +189,66 @@ impl Repository {
         let ours_prov = match (ours_root, ours_entry.as_ref()) {
             (Some(root), Some(entry)) if entry.is_blob() => {
                 self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    synthesize_file_provenance_from_blob(
-                        self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                        ours,
-                    )
+                    let blob = entry
+                        .blob_hash()
+                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                    synthesize_file_provenance_from_blob(blob.as_ref(), ours)
                 })
             }
-            (_, Some(entry)) if entry.is_blob() => synthesize_file_provenance_from_blob(
-                self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                ours,
-            ),
+            (_, Some(entry)) if entry.is_blob() => {
+                let blob = entry
+                    .blob_hash()
+                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                synthesize_file_provenance_from_blob(blob.as_ref(), ours)
+            }
             _ => None,
         };
         let theirs_prov = match (theirs_root, theirs_entry.as_ref()) {
             (Some(root), Some(entry)) if entry.is_blob() => {
                 self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    synthesize_file_provenance_from_blob(
-                        self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                        theirs,
-                    )
+                    let blob = entry
+                        .blob_hash()
+                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                    synthesize_file_provenance_from_blob(blob.as_ref(), theirs)
                 })
             }
-            (_, Some(entry)) if entry.is_blob() => synthesize_file_provenance_from_blob(
-                self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                theirs,
-            ),
+            (_, Some(entry)) if entry.is_blob() => {
+                let blob = entry
+                    .blob_hash()
+                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                synthesize_file_provenance_from_blob(blob.as_ref(), theirs)
+            }
             _ => None,
         };
         let base_prov = match (base_root, base_entry.as_ref(), base) {
             (Some(root), Some(entry), Some(base_state)) if entry.is_blob() => {
                 self.get_file_provenance_from_root(root, path)?.or_else(|| {
-                    synthesize_file_provenance_from_blob(
-                        self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                        base_state,
-                    )
+                    let blob = entry
+                        .blob_hash()
+                        .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                    synthesize_file_provenance_from_blob(blob.as_ref(), base_state)
                 })
             }
             (_, Some(entry), Some(base_state)) if entry.is_blob() => {
-                synthesize_file_provenance_from_blob(
-                    self.store.get_blob(&entry.hash).ok().flatten().as_ref(),
-                    base_state,
-                )
+                let blob = entry
+                    .blob_hash()
+                    .and_then(|hash| self.store.get_blob(&hash).ok().flatten());
+                synthesize_file_provenance_from_blob(blob.as_ref(), base_state)
             }
             _ => None,
         };
 
         let ours_same = ours_entry
-            .map(|entry| entry.hash == final_entry.hash)
+            .and_then(|entry| entry.blob_hash())
+            .map(|hash| hash == final_hash)
             .unwrap_or(false);
         let theirs_same = theirs_entry
-            .map(|entry| entry.hash == final_entry.hash)
+            .and_then(|entry| entry.blob_hash())
+            .map(|hash| hash == final_hash)
             .unwrap_or(false);
         let base_same = base_entry
-            .map(|entry| entry.hash == final_entry.hash)
+            .and_then(|entry| entry.blob_hash())
+            .map(|hash| hash == final_hash)
             .unwrap_or(false);
 
         if ours_same
@@ -243,7 +259,7 @@ impl Repository {
                 return Ok(Some(self.put_file_provenance(ours_prov)?));
             }
             let combined = self.combine_equal_file_provenance(
-                final_entry.hash,
+                final_hash,
                 &final_lines,
                 &[ours_prov, theirs_prov],
             )?;
@@ -261,7 +277,7 @@ impl Repository {
 
         let final_origin = self.state_origin(final_state);
         let merged = self.merge_file_provenance(
-            final_entry.hash,
+            final_hash,
             &final_lines,
             [ours_prov.as_ref(), theirs_prov.as_ref(), base_prov.as_ref()],
             final_origin,

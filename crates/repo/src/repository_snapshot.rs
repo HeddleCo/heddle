@@ -309,6 +309,20 @@ impl SnapshotMutation<'_> {
     }
 
     fn build_worktree_tree(&self) -> Result<(Tree, TreeBuildProfile)> {
+        let baseline_tree = match self.prev_head {
+            Some(prev_head) => {
+                let state = self
+                    .repo
+                    .store
+                    .get_state(&prev_head)?
+                    .ok_or(HeddleError::StateNotFound(prev_head))?;
+                Some(self.repo.store.get_tree(&state.tree)?.ok_or_else(|| {
+                    HeddleError::NotFound(format!("tree {} (for state {})", state.tree, prev_head))
+                })?)
+            }
+            None => None,
+        };
+
         let manifest_context: Option<(String, crate::thread_manifest::ThreadManifest)> =
             match &self.head {
                 Head::Attached { thread } => {
@@ -331,10 +345,14 @@ impl SnapshotMutation<'_> {
             };
 
         match manifest_context.as_ref() {
-            Some((_, manifest)) => self
+            Some((_, manifest)) => self.repo.build_tree_profiled_with_stat_cache_against(
+                &self.repo.root,
+                baseline_tree.as_ref(),
+                manifest,
+            ),
+            None => self
                 .repo
-                .build_tree_profiled_with_stat_cache(&self.repo.root, manifest),
-            None => self.repo.build_tree_profiled(&self.repo.root),
+                .build_tree_profiled_against(&self.repo.root, baseline_tree.as_ref()),
         }
     }
 }

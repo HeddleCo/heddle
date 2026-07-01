@@ -13,8 +13,11 @@ use ingest::ImportProgressEvent;
 use objects::Progress;
 use repo::Repository;
 
-use crate::cli::progress_render::{COMMIT_TICK_INTERVAL, finish_line, progress_for};
-use crate::cli::{Cli, style};
+use crate::cli::{
+    Cli,
+    progress_render::{COMMIT_TICK_INTERVAL, finish_line, progress_for},
+    style,
+};
 
 pub(crate) struct ImportProgress {
     /// The generic handle. A null handle (under `--json`) makes every method a

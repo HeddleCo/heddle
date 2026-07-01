@@ -452,8 +452,7 @@ mod tests {
             expected_markers.push((name, cid));
         }
 
-        let stats =
-            pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
+        let stats = pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
 
         assert_eq!(stats.threads_written, N_BRANCHES + N_REMOTES);
         assert_eq!(stats.markers_written, N_TAGS);
@@ -491,8 +490,7 @@ mod tests {
         );
 
         // Idempotent: a second identical emit is a no-op for final state.
-        let again =
-            pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
+        let again = pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
         assert_eq!(again.threads_written, N_BRANCHES + N_REMOTES);
         for (name, cid) in &expected_threads {
             assert_eq!(mgr.get_thread(&ThreadName::new(name)).unwrap(), Some(*cid));

@@ -6,10 +6,11 @@
 use std::{fs::OpenOptions, hint::black_box};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use heddle_format::compression::CompressionConfig;
 use objects::{
     object::ContentHash,
     store::{
-        CompressionConfig, FsStore, ObjectStore,
+        FsStore, ObjectStore,
         pack::{ObjectType, PackBuilder, PackObjectId, PackReader, StreamingPackBuilder},
     },
 };

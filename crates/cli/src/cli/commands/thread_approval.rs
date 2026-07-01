@@ -89,8 +89,7 @@ async fn open_heddle_client(
     repo: &Repository,
     remote_name: &str,
 ) -> Result<(HostedGrpcClient, String)> {
-    let (target, server_key) =
-        resolve_remote_with_key(repo, Some(remote_name)).map_err(anyhow::Error::msg)?;
+    let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name))?;
     let (addr, repo_path) = match target {
         RemoteTarget::Network { addr, repo_path } => (
             addr,

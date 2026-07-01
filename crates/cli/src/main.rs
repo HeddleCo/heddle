@@ -23,8 +23,8 @@ use cli::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_compat, cmd_complete,
-            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
+            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_adapter,
+            cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
@@ -33,7 +33,7 @@ use cli::{
             cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
             cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
+            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_adapter,
             cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
             cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
@@ -44,7 +44,7 @@ use cli::{
     exit::HeddleExitCode,
     logging::{LoggingConfig, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
-    perf::{ProfileField, emit_profile, profile_enabled},
+    perf::{ProfileField, emit_command_profile, profile_enabled},
 };
 use tracing::debug;
 
@@ -129,8 +129,9 @@ async fn async_main() -> Result<()> {
                 cli::cli::help::print_help(&Cli::command(), &[])?;
             }
             if profile {
-                emit_profile(
+                emit_command_profile(
                     "help",
+                    0,
                     &[
                         ProfileField::duration("command_body_ms", command_start.elapsed()),
                         ProfileField::duration("total_ms", total_start.elapsed()),
@@ -142,8 +143,9 @@ async fn async_main() -> Result<()> {
         if let Some(result) = cli::cli::help::print_direct_help_for_raw(&Cli::command(), &raw) {
             result?;
             if profile {
-                emit_profile(
+                emit_command_profile(
                     "help",
+                    0,
                     &[ProfileField::duration("total_ms", total_start.elapsed())],
                 );
             }
@@ -154,8 +156,7 @@ async fn async_main() -> Result<()> {
         // arg form `heddle help <topic>` also goes through clap.
     }
     let raw_argv: Vec<String> = std::env::args().collect();
-    let parse_argv = rewrite_phase_2_alias_argv(&raw_argv).unwrap_or(raw_argv);
-    let cli = match Cli::try_parse_from(parse_argv) {
+    let cli = match Cli::try_parse_from(raw_argv) {
         Ok(cli) => cli,
         Err(err) => {
             let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -183,8 +184,9 @@ async fn async_main() -> Result<()> {
     {
         cli::cli::help::print_capture_agent_help(&Cli::command())?;
         if profile {
-            emit_profile(
+            emit_command_profile(
                 "help",
+                0,
                 &[ProfileField::duration("total_ms", total_start.elapsed())],
             );
         }
@@ -408,7 +410,7 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        Commands::Commit(args) => cmd_commit_compat(&cli, args.clone()).await,
+        Commands::Commit(args) => cmd_commit_git_adapter(&cli, args.clone()).await,
 
         Commands::Log(LogArgs {
             state,
@@ -487,7 +489,7 @@ async fn async_main() -> Result<()> {
             *patch,
         ),
 
-        Commands::Switch(args) => cmd_switch_compat(&cli, args.clone()).await,
+        Commands::Switch(args) => cmd_switch_git_adapter(&cli, args.clone()).await,
 
         Commands::Revert(RevertArgs {
             state,
@@ -515,9 +517,8 @@ async fn async_main() -> Result<()> {
         Commands::Fsck {
             full,
             thorough,
-            repair,
             bridge,
-        } => cmd_fsck(&cli, *full, *thorough, *repair, *bridge),
+        } => cmd_fsck(&cli, *full, *thorough, *bridge),
 
         Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 
@@ -840,8 +841,14 @@ async fn async_main() -> Result<()> {
     );
 
     if profile {
-        emit_profile(
+        let exit_status = match &result {
+            Ok(()) => 0,
+            Err(err) if is_broken_pipe_error(err) => 0,
+            Err(err) => HeddleExitCode::from_error(err).into(),
+        };
+        emit_command_profile(
             &command_name,
+            exit_status,
             &[
                 ProfileField::millis("config_load_ms", config_load_ms),
                 ProfileField::millis("logging_init_ms", logging_init_ms),
@@ -870,58 +877,6 @@ fn is_harness_relay_invocation(command: &Commands) -> bool {
             command: IntegrationCommands::Relay(_),
         }
     )
-}
-
-fn rewrite_phase_2_alias_argv(argv: &[String]) -> Option<Vec<String>> {
-    let root = first_command_index(argv)?;
-    match argv[root].as_str() {
-        "blame" => {
-            let mut rewritten = Vec::with_capacity(argv.len() + 1);
-            rewritten.extend_from_slice(&argv[..root]);
-            rewritten.push("query".to_string());
-            rewritten.push("--attribution".to_string());
-            rewritten.extend_from_slice(&argv[root + 1..]);
-            Some(rewritten)
-        }
-        "purge" => {
-            let mut rewritten = Vec::with_capacity(argv.len() + 1);
-            rewritten.extend_from_slice(&argv[..root]);
-            rewritten.push("redact".to_string());
-            rewritten.push("purge".to_string());
-            rewritten.extend_from_slice(&argv[root + 1..]);
-            Some(rewritten)
-        }
-        _ => None,
-    }
-}
-
-fn first_command_index(argv: &[String]) -> Option<usize> {
-    let mut index = 1;
-    while index < argv.len() {
-        let arg = argv[index].as_str();
-        match arg {
-            "--" => return None,
-            "--output" | "--repo" | "-C" | "--op-id" => index += 2,
-            "--no-color" | "--verbose" | "--quiet" | "-v" | "-q" => index += 1,
-            _ if arg.starts_with("--output=")
-                || arg.starts_with("--repo=")
-                || arg.starts_with("--op-id=")
-                || (arg.starts_with("-C") && arg.len() > 2)
-                || short_verbose_quiet_cluster(arg) =>
-            {
-                index += 1;
-            }
-            _ => return Some(index),
-        }
-    }
-    None
-}
-
-fn short_verbose_quiet_cluster(arg: &str) -> bool {
-    arg.len() > 2
-        && arg.starts_with('-')
-        && !arg.starts_with("--")
-        && arg[1..].chars().all(|ch| matches!(ch, 'v' | 'q'))
 }
 
 /// True when the raw argv (after the program name) contains only global

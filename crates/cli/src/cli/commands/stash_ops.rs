@@ -47,8 +47,10 @@ pub(super) fn restore_worktree(
 ) -> Result<()> {
     for path in &status.modified {
         let full_path = repo.root().join(path);
-        if let Some(entry) = tree.get(&path.to_string_lossy()) {
-            let blob = repo.require_blob(&entry.hash)?;
+        if let Some(entry) = tree.get(&path.to_string_lossy())
+            && let Some(hash) = entry.leaf_content_hash()
+        {
+            let blob = repo.require_blob(&hash)?;
             fs::write(&full_path, blob.content())?;
         }
     }
@@ -73,8 +75,11 @@ pub(super) fn apply_stash(repo: &Repository, stash: &StashEntry) -> Result<()> {
     let stash_tree = repo.require_tree(&stash_tree_hash)?;
 
     for entry in stash_tree.entries() {
-        let full_path = repo.root().join(&entry.name);
-        let blob = repo.require_blob(&entry.hash)?;
+        let Some(hash) = entry.leaf_content_hash() else {
+            continue;
+        };
+        let full_path = repo.root().join(entry.name());
+        let blob = repo.require_blob(&hash)?;
         if let Some(parent) = full_path.parent()
             && !parent.exists()
         {

@@ -36,7 +36,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
     status: &mut WorktreeStatus,
 ) -> Result<()> {
     let tree_entries: HashMap<&str, &TreeEntry> = tree
-        .map(|t| t.entries().iter().map(|e| (e.name.as_str(), e)).collect())
+        .map(|t| t.entries().iter().map(|e| (e.name(), e)).collect())
         .unwrap_or_default();
 
     let mut seen_entries: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -65,8 +65,8 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                 let blob = Blob::new(crate::util::symlink_target_bytes(&target));
                 let hash = blob.hash();
                 match tree_entries.get(&name) {
-                    Some(tree_entry) if tree_entry.entry_type == EntryType::Symlink => {
-                        if hash != tree_entry.hash {
+                    Some(tree_entry) if tree_entry.entry_type() == EntryType::Symlink => {
+                        if Some(hash) != tree_entry.symlink_hash() {
                             status.modified.push(rel_path.to_path_buf());
                         }
                     }
@@ -87,7 +87,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                             let blob = Blob::new(content);
                             let hash = blob.hash();
 
-                            if hash != tree_entry.hash {
+                            if Some(hash) != tree_entry.blob_hash() {
                                 status.modified.push(rel_path.to_path_buf());
                             }
                         }
@@ -97,9 +97,11 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                     }
                 } else if metadata.is_dir() {
                     let subtree = match tree_entries.get(&name) {
-                        Some(tree_entry) if tree_entry.is_tree() => {
-                            store.get_tree(&tree_entry.hash)?
-                        }
+                        Some(tree_entry) if tree_entry.is_tree() => tree_entry
+                            .tree_hash()
+                            .map(|hash| store.get_tree(&hash))
+                            .transpose()?
+                            .flatten(),
                         _ => None,
                     };
 
@@ -120,10 +122,10 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
         if !seen_entries.contains(name) {
             let rel_path = dir.strip_prefix(base).unwrap_or(dir).join(name);
 
-            if entry.entry_type == EntryType::Blob {
+            if entry.entry_type() == EntryType::Blob || entry.entry_type() == EntryType::Gitlink {
                 status.deleted.push(rel_path);
-            } else if entry.entry_type == EntryType::Tree
-                && let Some(subtree) = store.get_tree(&entry.hash)?
+            } else if let Some(tree_hash) = entry.tree_hash()
+                && let Some(subtree) = store.get_tree(&tree_hash)?
             {
                 mark_all_deleted(store, &rel_path, &subtree, status)?;
             }
@@ -140,18 +142,20 @@ fn mark_all_deleted<S: ObjectStore + ?Sized>(
     status: &mut WorktreeStatus,
 ) -> Result<()> {
     for entry in tree.entries() {
-        let path = prefix.join(&entry.name);
+        let path = prefix.join(entry.name());
 
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Blob => {
                 status.deleted.push(path);
             }
             EntryType::Tree => {
-                if let Some(subtree) = store.get_tree(&entry.hash)? {
+                if let Some(tree_hash) = entry.tree_hash()
+                    && let Some(subtree) = store.get_tree(&tree_hash)?
+                {
                     mark_all_deleted(store, &path, &subtree, status)?;
                 }
             }
-            EntryType::Symlink => {
+            EntryType::Symlink | EntryType::Gitlink => {
                 status.deleted.push(path);
             }
         }

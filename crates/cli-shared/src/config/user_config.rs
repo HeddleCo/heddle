@@ -314,6 +314,16 @@ impl UserConfig {
         let mut file = fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(value) = invalid_output_format_value(&contents) {
+            return Err(objects::error::HeddleError::ConfigInvalidValue {
+                path: resolved,
+                key: "output.format".to_string(),
+                value,
+                valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+            }
+            .into());
+        }
         // Route TOML parse failures through `HeddleError::ConfigParse` so
         // the CLI error envelope (see `print_error_with_hint`) can
         // classify them and render the *actual* source file in the
@@ -322,7 +332,6 @@ impl UserConfig {
         // so the rendered hint is copy/paste-safe even when the caller
         // passed a relative or env-derived path.
         toml::from_str::<Self>(&contents).map_err(|err| {
-            let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             objects::error::HeddleError::ConfigParse {
                 path: resolved,
                 source: err,
@@ -487,6 +496,15 @@ fn parse_auto_capture_env(setting: &str, value: &str) -> anyhow::Result<UserAuto
             ),
         )),
     }
+}
+
+fn invalid_output_format_value(contents: &str) -> Option<String> {
+    let value = toml::from_str::<toml::Value>(contents).ok()?;
+    let format = value
+        .get("output")
+        .and_then(|output| output.get("format"))
+        .and_then(toml::Value::as_str)?;
+    (!matches!(format, "text" | "json")).then(|| format.to_string())
 }
 
 fn read_security_config_file(setting: &str, path: &Path) -> anyhow::Result<String> {

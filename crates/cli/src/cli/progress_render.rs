@@ -15,13 +15,15 @@
 //! change so stage transitions show immediately. This mirrors the cadence of
 //! the bespoke import progress line this sink replaces.
 
-use std::io::{self, IsTerminal, Write};
-use std::sync::Mutex;
+use std::{
+    io::{self, IsTerminal, Write},
+    sync::Mutex,
+};
 
 use objects::{Progress, ProgressSnapshot, Sink};
+use repo::Repository;
 
 use crate::cli::{Cli, should_output_json, style};
-use repo::Repository;
 
 /// Redraw the live line at most once per this many completed units, so a large
 /// operation doesn't spend its time flushing the terminal. Matches the historic
@@ -228,9 +230,12 @@ mod tests {
             last_phase: Some("p".into()),
             painted: true,
         };
-        for (done, total, want) in
-            [(0, 100, true), (64, 100, true), (100, 100, true), (63, 100, false)]
-        {
+        for (done, total, want) in [
+            (0, 100, true),
+            (64, 100, true),
+            (100, 100, true),
+            (63, 100, false),
+        ] {
             let snap = ProgressSnapshot {
                 done,
                 total,

@@ -1025,10 +1025,11 @@ fn test_redo_ff_merge_succeeds_when_source_deleted() {
     heddle_must_succeed(&["undo"], temp.path());
     assert_eq!(head_short(temp.path()), main_tip_before);
 
-    // Delete the source thread between undo and redo. The legacy CLI
-    // shape `thread delete <name>` is translated to
-    // `thread drop <name> --delete-thread` by `translate_legacy_args`.
-    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+    // Delete the source thread between undo and redo.
+    heddle_must_succeed(
+        &["thread", "drop", "feature", "--delete-thread"],
+        temp.path(),
+    );
 
     heddle_must_succeed(&["undo", "--redo"], temp.path());
 
@@ -1090,7 +1091,10 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     // redo arm doesn't read the source thread at all, but locking this down
     // ensures the test fails in the right way if a regression re-introduces
     // a live-resolve fallback.)
-    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+    heddle_must_succeed(
+        &["thread", "drop", "feature", "--delete-thread"],
+        temp.path(),
+    );
 
     let err = heddle(&["undo", "--redo"], Some(temp.path()))
         .expect_err("redo must refuse when the FF target state is missing");
@@ -1480,6 +1484,7 @@ fn test_undo_redact_refuses_when_blob_already_purged() {
     );
     heddle_must_succeed(
         &[
+            "redact",
             "purge",
             "apply",
             &state,
@@ -1780,6 +1785,7 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
     );
     heddle_must_succeed(
         &[
+            "redact",
             "purge",
             "apply",
             &state,
@@ -2958,6 +2964,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     );
     heddle_must_succeed(
         &[
+            "redact",
             "purge",
             "apply",
             &current_state,

@@ -69,11 +69,11 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
         };
 
         if parts.len() == 1 {
-            if entry.is_blob() {
-                return Ok(self.store.get_blob(&entry.hash)?);
+            if let Some(blob_hash) = entry.blob_hash() {
+                return Ok(self.store.get_blob(&blob_hash)?);
             }
-        } else if entry.is_tree()
-            && let Some(subtree) = self.get_tree(&entry.hash)?
+        } else if let Some(tree_hash) = entry.tree_hash()
+            && let Some(subtree) = self.get_tree(&tree_hash)?
         {
             return self.get_blob_recursive(&subtree, &parts[1..]);
         }
@@ -85,7 +85,7 @@ impl<'a, S: ObjectStore + ?Sized> TreeBlobContentLoader<'a, S> {
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Blob, EntryType, FileMode, TreeEntry},
+        object::{Blob, EntryType, TreeEntry},
         store::{InMemoryStore, ObjectStore},
     };
 
@@ -102,13 +102,14 @@ mod tests {
         let tree = Tree::from_entries(
             entries
                 .into_iter()
-                .map(|(name, hash, entry_type)| TreeEntry {
-                    name: name.to_string(),
-                    mode: FileMode::Normal,
-                    hash,
-                    entry_type,
+                .map(|(name, hash, entry_type)| match entry_type {
+                    EntryType::Blob => TreeEntry::file(name.to_string(), hash, false),
+                    EntryType::Tree => TreeEntry::directory(name.to_string(), hash),
+                    EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
+                    EntryType::Gitlink => unreachable!("semantic helper does not build gitlinks"),
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
         );
         store.put_tree(&tree).unwrap()
     }

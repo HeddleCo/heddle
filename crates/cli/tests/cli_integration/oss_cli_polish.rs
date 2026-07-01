@@ -4226,7 +4226,7 @@ fn heddle_output_without_principal_env(
     cwd: &std::path::Path,
 ) -> Result<std::process::Output, String> {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     cmd.current_dir(cwd);
     cmd.env("HEDDLE_CONFIG", cwd.join(".heddle-user/config.toml"));
     cmd.env_remove("HEDDLE_PRINCIPAL_NAME");
@@ -4533,7 +4533,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 }
 
 #[test]
-fn git_compat_commit_branch_and_switch_shims_work() {
+fn git_adapter_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
     SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
@@ -7662,6 +7662,25 @@ fn legacy_global_json_flag_is_not_supported() {
 }
 
 #[test]
+fn legacy_phase_2_root_aliases_are_not_rewritten() {
+    const CASES: &[(&str, &[&str])] = &[
+        ("blame", &["blame", "file.txt"]),
+        ("purge", &["purge", "apply"]),
+    ];
+
+    for (alias, args) in CASES {
+        let output = heddle_output(args, None).expect("invoke heddle");
+        assert!(!output.status.success(), "{alias} alias should be rejected");
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("unrecognized subcommand '{alias}'"))
+                || stderr.contains(&format!("unexpected argument '{alias}'")),
+            "clap should reject removed alias {alias}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -9668,78 +9687,104 @@ fn context_invalid_scope_uses_typed_advice_json() {
 }
 
 #[test]
-fn discuss_resolve_conditional_options_use_typed_advice_json() {
+fn discuss_resolve_into_annotation_emits_resolved_annotation_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
+    let capture = json_value(temp.path(), &["capture", "-m", "seed"]);
+    let state_id = capture["change_id"]
+        .as_str()
+        .expect("capture output should include change_id")
+        .to_string();
+    let opened = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "open",
+            "src/lib.rs",
+            "foo",
+            "Please keep this rationale",
+            "--state",
+            &state_id,
+        ],
+    );
+    let discussion_id = opened["id"]
+        .as_str()
+        .expect("discuss open should return an id")
+        .to_string();
+
+    let resolved = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "resolve",
+            &discussion_id,
+            "--mode",
+            "into-annotation",
+            "--annotation-kind",
+            "rationale",
+            "--annotation-content",
+            "Future annotation body",
+            "--annotation-tags",
+            "review,design",
+        ],
+    );
+    assert_eq!(resolved["output_kind"], "discuss_resolve");
+    assert_eq!(resolved["id"].as_str(), Some(discussion_id.as_str()));
+    assert_eq!(resolved["resolution"]["kind"], "resolved_into_annotation");
+    let annotation_id = resolved["resolved_annotation_id"]
+        .as_str()
+        .expect("resolved discussion should expose the created annotation id");
+    assert!(
+        annotation_id.starts_with("hd-"),
+        "annotation id should be a Heddle change id: {resolved}"
+    );
+    assert_eq!(
+        resolved["resolution"]["annotation_id"].as_str(),
+        Some(annotation_id),
+        "resolution payload and top-level convenience id should match: {resolved}"
+    );
+}
+
+#[test]
+fn discuss_resolve_dismiss_requires_reason_with_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    for (args, expected_kind, expected_error, expected_hint) in [
-        (
-            vec![
-                "--output",
-                "json",
-                "discuss",
-                "resolve",
-                "d1",
-                "--mode",
-                "into-annotation",
-            ],
-            "discuss_resolve_missing_annotation_kind",
-            "--annotation-kind is required for into-annotation",
-            "--annotation-kind",
-        ),
-        (
-            vec![
-                "--output",
-                "json",
-                "discuss",
-                "resolve",
-                "d1",
-                "--mode",
-                "into-annotation",
-                "--annotation-kind",
-                "rationale",
-            ],
-            "discuss_resolve_missing_annotation_content",
-            "--annotation-content is required for into-annotation",
-            "--annotation-content",
-        ),
-        (
-            vec![
-                "--output", "json", "discuss", "resolve", "d1", "--mode", "dismiss",
-            ],
-            "discuss_resolve_missing_dismiss_reason",
-            "--reason is required for dismiss",
-            "--reason",
-        ),
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke discuss resolve");
-        assert!(
-            !output.status.success(),
-            "conditional discuss resolve option should fail"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "JSON-mode discuss refusal must keep stdout quiet: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
-        assert_eq!(envelope["kind"], expected_kind);
-        assert_json_recovery_advice_fields(&envelope, stderr);
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains(expected_error)),
-            "discuss refusal should keep the centralized error: {stderr}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains(expected_hint)),
-            "discuss refusal hint should name the missing flag: {stderr}"
-        );
-    }
+    let output = heddle_output(
+        &[
+            "--output", "json", "discuss", "resolve", "d1", "--mode", "dismiss",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke discuss resolve");
+    assert!(
+        !output.status.success(),
+        "conditional discuss resolve option should fail"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode discuss refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "discuss_resolve_missing_dismiss_reason");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("--reason is required for dismiss")),
+        "discuss refusal should keep the centralized error: {stderr}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--reason")),
+        "discuss refusal hint should name the missing flag: {stderr}"
+    );
 }
 
 #[test]
@@ -10213,7 +10258,7 @@ fn agent_reserve_reports_path_for_existing_materialized_thread() {
 }
 
 #[test]
-fn index_json_emits_one_value_even_for_hidden_compat_alias() {
+fn index_json_emits_one_value_for_maintenance_index() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
     let index = json_value(temp.path(), &["maintenance", "index", "--output", "json"]);
@@ -11085,17 +11130,32 @@ fn schema_near_miss_recommends_real_match_or_catalog_not_unrelated_schema() {
 }
 
 #[test]
-fn schemas_resolves_unambiguous_base_verbs_to_concrete_runtime_schema() {
-    let output = heddle(&["schemas", "merge"], None).expect("heddle schemas merge");
-    let parsed: serde_json::Value = serde_json::from_str(&output)
-        .unwrap_or_else(|err| panic!("schemas merge should emit JSON: {err}: {output}"));
-    assert_eq!(parsed["title"], "MergePreviewSchema");
-    let properties = parsed["properties"]
-        .as_object()
-        .unwrap_or_else(|| panic!("schema should expose properties: {parsed}"));
+fn schemas_requires_exact_verb_but_suggests_unambiguous_schema() {
+    let output = heddle_output(&["--output", "json", "schemas", "merge"], None)
+        .expect("invoke exact-only schema lookup");
     assert!(
-        properties.contains_key("preview_summary") && properties.contains_key("would_merge"),
-        "`heddle schemas merge` should guide agents to the merge preview schema: {parsed}"
+        !output.status.success(),
+        "base schema lookup should fail exact-only"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failure must not pollute stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "schema_not_registered");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle schemas merge --preview"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("merge --preview")),
+        "exact-only schema lookup should still suggest the precise schema verb: {envelope}"
     );
 }
 
@@ -11760,7 +11820,7 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
 }
 
 #[test]
-fn blame_drops_email_when_attribution_overflows_column() {
+fn query_attribution_drops_email_when_attribution_overflows_column() {
     // `Ada Lovelace <ada@really.long.example.com>` blew the 20-char column,
     // truncating to `Ada Lovelace <ada...` — keeping the noise and
     // dropping the signal. The fit_author helper drops the email
@@ -11781,30 +11841,30 @@ fn blame_drops_email_when_attribution_overflows_column() {
     )
     .unwrap();
 
-    let blame = heddle_output_with_env(
-        &["--output", "text", "blame", "note.txt"],
+    let attribution = heddle_output_with_env(
+        &["--output", "text", "query", "--attribution", "note.txt"],
         Some(temp.path()),
         &[("HEDDLE_CONFIG", user_cfg.to_str().unwrap())],
     )
-    .expect("blame note.txt");
+    .expect("query --attribution note.txt");
     assert!(
-        blame.status.success(),
-        "blame should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&blame.stdout),
-        String::from_utf8_lossy(&blame.stderr)
+        attribution.status.success(),
+        "query --attribution should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&attribution.stdout),
+        String::from_utf8_lossy(&attribution.stderr)
     );
-    let output = String::from_utf8_lossy(&blame.stdout);
+    let output = String::from_utf8_lossy(&attribution.stdout);
     assert!(
         output.contains("Ada Lovelace"),
-        "blame must show the principal name: {output}"
+        "query attribution must show the principal name: {output}"
     );
     assert!(
         !output.contains("Ada Loveli...") && !output.contains("Ada Lovela..."),
-        "blame must not mid-name-truncate when the name itself fits: {output}"
+        "query attribution must not mid-name-truncate when the name itself fits: {output}"
     );
     assert!(
         !output.contains("really.long"),
-        "blame must drop the email when the name fits the column: {output}"
+        "query attribution must drop the email when the name fits the column: {output}"
     );
 }
 

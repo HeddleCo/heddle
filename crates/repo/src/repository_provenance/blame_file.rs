@@ -277,7 +277,7 @@ impl Repository {
         let Some(entry) = lookup_tree_entry(self, &tree, path) else {
             return Ok(None);
         };
-        Ok(entry.is_blob().then_some(entry.hash))
+        Ok(entry.blob_hash())
     }
 }
 

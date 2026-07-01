@@ -54,6 +54,7 @@ pub(crate) struct SnapshotOutput {
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
+    pub task_assignment_id: Option<String>,
     pub principal: SnapshotPrincipalOutput,
     pub agent: Option<SnapshotAgentOutput>,
     pub promotion_suggested: bool,
@@ -471,11 +472,11 @@ fn current_thread_name(repo: &Repository) -> String {
 
 /// Large-capture safety preflight for `commit`'s dirty path, reusing an
 /// already-computed git-overlay worktree status instead of re-walking the
-/// worktree. `commit` has already computed the same pre-mutation status for its
-/// own preflights and the (unchanged) clean classification, so threading it here
+/// worktree. The git adapter has already computed the same pre-mutation status
+/// for its own preflights and the clean classification, so threading it here
 /// removes a redundant full walk. The large-capture gating decision is
 /// byte-identical because it reads the same `WorktreeStatus`.
-pub(crate) fn preflight_large_capture_for_compat_commit_with_worktree_status(
+pub(crate) fn preflight_large_capture_for_git_adapter_commit_with_worktree_status(
     force: bool,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> Result<()> {
@@ -726,6 +727,7 @@ fn create_snapshot_profiled_inner(
         .as_deref()
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
+    let task_assignment_id = active_task_assignment_id(repo)?;
 
     let output = SnapshotOutput {
         output_kind: "capture",
@@ -735,6 +737,7 @@ fn create_snapshot_profiled_inner(
         content_hash: execution.state.hash().short(),
         intent: execution.state.intent.clone(),
         confidence: execution.state.confidence,
+        task_assignment_id,
         principal: (&execution.state.attribution.principal).into(),
         agent: execution
             .state
@@ -846,6 +849,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         .as_deref()
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
+    let task_assignment_id = active_task_assignment_id(repo)?;
 
     let output = SnapshotOutput {
         output_kind: "capture",
@@ -855,6 +859,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         content_hash: execution.state.hash().short(),
         intent: execution.state.intent.clone(),
         confidence: execution.state.confidence,
+        task_assignment_id,
         principal: (&execution.state.attribution.principal).into(),
         agent: execution
             .state
@@ -904,6 +909,13 @@ fn update_active_thread_metadata(
 ) -> Result<(bool, Vec<String>)> {
     let refresh = refresh_active_thread_metadata(repo, state, tree)?;
     Ok((refresh.promotion_suggested, refresh.heavy_impact_paths))
+}
+
+fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
+    let Some(thread) = current_thread(repo)? else {
+        return Ok(None);
+    };
+    Ok(find_active_thread_entry(repo, &thread.id)?.and_then(|entry| entry.task_assignment_id))
 }
 
 fn default_bootstrap_intent(repo: &Repository) -> String {
@@ -1303,6 +1315,7 @@ mod tests {
             last_progress_at: None,
             report_flush_state: Some("pending-local".to_string()),
             attach_reason: Some("test detected harness actor".to_string()),
+            task_assignment_id: None,
             attach_precedence: Vec::new(),
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),

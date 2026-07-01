@@ -828,22 +828,32 @@ fn walk_tree<S: ObjectStore + ?Sized>(
     };
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{}/{}", prefix, entry.name)
+            format!("{}/{}", prefix, entry.name())
         };
-        match entry.entry_type {
+        match entry.entry_type() {
             EntryType::Blob => {
-                out.insert(path, entry.hash);
+                if let Some(hash) = entry.blob_hash() {
+                    out.insert(path, hash);
+                }
             }
             EntryType::Tree => {
-                walk_tree(store, &entry.hash, &path, out)?;
+                if let Some(hash) = entry.tree_hash() {
+                    walk_tree(store, &hash, &path, out)?;
+                }
             }
             // Treat symlinks as leaf entries — their hash identifies
             // the link target. For transcript matching we only need
             // the path, not the semantics.
             EntryType::Symlink => {
-                out.insert(path, entry.hash);
+                if let Some(hash) = entry.symlink_hash() {
+                    out.insert(path, hash);
+                }
+            }
+            EntryType::Gitlink => {
+                // Gitlinks point at foreign git objects, not Heddle blobs,
+                // so they do not participate in transcript content matching.
             }
         }
     }

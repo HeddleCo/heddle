@@ -19,6 +19,7 @@ pub enum Verbosity {
 /// Semantic execution state for embeddable Heddle operations.
 pub struct ExecutionContext {
     repo: Option<Repository>,
+    start_path: Option<PathBuf>,
     config: UserConfig,
     verbosity: Verbosity,
     progress: Arc<dyn ProgressSink>,
@@ -40,6 +41,10 @@ impl ExecutionContext {
 
     pub fn repo(&self) -> Option<&Repository> {
         self.repo.as_ref()
+    }
+
+    pub fn start_path(&self) -> Option<&std::path::Path> {
+        self.start_path.as_deref()
     }
 
     pub fn config(&self) -> &UserConfig {
@@ -66,6 +71,7 @@ impl ExecutionContext {
 /// Builder for [`ExecutionContext`].
 pub struct ExecutionContextBuilder {
     repo: Option<Repository>,
+    start_path: Option<PathBuf>,
     config: UserConfig,
     verbosity: Verbosity,
     progress: Arc<dyn ProgressSink>,
@@ -77,6 +83,7 @@ impl Default for ExecutionContextBuilder {
     fn default() -> Self {
         Self {
             repo: None,
+            start_path: None,
             config: UserConfig::default(),
             verbosity: Verbosity::Normal,
             progress: Arc::new(NoopProgress),
@@ -89,6 +96,11 @@ impl Default for ExecutionContextBuilder {
 impl ExecutionContextBuilder {
     pub fn repo(mut self, repo: Repository) -> Self {
         self.repo = Some(repo);
+        self
+    }
+
+    pub fn start_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.start_path = Some(path.into());
         self
     }
 
@@ -120,6 +132,7 @@ impl ExecutionContextBuilder {
     pub fn build(self) -> ExecutionContext {
         ExecutionContext {
             repo: self.repo,
+            start_path: self.start_path,
             config: self.config,
             verbosity: self.verbosity,
             progress: self.progress,
@@ -155,6 +168,7 @@ mod tests {
     #[test]
     fn builder_sets_non_repo_fields() {
         let ctx = ExecutionContext::builder()
+            .start_path("/tmp/heddle-core-context-test")
             .config(UserConfig::default())
             .verbosity(Verbosity::Verbose)
             .op_id("op-123")
@@ -162,5 +176,9 @@ mod tests {
 
         assert_eq!(ctx.verbosity(), Verbosity::Verbose);
         assert_eq!(ctx.op_id(), Some("op-123"));
+        assert_eq!(
+            ctx.start_path(),
+            Some(std::path::Path::new("/tmp/heddle-core-context-test"))
+        );
     }
 }

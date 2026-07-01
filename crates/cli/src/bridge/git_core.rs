@@ -74,6 +74,9 @@ pub enum GitBridgeError {
     #[error("conflict during sync: {0}")]
     Conflict(String),
 
+    #[error("Git-overlay mapping conflict: {message}")]
+    MappingConflict { message: String },
+
     #[error("Git branch '{branch}' cannot be imported as a Heddle thread: {message}")]
     InvalidThreadName { branch: String, message: String },
 
@@ -538,19 +541,23 @@ impl SyncMapping {
         if let Some(existing) = self.heddle_to_git.get(&change_id)
             && *existing != git_oid
         {
-            return Err(GitBridgeError::Conflict(format!(
-                "change id {} mapped to {} (new {})",
-                change_id, existing, git_oid
-            )));
+            return Err(GitBridgeError::MappingConflict {
+                message: format!(
+                    "change id {} mapped to {} (new {})",
+                    change_id, existing, git_oid
+                ),
+            });
         }
 
         if let Some(existing) = self.git_to_heddle.get(&git_oid)
             && *existing != change_id
         {
-            return Err(GitBridgeError::Conflict(format!(
-                "git oid {} mapped to {} (new {})",
-                git_oid, existing, change_id
-            )));
+            return Err(GitBridgeError::MappingConflict {
+                message: format!(
+                    "git oid {} mapped to {} (new {})",
+                    git_oid, existing, change_id
+                ),
+            });
         }
 
         self.insert(change_id, git_oid);
@@ -1581,6 +1588,7 @@ impl<'a> GitBridge<'a> {
             entry.mode = match mode {
                 FileMode::Executable => 0o100755,
                 FileMode::Symlink => 0o120000,
+                FileMode::Gitlink => 0o160000,
                 FileMode::Normal => 0o100644,
             };
             changed = true;
@@ -2579,7 +2587,7 @@ fn path_prefix_conflict(a: &str, b: &str) -> bool {
     child_of(a, b) || child_of(b, a)
 }
 
-/// Recursively collect every file path (blob and symlink) in `tree`,
+/// Recursively collect every Git-indexable leaf path in `tree`,
 /// resolving subtrees through `store`. Missing subtree objects are
 /// skipped rather than treated as errors, matching the repo's other
 /// tree walks. Paths use `/` separators, the form Git's index expects.
@@ -2591,16 +2599,18 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
 ) -> GitResult<()> {
     for entry in tree.iter() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(subtree) = store.get_tree(&entry.hash)? {
+            if let Some(hash) = entry.tree_hash()
+                && let Some(subtree) = store.get_tree(&hash)?
+            {
                 collect_capture_paths(store, &subtree, &path, out)?;
             }
         } else {
-            out.push((path, entry.mode));
+            out.push((path, entry.mode()));
         }
     }
     Ok(())
@@ -3971,6 +3981,9 @@ pub(crate) fn copy_reachable_objects(
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<()> {
+    // TODO: Keep local Git-lane reachable transfer behind Sley primitives. If
+    // this needs pack identity/stream planning, route it through the Sley
+    // reachable-pack facade gate instead of adding a Heddle-local planner.
     let roots = roots.into_iter().collect::<Vec<_>>();
     target.copy_reachable_from(source, &roots).map_err(git_err)
 }
@@ -4003,6 +4016,9 @@ pub(crate) fn copy_reachable_objects_excluding(
         // its existing format-mismatch error surfaces unchanged.
         return copy_reachable_objects(source, target, roots);
     }
+    // TODO: This local incremental transfer already delegates pack installation
+    // to Sley. Keep future reachable-pack planning Sley-gated here too; Heddle
+    // should not grow its own exclusion-aware pack planner.
     sley::plumbing::sley_odb::install_reachable_pack_excluding(
         source.objects().as_ref(),
         target.objects().as_ref(),

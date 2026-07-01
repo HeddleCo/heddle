@@ -8,6 +8,8 @@ use std::{
     sync::{Mutex, RwLock},
 };
 
+use heddle_format::compression::CompressionConfig;
+
 use super::{
     fs_io::{AtomicWriteMode, write_atomic},
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
@@ -16,7 +18,7 @@ use crate::{
     fs_atomic::sync_directory,
     object::{Blob, ChangeId, ContentHash, State, Tree},
     store::{
-        CompressionConfig, Result,
+        Result,
         pack::{PackManager, PackObjectId},
     },
 };

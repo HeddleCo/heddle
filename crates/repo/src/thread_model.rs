@@ -310,47 +310,32 @@ pub struct ThreadIntegrationPolicy {
 pub struct ThreadRecord {
     pub id: String,
     pub thread: String,
-    #[serde(default)]
     pub target_thread: Option<String>,
-    #[serde(default)]
     pub parent_thread: Option<String>,
     pub mode: ThreadMode,
     pub state: ThreadState,
     pub base_state: String,
     pub base_root: String,
-    #[serde(default)]
     pub current_state: Option<String>,
-    #[serde(default)]
     pub merged_state: Option<String>,
-    #[serde(default)]
     pub task: Option<String>,
-    #[serde(default)]
     pub changed_paths: Vec<String>,
-    #[serde(default)]
     pub impact_categories: Vec<ThreadImpactCategory>,
-    #[serde(default)]
     pub heavy_impact_paths: Vec<String>,
-    #[serde(default)]
     pub promotion_suggested: bool,
-    #[serde(default = "default_freshness")]
     pub freshness: ThreadFreshness,
-    #[serde(default)]
     pub verification_summary: ThreadVerificationSummary,
-    #[serde(default)]
     pub confidence_summary: ThreadConfidenceSummary,
-    #[serde(default)]
     pub integration_policy_result: ThreadIntegrationPolicy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     // --- W1 tail-append fields below; new fields go here. ---
-    /// Optional ephemeral-thread marker. `None` (the default) means the
-    /// thread is persistent; `Some(...)` means the thread auto-collapses
-    /// after `ttl_seconds` from `created_at`. The collapse is recorded
+    /// Optional ephemeral-thread marker. `None` means the thread is
+    /// persistent; `Some(...)` means the thread auto-collapses after
+    /// `ttl_seconds` from `created_at`. The collapse is recorded
     /// as an `OpRecord::EphemeralThreadCollapse` and the thread is set
     /// to [`ThreadState::Abandoned`] — the underlying states remain
-    /// addressable. Pre-W1 records have no field on disk; serde defaults
-    /// to `None`, preserving "thread is persistent" behavior.
-    #[serde(default)]
+    /// addressable.
     pub ephemeral: Option<EphemeralMarker>,
 
     /// Whether the thread was created automatically by a harness
@@ -360,10 +345,6 @@ pub struct ThreadRecord {
     /// `heddle thread list` view and are eligible for sweep by
     /// `heddle thread cleanup --auto`.
     ///
-    /// Pre-existing thread records have no `auto` field on disk; serde
-    /// defaults to `false` so the historical "explicit" behaviour is
-    /// preserved across the upgrade. (Item 2.2 of the heddle 6→8 plan.)
-    #[serde(default)]
     pub auto: bool,
 
     /// When the thread was started with `heddle start --shared-target`,
@@ -375,7 +356,6 @@ pub struct ThreadRecord {
     /// arrangement and downstream tooling can locate build artefacts
     /// without re-deriving the fingerprint. (Item 2.1 of the heddle
     /// 6→8 plan.)
-    #[serde(default)]
     pub shared_target_dir: Option<PathBuf>,
 }
 
@@ -502,10 +482,6 @@ impl ThreadView {
 
 fn path_present(path: Option<&PathBuf>) -> bool {
     path.is_some_and(|path| !path.as_os_str().is_empty())
-}
-
-fn default_freshness() -> ThreadFreshness {
-    ThreadFreshness::Unknown
 }
 
 #[cfg(test)]

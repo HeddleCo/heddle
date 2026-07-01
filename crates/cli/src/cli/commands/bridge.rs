@@ -21,7 +21,8 @@ use super::{
         build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
-        canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
+        canonical_bridge_reconcile_ref_preview_command, repository_verification_state_from_health,
+        serialize_empty_action_as_null,
     },
     import_progress::ImportProgress,
     next_action::{NextActionValidationContext, write_full_command_json},
@@ -327,7 +328,7 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
     let mirror_initialized = mirror_path.exists();
     let import_hint = repo.git_overlay_import_hint().unwrap_or(None);
     let git_overlay_health = build_git_overlay_health(repo);
-    let trust = RepositoryVerificationState::from_health(repo, git_overlay_health.clone());
+    let trust = repository_verification_state_from_health(repo, git_overlay_health.clone());
     let output = BridgeGitStatusOutput {
         output_kind: "bridge_git_status",
         repository_capability: repo.capability_label().to_string(),

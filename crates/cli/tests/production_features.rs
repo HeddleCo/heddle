@@ -11,30 +11,9 @@ use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
 
-fn translate_legacy_args(args: &[&str]) -> Vec<String> {
-    let mut prefix = Vec::new();
-    let mut i = 0;
-    while i < args.len() && args[i].starts_with("--") {
-        prefix.push(args[i].to_string());
-        i += 1;
-    }
-    let rest = &args[i..];
-    let translated = match rest {
-        ["thread", "delete", name] => vec![
-            "thread".into(),
-            "drop".into(),
-            (*name).into(),
-            "--delete-thread".into(),
-        ],
-        _ => rest.iter().map(|arg| (*arg).to_string()).collect(),
-    };
-    prefix.extend(translated);
-    prefix
-}
-
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
     cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
         .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
 
@@ -65,7 +44,7 @@ fn heddle_with_env(
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
+    cmd.args(args);
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -502,12 +481,20 @@ mod fsck {
     }
 
     #[test]
-    fn test_fsck_repair_mode() {
+    fn test_fsck_rejects_removed_repair_flag() {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
         let result = heddle(&["fsck", "--repair"], Some(temp.path()));
-        assert!(result.is_ok(), "fsck --repair failed: {:?}", result.err());
+        assert!(
+            result.is_err(),
+            "fsck --repair should be rejected after no-op repair removal"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unexpected argument '--repair'") || err.contains("unrecognized"),
+            "removed flag should fail at CLI parsing, got: {err}"
+        );
     }
 
     #[test]
@@ -850,21 +837,14 @@ mod blame {
     }
 
     #[test]
-    fn test_blame_alias_routes_to_query_attribution_output() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "content\n").unwrap();
-        heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
-
-        let raw = heddle(
-            &["--output", "json", "blame", "file.txt"],
-            Some(temp.path()),
-        )
-        .expect("blame alias should route through query --attribution");
-        let output: Value = serde_json::from_str(&raw).expect("should be JSON");
-        assert_eq!(output["output_kind"], "query_attribution");
-        assert!(output.get("lines").is_some(), "should have 'lines' field");
+    fn test_blame_root_alias_is_rejected() {
+        let err = heddle(&["blame", "file.txt"], None)
+            .expect_err("removed blame root alias should fail through clap");
+        assert!(
+            err.contains("unrecognized subcommand 'blame'")
+                || err.contains("unexpected argument 'blame'"),
+            "clap should reject the removed blame alias: {err}"
+        );
     }
 
     #[test]

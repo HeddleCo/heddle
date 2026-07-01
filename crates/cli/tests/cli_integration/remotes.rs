@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::object::{MarkerName, ThreadName};
 
-use super::*;
+use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
@@ -2357,45 +2357,24 @@ fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
 
 #[test]
 fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
-    let temp = TempDir::new().unwrap();
-    let origin = temp.path().join("origin.git");
-    let backup = temp.path().join("backup.git");
-    let work = temp.path().join("work");
-    SleyRepository::init_bare(&origin).expect("init bare origin");
-    SleyRepository::init_bare(&backup).expect("init bare backup");
-    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    std::fs::write(backup.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-
-    std::fs::create_dir_all(&work).unwrap();
-    git_ok(&["init", "-b", "main"], &work);
-    git_ok(&["config", "user.name", "Heddle Test"], &work);
-    git_ok(&["config", "user.email", "heddle@example.com"], &work);
-    git_ok(
-        &[
-            "remote",
-            "add",
-            "origin",
-            origin.to_str().expect("origin path utf8"),
-        ],
-        &work,
-    );
-    std::fs::write(work.join("README.md"), "seed\n").unwrap();
-    git_ok(&["add", "README.md"], &work);
-    git_ok(&["commit", "-m", "seed"], &work);
-    git_ok(&["push", "-u", "origin", "main"], &work);
-    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt succeeds");
+    let fixture = GitOverlayFixture::adopted_main().with_bare_origin();
+    let work = fixture.path();
+    let origin = fixture.origin_path();
+    let backup = TempDir::new().unwrap();
+    SleyRepository::init_bare(backup.path()).expect("init bare backup");
+    std::fs::write(backup.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     heddle(
         &[
             "remote",
             "add",
             "backup",
-            backup.to_str().expect("backup path utf8"),
+            backup.path().to_str().expect("backup path utf8"),
         ],
-        Some(&work),
+        Some(work),
     )
     .expect("add backup remote");
-    let list_json = heddle(&["remote", "list", "--output", "json"], Some(&work)).unwrap();
+    let list_json = heddle(&["remote", "list", "--output", "json"], Some(work)).unwrap();
     let list: Value = serde_json::from_str(&list_json).expect("remote list JSON parses");
     assert!(
         list["remotes"]
@@ -2414,10 +2393,10 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         "new backup remote should not silently become default: {list}"
     );
 
-    std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
+    std::fs::write(work.join("README.md"), "base\nlocal heddle\n").unwrap();
     let commit_json = heddle(
         &["commit", "-m", "local heddle", "--output", "json"],
-        Some(&work),
+        Some(work),
     )
     .expect("heddle commit succeeds");
     let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
@@ -2426,14 +2405,14 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         .expect("commit should report Git OID")
         .to_string();
 
-    let push_json = heddle(&["push", "--output", "json"], Some(&work)).expect("push succeeds");
+    let push_json = heddle(&["push", "--output", "json"], Some(work)).expect("push succeeds");
     let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
     assert_eq!(
         push["remote"], "origin",
         "bare push should use tracked origin: {push}"
     );
     assert_eq!(
-        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], &origin),
+        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], origin),
         git_oid,
         "origin should receive the default push"
     );
@@ -2441,7 +2420,7 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
         !Command::new("git")
             .args([
                 "--git-dir",
-                backup.to_str().unwrap(),
+                backup.path().to_str().unwrap(),
                 "show-ref",
                 "--verify",
                 "refs/heads/main"

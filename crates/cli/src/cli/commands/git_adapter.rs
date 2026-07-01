@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Git-muscle-memory compatibility shims.
+//! Git adapter command implementations.
 
 use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
-    object::{
-        Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
-        TreeEntry,
-    },
+    object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
-    util::gitlink_blob_content,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -26,29 +22,22 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{
-        create_git_checkpoint_from_index_snapshot, create_git_checkpoint_with_worktree_status,
-        preflight_git_checkpoint_ref_update,
+        create_git_checkpoint_from_index_snapshot_with_worktree_status,
+        create_git_checkpoint_with_worktree_status,
     },
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state,
-        build_repository_verification_state_with_worktree_status,
-        git_overlay_mutation_preflight_advice_with_worktree_status,
-        override_trust_recommended_action, plain_git_mutation_preflight_advice,
-        repository_verification_blocked_advice,
-    },
+    git_overlay_health::RepositoryVerificationState,
+    git_overlay_txn,
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
         create_snapshot_profiled_with_worktree_status, is_placeholder_principal,
         placeholder_principal_warning,
-        preflight_large_capture_for_compat_commit_with_worktree_status, resolve_principal,
+        preflight_large_capture_for_git_adapter_commit_with_worktree_status, resolve_principal,
     },
     thread_cmd::cmd_thread,
 };
 use crate::{
-    bridge::git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
     cli::{
         Cli, CommitArgs, SwitchArgs, ThreadCommands, should_output_json, style,
         worktree_status_options,
@@ -64,7 +53,7 @@ const GIT_MODE_COMMIT: u32 = 0o160000;
 const GIT_MODE_DIR: u32 = 0o040000;
 
 #[derive(Serialize)]
-struct CommitCompatOutput {
+struct GitAdapterCommitOutput {
     output_kind: &'static str,
     status: &'static str,
     action: &'static str,
@@ -128,7 +117,7 @@ impl From<Agent> for CommitAgentOutput {
     }
 }
 
-pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
+pub async fn cmd_commit_git_adapter(cli: &Cli, args: CommitArgs) -> Result<()> {
     let message = require_commit_message(args.message.clone())?;
     let cwd;
     let start = if let Some(path) = cli.repo.as_ref() {
@@ -137,9 +126,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(advice) = plain_git_mutation_preflight_advice(start, "commit")? {
-        return Err(anyhow!(advice));
-    }
+    git_overlay_txn::preflight_plain_git_mutation(start, "commit")?;
 
     let repo = Repository::open(start)?;
     // Compute the git-overlay worktree status ONCE up front. The commit mutation
@@ -151,16 +138,9 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // tracked file — before this, the clean fast-path paid that walk 3× before
     // the ref ever moved.
     let preflight_worktree_status_start = Instant::now();
-    let worktree_status = repo.git_overlay_worktree_status();
+    let git_overlay_facts = git_overlay_txn::gather_mutation_facts(&repo);
     let preflight_worktree_status_ms = preflight_worktree_status_start.elapsed().as_millis();
-    if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
-        &repo,
-        "commit",
-        GitOverlayMutationPreflight::commit_like(),
-        &worktree_status,
-    )? {
-        return Err(anyhow!(advice));
-    }
+    git_overlay_txn::preflight_commit(&repo, &git_overlay_facts)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let placeholder_principal_warning =
         placeholder_principal_first_commit_warning(&repo, &user_config)?;
@@ -194,8 +174,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             // Reuse the pre-mutation git-overlay worktree status computed at the
             // top: no Git ref has moved on this fast-path, so the verification
             // state is byte-identical to a fresh walk here.
-            let trust =
-                build_repository_verification_state_with_worktree_status(&repo, &worktree_status);
+            let trust = git_overlay_txn::preflight_verify_with_worktree_status(
+                &repo,
+                git_overlay_facts.worktree_status(),
+            );
             // `--no-all` forces an index-only commit and must never auto-commit
             // the captured worktree state. On this fast-path the worktree is
             // clean and the index has no staged intent, so an index-only commit
@@ -205,7 +187,12 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                 return Err(anyhow!(nothing_to_commit_advice()));
             }
             if trust.status == "needs_checkpoint" {
-                preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
+                git_overlay_txn::preflight_git_checkpoint_identity(
+                    &repo,
+                    &user_config,
+                    "commit",
+                    "heddle commit -m \"...\"",
+                )?;
                 let git_previous_commit = git_head_oid(repo.root());
                 // Thread the same pre-mutation status into the checkpoint so it
                 // does not re-run its own pre-mutation worktree walk. The
@@ -215,10 +202,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     &repo,
                     Some(message.as_str()),
                     worktree_status_options(Some(repo.config())),
-                    &worktree_status,
+                    git_overlay_facts.worktree_status(),
                 )?;
-                let trust = commit_safe_trust(build_repository_verification_state(&repo));
-                let output = CommitCompatOutput {
+                let trust = git_overlay_txn::post_verify_commit(&repo);
+                let output = GitAdapterCommitOutput {
                     output_kind: "commit",
                     status: "committed",
                     action: "commit",
@@ -239,7 +226,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     trust,
                 };
                 let output = with_commit_action_metadata(output);
-                render_commit_compat(
+                render_git_adapter_commit(
                     &output,
                     should_output_json(cli, Some(repo.config())),
                     repo.capability(),
@@ -247,7 +234,9 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                 return Ok(());
             }
             if !trust.verified {
-                return Err(anyhow!(commit_blocked_by_trust_advice(&trust)));
+                return Err(anyhow!(git_overlay_txn::commit_blocked_by_trust_advice(
+                    &trust
+                )));
             }
             return Err(anyhow!(nothing_to_commit_advice()));
         }
@@ -271,8 +260,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         let captured_state = repo
             .current_state()?
             .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
-        let trust = commit_safe_trust(build_repository_verification_state(&repo));
-        let output = CommitCompatOutput {
+        let trust = git_overlay_txn::post_verify_commit(&repo);
+        let output = GitAdapterCommitOutput {
             output_kind: "commit",
             status: "committed",
             action: "commit",
@@ -297,7 +286,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         };
         let output = with_commit_action_metadata(output);
 
-        render_commit_compat(
+        render_git_adapter_commit(
             &output,
             should_output_json(cli, Some(repo.config())),
             repo.capability(),
@@ -317,8 +306,13 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         return Err(anyhow!(nothing_to_commit_advice()));
     }
 
-    preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
-    preflight_git_checkpoint_ref_update(&repo, "commit")?;
+    git_overlay_txn::preflight_git_checkpoint_identity(
+        &repo,
+        &user_config,
+        "commit",
+        "heddle commit -m \"...\"",
+    )?;
+    git_overlay_txn::preflight_commit_checkpoint_ref_update(&repo, &git_overlay_facts)?;
     let git_previous_commit = git_head_oid(repo.root());
     let pending_capture = pending_capture_before_commit(&repo)?;
     if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
@@ -329,10 +323,13 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             cli,
             &repo,
             &user_config,
-            &message,
-            args.confidence,
-            index_intent,
-            pending_capture,
+            StagedIndexCommit {
+                message: &message,
+                confidence: args.confidence,
+                intent: index_intent,
+                pending_capture,
+                git_overlay_facts: &git_overlay_facts,
+            },
         )?;
         return Ok(());
     }
@@ -351,7 +348,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // below) is left FRESH: the checkpoint advances the Git ref, which flips the
     // git-overlay health classification.
     let large_capture_start = Instant::now();
-    preflight_large_capture_for_compat_commit_with_worktree_status(args.force, &worktree_status)?;
+    preflight_large_capture_for_git_adapter_commit_with_worktree_status(
+        args.force,
+        git_overlay_facts.worktree_status(),
+    )?;
     let large_capture_preflight_ms = large_capture_start.elapsed().as_millis();
     let snapshot_start = Instant::now();
     let (snapshot, _snapshot_profile) = create_snapshot_profiled_with_worktree_status(
@@ -368,7 +368,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             no_policy: false,
             no_agent: false,
         },
-        &worktree_status,
+        git_overlay_facts.worktree_status(),
     )?;
     let snapshot_ms = snapshot_start.elapsed().as_millis();
     let captured_state = repo
@@ -380,10 +380,10 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         &repo,
         Some(message.as_str()),
         worktree_status_options(Some(repo.config())),
-        &worktree_status,
+        git_overlay_facts.worktree_status(),
     )
     .map_err(|err| {
-        anyhow!(commit_checkpoint_failed_advice(
+        anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
             &snapshot.change_id,
             Some(message.as_str()),
             &err,
@@ -399,7 +399,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         )?;
 
     let verify_start = Instant::now();
-    let trust = commit_safe_trust(build_repository_verification_state(&repo));
+    let trust = git_overlay_txn::post_verify_commit(&repo);
     let verify_ms = verify_start.elapsed().as_millis();
     if profile_enabled() {
         emit_profile(
@@ -414,7 +414,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             ],
         );
     }
-    let output = CommitCompatOutput {
+    let output = GitAdapterCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
@@ -439,7 +439,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     };
     let output = with_commit_action_metadata(output);
 
-    render_commit_compat(
+    render_git_adapter_commit(
         &output,
         should_output_json(cli, Some(repo.config())),
         repo.capability(),
@@ -448,15 +448,27 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     Ok(())
 }
 
+struct StagedIndexCommit<'a> {
+    message: &'a str,
+    confidence: Option<f32>,
+    intent: GitIndexIntent,
+    pending_capture: Option<ChangeId>,
+    git_overlay_facts: &'a git_overlay_txn::GitOverlayMutationFacts,
+}
+
 fn commit_staged_index(
     cli: &Cli,
     repo: &Repository,
     user_config: &UserConfig,
-    message: &str,
-    confidence: Option<f32>,
-    intent: GitIndexIntent,
-    pending_capture: Option<ChangeId>,
+    staged: StagedIndexCommit<'_>,
 ) -> Result<()> {
+    let StagedIndexCommit {
+        message,
+        confidence,
+        intent,
+        pending_capture,
+        git_overlay_facts,
+    } = staged;
     let index_tree = git_index_tree(repo)?;
     let snapshot = create_snapshot_from_tree(
         repo,
@@ -479,13 +491,14 @@ fn commit_staged_index(
         .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
     let snapshot_batch = find_recent_snapshot_batch(repo, &captured_state.change_id)?;
     let git_previous_commit = git_head_oid(repo.root());
-    let record = create_git_checkpoint_from_index_snapshot(
+    let record = create_git_checkpoint_from_index_snapshot_with_worktree_status(
         repo,
         Some(message),
         worktree_status_options(Some(repo.config())),
+        git_overlay_facts.worktree_status(),
     )
     .map_err(|err| {
-        anyhow!(commit_checkpoint_failed_advice(
+        anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
             &snapshot.change_id,
             Some(message),
             &err,
@@ -499,8 +512,8 @@ fn commit_staged_index(
             "commit completed but failed to record capture and Git checkpoint as one undo batch",
         )?;
 
-    let trust = commit_safe_trust(build_repository_verification_state(repo));
-    let output = CommitCompatOutput {
+    let trust = git_overlay_txn::post_verify_commit(repo);
+    let output = GitAdapterCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
@@ -527,43 +540,12 @@ fn commit_staged_index(
         trust,
     };
     let output = with_commit_action_metadata(output);
-    render_commit_compat(
+    render_git_adapter_commit(
         &output,
         should_output_json(cli, Some(repo.config())),
         repo.capability(),
     )?;
     Ok(())
-}
-
-fn preflight_git_checkpoint_identity(
-    repo: &Repository,
-    user_config: &UserConfig,
-    action: &str,
-) -> Result<()> {
-    let principal = resolve_principal(repo, user_config)?;
-    if !principal_is_default_unknown(&principal) {
-        return Ok(());
-    }
-    if git_config_identity_with_global_fallback(repo.root())?.is_some() {
-        return Ok(());
-    }
-    Err(anyhow!(missing_git_checkpoint_identity_advice(action)))
-}
-
-fn missing_git_checkpoint_identity_advice(action: &str) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "git_checkpoint_identity_required",
-        format!("Refusing to {action}: no accountable identity is configured for the Git commit"),
-        "Configure `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, set .heddle principal, or configure Git user.name/user.email before retrying.",
-        "Heddle would otherwise have to write Unknown <unknown@example.com> into the Git commit",
-        format!("{action} would create an auditable Git checkpoint without a real author identity"),
-        "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
-        "heddle init --principal-name <name> --principal-email <email>",
-        vec![
-            "heddle init --principal-name <name> --principal-email <email>".to_string(),
-            "heddle commit -m \"...\"".to_string(),
-        ],
-    )
 }
 
 fn staged_commit_summary(summary: &str, intent: &GitIndexIntent) -> String {
@@ -923,7 +905,7 @@ impl IndexTreeBuilder {
         for (name, node) in self.entries {
             match node {
                 IndexTreeNode::Blob(mut entry) => {
-                    entry.name = name;
+                    entry.set_name(name)?;
                     entries.push(entry);
                 }
                 IndexTreeNode::Tree(builder) => {
@@ -946,35 +928,17 @@ fn index_entry_node(
     let tree_entry = match entry.mode {
         mode if mode == GIT_MODE_FILE || mode == GIT_MODE_FILE_EXECUTABLE => {
             let hash = import_index_blob(repo, git, entry.oid, path)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: if entry.mode == GIT_MODE_FILE_EXECUTABLE {
-                    FileMode::Executable
-                } else {
-                    FileMode::Normal
-                },
-                entry_type: EntryType::Blob,
+            TreeEntry::file(
+                leaf_name(path),
                 hash,
-            }
+                entry.mode == GIT_MODE_FILE_EXECUTABLE,
+            )?
         }
         mode if mode == GIT_MODE_SYMLINK => {
             let hash = import_index_blob(repo, git, entry.oid, path)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: FileMode::Symlink,
-                entry_type: EntryType::Symlink,
-                hash,
-            }
+            TreeEntry::symlink(leaf_name(path), hash)?
         }
-        mode if mode == GIT_MODE_COMMIT => {
-            let hash = import_index_gitlink(repo, entry.oid)?;
-            TreeEntry {
-                name: leaf_name(path),
-                mode: FileMode::Normal,
-                entry_type: EntryType::Blob,
-                hash,
-            }
-        }
+        mode if mode == GIT_MODE_COMMIT => TreeEntry::gitlink(leaf_name(path), entry.oid)?,
         mode if mode == GIT_MODE_DIR => {
             return Err(anyhow!(sparse_git_index_advice(path)));
         }
@@ -1004,11 +968,6 @@ fn import_index_blob(
         ));
     }
     let blob = Blob::new(object.body.clone());
-    Ok(repo.store().put_blob(&blob)?)
-}
-
-fn import_index_gitlink(repo: &Repository, oid: ObjectId) -> Result<ContentHash> {
-    let blob = Blob::new(gitlink_blob_content(oid));
     Ok(repo.store().put_blob(&blob)?)
 }
 
@@ -1044,34 +1003,6 @@ fn sparse_git_index_advice(path: &str) -> RecoveryAdvice {
 
 fn git_path_from_bstring(path: &GitBString) -> String {
     String::from_utf8_lossy(path.as_bytes()).into_owned()
-}
-
-fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerificationState {
-    if is_commit_action(&trust.recommended_action) {
-        override_trust_recommended_action(&mut trust, "heddle status");
-    }
-    let status_action = "heddle status".to_string();
-    let status_template = ActionFields::from_action(&status_action).template;
-    for check in &mut trust.checks {
-        if check
-            .recommended_action
-            .as_deref()
-            .is_some_and(is_commit_action)
-        {
-            check.recommended_action = Some(status_action.clone());
-            check.recommended_action_template = status_template.clone();
-        }
-    }
-    trust
-}
-
-fn is_commit_action(action: &str) -> bool {
-    matches!(
-        action.trim(),
-        "heddle commit"
-            | "heddle commit -m \"...\""
-            | "heddle commit -m \"...\" --confidence <confidence>"
-    ) || action.trim().starts_with("heddle commit ")
 }
 
 fn commit_next_action(trust: &RepositoryVerificationState) -> Option<String> {
@@ -1115,7 +1046,7 @@ fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> 
     Ok(Some(current.change_id))
 }
 
-fn with_commit_action_metadata(mut output: CommitCompatOutput) -> CommitCompatOutput {
+fn with_commit_action_metadata(mut output: GitAdapterCommitOutput) -> GitAdapterCommitOutput {
     output.recommended_action = output.next_action.clone();
     let next_action = ActionFields::from_optional_action_ref(output.next_action.as_deref());
     let recommended_action =
@@ -1136,75 +1067,6 @@ fn nothing_to_commit_advice() -> RecoveryAdvice {
         "heddle status",
         vec!["heddle status".to_string()],
     )
-}
-
-fn commit_blocked_by_trust_advice(trust: &RepositoryVerificationState) -> RecoveryAdvice {
-    repository_verification_blocked_advice(
-        "commit_blocked_by_verification",
-        format!(
-            "refusing to report nothing to commit: repository verification is blocked ({})",
-            trust.status
-        ),
-        "retrying `heddle commit`",
-        trust,
-        format!(
-            "repository verification status is {}: {}",
-            trust.status, trust.summary
-        ),
-        "claiming nothing to commit could hide a Git/Heddle/import/operation disagreement",
-        "no capture, Git checkpoint, refs, or worktree files were changed",
-        None,
-    )
-}
-
-fn commit_checkpoint_failed_advice(
-    change_id: &str,
-    message: Option<&str>,
-    err: &anyhow::Error,
-    index_only: bool,
-) -> RecoveryAdvice {
-    let recovery = checkpoint_recovery_command(message, index_only);
-    RecoveryAdvice::safety_refusal(
-        "commit_checkpoint_failed",
-        format!("capture {change_id} was preserved, but checkpoint failed: {err}"),
-        format!("Resolve the checkpoint issue, then run `{recovery}`."),
-        "the Heddle capture succeeded but the Git checkpoint step failed",
-        "retrying through the canonical save path keeps the Git checkpoint repair on the supported surface",
-        format!("captured Heddle state {change_id} was preserved"),
-        recovery.clone(),
-        vec![recovery],
-    )
-}
-
-fn checkpoint_recovery_command(message: Option<&str>, index_only: bool) -> String {
-    // The Heddle state already exists when checkpoint recovery is offered. The
-    // retry must repair only the Git checkpoint instead of re-entering commit
-    // and minting another capture from the same tree.
-    let scope = if index_only {
-        " --from-index-snapshot"
-    } else {
-        ""
-    };
-    format!(
-        "heddle checkpoint{scope} -m {}",
-        shell_double_quoted(message.unwrap_or("commit"))
-    )
-}
-
-fn shell_double_quoted(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' | '"' | '$' | '`' => {
-                quoted.push('\\');
-                quoted.push(ch);
-            }
-            '\n' => quoted.push_str("\\n"),
-            _ => quoted.push(ch),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 fn find_recent_snapshot_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatch> {
@@ -1266,8 +1128,8 @@ fn current_state_is_bootstrap(repo: &Repository) -> Result<bool> {
         .is_none_or(|intent| intent.trim().is_empty()))
 }
 
-fn render_commit_compat(
-    output: &CommitCompatOutput,
+fn render_git_adapter_commit(
+    output: &GitAdapterCommitOutput,
     json: bool,
     repository_capability: RepositoryCapability,
 ) -> Result<()> {
@@ -1354,7 +1216,7 @@ fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
     }
 }
 
-pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
+pub async fn cmd_switch_git_adapter(cli: &Cli, args: SwitchArgs) -> Result<()> {
     if args.create {
         let path = args.target.replace('/', "-");
         let primary = format!("heddle start {} --path ../{}", args.target, path);
@@ -1411,45 +1273,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn commit_checkpoint_failure_advice_preserves_capture_and_exact_recovery() {
-        let error = anyhow!("git write failed");
-        let advice =
-            commit_checkpoint_failed_advice("change-123", Some("say \"hello\""), &error, false);
-
-        assert_eq!(advice.kind, "commit_checkpoint_failed");
-        assert!(advice.error.contains("capture change-123 was preserved"));
-        assert!(advice.error.contains("git write failed"));
-        assert_eq!(
-            advice.primary_command,
-            "heddle checkpoint -m \"say \\\"hello\\\"\""
-        );
-        assert_eq!(
-            advice.recovery_commands,
-            vec!["heddle checkpoint -m \"say \\\"hello\\\"\""]
-        );
-        assert!(advice.preserved.contains("change-123"));
-    }
-
-    // heddle#485: the staged-index checkpoint-failure recovery must retry only
-    // the Git checkpoint against the already-preserved state. Re-entering commit
-    // would create a duplicate capture from the same staged index tree.
-    #[test]
-    fn commit_checkpoint_failure_advice_retries_index_snapshot_checkpoint() {
-        let error = anyhow!("git write failed");
-        let advice =
-            commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
-
-        assert_eq!(
-            advice.primary_command,
-            "heddle checkpoint --from-index-snapshot -m \"index only\""
-        );
-        assert_eq!(
-            advice.recovery_commands,
-            vec!["heddle checkpoint --from-index-snapshot -m \"index only\""]
-        );
-    }
-
-    #[test]
     fn nothing_to_commit_advice_names_status_recovery() {
         let advice = nothing_to_commit_advice();
 
@@ -1457,48 +1280,5 @@ mod tests {
         assert_eq!(advice.primary_command, "heddle status");
         assert!(advice.error.contains("nothing to commit"));
         assert!(advice.primary_hint().contains("heddle status"));
-    }
-
-    #[test]
-    fn commit_blocked_by_trust_advice_uses_trust_recovery() {
-        let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
-        let trust = RepositoryVerificationState {
-            verified: false,
-            status: "operation_in_progress".to_string(),
-            repository_mode: "git-overlay".to_string(),
-            heddle_initialized: true,
-            git_branch: Some("main".to_string()),
-            heddle_thread: Some("main".to_string()),
-            worktree_dirty: false,
-            worktree_state: "clean".to_string(),
-            import_state: "clean".to_string(),
-            mapping_state: "clean".to_string(),
-            remote_drift: "clean".to_string(),
-            active_operation: Some("Git merge (in-progress)".to_string()),
-            default_remote: None,
-            clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
-                &machine_contract_coverage,
-            )
-            .to_string(),
-            machine_contract_coverage,
-            workflow_status: "clean".to_string(),
-            workflow_summary: "no ready threads are waiting to land".to_string(),
-            summary: "Git merge is in progress".to_string(),
-            recommended_action: "heddle continue".to_string(),
-            recommended_action_template: None,
-            recovery_commands: vec!["heddle continue".to_string()],
-            recovery_action_templates: Vec::new(),
-            checks: Vec::new(),
-        };
-
-        let advice = commit_blocked_by_trust_advice(&trust);
-
-        assert_eq!(advice.kind, "commit_blocked_by_verification");
-        assert_eq!(advice.primary_command, "heddle continue");
-        assert_eq!(advice.recovery_commands, vec!["heddle continue"]);
-        assert!(advice.error.contains("repository verification is blocked"));
-        assert!(advice.unsafe_condition.contains("Git merge is in progress"));
     }
 }

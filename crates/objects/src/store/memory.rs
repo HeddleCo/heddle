@@ -88,6 +88,10 @@ impl ObjectStore for InMemoryStore {
         }
     }
 
+    fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(self.trees.read_or_poisoned().get(hash).cloned())
+    }
+
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
         self.trees

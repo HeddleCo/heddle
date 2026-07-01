@@ -13,31 +13,19 @@
 //! convention.
 
 use anyhow::{Result, anyhow};
-use objects::{object::ThreadName, store::ObjectStore};
+use objects::store::ObjectStore;
 use oplog::{OpLogBackend, OpRecord};
-use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
+use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
-    action_line::print_next,
-    advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
-    git_overlay_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state,
-        build_repository_verification_state_with_worktree_status,
-        git_overlay_mutation_preflight_advice_with_worktree_status,
-        plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
-    },
-    snapshot::ensure_current_state,
-    worktree_safety::dirty_worktree_advice,
+    action_line::print_next, command_catalog::ActionTemplate,
+    git_overlay_health::RepositoryVerificationState, git_overlay_txn,
+    snapshot::ensure_current_state, worktree_safety::dirty_worktree_advice,
 };
 use crate::{
-    bridge::{
-        GitBridge, WriteThroughOutcome,
-        git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
-    },
+    bridge::{GitBridge, WriteThroughOutcome},
     cli::{CheckpointArgs, Cli, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
@@ -70,9 +58,7 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(advice) = plain_git_mutation_preflight_advice(start, "checkpoint")? {
-        return Err(anyhow!(advice));
-    }
+    git_overlay_txn::preflight_plain_git_mutation(start, "checkpoint")?;
 
     let repo = Repository::open(start)?;
     let status_options = worktree_status_options(Some(repo.config()));
@@ -130,7 +116,7 @@ pub(crate) fn create_git_checkpoint_with_worktree_status(
     repo: &Repository,
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
-    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
+    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
 ) -> Result<GitCheckpointRecord> {
     create_git_checkpoint_inner(
         repo,
@@ -150,16 +136,34 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     create_git_checkpoint_inner(repo, message, status_options, false, None, None)
 }
 
+pub(crate) fn create_git_checkpoint_from_index_snapshot_with_worktree_status(
+    repo: &Repository,
+    message: Option<&str>,
+    status_options: repo::WorktreeStatusOptions,
+    worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
+) -> Result<GitCheckpointRecord> {
+    create_git_checkpoint_inner(
+        repo,
+        message,
+        status_options,
+        false,
+        None,
+        Some(worktree_status),
+    )
+}
+
 fn create_git_checkpoint_inner(
     repo: &Repository,
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
     git_parent_override: Option<Vec<ObjectId>>,
-    precomputed_worktree_status: Option<&repo::Result<Option<objects::worktree::WorktreeStatus>>>,
+    precomputed_worktree_status: Option<&git_overlay_txn::GitOverlayWorktreeStatus>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
-        return Err(anyhow!(native_checkpoint_unavailable_advice(repo)));
+        return Err(anyhow!(
+            git_overlay_txn::native_checkpoint_unavailable_advice(repo)
+        ));
     }
     // Compute the git-overlay worktree status ONCE up front and thread it through
     // the two PRE-mutation consumers below: the ref-update preflight and the
@@ -172,23 +176,15 @@ fn create_git_checkpoint_inner(
     // consumers observe the SAME pre-mutation git state, so reuse is sound.
     // A caller that has already computed this pre-mutation status (e.g. `commit`)
     // passes it in so checkpoint does not re-walk the worktree.
-    let computed_worktree_status;
-    let worktree_status = match precomputed_worktree_status {
-        Some(status) => status,
+    match precomputed_worktree_status {
+        Some(status) => {
+            git_overlay_txn::preflight_checkpoint_with_worktree_status(repo, "checkpoint", status)?
+        }
         None => {
-            computed_worktree_status = repo.git_overlay_worktree_status();
-            &computed_worktree_status
+            let facts = git_overlay_txn::gather_mutation_facts(repo);
+            git_overlay_txn::preflight_checkpoint(repo, "checkpoint", &facts)?;
         }
     };
-    preflight_git_checkpoint_ref_update_with_worktree_status(repo, "checkpoint", worktree_status)?;
-    if let Some(advice) = git_overlay_mutation_preflight_advice_with_worktree_status(
-        repo,
-        "checkpoint",
-        GitOverlayMutationPreflight::checkpoint_like(),
-        worktree_status,
-    )? {
-        return Err(anyhow!(advice));
-    }
     let state_id = ensure_current_state(
         repo,
         &UserConfig::load_default()?,
@@ -214,11 +210,12 @@ fn create_git_checkpoint_inner(
     if let Some(record) = repo.latest_git_checkpoint_for_change(&state.change_id)? {
         return Ok(record);
     }
-    if principal_is_default_unknown(&state.attribution.principal)
-        && git_config_identity_with_global_fallback(repo.root())?.is_none()
-    {
-        return Err(anyhow!(missing_checkpoint_identity_advice("checkpoint")));
-    }
+    git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
+        repo,
+        &state.attribution.principal,
+        "checkpoint",
+        "heddle checkpoint -m \"...\"",
+    )?;
 
     let summary = message
         .map(ToOwned::to_owned)
@@ -237,9 +234,9 @@ fn create_git_checkpoint_inner(
     {
         WriteThroughOutcome::Wrote(git_commit) => git_commit.to_string(),
         WriteThroughOutcome::Skipped(reason) => {
-            return Err(anyhow!(checkpoint_git_write_skipped_advice(
-                reason.to_string()
-            )));
+            return Err(anyhow!(
+                git_overlay_txn::checkpoint_git_write_skipped_advice(reason.to_string())
+            ));
         }
     };
     let record = repo.record_git_checkpoint(&state.change_id, git_commit.clone(), summary)?;
@@ -255,164 +252,6 @@ fn create_git_checkpoint_inner(
     Ok(record)
 }
 
-pub(crate) fn preflight_git_checkpoint_ref_update(repo: &Repository, action: &str) -> Result<()> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
-    let trust = build_repository_verification_state(repo);
-    preflight_git_checkpoint_ref_update_with_trust(repo, action, trust)
-}
-
-/// `checkpoint` hot-path variant that reuses an already-computed git-overlay
-/// worktree status instead of re-walking the worktree to build the verification
-/// state. The gating decision is identical to
-/// [`preflight_git_checkpoint_ref_update`].
-pub(crate) fn preflight_git_checkpoint_ref_update_with_worktree_status(
-    repo: &Repository,
-    action: &str,
-    worktree_status: &repo::Result<Option<objects::worktree::WorktreeStatus>>,
-) -> Result<()> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Ok(());
-    }
-    let trust = build_repository_verification_state_with_worktree_status(repo, worktree_status);
-    preflight_git_checkpoint_ref_update_with_trust(repo, action, trust)
-}
-
-fn preflight_git_checkpoint_ref_update_with_trust(
-    repo: &Repository,
-    action: &str,
-    trust: RepositoryVerificationState,
-) -> Result<()> {
-    if git_checkpoint_trust_allows_ref_update(&trust)
-        || git_checkpoint_can_close_integrated_remote_gap(repo, &trust)
-    {
-        return Ok(());
-    }
-    Err(anyhow!(git_checkpoint_preflight_advice(
-        repo, &trust, action
-    )))
-}
-
-fn git_checkpoint_trust_allows_ref_update(trust: &RepositoryVerificationState) -> bool {
-    let status_allows_checkpoint = matches!(
-        trust.status.as_str(),
-        "clean" | "dirty_worktree" | "needs_checkpoint" | "remote_ahead" | "remote_untracked"
-    );
-    let remote_allows_checkpoint = matches!(
-        trust.remote_drift.as_str(),
-        "clean" | "remote_ahead" | "remote_untracked"
-    );
-    status_allows_checkpoint && remote_allows_checkpoint
-}
-
-fn git_checkpoint_can_close_integrated_remote_gap(
-    repo: &Repository,
-    trust: &RepositoryVerificationState,
-) -> bool {
-    if trust.status != "needs_checkpoint"
-        || !matches!(
-            trust.remote_drift.as_str(),
-            "remote_behind" | "remote_diverged"
-        )
-    {
-        return false;
-    }
-    let Some(remote) = repo.git_remote_tracking_status().ok().flatten() else {
-        return false;
-    };
-    let upstream = remote.upstream.trim();
-    if upstream.is_empty() {
-        return false;
-    }
-    let Ok(Some(upstream_state)) = repo.refs().get_thread(&ThreadName::new(upstream)) else {
-        return false;
-    };
-    let Ok(Some(current_state)) = repo.head() else {
-        return false;
-    };
-    let mut graph = CommitGraphIndex::new(repo);
-    graph
-        .is_ancestor(&upstream_state, &current_state)
-        .unwrap_or(false)
-}
-
-fn git_checkpoint_preflight_advice(
-    repo: &Repository,
-    trust: &RepositoryVerificationState,
-    action: &str,
-) -> RecoveryAdvice {
-    let primary_command = super::git_overlay_health::remote_drift_primary_action(repo)
-        .unwrap_or_else(|| {
-            if trust.recommended_action.trim().is_empty() {
-                "heddle verify".to_string()
-            } else {
-                trust.recommended_action.clone()
-            }
-        });
-    repository_verification_blocked_advice(
-        "git_checkpoint_preflight_blocked",
-        format!("Refusing to {action}: Git checkpoint preflight is blocked"),
-        format!("retrying `heddle {action}`"),
-        trust,
-        format!(
-            "repository verification status is {}; remote drift is {}: {}",
-            trust.status, trust.remote_drift, trust.summary
-        ),
-        format!(
-            "{action} would capture Heddle state before the Git checkpoint ref update is known to be safe"
-        ),
-        "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
-        Some(primary_command),
-    )
-}
-
-fn native_checkpoint_unavailable_advice(repo: &Repository) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "checkpoint_requires_git_overlay",
-        "`heddle checkpoint` is only for Git-overlay repositories",
-        "Use `heddle commit -m \"...\"` to save native Heddle work, or `heddle capture -m \"...\"` for a recoverable step without a Git checkpoint.",
-        format!("repository mode is {}", repo.storage_model_label()),
-        "checkpoint would need to write a Git commit, but this checkout has no Git-overlay branch/index",
-        "Heddle refs and worktree files were left unchanged",
-        "heddle commit -m \"...\"",
-        vec![
-            "heddle commit -m \"...\"".to_string(),
-            "heddle capture -m \"...\"".to_string(),
-            "heddle status".to_string(),
-        ],
-    )
-}
-
-fn missing_checkpoint_identity_advice(action: &str) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "git_checkpoint_identity_required",
-        format!("Refusing to {action}: no accountable identity is configured for the Git commit"),
-        "Configure `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, set .heddle principal, or configure Git user.name/user.email before retrying.",
-        "Heddle would otherwise have to write Unknown <unknown@example.com> into the Git commit",
-        format!("{action} would create an auditable Git checkpoint without a real author identity"),
-        "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
-        "heddle init --principal-name <name> --principal-email <email>",
-        vec![
-            "heddle init --principal-name <name> --principal-email <email>".to_string(),
-            "heddle checkpoint -m \"...\"".to_string(),
-        ],
-    )
-}
-
-fn checkpoint_git_write_skipped_advice(reason: String) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "checkpoint_git_write_skipped",
-        format!("Checkpoint could not update the Git checkout: {reason}"),
-        "Resolve the Git checkout issue, then retry with `heddle checkpoint -m \"...\"`.",
-        reason,
-        "checkpoint would need to write the current Heddle state into the Git branch and index",
-        "the current Heddle state was preserved; no Git checkpoint record was written",
-        "heddle checkpoint -m \"...\"",
-        vec!["heddle checkpoint -m \"...\"".to_string()],
-    )
-}
-
 fn git_rev_parse_head(root: &std::path::Path) -> Option<String> {
     let git = SleyRepository::discover(root).ok()?;
     git.head().ok()?.oid.map(|id| id.to_string())
@@ -426,7 +265,7 @@ fn build_output(
     // Fresh verification state: this runs AFTER the checkpoint advanced the Git
     // ref, so it must re-read the new git-overlay state (do NOT reuse the
     // pre-checkpoint worktree status threaded into the preflights above).
-    let trust = build_repository_verification_state(repo);
+    let trust = git_overlay_txn::post_verify(repo);
     let recommended_action = action_value(&trust);
     CheckpointOutput {
         output_kind: "checkpoint",

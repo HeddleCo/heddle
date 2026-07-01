@@ -313,6 +313,11 @@ impl TimelineView {
             .collect()
     }
 
+    /// Step summaries across all timeline threads in deterministic key order.
+    pub fn steps(&self) -> Vec<&TimelineStepSummary> {
+        self.steps.values().collect()
+    }
+
     /// Ordered step summaries for a branch.
     pub fn list_branch_steps(
         &self,

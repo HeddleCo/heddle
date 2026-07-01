@@ -570,24 +570,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn discuss_resolve_missing_annotation_kind() -> Self {
-        Self::missing_option(
-            "discuss_resolve_missing_annotation_kind",
-            "--annotation-kind",
-            "into-annotation",
-            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
-        )
-    }
-
-    pub(crate) fn discuss_resolve_missing_annotation_content() -> Self {
-        Self::missing_option(
-            "discuss_resolve_missing_annotation_content",
-            "--annotation-content",
-            "into-annotation",
-            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
-        )
-    }
-
     pub(crate) fn discuss_resolve_missing_dismiss_reason() -> Self {
         Self::missing_option(
             "discuss_resolve_missing_dismiss_reason",
@@ -884,9 +866,7 @@ impl RecoveryAdvice {
             GitBridgeError::NonFastForwardRef { name, .. } => name
                 .strip_prefix("refs/heads/")
                 .map(Self::git_overlay_remote_push_rejected),
-            GitBridgeError::Conflict(message) if is_git_overlay_mapping_conflict(message) => {
-                Some(Self::git_overlay_mapping_conflict())
-            }
+            GitBridgeError::MappingConflict { .. } => Some(Self::git_overlay_mapping_conflict()),
             GitBridgeError::GitHeddleThreadDiverged { thread, branch, .. } => {
                 Some(Self::git_heddle_thread_diverged(thread, branch))
             }
@@ -1327,31 +1307,6 @@ impl RecoveryAdvice {
         )
     }
 
-    /// Stored repository state failed msgpack/serde decoding. Without
-    /// this mapping the user sees the raw decoder internals ("wrong
-    /// msgpack marker FixArray(0)") with no recovery path — and every
-    /// subsequent command, including `heddle status` (the natural
-    /// recovery probe), dead-ends on the same opaque error
-    /// (HeddleCo/heddle#642). The decoder detail is preserved in
-    /// `unsafe_condition` for diagnosis; the user-facing error names the
-    /// condition and the recovery tooling.
-    pub(crate) fn serialization_error(detail: impl fmt::Display) -> Self {
-        Self::safety_refusal(
-            "state_corrupted",
-            "Repository state is corrupted or unreadable",
-            "Diagnose with `heddle verify`, inspect store integrity with `heddle fsck --full`, then repair with `heddle fsck --repair`.",
-            format!("a stored repository object failed to decode: {detail}"),
-            "continuing would read or write through repository state Heddle cannot decode",
-            "the command stopped before mutating repository state; intact objects were left unchanged",
-            "heddle verify",
-            vec![
-                "heddle verify".to_string(),
-                "heddle fsck --full".to_string(),
-                "heddle fsck --repair".to_string(),
-            ],
-        )
-    }
-
     /// A thread command resolved a state spec or anchor and the
     /// referenced state was not in the object store. Distinct from
     /// `state_not_found` because the lookup happens inside thread
@@ -1410,12 +1365,6 @@ impl RecoveryAdvice {
     }
 }
 
-fn is_git_overlay_mapping_conflict(message: &str) -> bool {
-    (message.starts_with("git oid ") || message.starts_with("change id "))
-        && message.contains(" mapped to ")
-        && message.contains(" (new ")
-}
-
 pub(crate) fn dirty_worktree_recovery_commands() -> Vec<String> {
     vec![
         DIRTY_WORKTREE_COMMIT_COMMAND.to_string(),
@@ -1462,9 +1411,9 @@ mod tests {
 
     #[test]
     fn git_bridge_mapping_conflict_returns_typed_advice() {
-        let error = GitBridgeError::Conflict(
-            "git oid abc mapped to old-change (new new-change)".to_string(),
-        );
+        let error = GitBridgeError::MappingConflict {
+            message: "git oid abc mapped to old-change (new new-change)".to_string(),
+        };
 
         let advice = RecoveryAdvice::from_git_bridge_error(&error)
             .expect("mapping conflict should be classified");
@@ -1476,6 +1425,15 @@ mod tests {
                 .unsafe_condition
                 .contains("one Git commit maps to different Heddle change ids")
         );
+    }
+
+    #[test]
+    fn git_bridge_plain_conflict_message_does_not_classify_as_mapping_conflict() {
+        let error = GitBridgeError::Conflict(
+            "git oid abc mapped to old-change (new new-change)".to_string(),
+        );
+
+        assert!(RecoveryAdvice::from_git_bridge_error(&error).is_none());
     }
 
     #[test]

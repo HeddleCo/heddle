@@ -191,7 +191,8 @@ impl StateReviewService for LocalStateReviewService {
         // Server-side reading-order partition. Same per-symbol
         // extraction logic as the hosted handler: tree-sitter when the
         // `semantic` feature is enabled, path-only fallback otherwise.
-        let symbols = changed_files_as_symbols(repo, &state).map_err(to_status)?;
+        let symbols = changed_files_as_symbols(repo, &state, &diff_summary.changed_paths)
+            .map_err(to_status)?;
         let partition = build_review_payload_partition(&symbols);
 
         // Project the state's `DiscussionsBlob` (when present)
@@ -560,45 +561,38 @@ fn risk_signal_to_proto(sig: objects::object::RiskSignal, visibility: &str) -> P
 
 /// Symbol projection for the reading-order partition. Mirrors the hosted-handler
 /// implementation: when the `semantic` feature is enabled and the
-/// changed file has a tree-sitter parser, emits one [`PathSymbol`] per
-/// definition. Otherwise falls back to a single path-only entry per
-/// changed file (kind = `Other`), routed by the path classifier.
+/// changed path has a tree-sitter parser and a readable new-side blob, emits
+/// one [`PathSymbol`] per definition. Otherwise falls back to a single path-only
+/// entry (kind = `Other`), which keeps deletes and gitlink pointer changes
+/// visible even though they do not carry Heddle blob content.
 fn changed_files_as_symbols(
     repo: &Repository,
     state: &State,
+    changed_paths: &[ChangedPath],
 ) -> objects::error::Result<Vec<PathSymbol>> {
     let new_tree = match repo.store().get_tree(&state.tree)? {
         Some(t) => t,
         None => return Ok(Vec::new()),
     };
-    let parent_tree = if let Some(parent_id) = state.parents.first() {
-        repo.store()
-            .get_state(parent_id)?
-            .and_then(|p| repo.store().get_tree(&p.tree).ok().flatten())
-    } else {
-        None
-    };
     let new_files = collect_files(repo, &new_tree, "")?;
-    let parent_files = match parent_tree {
-        Some(t) => collect_files(repo, &t, "")?,
-        None => std::collections::HashMap::new(),
-    };
 
     let mut out: Vec<PathSymbol> = Vec::new();
-    for (path, hash) in &new_files {
-        let changed = parent_files.get(path).map(|h| h != hash).unwrap_or(true);
-        if !changed {
-            continue;
-        }
+    for path_kind in changed_paths {
+        let path = &path_kind.path;
         #[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
         let mut emitted_any = false;
-        #[cfg(feature = "semantic")]
-        {
-            if let Some(blob) = repo.store().get_blob(hash)? {
-                emitted_any = extract_file_symbols(path, blob.content(), &mut out);
+        if let Some(hash) = new_files.get(path) {
+            #[cfg(feature = "semantic")]
+            {
+                if let Some(blob) = repo.store().get_blob(hash)? {
+                    emitted_any = extract_file_symbols(path, blob.content(), &mut out);
+                }
+            }
+            #[cfg(not(feature = "semantic"))]
+            {
+                let _ = hash;
             }
         }
-        let _ = hash;
         if !emitted_any {
             out.push(PathSymbol {
                 file: path.clone(),
@@ -655,17 +649,19 @@ fn collect_files(
     let mut out = std::collections::HashMap::new();
     for entry in tree.entries() {
         let path = if prefix.is_empty() {
-            entry.name.clone()
+            entry.name().to_string()
         } else {
-            format!("{prefix}/{}", entry.name)
+            format!("{prefix}/{}", entry.name())
         };
         if entry.is_tree() {
-            if let Some(subtree) = repo.store().get_tree(&entry.hash)? {
+            if let Some(hash) = entry.tree_hash()
+                && let Some(subtree) = repo.store().get_tree(&hash)?
+            {
                 let sub = collect_files(repo, &subtree, &path)?;
                 out.extend(sub);
             }
-        } else {
-            out.insert(path, entry.hash);
+        } else if let Some(hash) = entry.content_hash() {
+            out.insert(path, hash);
         }
     }
     Ok(out)
@@ -1316,6 +1312,81 @@ mod tests {
             payload_second.in_budget_signals.len() as u32,
             "in_budget_signal_count must match the array length"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn get_review_payload_surfaces_gitlink_target_changes() {
+        let (svc, repo, _tmp) = fresh_service();
+
+        let old_target = "0303030303030303030303030303030303030303"
+            .parse()
+            .expect("old git oid");
+        let new_target = "0404040404040404040404040404040404040404"
+            .parse()
+            .expect("new git oid");
+        let old_tree = objects::object::Tree::from_entries(vec![
+            objects::object::TreeEntry::gitlink("vendor", old_target).expect("old gitlink"),
+        ]);
+        let new_tree = objects::object::Tree::from_entries(vec![
+            objects::object::TreeEntry::gitlink("vendor", new_target).expect("new gitlink"),
+        ]);
+        let old_tree_hash = repo.store().put_tree(&old_tree).expect("put old tree");
+        let new_tree_hash = repo.store().put_tree(&new_tree).expect("put new tree");
+        let base = State::new_snapshot(
+            old_tree_hash,
+            Vec::new(),
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Gitlink Reviewer",
+                "gitlink@example.test",
+            )),
+        );
+        let base_id = base.change_id;
+        repo.store().put_state(&base).expect("put base state");
+        let changed = State::new_snapshot(
+            new_tree_hash,
+            vec![base_id],
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Gitlink Reviewer",
+                "gitlink@example.test",
+            )),
+        );
+        let changed_id = changed.change_id;
+        repo.store().put_state(&changed).expect("put changed state");
+
+        let resp = svc
+            .get_review_payload(Request::new(GetReviewPayloadRequest {
+                repo_path: String::new(),
+                state_id: changed_id.as_bytes().to_vec(),
+                include_all_signals: false,
+            }))
+            .await
+            .expect("get_review_payload gitlink change");
+        let payload = resp.into_inner();
+        let summary = payload.summary.as_ref().expect("summary present");
+        assert_eq!(
+            summary.files_changed, 1,
+            "gitlink pointer change should count as one changed path"
+        );
+        assert_eq!(summary.added_lines, 0);
+        assert_eq!(summary.removed_lines, 0);
+        assert_eq!(
+            payload
+                .in_budget_signals
+                .first()
+                .and_then(|signal| signal.anchor.as_ref())
+                .map(|anchor| anchor.file.as_str()),
+            Some("vendor"),
+            "diff_summary signal should be anchored on the gitlink path"
+        );
+        let partition = payload.partition.expect("partition present");
+        let surfaced = partition
+            .structural
+            .iter()
+            .chain(partition.consequence.iter())
+            .chain(partition.tests_and_docs.iter())
+            .any(|symbol| symbol.file == "vendor" && symbol.symbol == "vendor");
+        assert!(surfaced, "gitlink change should be path-visible in review");
     }
 
     /// Regression for codex feedback on PRs #52 (tree fallback) and

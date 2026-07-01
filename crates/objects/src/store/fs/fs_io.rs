@@ -15,8 +15,8 @@ use bytes::Bytes;
 
 use crate::{
     error::HeddleError,
-    fs_atomic::{enrich_fs_error, enrich_rename_error, sync_directory},
-    store::{Result, atomic::temp_path},
+    fs_atomic::{enrich_fs_error, enrich_rename_error, sync_directory, temp_path},
+    store::Result,
 };
 
 const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024;
