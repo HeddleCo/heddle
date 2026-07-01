@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
+use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
     action_line::print_next_step,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
-    },
+    next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
         OperatorEmission, SYNC_OPERATOR_EMISSION, abort_operator, exit_if_blocked_operator_status,
@@ -214,8 +213,4 @@ pub(crate) fn primary_next_action_with_verification(
         NextActionInput::default(operation, remote_tracking, import_hint, fallback)
             .with_verification(trust),
     )
-}
-
-fn non_empty_action(action: Option<&str>) -> Option<&str> {
-    action.filter(|action| !action.trim().is_empty())
 }

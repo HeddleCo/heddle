@@ -2,35 +2,11 @@
 //! Shared next-action selection and validation for command surfaces.
 
 use anyhow::{Context, Result};
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{
-    command_catalog::{split_recommended_action, validate_recommended_action},
-    git_overlay_health::{
-        RepositoryVerificationState, import_hint_includes_active_branch,
-        remote_tracking_next_action,
-    },
-};
+use super::command_catalog::{split_recommended_action, validate_recommended_action};
 use crate::cli::render::write_stdout;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NextActionScope {
-    Default,
-    CurrentThread,
-    Ready,
-}
-
-pub(crate) struct NextActionInput<'a> {
-    pub operation: Option<&'a RepositoryOperationStatus>,
-    pub remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-    pub import_hint: Option<&'a GitOverlayImportHint>,
-    pub fallback: Option<&'a str>,
-    pub thread_health: Option<&'a str>,
-    pub trust: Option<&'a RepositoryVerificationState>,
-    pub scope: NextActionScope,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NextActionValidationContext<'a> {
@@ -277,150 +253,10 @@ fn next_action_validation_error(message: String) -> anyhow::Error {
     anyhow::Error::msg(message)
 }
 
-impl<'a> NextActionInput<'a> {
-    pub(crate) fn default(
-        operation: Option<&'a RepositoryOperationStatus>,
-        remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-        import_hint: Option<&'a GitOverlayImportHint>,
-        fallback: Option<&'a str>,
-    ) -> Self {
-        Self {
-            operation,
-            remote_tracking,
-            import_hint,
-            fallback,
-            thread_health: None,
-            trust: None,
-            scope: NextActionScope::Default,
-        }
-    }
-
-    pub(crate) fn with_verification(mut self, trust: &'a RepositoryVerificationState) -> Self {
-        self.trust = Some(trust);
-        self
-    }
-
-    pub(crate) fn current_thread(mut self, thread_health: Option<&'a str>) -> Self {
-        self.thread_health = thread_health;
-        self.scope = NextActionScope::CurrentThread;
-        self
-    }
-
-    pub(crate) fn ready(mut self) -> Self {
-        self.scope = NextActionScope::Ready;
-        self
-    }
-}
-
-pub(crate) fn effective_next_action(input: NextActionInput<'_>) -> String {
-    if let Some(trust) = input.trust
-        && !trust.verified
-    {
-        return trust.recommended_action.clone();
-    }
-
-    match input.scope {
-        NextActionScope::Ready => ready_next_action(input),
-        NextActionScope::CurrentThread => current_thread_next_action(input),
-        NextActionScope::Default => default_next_action(input),
-    }
-}
-
-fn ready_next_action(input: NextActionInput<'_>) -> String {
-    if let Some(operation) = input.operation {
-        return operation.next_action.clone();
-    }
-    if let Some(action) = non_empty_action(input.fallback) {
-        return action.to_string();
-    }
-    default_next_action(NextActionInput {
-        operation: None,
-        remote_tracking: input.remote_tracking,
-        import_hint: input.import_hint,
-        fallback: None,
-        thread_health: None,
-        trust: None,
-        scope: NextActionScope::Default,
-    })
-}
-
-fn current_thread_next_action(input: NextActionInput<'_>) -> String {
-    let thread_action = non_empty_action(input.fallback);
-    if input.operation.is_none()
-        && thread_recovery_precedes_publish(
-            input.remote_tracking,
-            input.thread_health,
-            thread_action,
-        )
-    {
-        return thread_action.unwrap_or_default().to_string();
-    }
-    default_next_action(NextActionInput {
-        operation: input.operation,
-        remote_tracking: input.remote_tracking,
-        import_hint: input.import_hint,
-        fallback: thread_action,
-        thread_health: None,
-        trust: None,
-        scope: NextActionScope::Default,
-    })
-}
-
-fn default_next_action(input: NextActionInput<'_>) -> String {
-    if let Some(operation) = input.operation {
-        return operation.next_action.clone();
-    }
-    if let Some(remote_tracking) = input.remote_tracking
-        && let Some(action) = remote_tracking_next_action(remote_tracking)
-    {
-        return action;
-    }
-    if let Some(action) = non_empty_action(input.fallback) {
-        return action.to_string();
-    }
-    if let Some(hint) = input.import_hint
-        && import_hint_includes_active_branch(hint)
-    {
-        return hint.recommended_command.clone();
-    }
-    String::new()
-}
-
-pub(crate) fn thread_recovery_precedes_publish(
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-) -> bool {
-    let Some(remote_tracking) = remote_tracking else {
-        return false;
-    };
-    if remote_tracking.ahead == 0 || remote_tracking.behind > 0 {
-        return false;
-    }
-    let Some(thread_action) = thread_action else {
-        return false;
-    };
-    thread_recovery_action_is_primary(thread_health, thread_action)
-}
-
-pub(crate) fn thread_recovery_action_is_primary(
-    thread_health: Option<&str>,
-    thread_action: &str,
-) -> bool {
-    matches!(
-        thread_health.unwrap_or_default(),
-        "blocked" | "dirty_worktree" | "uncaptured"
-    ) || thread_action == "heddle commit"
-        || thread_action.starts_with("heddle commit ")
-        || thread_action.starts_with("heddle sync ")
-        || thread_action.starts_with("heddle resolve ")
-        || thread_action.starts_with("heddle thread promote ")
-}
-
 /// The single normalizer for serialized action fields
-/// (HeddleCo/heddle#645). The internal selection helpers above use
-/// `String` with "empty means no action"; this collapses that convention
-/// at the boundary — empty/whitespace-only becomes `None`, so JSON output
+/// (HeddleCo/heddle#645). Action selectors use `String` with "empty means
+/// no action"; this collapses that convention at the boundary —
+/// empty/whitespace-only becomes `None`, so JSON output
 /// serializes `null` (or omits the field) and `""` can never leak into a
 /// `next_action`/`recommended_action`. Route every output-struct
 /// assignment through here instead of ad-hoc `.is_empty()` checks; the
@@ -433,12 +269,6 @@ pub(crate) fn normalized_action(action: impl Into<String>) -> Option<String> {
     } else {
         Some(action)
     }
-}
-
-/// Borrowed sibling of [`normalized_action`] for render paths that only
-/// need to know whether an action exists.
-pub(crate) fn non_empty_action(action: Option<&str>) -> Option<&str> {
-    action.filter(|action| !action.trim().is_empty())
 }
 
 #[cfg(test)]

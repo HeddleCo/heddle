@@ -3,6 +3,9 @@
 
 use std::{error::Error, fmt};
 
+use heddle_core::status::next_action::{
+    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+};
 use serde_json::{Map, Value};
 
 pub(crate) const DIRTY_WORKTREE_COMMIT_COMMAND: &str = "heddle commit -m \"...\"";
@@ -104,10 +107,7 @@ impl RecoveryAdvice {
         let expected_oid = expected_oid.into();
         let branch = branch.into();
         let primary_command =
-            super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(
-                Some("heddle"),
-                &branch,
-            );
+            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), &branch);
         let dirty_summary = if dirty_paths.is_empty() {
             "dirty paths: none".to_string()
         } else {
@@ -934,8 +934,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
-        let primary_command =
-            super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(None, branch);
+        let primary_command = canonical_bridge_reconcile_ref_preview_command(None, branch);
         Self::safety_refusal(
             "git_heddle_thread_diverged",
             "Git branch and Heddle thread have diverged",
@@ -969,8 +968,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
-        let import_command =
-            super::git_overlay_health::canonical_bridge_import_ref_command(upstream);
+        let import_command = canonical_bridge_import_ref_command(upstream);
         let merge_preview = super::thread_landing::merge_preview_command(upstream);
         Self::safety_refusal(
             "git_overlay_remote_diverged",

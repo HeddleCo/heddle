@@ -7,6 +7,10 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use heddle_core::status::next_action::{
+    canonical_adopt_ref_command, canonical_bridge_import_ref_command,
+    canonical_bridge_reconcile_ref_command, canonical_bridge_reconcile_ref_preview_command,
+};
 use ingest::{ImportOptions, LossyImportEntry};
 use objects::object::{ChangeId, ThreadName};
 use refs::Head;
@@ -19,9 +23,7 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
         build_git_overlay_health, build_plain_git_verification_probe,
-        build_repository_verification_state, canonical_adopt_ref_command,
-        canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
-        canonical_bridge_reconcile_ref_preview_command, repository_verification_state_from_health,
+        build_repository_verification_state, repository_verification_state_from_health,
         serialize_empty_action_as_null,
     },
     import_progress::ImportProgress,

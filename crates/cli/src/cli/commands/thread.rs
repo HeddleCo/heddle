@@ -10,6 +10,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use heddle_core::status::next_action::{
+    NextActionInput, canonical_bridge_reconcile_ref_preview_command, effective_next_action,
+    thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+};
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
     store::{
@@ -35,16 +39,12 @@ use super::{
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, canonical_bridge_reconcile_ref_preview_command,
+        build_repository_verification_state,
         git_overlay_mutation_preflight_advice, override_trust_recommended_action,
         serialize_empty_action_as_null,
     },
     mount_lifecycle,
-    next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action,
-        thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
-        write_full_command_json,
-    },
+    next_action::{NextActionValidationContext, write_full_command_json},
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,

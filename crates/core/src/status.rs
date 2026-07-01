@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Status facade and report contract.
 
+pub mod next_action;
+
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -31,6 +33,11 @@ use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,
     ReportContract, RepositoryContextInfo, RepositoryVerificationState, schema_for_report,
     verify::serialize_empty_action_as_null,
+};
+
+use self::next_action::{
+    NextActionInput, effective_next_action, non_empty_action, remote_tracking_status,
+    thread_recovery_action_is_primary,
 };
 
 pub type GitOverlayHealthFn = fn(&Repository, &Result<Option<WorktreeStatus>>) -> GitOverlayHealth;
@@ -859,17 +866,10 @@ struct ShortPathInputs<'a> {
 }
 
 fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
-    let recommended_action = if input.trust.verified {
-        default_next_action_with_verification(
-            input.operation.as_ref(),
-            input.remote_tracking.as_ref(),
-            None,
-            None,
-            &input.trust,
-        )
-    } else {
-        input.trust.recommended_action.clone()
-    };
+    let recommended_action = effective_next_action(
+        NextActionInput::default(input.operation.as_ref(), input.remote_tracking.as_ref(), None, None)
+            .with_verification(&input.trust),
+    );
     let worktree_clean = input.changes.is_empty();
     let recommended_action =
         first_save_recommendation(input.repo, input.current_state, worktree_clean)
@@ -1043,13 +1043,17 @@ fn apply_status_advice(
     let thread_action = advice
         .as_ref()
         .map(|advice| advice.recommended_action.as_str());
-    let recommended_action = current_thread_next_action_with_verification(
-        output.operation.as_ref(),
-        output.remote_tracking.as_ref(),
-        import_hint.as_ref(),
-        thread_health,
-        thread_action,
-        &trust,
+    let fallback = non_empty_action(thread_action)
+        .or_else(|| non_empty_action(Some(trust.recommended_action.as_str())));
+    let recommended_action = effective_next_action(
+        NextActionInput::default(
+            output.operation.as_ref(),
+            output.remote_tracking.as_ref(),
+            import_hint.as_ref(),
+            fallback,
+        )
+        .current_thread(thread_health)
+        .with_verification(&trust),
     );
     let recommended_action = if let Some(thread) = output.thread.as_deref() {
         (opts.adapters.contextual_thread_action)(
@@ -1504,160 +1508,6 @@ fn remote_tracking_with_verification_action(
         remote.next_action = trust.recommended_action.clone();
     }
     remote
-}
-
-fn default_next_action_with_verification(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    fallback: Option<&str>,
-    trust: &RepositoryVerificationState,
-) -> String {
-    if !trust.verified {
-        return trust.recommended_action.clone();
-    }
-    default_next_action(operation, remote_tracking, import_hint, fallback)
-}
-
-fn current_thread_next_action_with_verification(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-    trust: &RepositoryVerificationState,
-) -> String {
-    if !trust.verified {
-        return trust.recommended_action.clone();
-    }
-    let fallback = non_empty_action(thread_action)
-        .or_else(|| non_empty_action(Some(trust.recommended_action.as_str())));
-    current_thread_next_action(
-        operation,
-        remote_tracking,
-        import_hint,
-        thread_health,
-        fallback,
-    )
-}
-
-fn current_thread_next_action(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-) -> String {
-    let thread_action = non_empty_action(thread_action);
-    if operation.is_none()
-        && thread_recovery_precedes_publish(remote_tracking, thread_health, thread_action)
-    {
-        return thread_action.unwrap_or_default().to_string();
-    }
-    default_next_action(operation, remote_tracking, import_hint, thread_action)
-}
-
-fn default_next_action(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    fallback: Option<&str>,
-) -> String {
-    if let Some(operation) = operation {
-        return operation.next_action.clone();
-    }
-    if let Some(remote_tracking) = remote_tracking
-        && let Some(action) = remote_tracking_next_action(remote_tracking)
-    {
-        return action;
-    }
-    if let Some(action) = non_empty_action(fallback) {
-        return action.to_string();
-    }
-    if let Some(hint) = import_hint
-        && import_hint_includes_active_branch(hint)
-    {
-        return hint.recommended_command.clone();
-    }
-    String::new()
-}
-
-fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
-    if remote.upstream.is_empty() {
-        return "remote_untracked";
-    }
-    if remote.upstream_is_undone_checkpoint && remote.ahead == 0 && remote.behind > 0 {
-        return "remote_contains_undone_checkpoint";
-    }
-    match (remote.ahead, remote.behind) {
-        (0, 0) => "clean",
-        (0, _) => "remote_behind",
-        (_, 0) => "remote_ahead",
-        _ => "remote_diverged",
-    }
-}
-
-fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<String> {
-    match remote_tracking_status(remote) {
-        "clean" => None,
-        "remote_untracked" => {
-            if remote.next_action.trim().is_empty() {
-                Some("heddle push".to_string())
-            } else {
-                Some(remote.next_action.clone())
-            }
-        }
-        "remote_contains_undone_checkpoint" => Some("heddle push --force".to_string()),
-        "remote_behind" => Some("heddle pull".to_string()),
-        "remote_ahead" => Some("heddle push".to_string()),
-        "remote_diverged" => {
-            let upstream = remote.upstream.trim();
-            if upstream.is_empty() {
-                Some("heddle fetch".to_string())
-            } else {
-                Some(format!("heddle bridge git import --ref {upstream}"))
-            }
-        }
-        _ => None,
-    }
-}
-
-fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
-    hint.missing_branches
-        .iter()
-        .any(|branch| branch == &hint.current_branch)
-}
-
-fn thread_recovery_precedes_publish(
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-) -> bool {
-    let Some(remote_tracking) = remote_tracking else {
-        return false;
-    };
-    if remote_tracking.ahead == 0 || remote_tracking.behind > 0 {
-        return false;
-    }
-    let Some(thread_action) = thread_action else {
-        return false;
-    };
-    thread_recovery_action_is_primary(thread_health, thread_action)
-}
-
-fn thread_recovery_action_is_primary(thread_health: Option<&str>, thread_action: &str) -> bool {
-    matches!(
-        thread_health.unwrap_or_default(),
-        "blocked" | "dirty_worktree" | "uncaptured"
-    ) || thread_action == "heddle commit"
-        || thread_action.starts_with("heddle commit ")
-        || thread_action.starts_with("heddle sync ")
-        || thread_action.starts_with("heddle resolve ")
-        || thread_action.starts_with("heddle thread promote ")
-}
-
-fn non_empty_action(action: Option<&str>) -> Option<&str> {
-    action.filter(|action| !action.trim().is_empty())
 }
 
 fn resolve_coordination_with_trust(

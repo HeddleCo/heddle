@@ -3,6 +3,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use heddle_core::status::next_action::{
+    NextActionInput, effective_next_action, non_empty_action,
+};
 use objects::object::Tree;
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
@@ -23,10 +26,7 @@ use super::{
         override_trust_recommended_action,
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
-    next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action, non_empty_action,
-        normalized_action, write_command_json,
-    },
+    next_action::{NextActionValidationContext, normalized_action, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
         exit_if_blocked_operator_status,
