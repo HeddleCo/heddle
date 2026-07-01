@@ -27,7 +27,7 @@ use crate::{
     bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     client::LocalSync,
-    remote::{RemoteTarget, resolve_remote_with_key},
+    remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
 #[derive(Serialize)]
@@ -58,7 +58,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     // by its own scheme rather than gating the whole batch on one guard.
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let remotes = if all {
-            let configured = repo.refs().list_remotes()?;
+            let configured = all_configured_remotes(&repo)?;
             if configured.is_empty() {
                 vec!["origin".to_string()]
             } else {
@@ -132,7 +132,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     }
 
     let remotes = if all {
-        repo.refs().list_remotes()?
+        all_configured_remotes(&repo)?
     } else if let Some(remote) = remote.as_ref() {
         vec![remote.clone()]
     } else if let Some(default) = resolved_default_remote_name(&repo)? {
@@ -142,6 +142,34 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     };
 
     fetch_via_network(cli, &repo, remotes, all).await
+}
+
+/// Enumerate every configured remote for `fetch --all`, unioning the Heddle
+/// remote aliases (`.heddle/remotes.toml`) with the refs backend's
+/// remote-tracking namespaces. `refs().list_remotes()` alone only surfaces
+/// remotes that already have tracking refs, so a freshly-added remote that has
+/// never been fetched — e.g. a hosted `heddle://` remote — was silently dropped
+/// from `--all` (#839). Ordering is deterministic: Heddle-config remotes first
+/// (in config order), then any tracking-only remotes not already listed.
+fn all_configured_remotes(repo: &Repository) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Ok(cfg) = RemoteConfig::open(repo) {
+        for (name, _) in cfg.list() {
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+        }
+    }
+
+    for name in repo.refs().list_remotes()? {
+        if seen.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+
+    Ok(names)
 }
 
 /// Fetch each remote through the resolve → `RemoteTarget` routing (local heddle
