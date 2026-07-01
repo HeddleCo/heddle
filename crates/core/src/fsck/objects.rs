@@ -17,16 +17,12 @@ pub(crate) fn check_tree_objects(
     objects_checked: &mut usize,
 ) -> Result<()> {
     let states = repo.store().list_states()?;
-    let roots: Vec<ContentHash> = states
-        .iter()
-        .filter_map(|state_id| {
-            repo.store()
-                .get_state(state_id)
-                .ok()
-                .flatten()
-                .map(|state| state.tree)
-        })
-        .collect();
+    let mut roots = Vec::with_capacity(states.len());
+    for state_id in states {
+        if let Some(state) = repo.store().get_state(&state_id)? {
+            roots.push(state.tree);
+        }
+    }
 
     let mut blob_hashes = HashSet::new();
 
