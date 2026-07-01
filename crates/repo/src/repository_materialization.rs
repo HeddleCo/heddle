@@ -472,6 +472,7 @@ impl Repository {
             let mut seeded = Vec::with_capacity(writes.len());
             for write in writes {
                 seeded.push(self.materialize_write_op(write, &context)?);
+                progress.inc(1);
             }
             Ok((worker_count, seeded))
         } else {
@@ -480,10 +481,12 @@ impl Repository {
                 let mut workers = Vec::new();
                 let context = &context;
                 for chunk in writes.chunks(chunk_size) {
+                    let progress = progress.clone();
                     workers.push(scope.spawn(move || -> Result<Vec<SeededWorktreeEntry>> {
                         let mut seeded = Vec::with_capacity(chunk.len());
                         for write in chunk {
                             seeded.push(self.materialize_write_op(write, context)?);
+                            progress.inc(1);
                         }
                         Ok(seeded)
                     }));
