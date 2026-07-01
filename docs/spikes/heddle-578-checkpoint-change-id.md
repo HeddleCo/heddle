@@ -29,11 +29,11 @@ fails (Git checkout problem, missing identity, ref-update preflight blocked),
 the capture is already durable but the Git commit is not. The user sees:
 
 > `capture <change_id> was preserved, but checkpoint failed: <err>`
-> (`crates/cli/src/cli/commands/git_compat.rs:1119`)
+> (`crates/cli/src/cli/commands/git_adapter.rs:1119`)
 
 The recovery advice tells them to re-run a checkpoint that repairs *only the Git
 side* without re-capturing
-(`checkpoint_recovery_command`, `git_compat.rs:1129`). Today that recovery
+(`checkpoint_recovery_command`, `git_adapter.rs:1129`). Today that recovery
 relies on the preserved state still being the checkout's **current** state, and
 uses the hidden `--from-index-snapshot` flag for the staged-index case
 (`commands_advanced.rs:14`).
@@ -165,7 +165,7 @@ checkpointing the state you named.
 
 Don't expose `--change-id` at all. Instead, fix #485 entirely **inside** the
 recovery code: `checkpoint_recovery_command` already knows the preserved
-`change_id` (`git_compat.rs:1110-1127`); route the retry to a
+`change_id` (`git_adapter.rs:1110-1127`); route the retry to a
 checkpoint-the-current-preserved-state path (the existing
 `--from-index-snapshot`-style internal path) that asserts "the current state IS
 the preserved change_id, and it has no checkpoint record yet" and repairs only
@@ -262,7 +262,7 @@ For the record, so a future impl issue doesn't re-derive it:
 The impl issue (#485) is the **recovery-plumbing fix (Shape B)**, NOT a public
 flag. ACs:
 
-1. The checkpoint-failure recovery (`git_compat.rs` commit path,
+1. The checkpoint-failure recovery (`git_adapter.rs` commit path,
    `commit_checkpoint_failed_advice` / `checkpoint_recovery_command`,
    `:1110-1142`) repairs the Git checkpoint **for the already-preserved
    `change_id`** without minting a second capture from the same tree (the #485

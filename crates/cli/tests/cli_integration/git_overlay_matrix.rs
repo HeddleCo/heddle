@@ -2607,7 +2607,7 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     assert_eq!(
         logical_operations.len(),
         2,
-        "compat commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
+        "git-adapter commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
     );
     assert!(
         logical_operations.iter().any(|op| op["description"]

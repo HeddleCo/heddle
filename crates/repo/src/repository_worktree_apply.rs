@@ -745,49 +745,6 @@ impl Repository {
     /// Remove only the heddle-tracked descendants beneath `path`, preserving
     /// any untracked or explicitly ignored siblings.
     ///
-    /// This exists so commands that mutate the worktree at the top-level
-    /// tree-entry granularity (`merge`, `cherry-pick`, `revert`) can drop a
-    /// tracked directory without recursively destroying the user's local
-    /// build artifacts, dependencies, or co-located Git state. The shape
-    /// matches `remove_existing_path` in this module: tracked content is
-    /// removed, then the directory itself is removed *if empty*; if ignored
-    /// content keeps it occupied, the dir is left in place. That keeps disk
-    /// in lock-step with the new tree (no stale tracked file under the dir)
-    /// without nuking work the user expects to survive.
-    ///
-    /// Ignore-pattern based variant. Uses the *current* `.heddleignore` to
-    /// decide which children to preserve. This is unsafe for the
-    /// merge/cherry-pick/revert flow when a tracked path is also matched by
-    /// a current ignore rule: the file would silently survive on disk after
-    /// HEAD advances. Prefer
-    /// [`Self::remove_tracked_descendants_with_source`] in those flows so
-    /// removal is driven by the source-tree's actual tracked set.
-    ///
-    /// `path` must be inside the repository root. If it doesn't exist, this
-    /// is a no-op. If it's a regular file or symlink, it is removed.
-    pub fn remove_tracked_descendants(&self, path: &Path) -> Result<()> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(HeddleError::Io(enrich_fs_error(path, "inspecting", error))),
-        };
-
-        let file_type = metadata.file_type();
-        if file_type.is_symlink() || file_type.is_file() {
-            fs::remove_file(path)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(path, "removing", e)))?;
-            return Ok(());
-        }
-        if !file_type.is_dir() {
-            return Ok(());
-        }
-
-        let patterns = self.ignore_patterns()?;
-        remove_tracked_descendants_inner_by_ignore(self.root(), path, &patterns)
-    }
-
-    /// Tree-driven variant of [`Self::remove_tracked_descendants`].
-    ///
     /// Removal is driven by `source_subtree` — the subtree at `path` in the
     /// state we're transitioning AWAY from. Every blob/symlink it lists is
     /// removed; nested directory entries are recursed into using the matching
@@ -827,9 +784,8 @@ impl Repository {
 
     /// Look up the subtree at `rel_path` within `root_tree`. Returns `None`
     /// if the path isn't reachable as a `Tree`-typed entry (missing entry,
-    /// blob entry, or unresolved hash). Used by
-    /// [`Self::remove_tracked_descendants_with_source`] callers to derive
-    /// the source subtree from a top-level tree entry.
+    /// blob entry, or unresolved hash). Used by callers to derive the
+    /// source subtree for [`Self::remove_tracked_descendants_with_source`].
     pub fn resolve_subtree(&self, root_tree: &Tree, rel_path: &Path) -> Result<Option<Tree>> {
         // Walk component-by-component, owning the current subtree at each
         // step. Each iteration consults the most recently resolved Tree,
@@ -1079,49 +1035,6 @@ fn format_at_risk_paths(paths: &[String]) -> String {
         rendered.push_str(&format!(", ... and {remaining} more"));
     }
     rendered
-}
-
-/// Legacy ignore-driven walker — backs the deprecated
-/// [`Repository::remove_tracked_descendants`] entrypoint. Walks `dir`
-/// recursively, removing every entry whose worktree-relative path is
-/// *not* heddle-ignored. New code should use the tree-driven variant
-/// (`remove_tracked_descendants_inner`) so that ignore-rule changes
-/// can't silently strand previously-tracked content on disk.
-fn remove_tracked_descendants_inner_by_ignore(
-    root: &Path,
-    dir: &Path,
-    patterns: &[String],
-) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(HeddleError::Io(enrich_fs_error(dir, "reading", error))),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let child = entry.path();
-        let rel = child.strip_prefix(root).unwrap_or(&child);
-
-        if should_ignore_path(rel, patterns) {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() || file_type.is_file() {
-            fs::remove_file(&child)
-                .map_err(|e| HeddleError::Io(enrich_fs_error(&child, "removing", e)))?;
-        } else if file_type.is_dir() {
-            remove_tracked_descendants_inner_by_ignore(root, &child, patterns)?;
-        }
-    }
-
-    match fs::remove_dir(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if is_directory_not_empty(&error) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(HeddleError::Io(enrich_fs_error(dir, "removing", error))),
-    }
 }
 
 /// Walk the entries listed in `source_subtree` and remove the matching

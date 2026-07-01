@@ -36,7 +36,7 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     command_catalog::ActionFields,
-    git_compat::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
+    git_adapter::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
     git_overlay_health::{
         RepositoryVerificationState, build_git_overlay_health_with_worktree_status,
         build_plain_git_verification_probe, repository_setup_guidance,

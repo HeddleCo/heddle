@@ -634,7 +634,6 @@ pub enum MaintenanceCommands {
     },
 
     /// Inspect and debug the worktree index.
-    #[command(hide = true)]
     Index {
         /// Dump the index contents in human-readable format.
         #[arg(long)]
@@ -642,7 +641,6 @@ pub enum MaintenanceCommands {
     },
 
     /// Inspect the local change monitor state.
-    #[command(hide = true)]
     Monitor {
         /// Print changed paths as well as backend/status summary.
         #[arg(long)]

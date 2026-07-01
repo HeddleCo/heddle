@@ -41,8 +41,8 @@ A `heddle commit`/`ship` in overlay mode writes the git commit **inline**:
 drives the bridge write-through, returning
 `WriteThroughOutcome::Wrote(git_commit)` (`checkpoint.rs:175-178`). It is
 called inline by both `heddle commit`
-(`crates/cli/src/cli/commands/git_compat.rs:156`, `:282`, `:364` —
-`heddle commit` routes to `cmd_commit_compat` per
+(`crates/cli/src/cli/commands/git_adapter.rs:156`, `:282`, `:364` —
+`heddle commit` routes to `cmd_commit_git_adapter` per
 `crates/cli/src/main.rs:394`) and `heddle ship`
 (`crates/cli/src/cli/commands/workflow.rs:375`, `:536`). The user never runs a bridge verb to get their own
 Heddle work onto the git side — it is there the moment they commit.

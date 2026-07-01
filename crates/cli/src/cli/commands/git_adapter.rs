@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Git-muscle-memory compatibility shims.
+//! Git adapter command implementations.
 
 use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
@@ -36,8 +36,8 @@ use super::{
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
         create_snapshot_profiled_with_worktree_status, is_placeholder_principal,
-        placeholder_principal_warning,
-        preflight_large_capture_for_compat_commit_with_worktree_status, resolve_principal,
+        placeholder_principal_warning, preflight_large_capture_for_git_adapter_commit_with_worktree_status,
+        resolve_principal,
     },
     thread_cmd::cmd_thread,
 };
@@ -57,7 +57,7 @@ const GIT_MODE_COMMIT: u32 = 0o160000;
 const GIT_MODE_DIR: u32 = 0o040000;
 
 #[derive(Serialize)]
-struct CommitCompatOutput {
+struct GitAdapterCommitOutput {
     output_kind: &'static str,
     status: &'static str,
     action: &'static str,
@@ -121,7 +121,7 @@ impl From<Agent> for CommitAgentOutput {
     }
 }
 
-pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
+pub async fn cmd_commit_git_adapter(cli: &Cli, args: CommitArgs) -> Result<()> {
     let message = require_commit_message(args.message.clone())?;
     let cwd;
     let start = if let Some(path) = cli.repo.as_ref() {
@@ -209,7 +209,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     git_overlay_facts.worktree_status(),
                 )?;
                 let trust = git_overlay_txn::post_verify_commit(&repo);
-                let output = CommitCompatOutput {
+                let output = GitAdapterCommitOutput {
                     output_kind: "commit",
                     status: "committed",
                     action: "commit",
@@ -230,7 +230,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     trust,
                 };
                 let output = with_commit_action_metadata(output);
-                render_commit_compat(
+                render_git_adapter_commit(
                     &output,
                     should_output_json(cli, Some(repo.config())),
                     repo.capability(),
@@ -265,7 +265,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             .current_state()?
             .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
         let trust = git_overlay_txn::post_verify_commit(&repo);
-        let output = CommitCompatOutput {
+        let output = GitAdapterCommitOutput {
             output_kind: "commit",
             status: "committed",
             action: "commit",
@@ -290,7 +290,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         };
         let output = with_commit_action_metadata(output);
 
-        render_commit_compat(
+        render_git_adapter_commit(
             &output,
             should_output_json(cli, Some(repo.config())),
             repo.capability(),
@@ -352,7 +352,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     // below) is left FRESH: the checkpoint advances the Git ref, which flips the
     // git-overlay health classification.
     let large_capture_start = Instant::now();
-    preflight_large_capture_for_compat_commit_with_worktree_status(
+    preflight_large_capture_for_git_adapter_commit_with_worktree_status(
         args.force,
         git_overlay_facts.worktree_status(),
     )?;
@@ -418,7 +418,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             ],
         );
     }
-    let output = CommitCompatOutput {
+    let output = GitAdapterCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
@@ -443,7 +443,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     };
     let output = with_commit_action_metadata(output);
 
-    render_commit_compat(
+    render_git_adapter_commit(
         &output,
         should_output_json(cli, Some(repo.config())),
         repo.capability(),
@@ -517,7 +517,7 @@ fn commit_staged_index(
         )?;
 
     let trust = git_overlay_txn::post_verify_commit(repo);
-    let output = CommitCompatOutput {
+    let output = GitAdapterCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
@@ -544,7 +544,7 @@ fn commit_staged_index(
         trust,
     };
     let output = with_commit_action_metadata(output);
-    render_commit_compat(
+    render_git_adapter_commit(
         &output,
         should_output_json(cli, Some(repo.config())),
         repo.capability(),
@@ -1073,7 +1073,7 @@ fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> 
     Ok(Some(current.change_id))
 }
 
-fn with_commit_action_metadata(mut output: CommitCompatOutput) -> CommitCompatOutput {
+fn with_commit_action_metadata(mut output: GitAdapterCommitOutput) -> GitAdapterCommitOutput {
     output.recommended_action = output.next_action.clone();
     let next_action = ActionFields::from_optional_action_ref(output.next_action.as_deref());
     let recommended_action =
@@ -1155,8 +1155,8 @@ fn current_state_is_bootstrap(repo: &Repository) -> Result<bool> {
         .is_none_or(|intent| intent.trim().is_empty()))
 }
 
-fn render_commit_compat(
-    output: &CommitCompatOutput,
+fn render_git_adapter_commit(
+    output: &GitAdapterCommitOutput,
     json: bool,
     repository_capability: RepositoryCapability,
 ) -> Result<()> {
@@ -1243,7 +1243,7 @@ fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
     }
 }
 
-pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
+pub async fn cmd_switch_git_adapter(cli: &Cli, args: SwitchArgs) -> Result<()> {
     if args.create {
         let path = args.target.replace('/', "-");
         let primary = format!("heddle start {} --path ../{}", args.target, path);

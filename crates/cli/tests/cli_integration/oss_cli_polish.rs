@@ -4533,7 +4533,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 }
 
 #[test]
-fn git_compat_commit_branch_and_switch_shims_work() {
+fn git_adapter_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
     SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());

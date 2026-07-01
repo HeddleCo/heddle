@@ -35,6 +35,17 @@ but durable signed data still needs a deletion path that preserves verification.
 - `PackedOpLog::load` is current-format only. V2/V3 containers and old
   OpRecord schemas decode only through `PackedOpLog::ensure_latest`, which is
   now driven by registered migration `0005_canonicalize_packed_oplog`.
+- The deprecated ignore-driven worktree descendant remover was deleted.
+  `revert` now uses the tree-driven tracked-removal interface when it can prove
+  the target state contains a subtree for the path, and otherwise refuses the
+  unexpected file-vs-directory mismatch instead of recursing by current ignore
+  rules.
+- The current Git command adapter was renamed from `git_compat` internals to
+  `git_adapter` internals. User-facing `commit` / `switch` behavior is
+  unchanged; the code no longer looks like a legacy compatibility shim.
+- `maintenance index` and `maintenance monitor` graduated from hidden clap
+  subcommands to discoverable admin maintenance commands. Their machine
+  contracts were already cataloged under the admin surface.
 
 Lane 6 registered the first deletion-prep migrations in
 `crates/repo/src/migration.rs`:
@@ -167,15 +178,35 @@ Verification:
 The `heddle-submodule:` blob convention is a bridge compromise. Deleting it
 needs a replacement import/export story that preserves Git submodule semantics.
 
+Current live writers/readers:
+- `crates/ingest/src/importer.rs` writes synthetic blob content for Git gitlinks.
+- `crates/cli/src/cli/commands/git_adapter.rs` writes the same representation
+  for Git-index gitlinks.
+- `crates/cli/src/bridge/git_export.rs` sniffs ordinary normal-file blobs for
+  the magic prefix and emits a Git gitlink.
+
+Deletion direction:
+- Introduce a first-class Heddle representation for Git gitlinks, either as a
+  tree entry kind or as explicit tree-entry metadata. The interface should make
+  the gitlink target object id a typed value, not blob bytes.
+- Move import paths to write that representation instead of
+  `heddle-submodule:` blob content.
+- Move export paths to emit Git gitlinks only from the first-class
+  representation.
+- Keep magic-prefix sniffing only inside a migration/legacy reader, or refuse
+  ordinary file blobs whose bytes exactly match the legacy prefix until they are
+  escaped. This closes the collision where a real file is silently exported as a
+  submodule.
+
 Verification:
 - Git bridge round-trip tests for submodules.
 - Diff patch conformance against Git worktrees containing gitlinks.
 
 ### Hidden maintenance commands
 
-Hidden `index` and `monitor` surfaces should either graduate into supported
-maintenance UX or be deleted. This is a product decision, not a mechanical
-compatibility cleanup.
+`maintenance index` and `maintenance monitor` have graduated into the admin
+maintenance surface. The remaining cleanup is contract polish, not deletion:
+`maintenance monitor` still has an opaque schema in the command catalog.
 
 Verification:
 - Command catalog visibility tests.
