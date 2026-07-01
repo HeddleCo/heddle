@@ -30,7 +30,7 @@ mod timeline;
 mod tree;
 mod tree_path;
 mod tree_diff;
-mod tree_walk;
+pub mod tree_walk;
 mod visibility_tier;
 
 pub use action_id::ActionId;
