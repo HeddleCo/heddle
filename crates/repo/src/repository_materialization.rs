@@ -12,7 +12,7 @@ use std::{
 };
 
 use objects::{
-    fs_atomic::enrich_fs_error,
+    fs_atomic::{enrich_fs_error, is_directory_not_empty},
     object::{Blob, ChangeId, ContentHash, Tree, TreeEntryTarget},
     store::ObjectStore,
     util::gitlink_placeholder_bytes,
@@ -20,10 +20,6 @@ use objects::{
 use sley::ObjectId as GitObjectId;
 use tracing::{debug, instrument};
 
-// Only consumed by the `#[cfg(unix)]` `remove_materialized_leaf`
-// helper; gate the import so Windows builds don't warn it unused.
-#[cfg(unix)]
-use super::repository_worktree_apply::is_directory_not_empty;
 use super::{HeddleError, Repository, Result};
 use crate::{
     worktree_index::IndexEntry,
@@ -872,9 +868,9 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort removal of a leaf path, used by the symlink-write
-/// branch when a tree entry has changed shape (e.g. a directory has
-/// become a symlink in the new tree).
+/// Best-effort removal of a leaf path before replacing it with another
+/// materialized leaf, such as a symlink on Unix or a gitlink placeholder
+/// on every platform.
 ///
 /// Tolerates `ENOTEMPTY` from `remove_dir` for the same reason the
 /// incremental apply path does: untracked or explicitly ignored siblings
@@ -884,11 +880,6 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
 /// tracked directory into a symlink aborts mid-apply with `os error
 /// 66`, leaving HEAD stuck and disk diverged from state.
 ///
-/// Only called from the `#[cfg(unix)]` symlink-write branch above;
-/// the `#[cfg(not(unix))]` build skips the call (no Windows symlink
-/// materialization), which would warn "function never used" without
-/// the matching gate here.
-#[cfg(unix)]
 fn remove_materialized_leaf(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
