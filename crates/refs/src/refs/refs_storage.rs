@@ -3,7 +3,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
     thread::{self},
     time::{Duration, Instant},
@@ -197,18 +197,22 @@ impl RefManager {
     pub(super) fn write_string(&self, path: &Path, contents: &str) -> Result<()> {
         Ok(write_file_atomic(path, contents.as_bytes())?)
     }
-    pub(super) fn write_string_temp(&self, path: &Path, contents: &str) -> Result<PathBuf> {
+
+    /// Allocate the temp path a canonical ref file will be staged into
+    /// (ensuring its parent directory exists), WITHOUT writing anything.
+    ///
+    /// Staging + fsync is done in one overlapped-writeback batch by
+    /// [`stage_temp_files_durable`](objects::fs_atomic::stage_temp_files_durable)
+    /// so publishing N refs pays ~1 fsync barrier's worth of latency instead of
+    /// N serial ones (the `heddle adopt` bulk-ref hot path).
+    pub(super) fn alloc_temp_path(&self, path: &Path) -> Result<PathBuf> {
         let parent = path
             .parent()
             .ok_or_else(|| std::io::Error::other("invalid ref path"))?;
         std::fs::create_dir_all(parent)?;
 
         let suffix: u64 = rand::random();
-        let temp_path = path.with_extension(format!("tmp-{}", suffix));
-        let mut file = File::create(&temp_path)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        Ok(temp_path)
+        Ok(path.with_extension(format!("tmp-{}", suffix)))
     }
     pub(super) fn list_refs_recursive(&self, dir: &Path, prefix: &str) -> Result<Vec<ThreadName>> {
         let mut refs = Vec::new();
