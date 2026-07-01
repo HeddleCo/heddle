@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use objects::{
     error::Result,
-    object::{ContentHash, TreeIntegrityEvent, walk_tree_integrity},
+    object::{TreeIntegrityEvent, walk_tree_integrity},
     store::ObjectStore,
 };
 use repo::Repository;
