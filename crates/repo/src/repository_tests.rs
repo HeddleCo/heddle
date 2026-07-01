@@ -2,12 +2,16 @@
 use std::{fs, path::Path};
 
 use objects::{
-    object::{Blob, ChangeId, ContentHash, ThreadName, Tree, TreeEntry},
+    object::{
+        Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, State,
+        ThreadName, Tree, TreeEntry,
+    },
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefManager};
+use serde::Serialize;
 use serde_json::json;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
@@ -59,6 +63,31 @@ fn loose_tree_path(repo: &Repository, hash: ContentHash) -> std::path::PathBuf {
         .join("trees")
         .join(prefix)
         .join(rest)
+}
+
+#[derive(Serialize)]
+struct LegacyTreeV1ForOpenTest {
+    entries: Vec<LegacyTreeEntryV1ForOpenTest>,
+}
+
+#[derive(Serialize)]
+struct LegacyTreeEntryV1ForOpenTest {
+    name: String,
+    mode: FileMode,
+    entry_type: EntryType,
+    hash: ContentHash,
+}
+
+fn legacy_tree_v1_bytes_for_open_test(name: &str, hash: ContentHash) -> Vec<u8> {
+    rmp_serde::to_vec(&LegacyTreeV1ForOpenTest {
+        entries: vec![LegacyTreeEntryV1ForOpenTest {
+            name: name.to_string(),
+            mode: FileMode::Normal,
+            entry_type: EntryType::Blob,
+            hash,
+        }],
+    })
+    .unwrap()
 }
 
 #[cfg(unix)]
@@ -201,6 +230,66 @@ fn open_fails_when_required_migration_fails() {
         message.contains("failed to decode legacy V1 tree"),
         "open error should keep the underlying migration failure: {message}"
     );
+}
+
+#[test]
+fn open_migrates_v1_tree_bytes_before_strict_tree_reads() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let ledger = repo.heddle_dir().join("state/schema_versions.toml");
+    if ledger.exists() {
+        fs::remove_file(&ledger).unwrap();
+    }
+
+    let config_path = repo.heddle_dir().join("config.toml");
+    fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
+
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::from("legacy tree body"))
+        .unwrap();
+    let current_tree = Tree::from_entries(vec![
+        TreeEntry::file("legacy.txt", blob_hash, false).expect("legacy tree entry"),
+    ]);
+    let tree_hash = current_tree.hash();
+    let legacy_tree_bytes = legacy_tree_v1_bytes_for_open_test("legacy.txt", blob_hash);
+    let legacy_tree_path = loose_tree_path(&repo, tree_hash);
+    fs::create_dir_all(legacy_tree_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_tree_path, &legacy_tree_bytes).unwrap();
+
+    assert!(
+        repo.store().get_tree(&tree_hash).is_err(),
+        "strict runtime reader must reject V1 bytes before open migration"
+    );
+
+    let state = State::new_snapshot(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Migration Tester", "migration@example.test")),
+    );
+    let state_id = state.change_id;
+    repo.store().put_state(&state).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_id)
+        .unwrap();
+    drop(repo);
+
+    let opened = Repository::open(temp_dir.path()).expect("normal open runs pending migrations");
+    let migrated = opened
+        .store()
+        .get_tree(&tree_hash)
+        .expect("strict reader succeeds after open migration")
+        .expect("migrated tree exists");
+    assert_eq!(
+        migrated.get("legacy.txt").and_then(TreeEntry::blob_hash),
+        Some(blob_hash)
+    );
+    assert_eq!(
+        opened.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(state_id)
+    );
+    let config = RepoConfig::load(&config_path).unwrap();
+    assert_eq!(config.repository.version, SUPPORTED_REPO_FORMAT);
 }
 
 #[test]

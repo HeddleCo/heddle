@@ -441,7 +441,6 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             root, heddle_dir, store, refs, oplog, config, shallow,
         ))
     }
-
 }
 
 impl Repository {

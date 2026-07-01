@@ -196,6 +196,9 @@ pub static MIGRATIONS: &[Migration] = &[
     },
     Migration {
         id: "0003_canonicalize_tree_entries",
+        // Load-bearing for strict Tree V2 reads: Repository::open must keep
+        // running this before any caller can touch tree objects, otherwise old
+        // V1 tree bytes become arbitrary runtime read failures.
         description: "Rewrite removed V1 tree entries into the current first-class gitlink tree envelope",
         applies_to: SchemaTarget::Trees,
         run: run_canonicalize_tree_entries,
@@ -238,6 +241,9 @@ pub fn apply_pending(repo: &Repository) -> Result<MigrationReport> {
             continue;
         }
         let mut ctx = MigrationCtx { repo };
+        // Hard gate, not telemetry: a failed migration means the repo may still
+        // contain bytes that current strict readers reject. Do not downgrade
+        // this to warn-and-continue.
         (migration.run)(&mut ctx).map_err(|err| {
             HeddleError::InvalidObject(format!(
                 "migration {} ({}) failed: {err}",

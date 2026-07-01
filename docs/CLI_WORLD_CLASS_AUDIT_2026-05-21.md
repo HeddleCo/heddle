@@ -51,7 +51,7 @@ extract time.
 | everyday save/read machine streams | `git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path` | Pass | In Git-overlay mode with `PATH=""`, `init`, `status`, `capture`, `checkpoint`, `log`, `show`, `diagnose`, and `ready` emit parseable JSON with empty stderr; `diff --output text` respects `NO_COLOR=1`. |
 | `start` / `merge` / `undo` JSON workflow | `start_merge_undo_json_workflow_keeps_machine_streams_clean` | Pass after strengthening | Isolated solid checkout, feature capture, merge preview/apply, undo list/preview all emit parseable JSON with empty stderr; merge and undo preview paths do not mutate current state or worktree content; repeat merge is a successful `Already up to date` text no-op. |
 | `version --repo <path> --verbose --output json` | `version_verbose_honors_explicit_repo_path` | Pass after fix | Verbose bug-context JSON reports the explicitly requested repository root, not the process cwd. |
-| `resolve` outside a merge | `resolve_without_merge_emits_actionable_json_error` | Pass after fix | JSON and text failures use `kind=operation_not_in_progress` / `Error: No merge in progress`, hint at `heddle status`, keep stdout empty, and avoid the old `object not found` wrapper. |
+| `resolve` outside a merge | `resolve_without_merge_emits_actionable_json_error` | Pass after fix | JSON and text failures use `kind=no_merge_in_progress` / `Error: No merge in progress`, hint at `heddle status`, keep stdout empty, and avoid the old `object not found` wrapper. |
 | corrupt repository ref recovery | `fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json` | Pass after fix | Corrupt thread ref fails non-zero with stdout clean; JSON stderr has `kind=repository_integrity_error`, preserves the invalid-object error, and hints `heddle fsck --full`; text mode mirrors the recovery hint. |
 | global quiet/color/narrow text behavior | `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` | Pass after fix | `--quiet` suppresses capture/log tips; `NO_COLOR=1` wins over forced color; `COLUMNS=28/30` text succeeds across status, diagnose, doctor, diff, log, show, thread list, status, bridge status, fsck, and ready with primary labels intact. |
 | default auto-output contract | `default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced`; `tty_auto_mode_renders_text_and_explicit_json_stays_json` | Pass | Confirms piped stdout uses parseable JSON in `auto` mode; TTY stdout uses human text for `status` and rich guidance for `start`; `--output text` and `--output json` override auto regardless of stream. |
@@ -93,8 +93,8 @@ extract time.
   `ready`, and `diff` with `NO_COLOR=1`.
 - Fixed `heddle doctor --repo <path> --verbose --output json` so bug-context output
   reports the explicitly requested repository instead of the process cwd.
-- Classified resolve/continue-style no-operation failures as
-  `operation_not_in_progress` with an actionable `heddle status` hint, and
+- Classified merge resolve/continue/abort-style no-operation failures as
+  `no_merge_in_progress` with an actionable `heddle status` hint, and
   no-conflict resolve attempts as `no_conflicts_to_resolve`.
 - Added a clean JSON workflow regression for `start`, `merge --preview`,
   `merge`, `undo --list`, and `undo --preview`.

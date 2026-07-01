@@ -3729,7 +3729,7 @@ ones do not change meaning.
 | `permission_denied`     | An underlying `io::Error` matching `objects::fs_atomic::is_permission_denied`.                       |
 | `read_only_filesystem`  | An underlying `io::Error` matching `objects::fs_atomic::is_read_only_filesystem`.                    |
 | `path_not_found`       | A missing explicit filesystem path, such as `--repo /tmp/missing`.                                  |
-| `operation_not_in_progress` | A continue/resolve/abort-style command was requested when no matching operation is active.    |
+| `no_merge_in_progress` | A merge continue/resolve/abort-style command was requested when no merge operation is active. |
 | `no_conflicts_to_resolve` | `heddle resolve --all` found no unresolved conflicts.                                             |
 | `verify_failed`         | `heddle verify` found a blocked repository verification state. The envelope includes nested `verification`. |
 
