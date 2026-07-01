@@ -11,7 +11,8 @@ use std::{
 use tempfile::NamedTempFile;
 
 use grpc::heddle::v1::{
-    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer, GitRefKind,
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer,
+    GitRefKind as GrpcGitRefKind,
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
     RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
@@ -24,7 +25,8 @@ use objects::{
     store::{AnyStore, ObjectStore, PackObjectId},
 };
 use repo::{
-    Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
+    GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
+    RevisionAddress, SyncedThreadMetadata,
     ThreadManager,
 };
 use sley::{
@@ -1811,7 +1813,7 @@ fn build_git_mirror_plan_from_sley(
         // stale `refs/original/*` backup) no longer fails the whole push.
         // Content refs — refs/heads/*, refs/tags/*, refs/notes/* (incl.
         // heddle's `refs/notes/heddle` state metadata) — are kept.
-        if is_local_only_ref(&reference.name) {
+        if GitRefName::new(&reference.name).is_local_only() {
             continue;
         }
 
@@ -1858,7 +1860,7 @@ fn build_git_mirror_plan_from_sley(
             .cloned()
             .unwrap_or(GitRefRemoteExpectation::Missing);
 
-        let kind = git_ref_kind_from_name(&reference.name);
+        let kind = grpc_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
         let mut message =
             git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
         apply_git_ref_expectation_value(&mut message, &expectation)?;
@@ -1886,34 +1888,12 @@ fn build_git_mirror_plan_from_sley(
     })
 }
 
-/// Local-only bookkeeping ref namespaces that the default mirror push must NOT
-/// ship to the hosted server (#846). Denylist rather than allowlist so that
-/// content namespaces we do not enumerate here — heddle's `refs/notes/heddle`,
-/// any future content ref — are pushed by default; only these four purely-local
-/// git-machinery prefixes are dropped.
-///
-///   - `refs/stash`: the local stash reflog stack (exact match — the ref is
-///     `refs/stash`; individual entries live in the reflog).
-///   - `refs/remotes/`: this clone's remote-tracking refs.
-///   - `refs/original/`: filter-branch/-repo backups.
-///   - `refs/replace/`: local object replacements (grafts).
-fn is_local_only_ref(name: &str) -> bool {
-    name == "refs/stash"
-        || name.starts_with("refs/remotes/")
-        || name.starts_with("refs/original/")
-        || name.starts_with("refs/replace/")
-}
-
-/// Classify a full ref name into the wire `GitRefKind` the server expects.
-fn git_ref_kind_from_name(name: &str) -> GitRefKind {
-    if name.starts_with("refs/heads/") {
-        GitRefKind::Branch
-    } else if name.starts_with("refs/tags/") {
-        GitRefKind::Tag
-    } else if name.starts_with("refs/notes/") {
-        GitRefKind::Note
-    } else {
-        GitRefKind::Other
+fn grpc_git_ref_kind(kind: ClassifiedGitRefKind) -> GrpcGitRefKind {
+    match kind {
+        ClassifiedGitRefKind::Branch => GrpcGitRefKind::Branch,
+        ClassifiedGitRefKind::Tag => GrpcGitRefKind::Tag,
+        ClassifiedGitRefKind::Note => GrpcGitRefKind::Note,
+        ClassifiedGitRefKind::Other => GrpcGitRefKind::Other,
     }
 }
 
@@ -2175,7 +2155,7 @@ impl Write for GitPackPushMessageWriter {
 /// is set for annotated-tag refs (the underlying object the tag names).
 fn git_ref_update_message(
     name: &str,
-    kind: GitRefKind,
+    kind: GrpcGitRefKind,
     target_oid: GitObjectId,
     peeled_oid: Option<GitObjectId>,
     checkpoint: Option<GitCheckpointTransfer>,
@@ -2969,7 +2949,7 @@ mod tests {
         let state = ChangeId::from_bytes([9u8; 16]);
         let ref_message = git_ref_update_message(
             "refs/heads/main",
-            GitRefKind::Branch,
+            GrpcGitRefKind::Branch,
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
@@ -2986,7 +2966,7 @@ mod tests {
             panic!("expected git ref update message");
         };
         assert_eq!(update.name, "refs/heads/main");
-        assert_eq!(update.kind, GitRefKind::Branch as i32);
+        assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
         let checkpoint = update.checkpoint.expect("checkpoint");
         assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
@@ -2997,7 +2977,7 @@ mod tests {
     fn sample_ref_update_message(commit_oid: GitObjectId) -> PushMessage {
         git_ref_update_message(
             "refs/heads/main",
-            GitRefKind::Branch,
+            GrpcGitRefKind::Branch,
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
@@ -3103,16 +3083,16 @@ mod tests {
             updates.iter().map(|u| (u.name.as_str(), u)).collect();
 
         let main = by_name["refs/heads/main"];
-        assert_eq!(main.kind, GitRefKind::Branch as i32);
+        assert_eq!(main.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(main.target_oid.as_ref(), main_commit.as_bytes());
         assert!(main.peeled_oid.is_empty(), "commit refs are not peeled");
 
         let feature = by_name["refs/heads/feature"];
-        assert_eq!(feature.kind, GitRefKind::Branch as i32);
+        assert_eq!(feature.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(feature.target_oid.as_ref(), feature_commit.as_bytes());
 
         let tag_update = by_name["refs/tags/v1"];
-        assert_eq!(tag_update.kind, GitRefKind::Tag as i32);
+        assert_eq!(tag_update.kind, GrpcGitRefKind::Tag as i32);
         assert_eq!(tag_update.target_oid.as_ref(), tag_oid.as_bytes());
         assert_eq!(
             tag_update.peeled_oid.as_ref(),
@@ -3249,7 +3229,7 @@ mod tests {
             .expect("refs/pull/* ref must be mirrored");
         assert_eq!(
             pull.kind,
-            GitRefKind::Other as i32,
+            GrpcGitRefKind::Other as i32,
             "refs/pull/* classifies as Other",
         );
         assert_eq!(pull.target_oid.as_ref(), pr_commit.as_bytes());

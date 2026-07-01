@@ -81,6 +81,7 @@ use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
+use crate::{GitRefContentNamespace, GitRefName};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.
@@ -920,7 +921,7 @@ impl Repository {
             return Ok(None);
         };
 
-        let local_ref_name = format!("refs/heads/{branch}");
+        let local_ref_name = GitRefName::branch_full_name(&branch);
         if git_find_reference(&git, &local_ref_name)?.is_some()
             && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
             && let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)?
@@ -962,7 +963,7 @@ impl Repository {
             return Ok(None);
         }
         for remote in &remotes {
-            let remote_ref = format!("refs/remotes/{remote}/{branch}");
+            let remote_ref = GitRefName::remote_branch_full_name(remote, &branch);
             if let Some(remote_head) = git_resolve_oid(&git, &remote_ref)? {
                 if remote_head == head {
                     return Ok(None);
@@ -1089,10 +1090,13 @@ impl Repository {
                 error
             ))
         })? {
-            let Some(name) = branch.name.strip_prefix("refs/heads/") else {
+            let ref_name = GitRefName::new(&branch.name);
+            if ref_name.content_namespace() != Some(GitRefContentNamespace::Branch) {
                 continue;
             };
-            let name = name.to_string();
+            let Some(name) = ref_name.short_name().map(str::to_string) else {
+                continue;
+            };
             let Some(target) =
                 self.git_overlay_commit_tip_oid(&git_repo, &branch, "branch", &name)?
             else {
@@ -1165,10 +1169,13 @@ impl Repository {
                 error
             ))
         })? {
-            let Some(name) = tag.name.strip_prefix("refs/tags/") else {
+            let ref_name = GitRefName::new(&tag.name);
+            if ref_name.content_namespace() != Some(GitRefContentNamespace::Tag) {
                 continue;
             };
-            let name = name.to_string();
+            let Some(name) = ref_name.short_name().map(str::to_string) else {
+                continue;
+            };
             let Some(target) = self.git_overlay_commit_tip_oid(&git_repo, &tag, "tag", &name)?
             else {
                 continue;
@@ -1231,10 +1238,7 @@ impl Repository {
         let Some(git_repo) = self.git_overlay_sley_repository()? else {
             return Ok(None);
         };
-        let full_name = name
-            .strip_prefix("refs/remotes/")
-            .map(|short| format!("refs/remotes/{short}"))
-            .unwrap_or_else(|| format!("refs/remotes/{name}"));
+        let full_name = GitRefName::remote_tracking_full_name(name);
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
@@ -2603,10 +2607,14 @@ fn git_configured_tracking_ref(repo: &SleyRepository, branch: &str) -> Result<Op
     if remote == "." {
         return Ok(Some(merge.to_string()));
     }
-    let Some(short) = merge.strip_prefix("refs/heads/") else {
+    let merge_ref = GitRefName::new(merge);
+    if merge_ref.content_namespace() != Some(GitRefContentNamespace::Branch) {
         return Ok(None);
     };
-    Ok(Some(format!("refs/remotes/{remote}/{short}")))
+    let Some(short) = merge_ref.short_name() else {
+        return Ok(None);
+    };
+    Ok(Some(GitRefName::remote_branch_full_name(remote, short)))
 }
 
 fn git_ahead_behind(
@@ -2812,7 +2820,11 @@ fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
     let content = std::fs::read_to_string(&head_path).ok()?;
     let trimmed = content.trim();
     let suffix = trimmed.strip_prefix("ref: ")?;
-    let name = suffix.strip_prefix("refs/heads/")?.to_string();
+    let suffix_ref = GitRefName::new(suffix);
+    if suffix_ref.content_namespace() != Some(GitRefContentNamespace::Branch) {
+        return None;
+    }
+    let name = suffix_ref.short_name()?.to_string();
     if name.is_empty() {
         return None;
     }
@@ -2839,7 +2851,10 @@ fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String>> {
         }
         let raw = fs::read_to_string(&branch_path)?;
         let value = raw.trim();
-        if let Some(short) = value.strip_prefix("refs/heads/") {
+        let ref_name = GitRefName::new(value);
+        if ref_name.content_namespace() == Some(GitRefContentNamespace::Branch)
+            && let Some(short) = ref_name.short_name()
+        {
             return Ok(Some(short.to_string()));
         }
         if !value.is_empty() {
