@@ -68,6 +68,7 @@ pub use context_suggestions::{
 };
 pub use objects::object::DiffKind;
 use objects::{
+    Progress,
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
@@ -307,6 +308,14 @@ where
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
     git_overlay_repo: RwLock<Option<SleyRepository>>,
+    /// Live progress handle driven by long-running operations (tree
+    /// materialization, and future streaming seams). Defaults to
+    /// [`Progress::null`] — a no-op that costs one relaxed atomic add per
+    /// update — so the common "no one is watching" path (piped output,
+    /// `--output json`, library use) pays nothing. A CLI command installs a
+    /// real, TTY-rendering handle via [`Repository::set_progress`] before
+    /// driving an operation. Set-after-construction like `blob_hydrator`.
+    progress: RwLock<Progress>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -348,6 +357,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             shallow: RwLock::new(shallow),
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
+            progress: RwLock::new(Progress::null()),
         }
     }
 
@@ -569,6 +579,7 @@ impl Repository {
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
+            progress: RwLock::new(Progress::null()),
         })
     }
 
@@ -2398,6 +2409,22 @@ impl Repository {
     /// The currently registered hydrator, if any.
     pub fn blob_hydrator(&self) -> Option<Arc<dyn BlobHydrator>> {
         self.blob_hydrator.read_or_poisoned().clone()
+    }
+
+    /// Install a live [`Progress`] handle. Long-running operations on this
+    /// repository (tree materialization today) drive it; the caller — the CLI —
+    /// installs a TTY-rendering handle here before the operation and reads the
+    /// same handle back to paint a completion line. Passing [`Progress::null`]
+    /// (the default) disables rendering. The handle is a cheap `Arc` clone, so
+    /// it can be shared across the parallel-materialization worker threads.
+    pub fn set_progress(&self, progress: Progress) {
+        *self.progress.write_or_poisoned() = progress;
+    }
+
+    /// The currently installed progress handle (a cheap clone). Defaults to
+    /// [`Progress::null`] until [`Repository::set_progress`] is called.
+    pub fn progress(&self) -> Progress {
+        self.progress.read_or_poisoned().clone()
     }
 
     fn partial_fetch_metadata(&self) -> repository_partial_fetch::PartialFetchMetadataManager {

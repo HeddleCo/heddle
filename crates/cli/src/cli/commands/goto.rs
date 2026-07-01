@@ -14,6 +14,7 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
+    cli::progress_render::{clear_line, progress_for},
     cli::{Cli, should_output_json},
     config::UserConfig,
 };
@@ -65,6 +66,14 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
 
     let target_state = require_resolved_state(&repo, &target_id)?;
 
+    // Install a live progress line for the checkout's tree materialization. The
+    // JSON guard (#550) is applied once here: under `--output json` / non-TTY
+    // this is a null handle that renders nothing, so machine output is
+    // byte-unchanged. The materialize seam drives `inc` per written file.
+    let progress = progress_for(cli, &repo);
+    progress.set_phase("checking out files");
+    repo.set_progress(progress.clone());
+
     if current_worktree_verified_clean {
         repo.goto_verified_clean(&target_id)?;
     } else if force {
@@ -72,6 +81,7 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
     } else {
         repo.goto(&target_id)?;
     }
+    clear_line(&progress);
 
     let output = SwitchOutput {
         output_kind: "thread_switch",

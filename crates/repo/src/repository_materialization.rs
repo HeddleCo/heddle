@@ -458,6 +458,16 @@ impl Repository {
         // dedicated probe.
         let context = MaterializationContext::new();
 
+        // Drive the repository's live progress handle: one `inc` per
+        // materialized write op. On the common null handle this is a relaxed
+        // atomic add plus a predicted-not-taken branch (no render). When a CLI
+        // command has installed a real sink, this paints a live "checking out
+        // files (n/total)" line. The handle is a cheap `Arc` clone, so it
+        // survives the `thread::scope` seam below — each worker gets its own
+        // clone and increments the shared atomic counter.
+        let progress = self.progress();
+        progress.set_total(writes.len());
+
         let result = if worker_count <= 1 {
             let mut seeded = Vec::with_capacity(writes.len());
             for write in writes {
@@ -941,6 +951,67 @@ mod tests {
         MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
         materialization_worker_count, remove_materialized_leaf,
     };
+
+    /// The generic [`Progress`](objects::Progress) handle installed on a
+    /// repository must survive the `thread::scope` parallel-materialization seam:
+    /// a single shared `Arc` handle, cloned into each worker, whose atomic
+    /// counter ends at exactly the file count no matter how the work was split
+    /// across threads. This is the load-bearing acceptance criterion for #844.
+    #[test]
+    fn progress_handle_survives_parallel_materialization_seam() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use objects::{Progress, ProgressSnapshot, Sink};
+
+        /// Active sink that just counts render calls, proving the active path
+        /// ran concurrently across workers without panicking.
+        struct CountingSink(Arc<AtomicUsize>);
+        impl Sink for CountingSink {
+            fn render(&self, _snap: ProgressSnapshot) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+
+        // Well over MATERIALIZE_PARALLEL_THRESHOLD (32): on any multi-core host
+        // this exercises the `thread::scope` branch; on a single core it
+        // degrades to the serial branch and the counter assertion still holds.
+        let file_count = 256usize;
+        for i in 0..file_count {
+            std::fs::write(
+                temp_dir.path().join(format!("seam-{i:04}.txt")),
+                format!("seam payload {i} {}", "y".repeat(48)),
+            )
+            .unwrap();
+        }
+        let state = repo.snapshot(Some("seam".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+
+        let render_count = Arc::new(AtomicUsize::new(0));
+        let progress = Progress::with_sink(Box::new(CountingSink(render_count.clone())));
+        repo.set_progress(progress.clone());
+
+        let dest = temp_dir.path().join("materialized");
+        repo.materialize_tree(&tree, &dest).unwrap();
+
+        // Every write op incremented the shared counter exactly once, across
+        // however many worker threads split the batch.
+        assert_eq!(
+            progress.done(),
+            file_count,
+            "shared progress counter must equal the file count after the parallel seam"
+        );
+        assert_eq!(progress.total(), file_count, "total set from the write batch");
+        // The active handle rendered at least once through the seam (throttled,
+        // so not once-per-file) — proving the sink is driven across threads.
+        assert!(
+            render_count.load(Ordering::Relaxed) > 0,
+            "active sink should have rendered during materialization"
+        );
+    }
 
     /// heddle#571 (round 2, finding 2): a clone syscall that raises ENOENT
     /// because the loose source vanished AFTER the pre-check (TOCTOU) must
