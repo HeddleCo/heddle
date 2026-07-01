@@ -24,7 +24,7 @@ use objects::{
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
+    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus,
     Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
@@ -690,12 +690,14 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
             summary.operation = operation.clone();
             summary.remote_tracking = remote_tracking.clone();
-            summary.recommended_action = current_thread_next_action(
-                operation.as_ref(),
-                remote_tracking.as_ref(),
-                import_hint.as_ref(),
-                Some(&summary.thread_health),
-                Some(&summary.recommended_action),
+            summary.recommended_action = effective_next_action(
+                NextActionInput::default(
+                    operation.as_ref(),
+                    remote_tracking.as_ref(),
+                    import_hint.as_ref(),
+                    Some(&summary.recommended_action),
+                )
+                .current_thread(Some(&summary.thread_health)),
             );
             summary.recommended_action = contextual_thread_action(
                 repo,
@@ -1182,19 +1184,11 @@ pub(crate) fn contextual_thread_action(
     target_thread: Option<&str>,
     action: &str,
 ) -> String {
-    super::thread_landing::contextual_thread_action(repo, thread_id, target_thread, action)
-}
-
-pub(crate) fn current_thread_next_action(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-) -> String {
-    effective_next_action(
-        NextActionInput::default(operation, remote_tracking, import_hint, thread_action)
-            .current_thread(thread_health),
+    heddle_core::status::next_action::contextual_thread_action(
+        repo,
+        thread_id,
+        target_thread,
+        action,
     )
 }
 

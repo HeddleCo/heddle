@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared status and command next-action selection.
 
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus, shell_quote};
+use repo::{
+    GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    shell_quote,
+};
 
 use crate::RepositoryVerificationState;
 
@@ -217,6 +220,94 @@ where
         .chain(args.into_iter().map(|arg| shell_quote(arg.as_ref())))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub fn thread_flag_args(thread_id: &str) -> Vec<String> {
+    if thread_id.starts_with('-') {
+        vec![format!("--thread={thread_id}")]
+    } else {
+        vec!["--thread".to_string(), thread_id.to_string()]
+    }
+}
+
+pub fn merge_preview_command(thread_id: &str) -> String {
+    if thread_id.starts_with('-') {
+        heddle_action(vec![
+            "merge".to_string(),
+            "--preview".to_string(),
+            "--".to_string(),
+            thread_id.to_string(),
+        ])
+    } else {
+        heddle_action(["merge", thread_id, "--preview"])
+    }
+}
+
+pub fn land_local_command(thread_id: &str) -> String {
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    argv.push("--no-push".to_string());
+    heddle_action(argv)
+}
+
+pub fn land_push_command(thread_id: &str) -> String {
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    argv.push("--push".to_string());
+    heddle_action(argv)
+}
+
+pub fn contextual_thread_action(
+    repo: &Repository,
+    thread_id: &str,
+    target_thread: Option<&str>,
+    action: &str,
+) -> String {
+    let Some(main_root) = repo.heddle_dir().parent() else {
+        return action.to_string();
+    };
+    if main_root == repo.root() || target_thread.is_none() {
+        return action.to_string();
+    }
+    if action == merge_preview_command(thread_id) {
+        let mut argv = vec!["--repo".to_string(), main_root.display().to_string()];
+        if thread_id.starts_with('-') {
+            argv.extend([
+                "merge".to_string(),
+                "--preview".to_string(),
+                "--".to_string(),
+                thread_id.to_string(),
+            ]);
+        } else {
+            argv.extend([
+                "merge".to_string(),
+                thread_id.to_string(),
+                "--preview".to_string(),
+            ]);
+        }
+        return heddle_action(argv);
+    }
+    if action == land_local_command(thread_id) {
+        let mut argv = vec![
+            "--repo".to_string(),
+            main_root.display().to_string(),
+            "land".to_string(),
+        ];
+        argv.extend(thread_flag_args(thread_id));
+        argv.push("--no-push".to_string());
+        return heddle_action(argv);
+    }
+    if action == land_push_command(thread_id) {
+        let mut argv = vec![
+            "--repo".to_string(),
+            main_root.display().to_string(),
+            "land".to_string(),
+        ];
+        argv.extend(thread_flag_args(thread_id));
+        argv.push("--push".to_string());
+        return heddle_action(argv);
+    }
+    action.to_string()
 }
 
 pub fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {

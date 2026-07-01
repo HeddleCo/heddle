@@ -45,7 +45,7 @@ use super::{
     },
     next_action::{NextActionValidationContext, write_command_json},
     snapshot::resolve_principal,
-    thread::{collect_thread_summaries, contextual_thread_action, find_thread_summary_single},
+    thread::{collect_thread_summaries, find_thread_summary_single},
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
@@ -382,7 +382,6 @@ fn status_adapters() -> StatusAdapters {
         identity_notice: core_first_capture_identity_notice,
         collect_thread_summaries: core_collect_thread_summaries,
         find_thread_summary: core_find_thread_summary_single,
-        contextual_thread_action,
         action_template: core_recommended_action_template,
     }
 }

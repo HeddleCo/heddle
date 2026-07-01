@@ -36,8 +36,8 @@ use crate::{
 };
 
 use self::next_action::{
-    NextActionInput, effective_next_action, non_empty_action, remote_tracking_status,
-    thread_recovery_action_is_primary,
+    NextActionInput, contextual_thread_action, effective_next_action, non_empty_action,
+    remote_tracking_status, thread_recovery_action_is_primary,
 };
 
 pub type GitOverlayHealthFn = fn(&Repository, &Result<Option<WorktreeStatus>>) -> GitOverlayHealth;
@@ -50,7 +50,6 @@ pub type GitIndexForRepoFn = fn(&Repository) -> Result<Option<GitIndexPlan>>;
 pub type IdentityNoticeFn = fn(&Repository, Option<&State>) -> Result<Option<String>>;
 pub type ThreadSummariesFn = fn(&Repository) -> Result<Vec<StatusThreadSummary>>;
 pub type ThreadSummaryFn = fn(&Repository, &str) -> Result<Option<StatusThreadSummary>>;
-pub type ContextualThreadActionFn = fn(&Repository, &str, Option<&str>, &str) -> String;
 pub type ActionTemplateFn = fn(&str) -> Option<ActionTemplate>;
 
 #[derive(Clone, Copy)]
@@ -61,7 +60,6 @@ pub struct StatusAdapters {
     pub identity_notice: IdentityNoticeFn,
     pub collect_thread_summaries: ThreadSummariesFn,
     pub find_thread_summary: ThreadSummaryFn,
-    pub contextual_thread_action: ContextualThreadActionFn,
     pub action_template: ActionTemplateFn,
 }
 
@@ -1029,7 +1027,7 @@ fn apply_status_advice(
     if let Some(thread) = output.thread.as_deref()
         && !trust.recommended_action.is_empty()
     {
-        let contextual = (opts.adapters.contextual_thread_action)(
+        let contextual = contextual_thread_action(
             repo,
             thread,
             output.target_thread.as_deref(),
@@ -1056,7 +1054,7 @@ fn apply_status_advice(
         .with_verification(&trust),
     );
     let recommended_action = if let Some(thread) = output.thread.as_deref() {
-        (opts.adapters.contextual_thread_action)(
+        contextual_thread_action(
             repo,
             thread,
             output.target_thread.as_deref(),
