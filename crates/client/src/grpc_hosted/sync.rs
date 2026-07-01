@@ -2055,9 +2055,17 @@ fn stream_git_pack_messages_blocking(
     pack_file
         .seek(SeekFrom::Start(0))
         .map_err(|err| ProtocolError::InvalidState(format!("rewind Git pack tempfile: {err}")))?;
-    io::copy(&mut pack_file.as_file_mut(), &mut writer).map_err(|err| {
+    let streamed = io::copy(&mut pack_file.as_file_mut(), &mut writer).map_err(|err| {
         ProtocolError::InvalidState(format!("stream Git pack tempfile: {err}"))
     })?;
+    if streamed != pack.pack_size {
+        return Err(ProtocolError::InvalidState(format!(
+            "Git pack stream changed while sending; expected {} bytes/{}, streamed {} bytes",
+            pack.pack_size,
+            hex::encode(&pack.pack_id),
+            streamed
+        )));
+    }
     writer.finish()?;
     Ok(())
 }
