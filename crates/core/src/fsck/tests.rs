@@ -12,7 +12,7 @@ use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
 use super::{
-    objects::{check_blobs, check_trees},
+    objects::check_tree_objects,
     state::check_states,
 };
 
@@ -158,8 +158,8 @@ fn test_fsck_treats_explicitly_missing_partial_fetch_blob_as_warning() {
     let mut warnings = Vec::new();
     let mut objects_checked = 0;
 
-    check_trees(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check trees");
-    check_blobs(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check blobs");
+    check_tree_objects(&repo, &mut errors, &mut warnings, &mut objects_checked)
+        .expect("check tree objects");
 
     assert!(
         errors.iter().all(|error| error.kind != "missing_blob"),
@@ -191,14 +191,93 @@ fn test_fsck_does_not_require_gitlink_target_object() {
     let mut warnings = Vec::new();
     let mut objects_checked = 0;
 
-    check_trees(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check trees");
-    check_blobs(&repo, &mut errors, &mut warnings, &mut objects_checked).expect("check blobs");
+    check_tree_objects(&repo, &mut errors, &mut warnings, &mut objects_checked)
+        .expect("check tree objects");
 
     assert!(
         errors.is_empty(),
         "gitlink target lives outside the Heddle object store: {errors:?}"
     );
     assert!(warnings.is_empty(), "warnings={warnings:?}");
+}
+
+/// Fixture exercising every tree/blob fsck finding class. Expected values were
+/// captured from the pre-refactor `check_trees` + `check_blobs` pair.
+#[test]
+fn test_tree_blob_checks_characterization() {
+    use objects::object::ContentHash;
+
+    let (_temp, repo) = setup_repo();
+
+    // Missing blob (not partial-fetch): referenced but never stored.
+    let missing_hash = ContentHash::compute(b"ghost-blob");
+
+    // Partial-fetch missing blob: referenced and explicitly marked absent.
+    let partial_blob = Blob::from("partial-fetch\n");
+    let partial_hash = partial_blob.hash();
+
+    // Shared subtree reused by two states.
+    let shared_blob = Blob::from("shared-leaf\n");
+    let shared_blob_hash = repo.store().put_blob(&shared_blob).expect("put shared blob");
+    let shared_tree = Tree::from_entries(vec![
+        objects::object::TreeEntry::file("shared.txt", shared_blob_hash, false).unwrap(),
+    ]);
+    let shared_tree_hash = repo.store().put_tree(&shared_tree).expect("put shared tree");
+
+    // Dangling subtree ref (missing child tree — fsck stays silent).
+    let dangling_tree_hash = ContentHash::compute(b"missing-subtree");
+    let dangling_parent = Tree::from_entries(vec![
+        objects::object::TreeEntry::directory("missing", dangling_tree_hash).unwrap(),
+        objects::object::TreeEntry::file("absent.txt", missing_hash, false).unwrap(),
+        objects::object::TreeEntry::file("partial.txt", partial_hash, false).unwrap(),
+    ]);
+    let dangling_parent_hash = repo
+        .store()
+        .put_tree(&dangling_parent)
+        .expect("put dangling parent");
+
+    let state_shared_a = State::new(shared_tree_hash, vec![], sample_attribution());
+    let state_shared_b = State::new(shared_tree_hash, vec![], sample_attribution());
+    let state_dangling = State::new(dangling_parent_hash, vec![], sample_attribution());
+    repo.store().put_state(&state_shared_a).expect("put state a");
+    repo.store().put_state(&state_shared_b).expect("put state b");
+    repo.store().put_state(&state_dangling).expect("put state dangling");
+    repo.record_missing_blob(partial_hash)
+        .expect("record partial-fetch blob");
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut objects_checked = 0;
+
+    check_tree_objects(&repo, &mut errors, &mut warnings, &mut objects_checked)
+        .expect("check tree objects");
+
+    assert_eq!(
+        objects_checked, 6,
+        "three unique trees plus three unique blob checks"
+    );
+
+    let error_kinds: Vec<_> = errors.iter().map(|error| error.kind.as_str()).collect();
+    assert_eq!(
+        error_kinds,
+        vec!["missing_blob", "missing_blob"],
+        "tree-phase then blob-phase ordering must be preserved"
+    );
+
+    assert_eq!(
+        errors[0].message,
+        "Tree entry 'absent.txt' references missing blob"
+    );
+    assert_eq!(errors[1].message, "Tree references missing blob");
+    assert_eq!(errors[0].object, errors[1].object, "same missing blob hash");
+
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("partial.txt")
+            && warnings[0].contains("explicitly absent under partial fetch"),
+        "partial-fetch warning: {}",
+        warnings[0]
+    );
 }
 
 #[test]

@@ -3,100 +3,65 @@ use std::collections::HashSet;
 
 use objects::{
     error::Result,
-    object::{ContentHash, Tree},
+    object::{ContentHash, TreeIntegrityEvent, walk_tree_integrity},
     store::ObjectStore,
 };
 use repo::Repository;
 
 use super::{FsckError, make_error};
 
-pub(crate) fn check_trees(
+pub(crate) fn check_tree_objects(
     repo: &Repository,
     errors: &mut Vec<FsckError>,
     warnings: &mut Vec<String>,
     objects_checked: &mut usize,
 ) -> Result<()> {
     let states = repo.store().list_states()?;
-    let mut checked_trees: HashSet<ContentHash> = HashSet::new();
+    let roots: Vec<ContentHash> = states
+        .iter()
+        .filter_map(|state_id| {
+            repo.store()
+                .get_state(state_id)
+                .ok()
+                .flatten()
+                .map(|state| state.tree)
+        })
+        .collect();
 
-    for state_id in states {
-        if let Some(state) = repo.store().get_state(&state_id)? {
-            check_tree_recursive(
-                repo,
-                &state.tree,
-                &mut checked_trees,
-                errors,
-                warnings,
-                objects_checked,
-            )?;
-        }
-    }
+    let mut blob_hashes = HashSet::new();
 
-    Ok(())
-}
-
-fn check_tree_recursive(
-    repo: &Repository,
-    tree_hash: &ContentHash,
-    checked: &mut HashSet<ContentHash>,
-    errors: &mut Vec<FsckError>,
-    warnings: &mut Vec<String>,
-    objects_checked: &mut usize,
-) -> Result<()> {
-    if checked.contains(tree_hash) {
-        return Ok(());
-    }
-    checked.insert(*tree_hash);
-
-    let Some(tree) = repo.store().get_tree(tree_hash)? else {
-        return Ok(());
-    };
-
-    *objects_checked += 1;
-
-    for entry in tree.entries() {
-        if let Some(hash) = entry.blob_hash() {
-            if !repo.store().has_blob(&hash)? {
-                if repo.is_missing_blob(&hash)? {
-                    warnings.push(format!(
-                        "Tree entry '{}' references blob {} that is explicitly absent under partial fetch",
-                        entry.name(),
-                        hash.short()
-                    ));
-                } else {
-                    errors.push(make_error(
-                        "missing_blob",
-                        &format!("Tree entry '{}' references missing blob", entry.name()),
-                        Some(hash.short()),
-                    ));
-                }
+    walk_tree_integrity(repo.store(), roots, &mut |event| {
+        match event {
+            TreeIntegrityEvent::EnterTree { .. } => {
+                *objects_checked += 1;
+                Ok(())
             }
-        } else if let Some(hash) = entry.tree_hash() {
-            check_tree_recursive(repo, &hash, checked, errors, warnings, objects_checked)?;
+            TreeIntegrityEvent::BlobLeaf { entry, .. } => {
+                if let Some(hash) = entry.blob_hash() {
+                    if !repo.store().has_blob(&hash)? {
+                        if repo.is_missing_blob(&hash)? {
+                            warnings.push(format!(
+                                "Tree entry '{}' references blob {} that is explicitly absent under partial fetch",
+                                entry.name(),
+                                hash.short()
+                            ));
+                        } else {
+                            errors.push(make_error(
+                                "missing_blob",
+                                &format!("Tree entry '{}' references missing blob", entry.name()),
+                                Some(hash.short()),
+                            ));
+                        }
+                    }
+                    blob_hashes.insert(hash);
+                }
+                Ok(())
+            }
+            TreeIntegrityEvent::TreeRef { .. } => Ok(()),
         }
-    }
+    })?;
 
-    Ok(())
-}
-
-pub(crate) fn check_blobs(
-    repo: &Repository,
-    errors: &mut Vec<FsckError>,
-    _warnings: &mut Vec<String>,
-    objects_checked: &mut usize,
-) -> Result<()> {
-    let states = repo.store().list_states()?;
-    let mut checked_blobs: HashSet<ContentHash> = HashSet::new();
-
-    for state_id in states {
-        if let Some(state) = repo.store().get_state(&state_id)?
-            && let Some(tree) = repo.store().get_tree(&state.tree)?
-        {
-            collect_blobs_from_tree(repo, &tree, &mut checked_blobs)?;
-        }
-    }
-
-    for blob_hash in checked_blobs {
+    for blob_hash in blob_hashes {
         *objects_checked += 1;
         if let Some(blob) = repo.store().get_blob(&blob_hash)? {
             let computed_hash = blob.hash();
@@ -118,22 +83,5 @@ pub(crate) fn check_blobs(
         }
     }
 
-    Ok(())
-}
-
-fn collect_blobs_from_tree(
-    repo: &Repository,
-    tree: &Tree,
-    blobs: &mut HashSet<ContentHash>,
-) -> Result<()> {
-    for entry in tree.entries() {
-        if let Some(hash) = entry.blob_hash() {
-            blobs.insert(hash);
-        } else if let Some(hash) = entry.tree_hash()
-            && let Some(subtree) = repo.store().get_tree(&hash)?
-        {
-            collect_blobs_from_tree(repo, &subtree, blobs)?;
-        }
-    }
     Ok(())
 }

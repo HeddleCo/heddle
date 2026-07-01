@@ -29,6 +29,7 @@ mod suggestion_core;
 mod timeline;
 mod tree;
 mod tree_diff;
+mod tree_walk;
 mod visibility_tier;
 
 pub use action_id::ActionId;
@@ -96,4 +97,5 @@ pub use tree::{
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
 pub use tree_diff::{diff_trees, diff_trees_visit};
+pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
