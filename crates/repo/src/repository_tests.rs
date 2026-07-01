@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::fs;
+use std::{fs, path::Path};
 
 use objects::{
     object::{Blob, ChangeId, ContentHash, ThreadName, Tree, TreeEntry},
-    store::ObjectStore,
+    store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
-use oplog::{OpLogBackend, OpRecord};
-use refs::Head;
+use oplog::{OpLog, OpLogBackend, OpRecord};
+use refs::{Head, RefManager};
 use serde_json::json;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
@@ -25,6 +25,22 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+fn open_test_repo_with_store<S: ObjectStore>(
+    heddle_dir: impl AsRef<Path>,
+    store: S,
+) -> Repository<RefManager, OpLog, S> {
+    let heddle_dir = heddle_dir.as_ref().to_path_buf();
+    let root = heddle_dir
+        .parent()
+        .expect("test heddle dir should live under a worktree root")
+        .to_path_buf();
+    let config = RepoConfig::load(&heddle_dir.join("config.toml")).unwrap();
+    let refs = RefManager::new(&heddle_dir);
+    let oplog = OpLog::new_unattributed(&heddle_dir);
+    let shallow = ShallowInfo::load(&heddle_dir).unwrap();
+    Repository::from_parts(root, heddle_dir, store, refs, oplog, config, shallow)
 }
 
 fn gitlink_target_for_tests() -> GitObjectId {
@@ -74,11 +90,10 @@ fn test_init_creates_structure() {
 }
 
 #[test]
-fn test_open_with_store_threads_a_custom_object_store() {
-    // heddle#283: `Repository::open_with_store` is generic over the object
-    // store `S`, so the whole `Repository<RefManager, OpLog, S>` plumbing has
-    // to compile and run with a concrete store that is *not* the default
-    // `AnyStore`. Inject a bare `FsStore` and round-trip an object through it.
+fn test_custom_store_fixture_threads_a_custom_object_store() {
+    // heddle#283: keep coverage that `Repository<RefManager, OpLog, S>`
+    // compiles and runs with a concrete store that is not the default
+    // `AnyStore`, without exposing a production custom-store open helper.
     use objects::store::FsStore;
 
     let temp_dir = TempDir::new().unwrap();
@@ -87,9 +102,9 @@ fn test_open_with_store_threads_a_custom_object_store() {
     drop(repo);
 
     let store = FsStore::new(&heddle_dir);
-    let repo: Repository<_, _, FsStore> = Repository::open_with_store(&heddle_dir, store).unwrap();
+    let repo: Repository<_, _, FsStore> = open_test_repo_with_store(&heddle_dir, store);
 
-    let blob = objects::object::Blob::from("open_with_store round-trip");
+    let blob = objects::object::Blob::from("custom store round-trip");
     let hash = repo.store().put_blob(&blob).unwrap();
     assert_eq!(
         repo.store().get_blob(&hash).unwrap().unwrap().content(),

@@ -10,6 +10,7 @@
 use std::{
     ffi::OsStr,
     fs,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -22,10 +23,12 @@ use objects::{
         Action, ActionId, Attribution, Blob, ChangeId, ContentHash, Principal, State, ThreadName,
         Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::{ObjectStore, ShallowInfo},
     util::gitlink_placeholder_bytes,
 };
-use repo::Repository;
+use oplog::OpLog;
+use refs::RefManager;
+use repo::{RepoConfig, Repository};
 use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
@@ -195,6 +198,22 @@ fn fixture() -> (TempDir, Repository) {
     }
     repo.snapshot(Some("fixture".into()), None).unwrap();
     (temp, repo)
+}
+
+fn open_mount_test_repo_with_store<S: ObjectStore>(
+    heddle_dir: impl AsRef<Path>,
+    store: S,
+) -> Repository<RefManager, OpLog, S> {
+    let heddle_dir = heddle_dir.as_ref().to_path_buf();
+    let root = heddle_dir
+        .parent()
+        .expect("test heddle dir should live under a worktree root")
+        .to_path_buf();
+    let config = RepoConfig::load(&heddle_dir.join("config.toml")).unwrap();
+    let refs = RefManager::new(&heddle_dir);
+    let oplog = OpLog::new_unattributed(&heddle_dir);
+    let shallow = ShallowInfo::load(&heddle_dir).unwrap();
+    Repository::from_parts(root, heddle_dir, store, refs, oplog, config, shallow)
 }
 
 fn open_mount() -> (TempDir, ContentAddressedMount) {
@@ -681,7 +700,7 @@ fn enumerate_serves_size_without_loading_blob_bytes() {
         get_blob_calls: get_blob_calls.clone(),
         blob_size_calls: blob_size_calls.clone(),
     };
-    let repo = Repository::open_with_store(temp.path().join(".heddle"), store).unwrap();
+    let repo = open_mount_test_repo_with_store(temp.path().join(".heddle"), store);
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
 
     let entries = mount.enumerate(NodeId::ROOT).unwrap();

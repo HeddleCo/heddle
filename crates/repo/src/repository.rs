@@ -333,9 +333,9 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
     ///
     /// Callers must ensure all backends point at the same repository root, the
     /// `heddle_dir` exists and is canonical for that root, and `shallow` matches
-    /// the on-disk shallow metadata. Prefer [`Repository::init`],
-    /// [`Repository::open`], or [`Repository::open_with_store`] unless a
-    /// cross-crate integration genuinely needs to assemble the pieces manually.
+    /// the on-disk shallow metadata. Prefer [`Repository::init`] or
+    /// [`Repository::open`] unless a cross-crate integration genuinely needs to
+    /// assemble the pieces manually.
     pub fn from_parts(
         root: PathBuf,
         heddle_dir: PathBuf,
@@ -442,29 +442,6 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         ))
     }
 
-    /// Open an existing Heddle repository using a custom object store backend.
-    ///
-    /// Expert/test injection point: takes the store by value (any
-    /// [`ObjectStore`]) and skips the local-only open hooks (declarative
-    /// migrations, lazy-clone hydrator reconstruction) that [`Repository::open`]
-    /// runs for the default `AnyStore` flavor.
-    pub fn open_with_store(heddle_dir: impl AsRef<Path>, store: S) -> Result<Self> {
-        let heddle_dir = heddle_dir.as_ref().to_path_buf();
-        let root = heddle_dir
-            .parent()
-            .ok_or_else(|| {
-                HeddleError::Config(format!(
-                    "heddle_dir '{}' has no parent directory",
-                    heddle_dir.display()
-                ))
-            })?
-            .to_path_buf();
-        let config_path = heddle_dir.join("config.toml");
-        let config = RepoConfig::load(&config_path)?;
-        ensure_supported_repo_format(&config_path, &config)?;
-        let refs = RefManager::new(&heddle_dir);
-        Self::open_raw(root, heddle_dir, store, config, refs)
-    }
 }
 
 impl Repository {
