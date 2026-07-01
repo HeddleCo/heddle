@@ -176,6 +176,7 @@ struct GitUpstreamConfiguredOutput {
 /// primary push to the Heddle/git-overlay remote succeeds, also push to
 /// the named git-bridge remote. Best-effort — mirror failure surfaces
 /// as a warning and does NOT abort the primary push.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_push(
     cli: &Cli,
     remote: Option<String>,
@@ -184,6 +185,7 @@ pub async fn cmd_push(
     force: bool,
     all_threads: bool,
     mirror: Option<String>,
+    git_mirror: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
@@ -424,12 +426,13 @@ pub async fn cmd_push(
                     track_name: &track_name,
                     force,
                     all_threads,
+                    git_mirror,
                     cli,
                 },
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, single_state_id);
+            let _ = (addr, repo_path, token, single_state_id, git_mirror);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -1286,6 +1289,16 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
+    // --git-mirror applies only to git-overlay repos (heddle#25); check it up
+    // front so both the single-thread and --all-threads paths reject early.
+    if options.git_mirror && repo.capability() != RepositoryCapability::GitOverlay {
+        return Err(anyhow!(
+            "--git-mirror applies only to git-overlay repositories"
+        ));
+    }
+
+    // --all-threads (heddle#838): fan out over every pushable thread, each at
+    // its own tip. Composes with --git-mirror (per-thread mirror transfer).
     if options.all_threads {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
@@ -1300,6 +1313,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         &state_id,
         options.track_name,
         options.force,
+        options.git_mirror,
     )
     .await?;
 
@@ -1342,11 +1356,21 @@ async fn push_network_one_thread(
     state_id: &objects::object::ChangeId,
     track_name: &str,
     force: bool,
+    git_mirror: bool,
 ) -> Result<wire::PushComplete> {
     let result = if repo.capability() == RepositoryCapability::GitOverlay {
-        client
-            .push_git_overlay_checkpoint(repo, repo_path, *state_id, track_name, force)
-            .await?
+        if git_mirror {
+            // Explicit opt-in (heddle#25): push ALL git-overlay refs in one
+            // multi-ref git-mirror transfer. Not the default yet (weft server
+            // change + end-to-end verify pending).
+            client
+                .push_git_overlay_mirror(repo, repo_path, *state_id, track_name, force)
+                .await?
+        } else {
+            client
+                .push_git_overlay_checkpoint(repo, repo_path, *state_id, track_name, force)
+                .await?
+        }
     } else {
         client
             .push(repo, repo_path, *state_id, track_name, force)
@@ -1380,6 +1404,7 @@ async fn push_network_all_threads(
             &thread.state,
             &thread.name,
             options.force,
+            options.git_mirror,
         )
         .await;
         match outcome {
@@ -1688,6 +1713,9 @@ struct PushNetworkOptions<'a> {
     /// heddle#838: fan out over every pushable thread instead of the single
     /// `track_name`/`state_id`.
     all_threads: bool,
+    /// Explicit `--git-mirror`: push ALL git-overlay refs via the multi-ref
+    /// git-mirror path instead of the native single-ref checkpoint path.
+    git_mirror: bool,
     cli: &'a Cli,
 }
 
