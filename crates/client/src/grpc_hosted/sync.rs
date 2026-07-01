@@ -22,7 +22,7 @@ use objects::{
     store::{AnyStore, ObjectStore, PackObjectId},
 };
 use repo::{
-    GitCheckpointRecord, Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
+    Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
     ThreadManager,
 };
 use sley::{
@@ -64,20 +64,12 @@ type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
 struct GitLanePushPlan {
     local_revision_address: String,
     pack: GitPackPushPlan,
-    /// One or more ref updates streamed after the single multi-root pack.
-    ///
-    /// The native checkpoint path (`build_git_lane_push_plan`) produces
-    /// exactly one entry carrying a `checkpoint: Some(..)`. The git-mirror
-    /// path (`build_git_mirror_push_plan`) produces N entries, each with
+    /// The N ref updates streamed after the single multi-root pack, one per
+    /// direct git-overlay ref (Branch/Tag/Note/Other). Every entry carries
     /// `checkpoint: None` — the discriminator the weft server uses to admit
-    /// checkpoint-less multi-ref (Branch/Tag/Note/Other) pushes.
+    /// checkpoint-less multi-ref pushes. Per-ref compare-and-set expectations
+    /// are pre-applied from the server `ListRefs` response.
     ref_updates: Vec<PushMessage>,
-    /// When true, `push_with_revision` applies the single-ref remote
-    /// expectation from `PushReady.remote_revision_address` to the sole
-    /// ref update (native path). Mirror-mode plans carry their per-ref
-    /// expectations pre-applied from the server `ListRefs` response and set
-    /// this to false.
-    apply_ready_expectation: bool,
 }
 
 #[derive(Clone)]
@@ -262,46 +254,25 @@ impl HostedGrpcClient {
             force,
             native_revision_address(local_state),
             None,
-        )
-        .await
-    }
-
-    pub async fn push_git_overlay_checkpoint(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: ChangeId,
-        target_thread: &str,
-        force: bool,
-    ) -> Result<PushComplete, ProtocolError> {
-        let git_lane = build_git_lane_push_plan(
-            repo,
-            local_state,
-            target_thread,
-            self.transport.chunk_size.max(1),
-        )?;
-        let local_revision_address = git_lane.local_revision_address.clone();
-        self.push_with_revision(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            local_revision_address,
-            Some(git_lane),
+            &Progress::null(),
         )
         .await
     }
 
     /// Push ALL git-overlay refs (every branch, tag, note, and other ref)
     /// in one shot: a single multi-root pack followed by N checkpoint-less
-    /// ref updates (git-mirror mode). Reachable only via `heddle push
-    /// --git-mirror`; the native single-ref checkpoint path
-    /// (`push_git_overlay_checkpoint`) stays the default.
+    /// ref updates (git-mirror mode). This is the DEFAULT hosted git-overlay
+    /// push path (#846) — the git format is shipped straight through weft's
+    /// git lane with no native conversion. Native heddle conversion stays
+    /// opt-in via `heddle adopt`.
     ///
     /// Per-ref remote expectations are read from the server `ListRefs`
     /// response so each ref update carries the compare-and-set precondition
     /// the server currently holds.
+    ///
+    /// `progress` drives the live push line (packing → uploading bytes →
+    /// writing N refs); pass [`Progress::null`] for machine-readable / non-TTY
+    /// callers.
     pub async fn push_git_overlay_mirror(
         &mut self,
         repo: &Repository,
@@ -309,7 +280,9 @@ impl HostedGrpcClient {
         local_state: ChangeId,
         target_thread: &str,
         force: bool,
+        progress: &Progress,
     ) -> Result<PushComplete, ProtocolError> {
+        progress.set_phase("packing refs");
         let remote_ref_expectations = self.git_mirror_ref_expectations(repo_path).await?;
         let git_lane = build_git_mirror_push_plan(
             repo,
@@ -325,6 +298,7 @@ impl HostedGrpcClient {
             force,
             local_revision_address,
             Some(git_lane),
+            progress,
         )
         .await
     }
@@ -354,7 +328,8 @@ impl HostedGrpcClient {
         target_thread: &str,
         force: bool,
         local_revision_address: String,
-        mut git_lane: Option<GitLanePushPlan>,
+        git_lane: Option<GitLanePushPlan>,
+        progress: &Progress,
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
@@ -420,17 +395,6 @@ impl HostedGrpcClient {
                 ));
             }
         };
-        if let Some(git_lane) = git_lane.as_mut()
-            && git_lane.apply_ready_expectation
-        {
-            let ref_update = git_lane.ref_updates.first_mut().ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "native git lane push plan has no ref update".to_string(),
-                )
-            })?;
-            apply_git_ref_expectation(ref_update, &ready.remote_revision_address)?;
-        }
-
         let object_index = match full_objects {
             Some(objects) => objects
                 .into_iter()
@@ -494,16 +458,16 @@ impl HostedGrpcClient {
         }
 
         if let Some(git_lane) = git_lane {
-            // One multi-root pack, then N checkpoint-less ref updates (native
-            // path: N == 1 with a checkpoint; mirror path: N refs, no
-            // checkpoint).
+            // One multi-root pack (live "uploading" progress), then N
+            // checkpoint-less ref updates (git-mirror mode).
             send_git_pack_streaming_messages(
                 &tx,
                 &git_lane.pack,
                 self.transport.chunk_size.max(1),
-                &Progress::null(),
+                progress,
             )
             .await?;
+            progress.set_phase(format!("writing {} refs", git_lane.ref_updates.len()));
             for ref_update in git_lane.ref_updates {
                 tx.send(ref_update).await.map_err(|_| {
                     ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
@@ -1807,68 +1771,6 @@ fn git_revision_address(commit_oid: &GitObjectId) -> String {
     RevisionAddress::git_commit(commit_oid.to_hex()).to_string()
 }
 
-fn build_git_lane_push_plan(
-    repo: &Repository,
-    local_state: ChangeId,
-    target_thread: &str,
-    chunk_size: usize,
-) -> Result<GitLanePushPlan, ProtocolError> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return Err(ProtocolError::InvalidState(
-            "Git lane pushes require a git-overlay repository".to_string(),
-        ));
-    }
-    let checkpoint = repo
-        .latest_git_checkpoint_for_change(&local_state)
-        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
-        .ok_or_else(|| {
-            ProtocolError::InvalidState(format!(
-                "state {} has no Git checkpoint; run `heddle checkpoint` before pushing this git-overlay spool",
-                local_state.short()
-            ))
-        })?;
-    let git_repo = repo
-        .git_overlay_sley_repository()
-        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?
-        .ok_or_else(|| {
-            ProtocolError::InvalidState("git-overlay repository has no Git store".to_string())
-        })?;
-    let commit_oid = GitObjectId::from_hex(git_repo.object_format(), &checkpoint.git_commit)
-        .map_err(|err| {
-            ProtocolError::InvalidState(format!(
-                "checkpoint {} has invalid Git commit oid: {err}",
-                checkpoint.git_commit
-            ))
-        })?;
-    git_repo.read_commit(&commit_oid).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "checkpoint {} is not a readable Git commit: {err}",
-            checkpoint.git_commit
-        ))
-    })?;
-
-    let pack = build_git_lane_pack_plan(&git_repo, commit_oid, chunk_size)?;
-    let ref_update = git_ref_update_message(
-        &format!("refs/heads/{target_thread}"),
-        GitRefKind::Branch,
-        commit_oid,
-        None,
-        Some(GitCheckpointTransfer {
-            heddle_change_id: local_state.as_bytes().to_vec().into(),
-            git_commit_oid: commit_oid.as_bytes().to_vec().into(),
-            thread: target_thread.to_string(),
-            metadata_json: checkpoint_metadata_json(&checkpoint),
-        }),
-    );
-
-    Ok(GitLanePushPlan {
-        local_revision_address: git_revision_address(&commit_oid),
-        pack,
-        ref_updates: vec![ref_update],
-        apply_ready_expectation: true,
-    })
-}
-
 /// Build the git-mirror push plan: read ALL refs from the git ODB, resolve
 /// each to its object oid, build ONE multi-root pack over the resolved
 /// targets, and emit N checkpoint-less `GitRefUpdateTransfer` messages.
@@ -1984,7 +1886,6 @@ fn build_git_mirror_plan_from_sley(
         local_revision_address,
         pack,
         ref_updates,
-        apply_ready_expectation: false,
     })
 }
 
@@ -2001,27 +1902,10 @@ fn git_ref_kind_from_name(name: &str) -> GitRefKind {
     }
 }
 
-fn checkpoint_metadata_json(checkpoint: &GitCheckpointRecord) -> String {
-    serde_json::json!({
-        "source": "heddle-checkpoint",
-        "summary": checkpoint.summary,
-        "committed_at": checkpoint.committed_at,
-    })
-    .to_string()
-}
-
-fn build_git_lane_pack_plan(
-    git_repo: &SleyRepository,
-    root: GitObjectId,
-    chunk_size: usize,
-) -> Result<GitPackPushPlan, ProtocolError> {
-    build_git_lane_multi_root_pack_plan(git_repo, vec![root], chunk_size)
-}
-
-/// Plan a single pack over `roots` (one for the native checkpoint path, N
-/// for the git-mirror path). `write_reachable_pack_to_writer` already takes
-/// `IntoIterator<Item = ObjectId>`, so the multi-root case needs no sley
-/// change — it packs the transitive closure of every root into one pack.
+/// Plan a single pack over `roots` (N for the git-mirror path).
+/// `write_reachable_pack_to_writer` already takes `IntoIterator<Item =
+/// ObjectId>`, so the multi-root case needs no sley change — it packs the
+/// transitive closure of every root into one pack.
 fn build_git_lane_multi_root_pack_plan(
     git_repo: &SleyRepository,
     roots: Vec<GitObjectId>,
@@ -2211,9 +2095,27 @@ impl GitPackPushMessageWriter {
         self.chunk_index = self.chunk_index.checked_add(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "Git pack chunk index overflow")
         })?;
-        // Progress driving wired in the next commit.
-        let _ = (&self.progress, self.last_progress_pct);
+        self.report_upload_progress();
         Ok(())
+    }
+
+    /// Paint the live "uploading N/M bytes" line for the bytes flushed so far,
+    /// throttled to one repaint per integer percent so a large pack does not
+    /// spend its time formatting. A null (`--output json` / non-TTY) handle
+    /// short-circuits before any formatting.
+    fn report_upload_progress(&mut self) {
+        if !self.progress.is_active() {
+            return;
+        }
+        let pct = self.offset.saturating_mul(100) / self.pack_size.max(1);
+        if pct == self.last_progress_pct {
+            return;
+        }
+        self.last_progress_pct = pct;
+        self.progress.set_phase(format!(
+            "uploading {}/{} bytes ({pct}%)",
+            self.offset, self.pack_size
+        ));
     }
 
     fn finish(mut self) -> Result<(), ProtocolError> {
@@ -2286,14 +2188,6 @@ fn git_ref_update_message(
         expected_target_oid: Vec::new().into(),
         checkpoint,
     }))
-}
-
-fn apply_git_ref_expectation(
-    message: &mut PushMessage,
-    remote_revision_address: &str,
-) -> Result<(), ProtocolError> {
-    let expectation = parse_git_ref_expectation(remote_revision_address)?;
-    apply_git_ref_expectation_value(message, &expectation)
 }
 
 fn apply_git_ref_expectation_value(
@@ -3033,7 +2927,7 @@ mod tests {
             .write_raw_object(sley::GitObjectType::Commit, commit.write())
             .expect("write commit");
 
-        let pack = build_git_lane_pack_plan(&git, commit_oid, 64 * 1024)
+        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64 * 1024)
             .expect("build git lane pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
@@ -3087,7 +2981,7 @@ mod tests {
         assert_eq!(checkpoint.thread, "main");
     }
 
-    fn native_ref_update_message(commit_oid: GitObjectId) -> PushMessage {
+    fn sample_ref_update_message(commit_oid: GitObjectId) -> PushMessage {
         git_ref_update_message(
             "refs/heads/main",
             GitRefKind::Branch,
@@ -3319,45 +3213,34 @@ mod tests {
         );
     }
 
-    /// Regression guard: the native checkpoint plan is unchanged — exactly
-    /// one ref update, carrying a checkpoint.
+    /// GitHub-style `refs/pull/*` ref names must pass through the mirror plan
+    /// unchanged: classified as `Other` (not branch/tag/note), packed with the
+    /// correct target, and checkpoint-less. Confirms the #846 ref-name caveat.
     #[test]
-    fn native_git_lane_plan_remains_single_checkpoint_ref() {
+    fn git_mirror_plan_includes_pull_request_refs() {
         let dir = TempDir::new().expect("tempdir");
-        let git = sley::Repository::init(dir.path()).expect("init git");
-        let commit_oid = write_commit(&git, "native");
+        let mut git = sley::Repository::init(dir.path()).expect("init git");
+        let pr_commit = write_commit(&git, "pr");
+        set_ref(&mut git, "refs/pull/42/head", pr_commit);
 
-        let pack = build_git_lane_pack_plan(&git, commit_oid, 64 * 1024)
-            .expect("build native pack plan");
-        assert_eq!(pack.roots, vec![commit_oid], "native path has one root");
-
-        // Reconstruct the native ref update as build_git_lane_push_plan does.
-        let state = ChangeId::from_bytes([9u8; 16]);
-        let message = git_ref_update_message(
-            "refs/heads/main",
-            GitRefKind::Branch,
-            commit_oid,
-            None,
-            Some(GitCheckpointTransfer {
-                heddle_change_id: state.as_bytes().to_vec().into(),
-                git_commit_oid: commit_oid.as_bytes().to_vec().into(),
-                thread: "main".to_string(),
-                metadata_json: String::new(),
-            }),
+        let plan = build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new())
+            .expect("build mirror plan");
+        let updates = mirror_ref_updates(&plan);
+        let pull = updates
+            .iter()
+            .find(|update| update.name == "refs/pull/42/head")
+            .expect("refs/pull/* ref must be mirrored");
+        assert_eq!(
+            pull.kind,
+            GitRefKind::Other as i32,
+            "refs/pull/* classifies as Other",
         );
-        let plan = GitLanePushPlan {
-            local_revision_address: git_revision_address(&commit_oid),
-            pack,
-            ref_updates: vec![message],
-            apply_ready_expectation: true,
-        };
-        assert_eq!(plan.ref_updates.len(), 1);
-        assert!(plan.apply_ready_expectation);
-        let update = git_ref_update_from_message(&plan.ref_updates[0]);
+        assert_eq!(pull.target_oid.as_ref(), pr_commit.as_bytes());
         assert!(
-            update.checkpoint.is_some(),
-            "native path keeps checkpoint: Some",
+            pull.checkpoint.is_none(),
+            "mirror ref updates are checkpoint-less",
         );
+        assert!(pull.peeled_oid.is_empty(), "a commit ref is not peeled");
     }
 
     #[test]
@@ -3367,9 +3250,10 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567",
         )
         .expect("oid");
-        let mut message = native_ref_update_message(commit_oid);
+        let mut message = sample_ref_update_message(commit_oid);
 
-        apply_git_ref_expectation(&mut message, "").expect("missing expectation");
+        let expectation = parse_git_ref_expectation("").expect("missing expectation");
+        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
         assert!(update.expected_missing);
         assert!(update.expected_target_oid.is_empty());
@@ -3383,10 +3267,11 @@ mod tests {
         )
         .expect("oid");
         let remote_oid = "89abcdef012345670123456789abcdef01234567";
-        let mut message = native_ref_update_message(commit_oid);
+        let mut message = sample_ref_update_message(commit_oid);
 
-        apply_git_ref_expectation(&mut message, &format!("git:{remote_oid}"))
-            .expect("git expectation");
+        let expectation =
+            parse_git_ref_expectation(&format!("git:{remote_oid}")).expect("git expectation");
+        apply_git_ref_expectation_value(&mut message, &expectation).expect("apply expectation");
         let update = git_ref_update_from_message(&message);
         assert!(!update.expected_missing);
         assert_eq!(hex::encode(update.expected_target_oid.as_ref()), remote_oid);

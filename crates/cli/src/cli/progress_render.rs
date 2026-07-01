@@ -114,6 +114,26 @@ impl Sink for TerminalSink {
     }
 }
 
+/// Erase the live progress line so a subsequent `println!` starts clean.
+///
+/// On a TTY the live line is drawn with `\r` and no trailing newline, so
+/// without this the next line would overwrite it from column 0. Off a TTY each
+/// throttled tick already printed its own newline-terminated line, so there is
+/// nothing to clear. No-op for a null (inactive) handle.
+///
+/// Only the hosted (network) push path drives progress, so this is gated on the
+/// `client` feature to stay dead-code-clean in default-feature builds.
+#[cfg(feature = "client")]
+pub(crate) fn clear_progress_line(progress: &Progress) {
+    if !progress.is_active() {
+        return;
+    }
+    if io::stdout().is_terminal() {
+        print!("\r\x1b[K");
+        io::stdout().flush().ok();
+    }
+}
+
 /// Paint a terminal "done" line for a finished [`Progress`], clearing the live
 /// line first on a TTY. No-op for a null (inactive) handle. Used by consumers
 /// that want an explicit completion marker (e.g. import's `[done]` line).

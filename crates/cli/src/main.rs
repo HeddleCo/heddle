@@ -582,7 +582,6 @@ async fn async_main() -> Result<()> {
                 args.force,
                 args.all_threads,
                 args.mirror.clone(),
-                args.git_mirror,
             )
             .await
         }

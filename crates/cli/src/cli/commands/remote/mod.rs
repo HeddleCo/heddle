@@ -26,6 +26,8 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
+use crate::cli::progress_render::{clear_progress_line, progress_for};
+#[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedSession};
@@ -184,7 +186,6 @@ pub async fn cmd_push(
     force: bool,
     all_threads: bool,
     mirror: Option<String>,
-    git_mirror: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
@@ -429,13 +430,12 @@ pub async fn cmd_push(
                     state_id: &state_id,
                     track_name: &track_name,
                     force,
-                    git_mirror,
                     cli,
                 },
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, git_mirror);
+            let _ = (addr, repo_path, token);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -1095,37 +1095,23 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         None => auto_provision_hosted_repo(repo, &mut client, &options).await?,
     };
 
-    if options.git_mirror && repo.capability() != RepositoryCapability::GitOverlay {
-        return Err(anyhow!(
-            "--git-mirror applies only to git-overlay repositories"
-        ));
-    }
-
+    // Git-overlay repos DEFAULT to the git-backed fast path (#846): ship the
+    // git format (one multi-root pack + all refs) straight through weft's git
+    // lane with no native conversion. Native heddle conversion stays opt-in via
+    // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
+    // plain native push below.
+    let progress = progress_for(options.cli, repo);
     let result = if repo.capability() == RepositoryCapability::GitOverlay {
-        if options.git_mirror {
-            // Explicit opt-in: push ALL git-overlay refs in one multi-ref
-            // git-mirror transfer. Not the default yet (weft server change +
-            // end-to-end verify pending).
-            client
-                .push_git_overlay_mirror(
-                    repo,
-                    &repo_path,
-                    *options.state_id,
-                    options.track_name,
-                    options.force,
-                )
-                .await?
-        } else {
-            client
-                .push_git_overlay_checkpoint(
-                    repo,
-                    &repo_path,
-                    *options.state_id,
-                    options.track_name,
-                    options.force,
-                )
-                .await?
-        }
+        client
+            .push_git_overlay_mirror(
+                repo,
+                &repo_path,
+                *options.state_id,
+                options.track_name,
+                options.force,
+                &progress,
+            )
+            .await?
     } else {
         client
             .push(
@@ -1137,6 +1123,8 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
             )
             .await?
     };
+    // Clear the live progress line so the result message starts clean on a TTY.
+    clear_progress_line(&progress);
 
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
@@ -1409,9 +1397,6 @@ struct PushNetworkOptions<'a> {
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
     force: bool,
-    /// Explicit `--git-mirror`: push ALL git-overlay refs via the multi-ref
-    /// git-mirror path instead of the native single-ref checkpoint path.
-    git_mirror: bool,
     cli: &'a Cli,
 }
 
