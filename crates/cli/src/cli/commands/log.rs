@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::status::next_action::canonical_adopt_ref_command;
 use objects::object::{
     Agent, ChangeId, State, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
     TimelineToolCallStatus,
@@ -411,9 +412,7 @@ fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: b
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
-                style::bold(&super::git_overlay_health::canonical_adopt_ref_command(
-                    branch
-                ))
+                style::bold(&canonical_adopt_ref_command(branch))
             );
         }
     }

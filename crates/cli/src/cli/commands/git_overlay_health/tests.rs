@@ -6,14 +6,17 @@
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
 use objects::object::ThreadName;
+use heddle_core::status::next_action::{
+    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+    remote_tracking_next_action,
+};
 use repo::{GitRemoteTrackingStatus, Repository};
 use sley::Repository as SleyRepository;
 use tempfile::TempDir;
 
 use super::{
     RepositoryVerificationState, VerificationActionPlan, action_template,
-    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
-    clean_health, machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
+    clean_health, machine_contract_coverage, remote_drift_decision,
     repository_setup_guidance, repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;

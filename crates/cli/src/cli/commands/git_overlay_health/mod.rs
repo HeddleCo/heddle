@@ -10,6 +10,11 @@ pub(crate) use heddle_core::{
     ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
     RepositoryVerificationState, VerificationCheck, verify::serialize_empty_action_as_null,
 };
+use heddle_core::status::next_action::{
+    canonical_adopt_ref_command, canonical_bridge_import_ref_command,
+    canonical_bridge_reconcile_ref_preview_command, heddle_action as core_heddle_action,
+    import_hint_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
+};
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
@@ -2315,21 +2320,6 @@ fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
     })
 }
 
-pub(crate) fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
-    if remote.upstream.is_empty() {
-        return "remote_untracked";
-    }
-    if remote.upstream_is_undone_checkpoint && remote.ahead == 0 && remote.behind > 0 {
-        return "remote_contains_undone_checkpoint";
-    }
-    match (remote.ahead, remote.behind) {
-        (0, 0) => "clean",
-        (0, _) => "remote_behind",
-        (_, 0) => "remote_ahead",
-        _ => "remote_diverged",
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteDriftDecision {
     pub status: &'static str,
@@ -2337,25 +2327,6 @@ pub(crate) struct RemoteDriftDecision {
     pub primary_action: Option<String>,
     pub recovery_commands: Vec<String>,
     pub requires_clean_worktree: bool,
-}
-
-pub(crate) fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<String> {
-    match remote_tracking_status(remote) {
-        "clean" => None,
-        "remote_untracked" => Some(remote_untracked_action(remote)),
-        "remote_contains_undone_checkpoint" => Some(heddle_action(["push", "--force"])),
-        "remote_behind" => Some("heddle pull".to_string()),
-        "remote_ahead" => Some("heddle push".to_string()),
-        "remote_diverged" => {
-            let upstream = remote.upstream.trim();
-            if upstream.is_empty() {
-                Some("heddle fetch".to_string())
-            } else {
-                Some(canonical_bridge_import_ref_command(upstream))
-            }
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn remote_drift_decision(
@@ -2374,7 +2345,7 @@ pub(crate) fn remote_drift_decision(
         "remote_untracked" => RemoteDriftDecision {
             status,
             verified_as_clean: true,
-            primary_action: Some(remote_untracked_action(remote)),
+            primary_action: remote_tracking_next_action(remote),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
@@ -2388,10 +2359,10 @@ pub(crate) fn remote_drift_decision(
         "remote_contains_undone_checkpoint" => RemoteDriftDecision {
             status,
             verified_as_clean: false,
-            primary_action: Some(heddle_action(["push", "--force"])),
+            primary_action: remote_tracking_next_action(remote),
             recovery_commands: vec![
-                heddle_action(["push", "--force"]),
-                heddle_action(["undo", "--redo"]),
+                core_heddle_action(["push", "--force"]),
+                core_heddle_action(["undo", "--redo"]),
             ],
             requires_clean_worktree: true,
         },
@@ -2463,14 +2434,6 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
         .ok()
         .flatten()
         .is_some_and(|mapped_tip| mapped_tip == thread_tip)
-}
-
-fn remote_untracked_action(remote: &GitRemoteTrackingStatus) -> String {
-    if remote.next_action.trim().is_empty() {
-        "heddle push".to_string()
-    } else {
-        remote.next_action.clone()
-    }
 }
 
 pub(crate) fn remote_drift_primary_action(repo: &Repository) -> Option<String> {
@@ -3222,51 +3185,6 @@ fn needs_import(
         recovery_commands: vec![hint.recommended_command],
         checks,
     }
-}
-
-pub(crate) fn canonical_adopt_ref_command(ref_name: &str) -> String {
-    heddle_action(["adopt", "--ref", ref_name])
-}
-
-pub(crate) fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
-    heddle_action(["bridge", "git", "import", "--ref", ref_name])
-}
-
-pub(crate) fn canonical_bridge_reconcile_ref_preview_command(
-    prefer: Option<&str>,
-    ref_name: &str,
-) -> String {
-    match prefer {
-        Some(prefer) => heddle_action([
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            prefer,
-            "--ref",
-            ref_name,
-            "--preview",
-        ]),
-        None => heddle_action(["bridge", "git", "reconcile", "--ref", ref_name, "--preview"]),
-    }
-}
-
-pub(crate) fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
-    heddle_action([
-        "bridge",
-        "git",
-        "reconcile",
-        "--prefer",
-        prefer,
-        "--ref",
-        ref_name,
-    ])
-}
-
-pub(crate) fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
-    hint.missing_branches
-        .iter()
-        .any(|branch| branch == &hint.current_branch)
 }
 
 /// Render the "(N out-of-band git commits detected)" clause for the

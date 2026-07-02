@@ -691,19 +691,6 @@ pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan
     )))
 }
 
-pub(crate) fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
-    let Some(git) = repo.git_overlay_sley_repository()? else {
-        return Ok(None);
-    };
-    if !git_worktree_matches_root(&git, repo.root()) {
-        return Ok(None);
-    }
-    Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent(repo, &git)?,
-        false,
-    )))
-}
-
 fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
     let mut unstaged_paths = Vec::new();
     let mut untracked_paths = Vec::new();

@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
+use heddle_core::status::next_action::{NextActionInput, effective_next_action};
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
@@ -17,7 +18,6 @@ use super::{
         RepositoryVerificationState, action_template, repository_verification_blockers,
         repository_verification_primary_command,
     },
-    next_action::{NextActionInput, effective_next_action},
     rebase::{
         OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
         has_persisted_rebase_state,

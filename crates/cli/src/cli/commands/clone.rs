@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
+use heddle_core::status::next_action::canonical_bridge_import_ref_command;
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -33,10 +34,7 @@ use sley::{
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{
-        RepositoryVerificationState, build_repository_verification_state,
-        canonical_bridge_import_ref_command,
-    },
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;

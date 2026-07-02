@@ -19,6 +19,8 @@
 //! [`resolve_state_id_bytes`] when you need the wire-form 16-byte
 //! representation (e.g. when handing it to a gRPC service stub).
 
+use heddle_core::status::next_action::canonical_adopt_ref_command;
+
 use anyhow::{Result, anyhow};
 use objects::{
     error::HeddleError,
@@ -99,7 +101,7 @@ fn state_not_found_advice(spec: &str) -> RecoveryAdvice {
 }
 
 fn tip_only_branch_history_advice(branch: &str) -> RecoveryAdvice {
-    let import_command = super::git_overlay_health::canonical_adopt_ref_command(branch);
+    let import_command = canonical_adopt_ref_command(branch);
     RecoveryAdvice::safety_refusal(
         "git_branch_history_not_imported",
         format!("Heddle has not imported Git branch '{branch}' history yet"),
@@ -113,7 +115,7 @@ fn tip_only_branch_history_advice(branch: &str) -> RecoveryAdvice {
 }
 
 fn tip_only_tag_history_advice(tag: &str) -> RecoveryAdvice {
-    let import_command = super::git_overlay_health::canonical_adopt_ref_command(tag);
+    let import_command = canonical_adopt_ref_command(tag);
     RecoveryAdvice::safety_refusal(
         "git_tag_history_not_imported",
         format!("Git tag '{tag}' is visible but its history is not imported yet"),

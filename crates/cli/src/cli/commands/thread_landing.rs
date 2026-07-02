@@ -77,59 +77,6 @@ pub(crate) fn land_local_command(thread_id: &str) -> String {
     heddle_action(argv)
 }
 
-pub(crate) fn contextual_thread_action(
-    repo: &Repository,
-    thread_id: &str,
-    target_thread: Option<&str>,
-    action: &str,
-) -> String {
-    let Some(main_root) = repo.heddle_dir().parent() else {
-        return action.to_string();
-    };
-    if main_root == repo.root() || target_thread.is_none() {
-        return action.to_string();
-    }
-    if action == merge_preview_command(thread_id) {
-        let mut argv = vec!["--repo".to_string(), main_root.display().to_string()];
-        if thread_id.starts_with('-') {
-            argv.extend([
-                "merge".to_string(),
-                "--preview".to_string(),
-                "--".to_string(),
-                thread_id.to_string(),
-            ]);
-        } else {
-            argv.extend([
-                "merge".to_string(),
-                thread_id.to_string(),
-                "--preview".to_string(),
-            ]);
-        }
-        return heddle_action(argv);
-    }
-    if action == land_local_command(thread_id) {
-        let mut argv = vec![
-            "--repo".to_string(),
-            main_root.display().to_string(),
-            "land".to_string(),
-        ];
-        argv.extend(thread_flag_args(thread_id));
-        argv.push("--no-push".to_string());
-        return heddle_action(argv);
-    }
-    if action == land_push_command(thread_id) {
-        let mut argv = vec![
-            "--repo".to_string(),
-            main_root.display().to_string(),
-            "land".to_string(),
-        ];
-        argv.extend(thread_flag_args(thread_id));
-        argv.push("--push".to_string());
-        return heddle_action(argv);
-    }
-    action.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

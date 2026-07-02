@@ -30,8 +30,8 @@ pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck, GitOverlayImportHintReport,
-    MaterializedThreadInfo, ParallelThreadInfo, StateInfo, StatusAdapters, StatusDetail,
-    StatusOptions, StatusProfile, StatusReport, StatusThreadSummary, assess_materialized_threads,
+    MaterializedThreadInfo, ParallelThreadInfo, StateInfo, StatusDetail, StatusOptions,
+    StatusProfile, StatusReport, StatusThreadSummary, assess_materialized_threads,
     changes_from_worktree_status, changes_path_count, changes_paths, fast_short_status_report,
     status,
 };
