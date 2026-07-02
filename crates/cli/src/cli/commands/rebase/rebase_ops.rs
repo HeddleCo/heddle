@@ -533,7 +533,7 @@ fn try_auto_merge_textual_change(
 /// Routes through the AST-aware function-level merge driver from heddle#68
 /// (`semantic::merge_driver::semantic_three_way_merge`) — the same driver the
 /// `heddle merge` path uses by default (see
-/// `merge::merge_algo::executor::text_hunk_merge_blobs`, `MergeStrategy::Semantic`).
+/// `merge::merge_trees`, `MergeStrategy::Semantic`).
 /// `path` selects the language; parseable source merges per-item by stable
 /// identity, so a structural reshape (function reorder / add / delete) that
 /// would shift every line past the change point — and so collide under the

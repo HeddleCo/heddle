@@ -49,12 +49,18 @@ mod diff3;
 mod lines;
 mod markers;
 mod preflight;
+mod tree_merge;
 mod whitespace;
 
 #[cfg(test)]
 mod tests;
 
 pub use markers::ConflictMarkers;
+pub use tree_merge::{
+    ConflictLabels, DetectedRename, DirectoryRename, MergeBlobSource, MergeError, MergeOptions,
+    MergeStrategy, RenameDetectionResult, RenameMatcherStats, RenameOptions, SemanticMergeFn,
+    SemanticSimilarityFn, TreeMergeResult, detect_renames_between_trees, merge_trees,
+};
 
 /// Outcome of a three-way line-based merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
