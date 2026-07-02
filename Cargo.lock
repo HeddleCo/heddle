@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-grpc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "prost 0.14.4",
