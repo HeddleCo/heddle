@@ -45,7 +45,7 @@ use super::{
     },
     mount_lifecycle,
     next_action::{NextActionValidationContext, write_full_command_json},
-    operator_loop::{primary_next_action, primary_next_action_with_verification},
+    operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
@@ -1025,119 +1025,6 @@ pub fn find_thread_summary(repo: &Repository, name: &str) -> Result<Option<Threa
     Ok(collect_thread_summaries(repo)?
         .into_iter()
         .find(|summary| summary.name == name))
-}
-
-/// Fast single-thread summary. Skips the full `collect_thread_summaries`
-/// walk (which reads every thread record, every agent entry, every git
-/// branch tip — 45ms on a 69-thread repo) in favor of reading just the
-/// one thread we care about.
-///
-/// Trade-offs vs. the full path:
-/// - `child_threads` / `sibling_threads` are always empty. Computing
-///   them needs a global parent-thread scan; callers that display these
-///   relations should route through `find_thread_summary` instead.
-/// - `git_branch_tip` and `history_imported` are not populated for
-///   the same reason — discovering them needs the full Sley-backed
-///   branch walk.
-///   `tip_only` thread_health is therefore not surfaced; the import-
-///   hint line on the surrounding render already nudges the user.
-///
-/// Used by `heddle status` on the default text path where none of the
-/// above fields are rendered. JSON and `-v` still go through the
-/// full walk because those surfaces actually display the relations.
-pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Option<ThreadSummary>> {
-    let current = repo.current_lane()?;
-    let is_current = current.as_deref() == Some(name);
-    // Just this thread's record.
-    let thread_manager = ThreadManager::new(repo.heddle_dir());
-    let mut thread_record = thread_manager.find_by_thread(name)?;
-    if let Some(thread) = thread_record.as_mut() {
-        refresh_thread_freshness(repo, thread)?;
-    }
-    // Just this thread's agent entries.
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let entries: Vec<AgentEntry> = registry
-        .list()?
-        .into_iter()
-        .filter(|entry| entry.thread == name)
-        .collect();
-    let task_store = AgentTaskStore::new(repo.heddle_dir());
-    let task_assignment_id = task_assignment_id_from_entries(&entries);
-    let task_summary = task_summary_for_assignment(&task_store, task_assignment_id.as_deref())?;
-
-    let (view, coordination_status) = build_thread_view(
-        repo,
-        is_current,
-        name.to_string(),
-        entries,
-        thread_record,
-        None, // skip branch_tip lookup (would require full Sley-backed walk)
-    )?;
-    let mut summary = ThreadSummary::from_view(view, coordination_status);
-    summary.task_assignment_id = task_assignment_id;
-    summary.task_summary = task_summary;
-
-    // Re-run the per-thread fixups that `collect_thread_summaries` applies.
-    let thread_for_advice = Thread {
-        id: summary.name.clone(),
-        thread: summary.name.clone(),
-        target_thread: summary.target_thread.clone(),
-        parent_thread: summary.parent_thread.clone(),
-        mode: summary
-            .thread_mode
-            .clone()
-            .unwrap_or(ThreadMode::Materialized),
-        state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
-        base_state: summary.base_state.clone().unwrap_or_default(),
-        base_root: summary.base_root.clone().unwrap_or_default(),
-        current_state: summary.current_state.clone(),
-        merged_state: None,
-        task: summary.task.clone(),
-        execution_path: summary
-            .execution_path
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| repo.root().to_path_buf()),
-        materialized_path: summary.path.as_ref().map(PathBuf::from),
-        changed_paths: summary.changed_paths.clone(),
-        impact_categories: summary.impact_categories.clone(),
-        heavy_impact_paths: summary.heavy_impact_paths.clone(),
-        promotion_suggested: summary.promotion_suggested,
-        freshness: summary
-            .freshness
-            .clone()
-            .unwrap_or(ThreadFreshness::Unknown),
-        verification_summary: summary.verification_summary.clone(),
-        confidence_summary: summary.confidence_summary.clone(),
-        integration_policy_result: summary.integration_policy_result.clone(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        ephemeral: None,
-        auto: summary.auto,
-        shared_target_dir: summary.shared_target_dir.as_ref().map(PathBuf::from),
-    };
-    let advice = describe_thread_advice(&thread_for_advice, false, 0, false);
-    summary.thread_health = advice.thread_health;
-    summary.blockers = advice.blockers;
-    summary.recommended_action = advice.recommended_action;
-    apply_terminal_thread_advice(&mut summary);
-    apply_materialized_merge_advice(repo, &mut summary);
-    if is_current {
-        // Current-thread next-action enrichment. Same as the full path,
-        // but we skip the operation/remote_tracking/import_hint reads
-        // because the caller (status) already has those and threads
-        // through different fields anyway.
-        summary.recommended_action =
-            primary_next_action(None, None, None, Some(&summary.recommended_action));
-        summary.recommended_action = contextual_thread_action(
-            repo,
-            &summary.name,
-            summary.target_thread.as_deref(),
-            &summary.recommended_action,
-        );
-    }
-    summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
-    Ok(Some(summary))
 }
 
 fn apply_materialized_merge_advice(repo: &Repository, summary: &mut ThreadSummary) {

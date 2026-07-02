@@ -11,15 +11,13 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
-    ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusReport,
+    ChangesInfo, CoordinationStatus, FastShortStatusReport,
     GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
-    MaterializedThreadInfo, StatusAdapters, StatusDetail, StatusOptions,
-    StatusReport as StatusOutput, StatusThreadSummary, changes_from_worktree_status, changes_paths,
-    fast_short_status_report, status as core_status,
+    MaterializedThreadInfo, StatusDetail, StatusOptions, StatusReport as StatusOutput,
+    changes_from_worktree_status, changes_paths, fast_short_status_report, status as core_status,
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
-    is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
@@ -35,24 +33,19 @@ use tracing::debug;
 
 use super::{
     action_line::print_command,
-    command_catalog::ActionFields,
-    git_adapter::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
+    git_adapter::{GitIndexPlan, git_index_plan_for_root},
     git_overlay_health::{
-        RepositoryVerificationState, build_git_overlay_health_with_worktree_status,
-        build_plain_git_verification_probe, repository_setup_guidance,
-        repository_verification_state_from_health_with_worktree_status,
+        RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
-    snapshot::resolve_principal,
-    thread::{collect_thread_summaries, find_thread_summary_single},
 };
 use crate::{
-    bridge::git_core::principal_is_default_unknown,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
-    config::UserConfig,
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
+#[cfg(feature = "client")]
+use crate::config::UserConfig;
 
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
@@ -359,7 +352,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         .build();
     let output = core_status(
         &ctx,
-        StatusOptions::new(detail, status_options, status_adapters()).with_start_path(start),
+        StatusOptions::new(detail, status_options).with_start_path(start),
     )?;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,
@@ -374,72 +367,6 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     })
 }
 
-fn status_adapters() -> StatusAdapters {
-    StatusAdapters {
-        git_overlay_health: core_git_overlay_health,
-        repository_trust_with_worktree: core_repository_trust_with_worktree,
-        git_index_for_repo: core_git_index_plan_for_repo,
-        identity_notice: core_first_capture_identity_notice,
-        collect_thread_summaries: core_collect_thread_summaries,
-        find_thread_summary: core_find_thread_summary_single,
-        action_template: core_recommended_action_template,
-    }
-}
-
-fn core_git_overlay_health(
-    repo: &Repository,
-    worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
-) -> GitOverlayHealth {
-    build_git_overlay_health_with_worktree_status(repo, worktree_status)
-}
-
-fn core_repository_trust_with_worktree(
-    repo: &Repository,
-    health: GitOverlayHealth,
-    worktree_status: &objects::error::Result<Option<objects::worktree::WorktreeStatus>>,
-) -> heddle_core::RepositoryVerificationState {
-    repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
-}
-
-fn core_git_index_plan_for_repo(
-    repo: &Repository,
-) -> objects::error::Result<Option<CoreGitIndexPlan>> {
-    git_index_plan_for_repo(repo)
-        .map(|plan| plan.map(core_git_index_plan))
-        .map_err(|err| objects::HeddleError::Config(err.to_string()))
-}
-
-fn core_first_capture_identity_notice(
-    repo: &Repository,
-    current_state: Option<&objects::object::State>,
-) -> objects::error::Result<Option<String>> {
-    first_capture_identity_notice(repo, current_state)
-        .map_err(|err| objects::HeddleError::Config(err.to_string()))
-}
-
-fn core_collect_thread_summaries(
-    repo: &Repository,
-) -> objects::error::Result<Vec<StatusThreadSummary>> {
-    collect_thread_summaries(repo)
-        .map(|summaries| summaries.into_iter().map(core_thread_summary).collect())
-        .map_err(|err| objects::HeddleError::Config(err.to_string()))
-}
-
-fn core_find_thread_summary_single(
-    repo: &Repository,
-    thread: &str,
-) -> objects::error::Result<Option<StatusThreadSummary>> {
-    find_thread_summary_single(repo, thread)
-        .map(|summary| summary.map(core_thread_summary))
-        .map_err(|err| objects::HeddleError::Config(err.to_string()))
-}
-
-fn core_recommended_action_template(
-    action: &str,
-) -> Option<super::command_catalog::ActionTemplate> {
-    ActionFields::from_action(action).template
-}
-
 fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
     CoreGitIndexPlan {
         commit_mode: plan.commit_mode,
@@ -449,56 +376,6 @@ fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
         untracked_paths: plan.untracked_paths,
         will_commit: plan.will_commit,
         preserved_after_commit: plan.preserved_after_commit,
-    }
-}
-
-fn core_thread_summary(summary: super::thread::ThreadSummary) -> StatusThreadSummary {
-    StatusThreadSummary {
-        name: summary.name,
-        base_state: summary.base_state,
-        base_root: summary.base_root,
-        current_state: summary.current_state,
-        path: summary.path,
-        execution_path: summary.execution_path,
-        session_id: summary.session_id,
-        heddle_session_id: summary.heddle_session_id,
-        actor: summary.actor.map(|actor| ActorInfo {
-            provider: actor.provider,
-            model: actor.model,
-        }),
-        harness: summary.harness,
-        thinking_level: summary.thinking_level,
-        usage_summary: summary.usage_summary,
-        last_progress_at: summary.last_progress_at,
-        report_flush_state: summary.report_flush_state,
-        attach_reason: summary.attach_reason,
-        thread_mode: summary.thread_mode,
-        thread_state: summary.thread_state,
-        freshness: summary.freshness,
-        target_thread: summary.target_thread,
-        parent_thread: summary.parent_thread,
-        child_threads: summary.child_threads,
-        task: summary.task,
-        promotion_suggested: summary.promotion_suggested,
-        impact_categories: summary.impact_categories,
-        heavy_impact_paths: summary.heavy_impact_paths,
-        changed_paths: summary.changed_paths,
-        verification_summary: summary.verification_summary,
-        confidence_summary: summary.confidence_summary,
-        integration_policy_result: summary.integration_policy_result,
-        coordination_status: core_coordination_status(summary.coordination_status),
-        is_current: summary.is_current,
-        is_isolated: summary.is_isolated,
-    }
-}
-
-fn core_coordination_status(status: super::thread::CoordinationStatus) -> CoordinationStatus {
-    match status {
-        super::thread::CoordinationStatus::Clean => CoordinationStatus::Clean,
-        super::thread::CoordinationStatus::Ahead => CoordinationStatus::Ahead,
-        super::thread::CoordinationStatus::Diverged => CoordinationStatus::Diverged,
-        super::thread::CoordinationStatus::Blocked => CoordinationStatus::Blocked,
-        super::thread::CoordinationStatus::MergeReady => CoordinationStatus::MergeReady,
     }
 }
 
@@ -1464,6 +1341,9 @@ fn checkpoint_blocker_text(blocker: &str) -> String {
 }
 
 fn human_status_blocker_text(blocker: &str) -> String {
+    if blocker.starts_with("Verification: ") && blocker.contains("Heddle worktree path(s)") {
+        return blocker.to_string();
+    }
     if let Some(summary) = blocker
         .strip_prefix("Mapping: ")
         .or_else(|| blocker.strip_prefix("Heddle: "))
@@ -1544,23 +1424,6 @@ fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupAct
 #[cfg(test)]
 fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
     heddle_core::assess_materialized_threads(repo)
-}
-
-fn first_capture_identity_notice(
-    repo: &Repository,
-    current_state: Option<&objects::object::State>,
-) -> Result<Option<String>> {
-    if !current_state.map(is_synthetic_root).unwrap_or(true) {
-        return Ok(None);
-    }
-    let user_config = UserConfig::load_default().unwrap_or_default();
-    let principal = resolve_principal(repo, &user_config)?;
-    if principal_is_default_unknown(&principal) {
-        return Ok(Some(
-            "no principal configured; the first capture/checkpoint would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
-        ));
-    }
-    Ok(None)
 }
 
 fn render_status_changes(output: &StatusOutput) {
@@ -1992,15 +1855,16 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
+    use heddle_core::ActorInfo;
     use repo::{AgentUsageSummary, Repository};
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
-        ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
+        ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
         PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
-        render_status_materialized, resolve_coordination_with_trust,
+        build_status_output, combined_verdict_axes, coordination_axis_clean,
+        coordination_label, render_status_materialized, resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[

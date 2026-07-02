@@ -5,16 +5,14 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck, VerifyOptions,
-    VerifyReport, verify as core_verify,
+    RepositoryVerificationState, VerificationCheck, VerifyOptions, VerifyReport,
+    verify as core_verify,
 };
-use objects::HeddleError;
 use repo::Repository;
 
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    git_overlay_health::{build_plain_git_verification_probe, build_repository_verification_state},
 };
 use crate::{
     cli::{Cli, should_output_json, style},
@@ -27,11 +25,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let ctx = verify_execution_context_from_cli(cli, &start)?;
-    let output = core_verify(
-        &ctx,
-        VerifyOptions::new(core_plain_git_probe, core_repository_trust)
-            .with_start_path(start.clone()),
-    )?;
+    let output = core_verify(&ctx, VerifyOptions::new().with_start_path(start.clone()))?;
     if profile_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
@@ -118,16 +112,6 @@ fn verify_execution_context_from_cli(
     }
 
     Ok(builder.build())
-}
-
-fn core_plain_git_probe(start: &Path) -> objects::error::Result<Option<PlainGitVerifyProbe>> {
-    build_plain_git_verification_probe(start)
-        .map(|probe| probe.map(|probe| PlainGitVerifyProbe { trust: probe.trust }))
-        .map_err(|err| HeddleError::Config(err.to_string()))
-}
-
-fn core_repository_trust(repo: &Repository) -> objects::error::Result<RepositoryVerificationState> {
-    Ok(build_repository_verification_state(repo))
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {
