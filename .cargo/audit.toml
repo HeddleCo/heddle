@@ -22,4 +22,12 @@ ignore = [
     # biscuit-quote → biscuit-auth 6.0 (heddle-client). No runtime exposure,
     # no CVE. Remove when biscuit-auth drops it. (Mirrors deny.toml.)
     "RUSTSEC-2026-0173",
+
+    # quick-xml 0.26 NsReader unbounded namespace-declaration allocation (DoS).
+    # Dev-only: inferno 0.11 → pprof 0.15 flamegraph, a [dev-dependencies] of
+    # heddle-semantic used by criterion benchmarks — not in any shipped binary,
+    # and the vulnerable untrusted-XML NsReader path is unreachable (inferno
+    # writes SVGs). Remove when pprof/inferno bump quick-xml. (Mirrors deny.toml.)
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
