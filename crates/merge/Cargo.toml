@@ -15,10 +15,10 @@ name = "merge"
 
 [dependencies]
 anyhow.workspace = true
-heddle-format = { path = "../format", version = "0.6" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
+heddle-format = { path = "../format", version = "0.7" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.7" }
 similar.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.6", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.7", features = ["memory-backend"] }

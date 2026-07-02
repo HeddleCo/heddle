@@ -16,7 +16,7 @@ categories.workspace = true
 # when they explicitly built with `--no-default-features`. Default-on
 # preserves the historical behavior; downstream can disable with
 # `--no-default-features` cleanly.
-objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.7" }
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
