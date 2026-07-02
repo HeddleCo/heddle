@@ -1711,6 +1711,42 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     assert_eq!(reopened.head().unwrap(), Some(state1.change_id));
 }
 
+/// Characterization: git overlay HEAD inspection matches attached/detached/unborn
+/// symref semantics previously obtained from manual `.git/HEAD` parsing.
+#[test]
+fn git_overlay_head_state_matches_symref_semantics() {
+    let temp_dir = TempDir::new().unwrap();
+    let git_dir = temp_dir.path().join(".git");
+    sley::Repository::init_bare(&git_dir).expect("init bare .git");
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    assert_eq!(
+        repo.git_overlay_current_branch().unwrap(),
+        Some("main".to_string())
+    );
+    assert!(!repo.git_overlay_head_is_detached().unwrap());
+
+    let oid = GitObjectId::from_hex(
+        GitObjectFormat::Sha1,
+        "0000000000000000000000000000000000000002",
+    )
+    .unwrap();
+    std::fs::write(git_dir.join("HEAD"), format!("{oid}\n")).unwrap();
+    assert_eq!(repo.git_overlay_current_branch().unwrap(), None);
+    assert!(repo.git_overlay_head_is_detached().unwrap());
+    assert_eq!(
+        repo.git_overlay_detached_head_commit().unwrap(),
+        Some(oid.to_string())
+    );
+
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/unborn\n").unwrap();
+    assert_eq!(
+        repo.git_overlay_current_branch().unwrap(),
+        Some("unborn".to_string())
+    );
+}
+
 /// Regression for heddle#152: `heddle clone <url>` produces a directory
 /// whose embedded `.git/` is a bare mirror (no working tree). Shelling
 /// out to `git -C <root> status --porcelain` then fails with

@@ -2753,10 +2753,9 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
     Ok(())
 }
 
-/// Read git's HEAD ref via `sley::Repository::discover` (~25ms — full repository
-/// inspection). Used as a fallback when the fast path can't parse the
-/// raw `.git/HEAD` file (e.g. detached HEAD, multi-worktree layouts).
-fn detect_git_head_state_via_sley(path: &Path) -> Result<Option<GitHeadState>> {
+/// Read git's HEAD via sley's [`SleyRepository::head_state`], including
+/// worktree `gitdir:` indirections and detached HEAD.
+fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
     let repo = SleyRepository::discover(path).map_err(|error| {
         HeddleError::Config(format!(
             "failed to inspect git repository at '{}': {}",
@@ -2764,38 +2763,29 @@ fn detect_git_head_state_via_sley(path: &Path) -> Result<Option<GitHeadState>> {
             error
         ))
     })?;
-    let head = match repo.head() {
+    let head = match repo.head_state() {
         Ok(head) => head,
         Err(_) => return Ok(None),
     };
 
+    if head.is_missing() {
+        return Ok(None);
+    }
     if let Some(name) = head.branch_name() {
+        if name.is_empty() {
+            return Ok(None);
+        }
         return Ok(Some(GitHeadState::Attached(name.to_string())));
     }
     if head.is_detached()
-        && let Some(id) = head.oid
+        && let Some(id) = head.oid()
     {
         return Ok(Some(GitHeadState::Detached(id)));
     }
     Ok(None)
 }
 
-fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
-    if let Some(head) = detect_git_head_fast(path) {
-        return Ok(Some(head));
-    }
-    detect_git_head_state_via_sley(path)
-}
-
 /// Detect git's current HEAD branch.
-///
-/// The fast path reads `.git/HEAD` directly as text. `.git/HEAD` is a
-/// tiny file (~30 bytes for `ref: refs/heads/<name>\n`) and a direct
-/// read is ~50us vs. repository discovery's ~25ms full repository
-/// inspection. Falls back to sley only for the cases the text parser
-/// can't handle: detached HEAD, multi-worktree `gitdir:` indirections,
-/// and any malformed file (where we'd rather surface the right error
-/// than guess).
 fn detect_git_head(path: &Path) -> Result<Option<Head>> {
     if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
         return Ok(Some(Head::Attached {
@@ -2803,32 +2793,6 @@ fn detect_git_head(path: &Path) -> Result<Option<Head>> {
         }));
     }
     Ok(None)
-}
-
-/// Fast path for `.git/HEAD` parsing. Returns `Some(GitHeadState::Attached)`
-/// when `.git/HEAD` is the simple `ref: refs/heads/<name>` form;
-/// returns `None` for any case we don't trust ourselves to parse
-/// correctly (detached HEAD raw OIDs, `gitdir:` worktree pointers,
-/// missing files), letting the sley fallback handle it.
-fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
-    let head_path = path.join(".git").join("HEAD");
-    // `.git` may also be a *file* (the gitdir: pointer used by
-    // worktrees and submodules) — don't try to read it as a directory.
-    if !head_path.is_file() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&head_path).ok()?;
-    let trimmed = content.trim();
-    let suffix = trimmed.strip_prefix("ref: ")?;
-    let suffix_ref = GitRefName::new(suffix);
-    if suffix_ref.content_namespace() != Some(GitRefContentNamespace::Branch) {
-        return None;
-    }
-    let name = suffix_ref.short_name()?.to_string();
-    if name.is_empty() {
-        return None;
-    }
-    Some(GitHeadState::Attached(name))
 }
 
 fn resolve_git_dir(path: &Path) -> Result<PathBuf> {

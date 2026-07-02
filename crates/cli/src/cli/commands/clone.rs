@@ -901,10 +901,10 @@ fn select_clone_thread(
 /// files, or symrefs outside `refs/heads/` — none of which can drive
 /// thread selection.
 fn read_git_head_branch(git_dir: &Path) -> Option<String> {
-    let contents = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let trimmed = contents.trim();
-    let suffix = trimmed.strip_prefix("ref: ")?;
-    let branch = suffix.strip_prefix("refs/heads/")?;
+    let worktree = git_dir.parent().unwrap_or(git_dir);
+    let repo = open_repo(worktree).ok()?;
+    let head = repo.head_state().ok()?;
+    let branch = head.branch_name()?;
     if branch.is_empty() {
         None
     } else {
