@@ -33,7 +33,7 @@ use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
 use crate::{
-    core::ContentAddressedMount,
+    core::{ContentAddressedMount, MAX_MOUNT_HOT_FILE_SIZE},
     error::MountError,
     shell::{NodeId, NodeKind, PlatformShell},
 };
@@ -489,6 +489,61 @@ fn write_past_end_zero_fills() {
     let bytes = read_captured_blob(&mount, &new_id, "short.txt");
     assert_eq!(bytes, b"abc\0\0\0\0\0\0\0XYZ");
     assert_eq!(bytes.len(), 13);
+}
+
+/// heddle#877 / HEDDLE-DR-5: wire offset+len must be clamped before
+/// `Vec::resize` — overflow must not panic and huge offsets must not
+/// attempt multi-TiB allocations.
+#[test]
+fn write_rejects_overflowing_offset_plus_length() {
+    let (_temp, mount) = mount_with_seed("big.txt", b"x");
+    let node = mount.lookup_path("big.txt").unwrap();
+    let err = mount.write(node, u64::MAX, &[0u8]).unwrap_err();
+    assert!(
+        matches!(err, MountError::InvalidArgument(_)),
+        "got {err:?}"
+    );
+    assert_eq!(err.to_errno(), libc::EINVAL);
+}
+
+#[test]
+fn write_rejects_extent_beyond_max_hot_file_size() {
+    let (_temp, mount) = mount_with_seed("cap.txt", b"x");
+    let node = mount.lookup_path("cap.txt").unwrap();
+    let err = mount
+        .write(node, MAX_MOUNT_HOT_FILE_SIZE, &[0u8])
+        .unwrap_err();
+    assert!(matches!(err, MountError::FileTooLarge(_)), "got {err:?}");
+    assert_eq!(err.to_errno(), libc::EFBIG);
+}
+
+#[test]
+fn write_in_bounds_at_max_hot_file_size_succeeds() {
+    let (_temp, mount) = mount_with_seed("edge.txt", b"");
+    let node = mount.lookup_path("edge.txt").unwrap();
+    let written = mount
+        .write(node, MAX_MOUNT_HOT_FILE_SIZE - 1, b"z")
+        .unwrap();
+    assert_eq!(written, 1);
+}
+
+#[test]
+fn set_attrs_truncate_rejects_beyond_max_hot_file_size() {
+    use crate::shell::AttrUpdate;
+
+    let (_temp, mount) = mount_with_seed("trunc.txt", b"hi");
+    let node = mount.lookup_path("trunc.txt").unwrap();
+    let err = mount
+        .set_attrs(
+            node,
+            AttrUpdate {
+                size: Some(MAX_MOUNT_HOT_FILE_SIZE + 1),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, MountError::FileTooLarge(_)), "got {err:?}");
+    assert_eq!(err.to_errno(), libc::EFBIG);
 }
 
 /// Serializes the env-mutating signing test(s) below: they pin the
