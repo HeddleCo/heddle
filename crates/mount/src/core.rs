@@ -103,6 +103,48 @@ const DEFAULT_PROMOTION_IDLE: Duration = Duration::from_secs(2);
 /// catches process-pause/agent-crash leaks without burning CPU.
 const DEFAULT_SWEEP_INTERVAL: Option<Duration> = Some(Duration::from_secs(5));
 
+/// Maximum hot-buffer size accepted by [`ContentAddressedMount::write`] and
+/// [`ContentAddressedMount::apply_truncate`]. Matches the 100 MiB cap in
+/// `repo::worktree_walk` so mount promotion cannot build blobs capture would
+/// reject anyway.
+pub(crate) const MAX_MOUNT_HOT_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
+/// Reject wire offsets/sizes at the trust boundary before they reach
+/// `Vec::resize` (overflow panic or multi-TiB allocation abort).
+fn validate_write_extent(offset: u64, data_len: usize) -> Result<usize> {
+    let data_len_u64 = u64::try_from(data_len).map_err(|_| {
+        MountError::InvalidArgument(format!("write length {data_len} does not fit in u64"))
+    })?;
+    let end = offset.checked_add(data_len_u64).ok_or_else(|| {
+        MountError::InvalidArgument(format!(
+            "write offset {offset} + length {data_len} overflows u64"
+        ))
+    })?;
+    if end > MAX_MOUNT_HOT_FILE_SIZE {
+        return Err(MountError::FileTooLarge(format!(
+            "write would extend file to {end} bytes (max {MAX_MOUNT_HOT_FILE_SIZE})"
+        )));
+    }
+    usize::try_from(end).map_err(|_| {
+        MountError::InvalidArgument(format!(
+            "write extent end {end} does not fit in usize on this platform"
+        ))
+    })
+}
+
+fn validate_truncate_size(new_size: u64) -> Result<usize> {
+    if new_size > MAX_MOUNT_HOT_FILE_SIZE {
+        return Err(MountError::FileTooLarge(format!(
+            "truncate to {new_size} bytes exceeds max {MAX_MOUNT_HOT_FILE_SIZE}"
+        )));
+    }
+    usize::try_from(new_size).map_err(|_| {
+        MountError::InvalidArgument(format!(
+            "truncate size {new_size} does not fit in usize on this platform"
+        ))
+    })
+}
+
 /// Tunables for when buffered writes get promoted to CAS.
 #[derive(Clone, Copy, Debug)]
 pub struct PromotionPolicy {
@@ -2364,6 +2406,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     }
 
     fn apply_truncate(&self, node: NodeId, new_size: u64) -> Result<()> {
+        let new_size = validate_truncate_size(new_size)?;
         let record = self.record_for(node)?;
         let (path, mode, captured_blob) = match &record {
             NodeRecord::File {
@@ -2419,7 +2462,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             if let Some(id) = id
                 && let Some(buf) = pending.hot.get_mut(&id)
             {
-                buf.bytes.resize(new_size as usize, 0);
+                buf.bytes.resize(new_size, 0);
                 buf.last_touched = Instant::now();
                 Phase1::ResizedInPlace
             } else {
@@ -2449,7 +2492,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             Some(hash) => (*self.load_blob_bytes(&hash)?).to_vec(),
             None => Vec::new(),
         };
-        bytes.resize(new_size as usize, 0);
+        bytes.resize(new_size, 0);
         let mut pending = self.inner.pending.lock_or_poisoned();
         if orphan {
             // Per-NodeId buffer only. Skip the tombstone-clear and
@@ -3386,6 +3429,10 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
     }
 
     fn write(&self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize> {
+        let end = validate_write_extent(offset, data.len())?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            MountError::InvalidArgument(format!("write offset {offset} does not fit in usize"))
+        })?;
         // Determine the mount-relative path and mode to key the hot
         // buffer on. New files (`PendingFile`) carry their path
         // directly; pre-existing files identify by the parent's
@@ -3534,8 +3581,6 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             bytes: seed_bytes.unwrap_or_default(),
             last_touched: Instant::now(),
         });
-        let offset = offset as usize;
-        let end = offset + data.len();
         // POSIX `pwrite` past EOF zero-fills the gap.
         if buf.bytes.len() < end {
             buf.bytes.resize(end, 0);

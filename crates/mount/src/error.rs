@@ -59,6 +59,11 @@ pub enum MountError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// A write or truncate would grow the hot buffer past the mount's
+    /// configured maximum file size. Maps to `EFBIG`.
+    #[error("file too large: {0}")]
+    FileTooLarge(String),
+
     /// The platform shell failed to construct its mount session
     /// (e.g. the Swift FSKit shim returned a null session handle).
     /// Maps to `EIO`: the mount never came up, nothing to retry
@@ -91,6 +96,7 @@ impl MountError {
             MountError::IsADirectory(_) => libc::EISDIR,
             MountError::NotEmpty(_) => libc::ENOTEMPTY,
             MountError::InvalidArgument(_) => libc::EINVAL,
+            MountError::FileTooLarge(_) => libc::EFBIG,
             MountError::SessionInit(_) => libc::EIO,
             MountError::Store(HeddleError::NotFound(_))
             | MountError::Store(HeddleError::StateNotFound(_))
