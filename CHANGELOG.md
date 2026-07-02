@@ -13,6 +13,86 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Added
+
+- **`--git-mirror` hosted push + generic progress substrate.** A new
+  multi-ref git-mirror push plan builds one pack over all resolved ref
+  targets and emits checkpoint-less ref updates in a single round trip; a
+  near-zero-cost `Progress`/`Sink` substrate threads live counts through the
+  parallel materialization seam and the git-mirror pack upload. Hosted
+  git-overlay push now defaults to this git-mirror path with live progress
+  output. (#834, #835, #844, #847, #848)
+
+### Changed
+
+- **Internal consolidation.** A series of behavior-neutral refactors
+  unified previously-duplicated logic behind shared, typed APIs: a single
+  tree-integrity walk backs both fsck's tree and blob checks; a typed tree
+  path resolver replaces three private recursive walkers; state-closure
+  traversal is unified in `heddle-wire`; thread capture-split/move moved
+  into `heddle-core`; ref-name classification, `ObjectType` wire mapping,
+  and `RevisionAddress` git-ref expectations are now typed and centralized;
+  repo state resolution collapsed onto one policy-driven API, deleting six
+  scattered per-command resolvers; and the tree-merge engine with rename
+  detection moved into its own `crates/merge`. Also folds in the broader
+  "Heddle improvement program" foundation wave (command facades, operation
+  seams, first-class Gitlink tree entries, hardened CLI exit codes). No
+  user-visible behavior change. (#832, #860, #861, #863, #854, #864, #865,
+  #856, #867, #868, #869, #870, #871, #872, #873)
+- **Homebrew tap moved.** The tap repo is now `HeddleCo/homebrew-tap`, so
+  install is `brew install HeddleCo/tap/heddle` instead of the redundant
+  `HeddleCo/heddle/heddle` path. (#831)
+
+### Fixed
+
+- **`heddle://` hosted remotes on `fetch`.** A git-overlay repo with a
+  `heddle://` remote previously hard-errored on `fetch`/`fetch --all`
+  (diverted into the git-overlay exporter, which rejects the hosted
+  scheme); each remote is now classified by its own scheme so mixed
+  git+hosted remote sets route correctly. (#839, #840)
+- **Symlinks served from the blob content walk.** `get_blob`/`get_blame`
+  and other content readers treated a tree's `Symlink` entry as "not
+  found" instead of serving the underlying blob (the link target path);
+  symlinks now resolve like any other blob without being followed. (#841,
+  #850)
+- **`push <remote> <thread>` resolves state from the named thread.**
+  Previously it resolved the pushed state from the current checkout's HEAD
+  regardless of the named thread, silently writing the wrong state under
+  that thread's ref; it now resolves from the named thread's tip and
+  refuses rather than falling back to HEAD. `--all-threads` now fans out
+  consistently on both the native and hosted push paths. (#837, #838,
+  #842)
+- **Discussions carried forward on non-capture state advances.** Annotation-
+  driven HEAD advances (e.g. `context set`) zeroed the discussions
+  side-band pointer, so `discuss show` on HEAD could no longer resolve the
+  thread; discussions now carry forward on these advances too, and `discuss
+  show` gained a `--state` flag. (#836, #843)
+- **0.5.1 review nits.** Documented pull's intentional unconditional CAS
+  on ref application, normalized parsed Git commit OIDs to lowercase hex,
+  and made pack building on this path single-pass. (#791, #851)
+- **`SHA256SUMS` checksum aggregation strips Windows CRLF.** The Windows
+  build's `.sha256` sidecar used CRLF line endings, which broke the Scoop
+  manifest's anchored checksum lookup; aggregation now normalizes to LF so
+  published checksums are consistent across platforms. (#824)
+
+### Performance
+
+- **`adopt`/ingest quadratic-cost fixes at scale.** A chain of fixes closes
+  out the remaining super-linear cost of adopting/importing many refs:
+  incremental (not full-rescan) ref-summary-index rebuilds, batched
+  ref-publish writes instead of one-at-a-time, batched reflog→oplog
+  emission (one log append instead of one per entry), skipping repeated
+  full-oplog reparsing on every ref read, and batching ref-publish fsyncs.
+  Net effect on an 800-ref adopt: ~46s down to a small fraction of that,
+  with `status` on an adopted repo no longer re-parsing the oplog
+  thousands of times. (#825, #826, #827, #830, #845, #849)
+- **`capture`/`commit` share one worktree-status walk.** The dirty
+  git-overlay path re-walked and re-hashed the worktree several times
+  before any ref moved (large-capture preflight, mutation preflight, both
+  checkpoint preflights); all now share the single pre-mutation status
+  already computed at the top of the command, matching the fast-path
+  threading `capture` already had. (#829)
+
 ## 0.6.0 - Unreleased
 
 ### Added
