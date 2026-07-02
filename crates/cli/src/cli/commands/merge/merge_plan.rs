@@ -8,7 +8,7 @@ use repo::{CommitGraphIndex, Repository};
 
 use super::{
     merge_relation::{MergeRelation, MergeRelationKind},
-    tree_merge_options,
+    map_tree_merge_error, tree_merge_options, RepositoryMergeBlobSource,
 };
 use crate::cli::commands::RecoveryAdvice;
 
@@ -105,13 +105,16 @@ impl MergePlan {
         let base_tree = load_tree(repo, &merge_base_id)?;
         let current_tree = load_tree(repo, current_change_id)?;
         let target_tree = load_tree(repo, target_change_id)?;
+        let blob_source = RepositoryMergeBlobSource { repo };
         let merge_result = merge_trees(
             repo.store(),
+            &blob_source,
             &base_tree,
             &current_tree,
             &target_tree,
             tree_merge_options(labels),
-        )?;
+        )
+        .map_err(map_tree_merge_error)?;
         let relation_kind = if merge_result.conflicts.is_empty() {
             MergeRelationKind::CleanApply
         } else {

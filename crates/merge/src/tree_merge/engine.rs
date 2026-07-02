@@ -4,7 +4,7 @@ use objects::{object::Tree, store::ObjectStore};
 use tracing::debug;
 
 use super::{
-    DetectedRename, DirectoryRename, MergeOptions, TreeMergeResult,
+    DetectedRename, DirectoryRename, MergeBlobSource, MergeOptions, TreeMergeResult,
     executor::{merge_with_renames, merge_without_renames},
     rename_matcher::infer_directory_renames,
     renames::{MergeRenameMap, detect_merge_renames},
@@ -12,6 +12,7 @@ use super::{
 
 pub(crate) fn merge_trees(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,
@@ -30,6 +31,7 @@ pub(crate) fn merge_trees(
         if rename_map.our_renames.is_empty() && rename_map.their_renames.is_empty() {
             merge_without_renames(
                 store,
+                blob_source,
                 base_tree,
                 our_tree,
                 their_tree,
@@ -39,6 +41,7 @@ pub(crate) fn merge_trees(
         } else {
             merge_with_renames(
                 store,
+                blob_source,
                 base_tree,
                 our_tree,
                 their_tree,

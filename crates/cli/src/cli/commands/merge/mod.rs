@@ -6,7 +6,7 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{DiffReport, SemanticChangeEntry, compute_state_diff, compute_tree_diff};
 use objects::{
-    object::{Attribution, ChangeId, ThreadName, Tree},
+    object::{Attribution, ChangeId, ContentHash, ThreadName, Tree},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
@@ -48,13 +48,43 @@ mod merge_relation;
 
 use git_commit::{GitCommitInfo, GitCommitPreview};
 use ::merge::{
-    ConflictLabels, MergeOptions, MergeStrategy, RenameMatcherStats, RenameOptions,
-    SemanticMergeFn, SemanticSimilarityFn, detect_renames_between_trees, merge_trees,
+    ConflictLabels, MergeBlobSource, MergeError, MergeOptions, MergeStrategy, RenameMatcherStats,
+    RenameOptions, SemanticMergeFn, SemanticSimilarityFn, detect_renames_between_trees,
+    merge_trees,
 };
 use merge_algo::apply_merged_tree;
 use merge_plan::MergePlan;
 use merge_relation::MergeRelationKind;
 use repo::{CommitGraphIndex, find_merge_base};
+
+/// CLI merge planning must hydrate partial-clone blobs before content merge.
+/// The engine stays repository-free and only asks this boundary for bytes.
+struct RepositoryMergeBlobSource<'repo> {
+    repo: &'repo Repository,
+}
+
+impl MergeBlobSource for RepositoryMergeBlobSource<'_> {
+    fn load_blob(&self, hash: &ContentHash, _path: &str) -> Result<Vec<u8>> {
+        Ok(self.repo.require_blob(hash)?.content().to_vec())
+    }
+}
+
+fn map_tree_merge_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<MergeError>() {
+        Some(MergeError::RepositoryIntegrity {
+            error,
+            unsafe_condition,
+            would_change,
+            preserved,
+        }) => anyhow!(RecoveryAdvice::merge_integrity_refusal(
+            error.clone(),
+            unsafe_condition.clone(),
+            would_change.clone(),
+            preserved.clone(),
+        )),
+        None => error,
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct RenameEntry {
@@ -1812,13 +1842,16 @@ pub(crate) fn bench_three_way_merge(
     our_tree: &Tree,
     their_tree: &Tree,
 ) -> Result<(Tree, usize, usize, usize)> {
+    let blob_source = RepositoryMergeBlobSource { repo };
     let result = merge_trees(
         repo.store(),
+        &blob_source,
         base_tree,
         our_tree,
         their_tree,
         tree_merge_options(ConflictLabels::DEFAULT),
-    )?;
+    )
+    .map_err(map_tree_merge_error)?;
     Ok((
         result.tree,
         result.conflicts.len(),

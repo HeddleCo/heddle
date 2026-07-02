@@ -14,13 +14,14 @@ use objects::{
 };
 
 use super::{
-    ConflictLabels, RenameMatch, SemanticMergeFn,
+    ConflictLabels, MergeBlobSource, MergeError, RenameMatch, SemanticMergeFn,
     rename_matcher::flatten_tree,
     renames::MergeRenameMap,
 };
 
 pub(super) fn merge_with_renames(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,
@@ -37,6 +38,7 @@ pub(super) fn merge_with_renames(
 
     apply_renames(
         store,
+        blob_source,
         &rename_map.our_renames,
         &rename_map.their_renames,
         &their_flat,
@@ -48,6 +50,7 @@ pub(super) fn merge_with_renames(
     )?;
     apply_renames(
         store,
+        blob_source,
         &rename_map.their_renames,
         &rename_map.our_renames,
         &our_flat,
@@ -60,6 +63,7 @@ pub(super) fn merge_with_renames(
 
     merge_remaining_paths(
         store,
+        blob_source,
         &base_flat,
         &our_flat,
         &their_flat,
@@ -75,6 +79,7 @@ pub(super) fn merge_with_renames(
 
 pub(super) fn merge_without_renames(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,
@@ -83,6 +88,7 @@ pub(super) fn merge_without_renames(
 ) -> Result<(Tree, Vec<String>)> {
     three_way_merge_recursive(
         store,
+        blob_source,
         base_tree,
         our_tree,
         their_tree,
@@ -94,6 +100,7 @@ pub(super) fn merge_without_renames(
 
 fn apply_renames(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     active_renames: &HashMap<String, RenameMatch>,
     opposing_renames: &HashMap<String, RenameMatch>,
     opposing_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
@@ -126,6 +133,7 @@ fn apply_renames(
             if opposing_hash != &rename.from_hash {
                 let merged_hash = three_way_content_merge(
                     store,
+                    blob_source,
                     &rename.from_hash,
                     &rename.to_hash,
                     opposing_hash,
@@ -155,6 +163,7 @@ fn apply_renames(
 
 fn merge_remaining_paths(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
     our_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
     their_flat: &HashMap<String, (ContentHash, objects::object::EntryType)>,
@@ -189,6 +198,7 @@ fn merge_remaining_paths(
                 } else {
                     content_conflict_merge(
                         store,
+                        blob_source,
                         our_hash,
                         their_hash,
                         path,
@@ -202,14 +212,28 @@ fn merge_remaining_paths(
             (Some((base_hash, _)), Some((our_hash, _)), None) => {
                 if our_hash != base_hash {
                     let merged_hash =
-                        modify_delete_conflict_merge(store, our_hash, path, conflicts, labels)?;
+                        modify_delete_conflict_merge(
+                            store,
+                            blob_source,
+                            our_hash,
+                            path,
+                            conflicts,
+                            labels,
+                        )?;
                     merged_flat.insert(path.clone(), merged_hash);
                 }
             }
             (Some((base_hash, _)), None, Some((their_hash, _))) => {
                 if their_hash != base_hash {
                     let merged_hash =
-                        modify_delete_conflict_merge(store, their_hash, path, conflicts, labels)?;
+                        modify_delete_conflict_merge(
+                            store,
+                            blob_source,
+                            their_hash,
+                            path,
+                            conflicts,
+                            labels,
+                        )?;
                     merged_flat.insert(path.clone(), merged_hash);
                 }
             }
@@ -223,6 +247,7 @@ fn merge_remaining_paths(
                 } else {
                     three_way_content_merge(
                         store,
+                        blob_source,
                         base_hash,
                         our_hash,
                         their_hash,
@@ -242,6 +267,7 @@ fn merge_remaining_paths(
 
 fn three_way_content_merge(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_hash: &ContentHash,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
@@ -262,6 +288,7 @@ fn three_way_content_merge(
 
     text_hunk_merge_blobs(
         store,
+        blob_source,
         base_hash,
         our_hash,
         their_hash,
@@ -274,6 +301,7 @@ fn three_way_content_merge(
 
 fn text_hunk_merge_blobs(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_hash: &ContentHash,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
@@ -284,9 +312,9 @@ fn text_hunk_merge_blobs(
 ) -> Result<ContentHash> {
     use crate::{ConflictMarkers, MergeOutcome, MergeStrategy, text_hunk_merge_with_markers};
 
-    let base_content = load_blob_content(store, base_hash, path)?;
-    let our_content = load_blob_content(store, our_hash, path)?;
-    let their_content = load_blob_content(store, their_hash, path)?;
+    let base_content = load_blob_content(blob_source, base_hash, path)?;
+    let our_content = load_blob_content(blob_source, our_hash, path)?;
+    let their_content = load_blob_content(blob_source, their_hash, path)?;
 
     let markers = ConflictMarkers {
         ours: labels.current,
@@ -333,7 +361,15 @@ fn text_hunk_merge_blobs(
         // never produced by text_hunk_merge (its signature has all three
         // inputs present; deletion is detected at the tree layer).
         MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
-            content_conflict_merge(store, our_hash, their_hash, path, conflicts, labels)
+            content_conflict_merge(
+                store,
+                blob_source,
+                our_hash,
+                their_hash,
+                path,
+                conflicts,
+                labels,
+            )
         }
     }
 }
@@ -346,17 +382,12 @@ fn text_hunk_merge_blobs(
 /// causes the merger to silently produce a result where the other side
 /// "wins" with no markers, committing a merge that loses data. Bail loudly
 /// so the user sees the corruption instead of inheriting a silent rewrite.
-fn load_blob_content(store: &impl ObjectStore, hash: &ContentHash, path: &str) -> Result<Vec<u8>> {
-    let blob = store.get_blob(hash)?.ok_or_else(|| {
-        anyhow!(merge_integrity_refusal(
-            "merge input blob {hash} for path {path:?} is missing from the object store; \
-             aborting to avoid silently merging against empty content",
-            format!("merge input path {path:?} references missing blob {hash} in the object store"),
-            "the merge would use empty bytes for the missing blob and could choose the other side cleanly, committing silent content loss without conflict markers",
-            "HEAD, refs, and worktree were left unchanged; any merge scratch objects written before this refusal are unreachable until a successful capture",
-        ))
-    })?;
-    Ok(blob.content().to_vec())
+fn load_blob_content(
+    blob_source: &impl MergeBlobSource,
+    hash: &ContentHash,
+    path: &str,
+) -> Result<Vec<u8>> {
+    blob_source.load_blob(hash, path)
 }
 
 /// Load a tree, surfacing an error if it's missing from the store.
@@ -388,26 +419,26 @@ fn merge_integrity_refusal(
     unsafe_condition: impl AsRef<str>,
     would_change: impl AsRef<str>,
     preserved: impl AsRef<str>,
-) -> String {
-    format!(
-        "{}\nUnsafe condition: {}\nWould change: {}\nPreserved: {}\nNext: heddle fsck --full",
-        summary.into(),
+) -> MergeError {
+    MergeError::repository_integrity_refusal(
+        summary,
         unsafe_condition.as_ref(),
         would_change.as_ref(),
-        preserved.as_ref()
+        preserved.as_ref(),
     )
 }
 
 fn content_conflict_merge(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
     path: &str,
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<ContentHash> {
-    let our_content = load_blob_content(store, our_hash, path)?;
-    let their_content = load_blob_content(store, their_hash, path)?;
+    let our_content = load_blob_content(blob_source, our_hash, path)?;
+    let their_content = load_blob_content(blob_source, their_hash, path)?;
     let blob = Blob::new(format_conflict_content(
         &our_content,
         &their_content,
@@ -420,12 +451,13 @@ fn content_conflict_merge(
 
 fn modify_delete_conflict_merge(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     kept_hash: &ContentHash,
     path: &str,
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<ContentHash> {
-    let kept_content = load_blob_content(store, kept_hash, path)?;
+    let kept_content = load_blob_content(blob_source, kept_hash, path)?;
     let blob = Blob::new(format_conflict_content(&kept_content, &[], labels));
     let hash = store.put_blob(&blob)?;
     conflicts.push(path.to_string());
@@ -494,6 +526,7 @@ fn build_nested_tree(
 
 fn three_way_merge_recursive(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,
@@ -541,6 +574,7 @@ fn three_way_merge_recursive(
             (None, Some(our), None) => merged_entries.push((*our).clone()),
             (Some(base), None, Some(their)) => merge_delete_changed_entry(
                 store,
+                blob_source,
                 base,
                 their,
                 &conflict_path,
@@ -550,6 +584,7 @@ fn three_way_merge_recursive(
             )?,
             (Some(base), Some(our), None) => merge_delete_changed_entry(
                 store,
+                blob_source,
                 base,
                 our,
                 &conflict_path,
@@ -560,6 +595,7 @@ fn three_way_merge_recursive(
             (None, Some(our), Some(their)) => {
                 merge_added_entries(
                     store,
+                    blob_source,
                     our,
                     their,
                     &conflict_path,
@@ -572,6 +608,7 @@ fn three_way_merge_recursive(
             (Some(base), Some(our), Some(their)) => {
                 merge_changed_entries(
                     store,
+                    blob_source,
                     base,
                     our,
                     their,
@@ -591,6 +628,7 @@ fn three_way_merge_recursive(
 
 fn merge_delete_changed_entry(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_entry: &&TreeEntry,
     kept_entry: &&TreeEntry,
     conflict_path: &str,
@@ -602,7 +640,7 @@ fn merge_delete_changed_entry(
         return Ok(());
     }
 
-    let kept_content = conflict_entry_content(store, kept_entry)?;
+    let kept_content = conflict_entry_content(store, blob_source, kept_entry)?;
     let blob = Blob::new(format_conflict_content(&kept_content, &[], labels));
     let hash = store.put_blob(&blob)?;
     merged_entries.push(TreeEntry::file(kept_entry.name().to_string(), hash, false)?);
@@ -612,6 +650,7 @@ fn merge_delete_changed_entry(
 
 fn merge_added_entries(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     our_entry: &&TreeEntry,
     their_entry: &&TreeEntry,
     conflict_path: &str,
@@ -625,6 +664,7 @@ fn merge_added_entries(
     } else if our_entry.is_tree() && their_entry.is_tree() {
         let (entry, sub_conflicts) = merge_subtrees(
             store,
+            blob_source,
             &Tree::new(),
             our_entry,
             their_entry,
@@ -635,7 +675,8 @@ fn merge_added_entries(
         merged_entries.push(entry);
         conflicts.extend(sub_conflicts);
     } else {
-        let conflict_content = generate_conflict_content(store, our_entry, their_entry, labels)?;
+        let conflict_content =
+            generate_conflict_content(store, blob_source, our_entry, their_entry, labels)?;
         let blob = Blob::new(conflict_content);
         let hash = store.put_blob(&blob)?;
         merged_entries.push(TreeEntry::file(our_entry.name().to_string(), hash, false)?);
@@ -647,6 +688,7 @@ fn merge_added_entries(
 
 fn merge_changed_entries(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_entry: &&TreeEntry,
     our_entry: &&TreeEntry,
     their_entry: &&TreeEntry,
@@ -686,6 +728,7 @@ fn merge_changed_entries(
         };
         let (entry, sub_conflicts) = merge_subtrees(
             store,
+            blob_source,
             &base_subtree,
             our_entry,
             their_entry,
@@ -710,6 +753,7 @@ fn merge_changed_entries(
         };
         let merged_hash = three_way_content_merge(
             store,
+            blob_source,
             &base_hash,
             &our_hash,
             &their_hash,
@@ -724,7 +768,8 @@ fn merge_changed_entries(
             our_entry.is_executable(),
         )?);
     } else {
-        let conflict_content = generate_conflict_content(store, our_entry, their_entry, labels)?;
+        let conflict_content =
+            generate_conflict_content(store, blob_source, our_entry, their_entry, labels)?;
         let blob = Blob::new(conflict_content);
         let hash = store.put_blob(&blob)?;
         merged_entries.push(TreeEntry::file(our_entry.name().to_string(), hash, false)?);
@@ -762,6 +807,7 @@ fn merge_mode_content_orthogonal_change(
 
 fn merge_subtrees(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_subtree: &Tree,
     our_entry: &TreeEntry,
     their_entry: &TreeEntry,
@@ -813,6 +859,7 @@ fn merge_subtrees(
     )?;
     let (merged_subtree, conflicts) = three_way_merge_recursive(
         store,
+        blob_source,
         base_subtree,
         &our_subtree,
         &their_subtree,
@@ -829,12 +876,13 @@ fn merge_subtrees(
 
 fn generate_conflict_content(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     our_entry: &TreeEntry,
     their_entry: &TreeEntry,
     labels: ConflictLabels<'_>,
 ) -> Result<Vec<u8>> {
-    let our_content = conflict_entry_content(store, our_entry)?;
-    let their_content = conflict_entry_content(store, their_entry)?;
+    let our_content = conflict_entry_content(store, blob_source, our_entry)?;
+    let their_content = conflict_entry_content(store, blob_source, their_entry)?;
     Ok(format_conflict_content(
         &our_content,
         &their_content,
@@ -842,7 +890,11 @@ fn generate_conflict_content(
     ))
 }
 
-fn conflict_entry_content(store: &impl ObjectStore, entry: &TreeEntry) -> Result<Vec<u8>> {
+fn conflict_entry_content(
+    store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
+    entry: &TreeEntry,
+) -> Result<Vec<u8>> {
     if entry.is_tree() {
         let Some(hash) = entry.tree_hash() else {
             return Err(anyhow!(merge_integrity_refusal(
@@ -872,7 +924,7 @@ fn conflict_entry_content(store: &impl ObjectStore, entry: &TreeEntry) -> Result
         };
         Ok(listing.into_bytes())
     } else if let Some(hash) = entry.leaf_content_hash() {
-        load_blob_content(store, &hash, entry.name())
+        load_blob_content(blob_source, &hash, entry.name())
     } else if let Some(target) = entry.gitlink_target() {
         Ok(gitlink_placeholder_bytes(&target))
     } else {
@@ -902,7 +954,8 @@ mod tests {
         let missing_hash = missing.hash();
         assert_ne!(present_hash, missing_hash);
 
-        let err = load_blob_content(&store, &missing_hash, "src/foo.rs")
+        let blob_source = &store;
+        let err = load_blob_content(&blob_source, &missing_hash, "src/foo.rs")
             .expect_err("expected a hard error on missing merge input");
         let msg = format!("{err}");
         assert!(
@@ -939,9 +992,50 @@ mod tests {
         let store = InMemoryStore::new();
         let blob = Blob::new(b"hello\nworld\n".to_vec());
         let hash = store.put_blob(&blob).unwrap();
+        let blob_source = &store;
         let content =
-            load_blob_content(&store, &hash, "src/bar.rs").expect("blob present in store");
+            load_blob_content(&blob_source, &hash, "src/bar.rs").expect("blob present in store");
         assert_eq!(content, b"hello\nworld\n");
+    }
+
+    #[test]
+    fn merge_trees_with_missing_base_blob_refuses_with_plain_store_source() {
+        let store = InMemoryStore::new();
+        let missing_base_hash = Blob::new(b"base\n".to_vec()).hash();
+        let our_hash = store.put_blob(&Blob::new(b"ours\n".to_vec())).unwrap();
+        let their_hash = store.put_blob(&Blob::new(b"theirs\n".to_vec())).unwrap();
+        let base_tree = Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), missing_base_hash, false).unwrap(),
+        ]);
+        let our_tree =
+            Tree::from_entries(vec![TreeEntry::file("file.txt".to_string(), our_hash, false)
+                .unwrap()]);
+        let their_tree =
+            Tree::from_entries(vec![TreeEntry::file("file.txt".to_string(), their_hash, false)
+                .unwrap()]);
+
+        let blob_source = &store;
+        let err = match crate::merge_trees(
+            &store,
+            &blob_source,
+            &base_tree,
+            &our_tree,
+            &their_tree,
+            crate::MergeOptions::default(),
+        ) {
+            Ok(_) => panic!("plain store blob source must refuse absent merge blobs"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.downcast_ref::<crate::MergeError>().is_some(),
+            "missing plain-store blob should stay typed as MergeError: {err}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("file.txt") && msg.contains(&missing_base_hash.to_hex()),
+            "merge-level refusal should name the path and missing base blob: {msg}"
+        );
     }
 
     /// Symmetric guard for [`load_blob_content`]: a missing subtree

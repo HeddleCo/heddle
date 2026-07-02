@@ -6,10 +6,13 @@ mod executor;
 mod rename_matcher;
 mod renames;
 
-use std::path::Path;
+use std::{error::Error, fmt, path::Path};
 
-use anyhow::Result;
-use objects::{object::Tree, store::ObjectStore};
+use anyhow::{Result, anyhow};
+use objects::{
+    object::{ContentHash, Tree},
+    store::ObjectStore,
+};
 
 use crate::{ConflictMarkers, MergeOutcome};
 
@@ -22,6 +25,76 @@ pub type SemanticMergeFn =
 
 /// Optional semantic similarity hook used by rename detection.
 pub type SemanticSimilarityFn = fn(&str, &str, &[u8], &[u8]) -> f64;
+
+/// Source for blob contents used by tree merge content resolution.
+pub trait MergeBlobSource {
+    fn load_blob(&self, hash: &ContentHash, path: &str) -> Result<Vec<u8>>;
+}
+
+impl<T> MergeBlobSource for &T
+where
+    T: ObjectStore + ?Sized,
+{
+    fn load_blob(&self, hash: &ContentHash, path: &str) -> Result<Vec<u8>> {
+        let blob = self.get_blob(hash)?.ok_or_else(|| {
+            anyhow!(MergeError::repository_integrity_refusal(
+                format!(
+                    "merge input blob {hash} for path {path:?} is missing from the object store; \
+                     aborting to avoid silently merging against empty content"
+                ),
+                format!("merge input path {path:?} references missing blob {hash} in the object store"),
+                "the merge would use empty bytes for the missing blob and could choose the other side cleanly, committing silent content loss without conflict markers",
+                "HEAD, refs, and worktree were left unchanged; any merge scratch objects written before this refusal are unreachable until a successful capture",
+            ))
+        })?;
+        Ok(blob.content().to_vec())
+    }
+}
+
+/// Typed merge-engine failures that callers can map to their own UX.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeError {
+    RepositoryIntegrity {
+        error: String,
+        unsafe_condition: String,
+        would_change: String,
+        preserved: String,
+    },
+}
+
+impl MergeError {
+    pub fn repository_integrity_refusal(
+        error: impl Into<String>,
+        unsafe_condition: impl Into<String>,
+        would_change: impl Into<String>,
+        preserved: impl Into<String>,
+    ) -> Self {
+        Self::RepositoryIntegrity {
+            error: error.into(),
+            unsafe_condition: unsafe_condition.into(),
+            would_change: would_change.into(),
+            preserved: preserved.into(),
+        }
+    }
+}
+
+impl fmt::Display for MergeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RepositoryIntegrity {
+                error,
+                unsafe_condition,
+                would_change,
+                preserved,
+            } => write!(
+                formatter,
+                "{error}\nUnsafe condition: {unsafe_condition}\nWould change: {would_change}\nPreserved: {preserved}\nNext: heddle fsck --full"
+            ),
+        }
+    }
+}
+
+impl Error for MergeError {}
 
 /// A file rename detected during tree merge planning.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,12 +186,13 @@ pub struct RenameDetectionResult {
 /// Merge three trees using the supplied object store.
 pub fn merge_trees(
     store: &impl ObjectStore,
+    blob_source: &impl MergeBlobSource,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,
     options: MergeOptions<'_>,
 ) -> Result<TreeMergeResult> {
-    engine::merge_trees(store, base_tree, our_tree, their_tree, options)
+    engine::merge_trees(store, blob_source, base_tree, our_tree, their_tree, options)
 }
 
 /// Detect file and directory renames between two trees.
