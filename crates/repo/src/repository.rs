@@ -2823,7 +2823,7 @@ fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
-mod git_remote_tracking_ahead_behind_characterization {
+mod tests {
     use std::{path::Path, process::Command};
 
     use tempfile::TempDir;
