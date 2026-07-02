@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     io::{self, Seek, SeekFrom, Write},
     sync::{
         Arc, Mutex,
@@ -84,8 +84,8 @@ struct GitPackPushPlan {
     pack_size: u64,
     /// Root oids the pack is built from. The native path has exactly one
     /// root (the checkpoint commit); the mirror path has one per resolved
-    /// ref target. `write_reachable_pack_to_writer` packs the transitive
-    /// closure of every root into a single pack.
+    /// ref target. The reachable-pack plan packs the transitive closure of
+    /// every root into a single pack.
     #[cfg_attr(not(test), allow(dead_code))]
     roots: Vec<GitObjectId>,
     /// Reachable pack bytes written once during planning; streamed on the wire
@@ -1892,9 +1892,6 @@ fn grpc_git_ref_kind(kind: ClassifiedGitRefKind) -> GrpcGitRefKind {
 }
 
 /// Plan a single pack over `roots` (N for the git-mirror path).
-/// `write_reachable_pack_to_writer` already takes `IntoIterator<Item =
-/// ObjectId>`, so the multi-root case needs no sley change — it packs the
-/// transitive closure of every root into one pack.
 fn build_git_lane_multi_root_pack_plan(
     git_repo: &SleyRepository,
     roots: Vec<GitObjectId>,
@@ -1905,39 +1902,44 @@ fn build_git_lane_multi_root_pack_plan(
             "cannot plan a Git pack with no roots".to_string(),
         ));
     }
-    let objects = git_repo.objects();
-    let mut pack_file = NamedTempFile::new().map_err(|err| {
+    let plan = git_repo
+        .reachable_pack_plan()
+        .roots(roots.iter().copied())
+        .build()
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}"))
+        })?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
+        })?;
+    let pack_file = NamedTempFile::new().map_err(|err| {
         ProtocolError::InvalidState(format!("create Git pack tempfile: {err}"))
     })?;
-    let pack = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
-        objects.as_ref(),
-        git_repo.object_format(),
-        roots.iter().copied(),
-        &HashSet::new(),
-        &mut pack_file,
-    )
-    .map_err(|err| ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}")))?
-    .ok_or_else(|| {
-        ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
-    })?;
-    if pack.pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
+    let prepared = plan
+        .prepare_to_file(pack_file.path())
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("write reachable Git pack tempfile: {err}"))
+        })?;
+    let pack_size = prepared.summary.pack_size;
+    let checksum = prepared.summary.checksum;
+    if pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
         return Err(ProtocolError::InvalidState(format!(
             "Git pack exceeds maximum transfer size of {} bytes; multi-pack split for repos over this size is a follow-up (plan §B.2)",
             wire::MAX_RECEIVED_GIT_PACK_SIZE
         )));
     }
     let chunk_size = chunk_size.max(1) as u64;
-    let chunk_count = pack.pack_size.div_ceil(chunk_size);
+    let chunk_count = pack_size.div_ceil(chunk_size);
     if chunk_count > u32::MAX as u64 {
         return Err(ProtocolError::InvalidState(
             "Git pack chunk count exceeds u32".to_string(),
         ));
     }
-    let transfer_id = format!("git-pack:{}", pack.checksum.to_hex());
+    let transfer_id = format!("git-pack:{}", checksum.to_hex());
     Ok(GitPackPushPlan {
         transfer_id,
-        pack_id: pack.checksum.as_bytes().to_vec(),
-        pack_size: pack.pack_size,
+        pack_id: checksum.as_bytes().to_vec(),
+        pack_size,
         roots,
         pack_file: Arc::new(Mutex::new(pack_file)),
     })
@@ -2802,6 +2804,8 @@ fn preferred_transport_mode(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::{TimeZone, Utc};
     use cli_shared::ClientConfig;
     use grpc::heddle::v1::{
@@ -3027,6 +3031,51 @@ mod tests {
             .map(git_ref_update_from_message)
             .cloned()
             .collect()
+    }
+
+    /// `ReachablePackPlan::prepare_to_file` must emit the same pack bytes as the
+    /// legacy `write_reachable_pack_to_writer` path (wire checksum + size).
+    #[test]
+    fn git_lane_reachable_pack_plan_matches_legacy_writer_checksum() {
+        let dir = TempDir::new().expect("tempdir");
+        let git = sley::Repository::init(dir.path()).expect("init git");
+        let commit_oid = write_commit(&git, "byte-identity");
+
+        let pack_plan = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64 * 1024)
+            .expect("build pack plan");
+
+        let mut legacy_pack = Vec::new();
+        let legacy = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
+            git.objects().as_ref(),
+            git.object_format(),
+            std::iter::once(commit_oid),
+            &HashSet::new(),
+            &mut legacy_pack,
+        )
+        .expect("legacy reachable pack")
+        .expect("legacy pack summary");
+
+        assert_eq!(pack_plan.pack_id, legacy.checksum.as_bytes().to_vec());
+        assert_eq!(pack_plan.pack_size, legacy.pack_size);
+        assert_eq!(pack_plan.pack_size, legacy_pack.len() as u64);
+
+        let mut planned_pack = Vec::new();
+        pack_plan
+            .pack_file
+            .lock()
+            .expect("lock pack tempfile")
+            .seek(SeekFrom::Start(0))
+            .expect("rewind pack tempfile");
+        io::copy(
+            &mut pack_plan
+                .pack_file
+                .lock()
+                .expect("lock pack tempfile")
+                .as_file_mut(),
+            &mut planned_pack,
+        )
+        .expect("read planned pack");
+        assert_eq!(planned_pack, legacy_pack);
     }
 
     /// The mirror plan builder reads ALL direct refs (N branches + a tag),
