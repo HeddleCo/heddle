@@ -926,7 +926,7 @@ impl Repository {
             && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
             && let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)?
         {
-            let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
+            let (ahead, behind) = git_ahead_behind_counts(&git, head, upstream_head)?;
             if ahead == 0 && behind == 0 {
                 return Ok(None);
             }
@@ -968,7 +968,7 @@ impl Repository {
                 if remote_head == head {
                     return Ok(None);
                 }
-                let (ahead, behind) = git_ahead_behind(&self.root, &git, remote_head, head)?;
+                let (ahead, behind) = git_ahead_behind_counts(&git, head, remote_head)?;
                 if behind > 0 {
                     let upstream = format!("{remote}/{branch}");
                     let local_oid = head.to_string();
@@ -2617,66 +2617,24 @@ fn git_configured_tracking_ref(repo: &SleyRepository, branch: &str) -> Result<Op
     Ok(Some(GitRefName::remote_branch_full_name(remote, short)))
 }
 
-fn git_ahead_behind(
-    root: &Path,
-    repo: &SleyRepository,
-    upstream: SleyObjectId,
+fn git_ahead_behind_counts(
+    git: &SleyRepository,
     head: SleyObjectId,
+    upstream: SleyObjectId,
 ) -> Result<(usize, usize)> {
     if upstream == head {
         return Ok((0, 0));
     }
-    let ahead = git_reachable_count(root, repo, head, upstream)?;
-    let behind = git_reachable_count(root, repo, upstream, head)?;
+    let db = sley::ObjectDatabase::from_git_dir(git.common_dir(), git.object_format());
+    let (ahead, behind) = sley::plumbing::sley_rev::ahead_behind_counts(
+        git.git_dir(),
+        git.object_format(),
+        &db,
+        &head,
+        &upstream,
+    )
+    .map_err(|error| HeddleError::Config(error.to_string()))?;
     Ok((ahead, behind))
-}
-
-fn git_reachable_count(
-    root: &Path,
-    repo: &SleyRepository,
-    tip: SleyObjectId,
-    hidden: SleyObjectId,
-) -> Result<usize> {
-    let hidden = git_ancestor_set(root, repo, hidden)?;
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![tip];
-    let mut count = 0;
-    while let Some(oid) = pending.pop() {
-        if hidden.contains(&oid) || !seen.insert(oid) {
-            continue;
-        }
-        count += 1;
-        let commit = repo.read_commit(&oid).map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git upstream drift at '{}': {error}",
-                root.display()
-            ))
-        })?;
-        pending.extend(commit.parents);
-    }
-    Ok(count)
-}
-
-fn git_ancestor_set(
-    root: &Path,
-    repo: &SleyRepository,
-    start: SleyObjectId,
-) -> Result<std::collections::HashSet<SleyObjectId>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![start];
-    while let Some(oid) = pending.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        let commit = repo.read_commit(&oid).map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git upstream drift at '{}': {error}",
-                root.display()
-            ))
-        })?;
-        pending.extend(commit.parents);
-    }
-    Ok(seen)
 }
 
 fn git_remote_tracking_display_name(name: &str) -> String {
@@ -2826,4 +2784,130 @@ fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, process::Command};
+
+    use tempfile::TempDir;
+
+    use super::Repository;
+    use crate::RepositoryCapability;
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {:?} failed in {}", args, root.display());
+    }
+
+    fn git_output(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn init_git_with_identity(root: &Path) {
+        sley::Repository::init(root).expect("init git repository");
+        git(root, &["config", "user.email", "test@heddle.local"]);
+        git(root, &["config", "user.name", "Heddle Test"]);
+    }
+
+    fn configure_main_tracks_origin(root: &Path) {
+        git(root, &["config", "branch.main.remote", "origin"]);
+        git(root, &["config", "branch.main.merge", "refs/heads/main"]);
+    }
+
+    /// Diverged history (2 ahead / 1 behind) from the pre-sley hand-walk on this fixture:
+    ///
+    /// ```text
+    ///        base
+    ///       /    \
+    ///      u1    l1
+    ///           l2  <- HEAD
+    /// ```
+    ///
+    /// `refs/remotes/origin/main` points at `u1`.
+    fn diverged_two_ahead_one_behind_fixture() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_git_with_identity(root);
+        git(root, &["commit", "--allow-empty", "-m", "base"]);
+        let base = git_output(root, &["rev-parse", "HEAD"]);
+        git(root, &["commit", "--allow-empty", "-m", "u1"]);
+        let upstream_tip = git_output(root, &["rev-parse", "HEAD"]);
+        git(root, &["reset", "--hard", &base]);
+        git(root, &["commit", "--allow-empty", "-m", "l1"]);
+        git(root, &["commit", "--allow-empty", "-m", "l2"]);
+        git(
+            root,
+            &["update-ref", "refs/remotes/origin/main", &upstream_tip],
+        );
+        configure_main_tracks_origin(root);
+        temp
+    }
+
+    #[test]
+    fn git_remote_tracking_reports_diverged_ahead_behind() {
+        let temp = diverged_two_ahead_one_behind_fixture();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
+
+        let status = repo
+            .git_remote_tracking_status()
+            .unwrap()
+            .expect("configured upstream with drift should return status");
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 1);
+        assert_eq!(status.upstream, "origin/main");
+    }
+
+    #[test]
+    fn git_remote_tracking_in_sync_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_git_with_identity(root);
+        git(root, &["commit", "--allow-empty", "-m", "only"]);
+        let tip = git_output(root, &["rev-parse", "HEAD"]);
+        git(root, &["update-ref", "refs/remotes/origin/main", &tip]);
+        configure_main_tracks_origin(root);
+
+        let repo = Repository::init_default(root).unwrap();
+        assert!(repo.git_remote_tracking_status().unwrap().is_none());
+    }
+
+    #[test]
+    fn git_remote_tracking_without_upstream_config() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_git_with_identity(root);
+        git(root, &["commit", "--allow-empty", "-m", "only"]);
+        git(root, &["remote", "add", "origin", root.to_str().unwrap()]);
+
+        let repo = Repository::init_default(root).unwrap();
+        let status = repo
+            .git_remote_tracking_status()
+            .unwrap()
+            .expect("no upstream config still reports actionable status");
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+        assert!(status.upstream.is_empty());
+        assert!(
+            status
+                .message
+                .contains("has no upstream tracking branch")
+        );
+    }
 }
