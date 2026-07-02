@@ -8,7 +8,7 @@
 //! modules can use it without a `repo` dependency. The `repo` crate
 //! re-exports the public surface for backwards compatibility.
 
-use std::path::Path;
+use std::{path::Path, rc::Rc};
 
 use crate::{
     parser::{Language, ParsedFile},
@@ -107,7 +107,7 @@ pub fn extract_definitions(
     let parsed = ParsedFile::parse(source_text, language).ok_or(SymbolResolveError::ParseFailed)?;
 
     let mut out = Vec::new();
-    walk_definitions(&parsed.root_node(), source, None, &mut out);
+    walk_definitions(parsed.root_node(), source, &mut out);
     Ok(out)
 }
 
@@ -137,213 +137,219 @@ fn push_named_definition(
     }
 }
 
+/// Iterative DFS over a `Vec<(Node, parent)>` worklist — mirrors
+/// [`symbol_extraction::find_definitions`]: a recursive walker would recurse
+/// for every child of every non-scope node, so deeply-parseable input drives
+/// call depth proportional to AST depth.
 fn walk_definitions(
-    node: &tree_sitter::Node,
+    root: tree_sitter::Node,
     source: &[u8],
-    current_parent: Option<&str>,
     out: &mut Vec<Definition>,
 ) {
-    let kind = node.kind();
+    let mut stack: Vec<(tree_sitter::Node, Option<Rc<str>>)> = vec![(root, None)];
 
-    match kind {
-        // ── Rust ──────────────────────────────────────────────
-        "function_item" => {
-            push_named_definition(node, source, DefinitionKind::Function, current_parent, out)
-        }
-        "struct_item" => {
-            push_named_definition(node, source, DefinitionKind::Type, current_parent, out)
-        }
-        "enum_item" => {
-            push_named_definition(node, source, DefinitionKind::EnumDef, current_parent, out)
-        }
-        "trait_item" => {
-            push_named_definition(node, source, DefinitionKind::Trait, current_parent, out)
-        }
-        "type_item" => {
-            push_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, out)
-        }
-        "const_item" | "static_item" => {
-            push_named_definition(node, source, DefinitionKind::ConstDecl, current_parent, out)
-        }
-        "mod_item" => {
-            push_named_definition(node, source, DefinitionKind::Module, current_parent, out)
-        }
-        "impl_item" => {
-            // Walk children with the impl's type as parent so methods
-            // get the qualified parent name.
-            let parent_name = extract_rust_impl_type_name(node, source);
-            let parent = parent_name.as_deref();
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                walk_definitions(&child, source, parent, out);
-            }
-            return;
-        }
+    while let Some((node, parent)) = stack.pop() {
+        let current_parent = parent.as_deref();
+        let kind = node.kind();
+        let mut descended_with_new_parent = false;
 
-        // ── Python ───────────────────────────────────────────
-        "function_definition" => {
-            push_named_definition(node, source, DefinitionKind::Function, current_parent, out)
-        }
-        "class_definition" => {
-            let class_name = node
-                .child_by_field_name("name")
-                .map(|n| node_text(&n, source).to_string());
-            if let Some(ref name) = class_name
-                && !name.is_empty()
-            {
-                out.push(Definition {
-                    name: name.clone(),
-                    kind: DefinitionKind::Class,
-                    start_line: node.start_position().row as u32 + 1,
-                    end_line: node.end_position().row as u32 + 1,
-                    parent_name: current_parent.map(String::from),
-                });
+        match kind {
+            // ── Rust ──────────────────────────────────────────────
+            "function_item" => {
+                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
             }
-            let parent = class_name.as_deref();
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                walk_definitions(&child, source, parent, out);
+            "struct_item" => {
+                push_named_definition(&node, source, DefinitionKind::Type, current_parent, out)
             }
-            return;
-        }
+            "enum_item" => {
+                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+            }
+            "trait_item" => {
+                push_named_definition(&node, source, DefinitionKind::Trait, current_parent, out)
+            }
+            "type_item" => {
+                push_named_definition(&node, source, DefinitionKind::TypeAlias, current_parent, out)
+            }
+            "const_item" | "static_item" => {
+                push_named_definition(&node, source, DefinitionKind::ConstDecl, current_parent, out)
+            }
+            "mod_item" => {
+                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+            }
+            "impl_item" => {
+                let parent_name: Option<Rc<str>> =
+                    extract_rust_impl_type_name(&node, source).map(Rc::from);
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, parent_name.clone()));
+                }
+                descended_with_new_parent = true;
+            }
 
-        // ── Go ───────────────────────────────────────────────
-        "function_declaration" => {
-            // Note: Go and JS/TS share this kind. The kind is `Function`
-            // either way so we just emit it.
-            push_named_definition(node, source, DefinitionKind::Function, current_parent, out)
-        }
-        "method_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source).to_string();
-                if !name.is_empty() {
-                    let receiver = extract_go_receiver_type(node, source);
+            // ── Python ───────────────────────────────────────────
+            "function_definition" => {
+                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+            }
+            "class_definition" => {
+                let class_name: Option<Rc<str>> = node
+                    .child_by_field_name("name")
+                    .map(|n| Rc::from(node_text(&n, source)));
+                if let Some(ref name) = class_name
+                    && !name.is_empty()
+                {
                     out.push(Definition {
-                        name,
-                        kind: DefinitionKind::Function,
+                        name: name.to_string(),
+                        kind: DefinitionKind::Class,
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
-                        parent_name: receiver.or_else(|| current_parent.map(String::from)),
-                    });
-                }
-            }
-        }
-        "type_declaration" => {
-            // Go: `type Foo struct { ... }` or `type Foo interface { ... }`.
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "type_spec"
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
-                    let name = node_text(&name_node, source).to_string();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let dk = match child.child_by_field_name("type").map(|t| t.kind()) {
-                        Some("interface_type") => DefinitionKind::Interface,
-                        Some("struct_type") => DefinitionKind::Type,
-                        _ => DefinitionKind::TypeAlias,
-                    };
-                    out.push(Definition {
-                        name,
-                        kind: dk,
-                        start_line: child.start_position().row as u32 + 1,
-                        end_line: child.end_position().row as u32 + 1,
                         parent_name: current_parent.map(String::from),
                     });
                 }
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, class_name.clone()));
+                }
+                descended_with_new_parent = true;
             }
-        }
 
-        // ── JavaScript / TypeScript ──────────────────────────
-        "method_definition" => {
-            push_named_definition(node, source, DefinitionKind::Function, current_parent, out)
-        }
-        "class_declaration" => {
-            let class_name = node
-                .child_by_field_name("name")
-                .map(|n| node_text(&n, source).to_string());
-            if let Some(ref name) = class_name
-                && !name.is_empty()
-            {
-                out.push(Definition {
-                    name: name.clone(),
-                    kind: DefinitionKind::Class,
-                    start_line: node.start_position().row as u32 + 1,
-                    end_line: node.end_position().row as u32 + 1,
-                    parent_name: current_parent.map(String::from),
-                });
+            // ── Go ───────────────────────────────────────────────
+            "function_declaration" => {
+                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
             }
-            let parent = class_name.as_deref();
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                walk_definitions(&child, source, parent, out);
-            }
-            return;
-        }
-        "interface_declaration" => {
-            push_named_definition(node, source, DefinitionKind::Interface, current_parent, out)
-        }
-        "type_alias_declaration" => {
-            push_named_definition(node, source, DefinitionKind::TypeAlias, current_parent, out)
-        }
-        "enum_declaration" => {
-            push_named_definition(node, source, DefinitionKind::EnumDef, current_parent, out)
-        }
-        "lexical_declaration" | "variable_declaration" => {
-            // `const foo = () => { ... }` or `const foo = function() { ... }`
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "variable_declarator"
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
+            "method_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
                     let name = node_text(&name_node, source).to_string();
-                    if name.is_empty() {
-                        continue;
+                    if !name.is_empty() {
+                        let receiver = extract_go_receiver_type(&node, source);
+                        out.push(Definition {
+                            name,
+                            kind: DefinitionKind::Function,
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: receiver.or_else(|| current_parent.map(String::from)),
+                        });
                     }
-                    if let Some(value_node) = child.child_by_field_name("value") {
-                        let vkind = value_node.kind();
-                        let dk = if vkind == "arrow_function"
-                            || vkind == "function"
-                            || vkind == "function_expression"
-                        {
-                            DefinitionKind::Function
-                        } else {
-                            DefinitionKind::ConstDecl
+                }
+            }
+            "type_declaration" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "type_spec"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(&name_node, source).to_string();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let dk = match child.child_by_field_name("type").map(|t| t.kind()) {
+                            Some("interface_type") => DefinitionKind::Interface,
+                            Some("struct_type") => DefinitionKind::Type,
+                            _ => DefinitionKind::TypeAlias,
                         };
                         out.push(Definition {
                             name,
                             kind: dk,
-                            start_line: node.start_position().row as u32 + 1,
-                            end_line: node.end_position().row as u32 + 1,
+                            start_line: child.start_position().row as u32 + 1,
+                            end_line: child.end_position().row as u32 + 1,
                             parent_name: current_parent.map(String::from),
                         });
                     }
                 }
             }
+
+            // ── JavaScript / TypeScript ──────────────────────────
+            "method_definition" => {
+                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+            }
+            "class_declaration" => {
+                let class_name: Option<Rc<str>> = node
+                    .child_by_field_name("name")
+                    .map(|n| Rc::from(node_text(&n, source)));
+                if let Some(ref name) = class_name
+                    && !name.is_empty()
+                {
+                    out.push(Definition {
+                        name: name.to_string(),
+                        kind: DefinitionKind::Class,
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                        parent_name: current_parent.map(String::from),
+                    });
+                }
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, class_name.clone()));
+                }
+                descended_with_new_parent = true;
+            }
+            "interface_declaration" => {
+                push_named_definition(&node, source, DefinitionKind::Interface, current_parent, out)
+            }
+            "type_alias_declaration" => {
+                push_named_definition(&node, source, DefinitionKind::TypeAlias, current_parent, out)
+            }
+            "enum_declaration" => {
+                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "variable_declarator"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(&name_node, source).to_string();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        if let Some(value_node) = child.child_by_field_name("value") {
+                            let vkind = value_node.kind();
+                            let dk = if vkind == "arrow_function"
+                                || vkind == "function"
+                                || vkind == "function_expression"
+                            {
+                                DefinitionKind::Function
+                            } else {
+                                DefinitionKind::ConstDecl
+                            };
+                            out.push(Definition {
+                                name,
+                                kind: dk,
+                                start_line: node.start_position().row as u32 + 1,
+                                end_line: node.end_position().row as u32 + 1,
+                                parent_name: current_parent.map(String::from),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── C / C++ / Java ───────────────────────────────────
+            "struct_specifier" | "class_specifier" => {
+                push_named_definition(&node, source, DefinitionKind::Class, current_parent, out)
+            }
+            "namespace_definition" => {
+                push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
+            }
+            "enum_specifier" => {
+                push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
+            }
+            "constructor_declaration" => {
+                push_named_definition(&node, source, DefinitionKind::Function, current_parent, out)
+            }
+
+            _ => {}
         }
 
-        // ── C / C++ / Java ───────────────────────────────────
-        "struct_specifier" | "class_specifier" => {
-            push_named_definition(node, source, DefinitionKind::Class, current_parent, out)
+        if !descended_with_new_parent {
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            for child in children.into_iter().rev() {
+                stack.push((child, parent.clone()));
+            }
         }
-        "namespace_definition" => {
-            push_named_definition(node, source, DefinitionKind::Module, current_parent, out)
-        }
-        "enum_specifier" => {
-            push_named_definition(node, source, DefinitionKind::EnumDef, current_parent, out)
-        }
-        "constructor_declaration" => {
-            push_named_definition(node, source, DefinitionKind::Function, current_parent, out)
-        }
-
-        _ => {}
-    }
-
-    // Default recursive descent for non-scope-introducing nodes.
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_definitions(&child, source, current_parent, out);
     }
 }
 
@@ -868,6 +874,90 @@ export const settings = { retry: 2 };
             extract_definitions(b"fn broken( -> usize { 1 }", Path::new("broken.rs")).unwrap_err();
 
         assert!(matches!(err, SymbolResolveError::ParseFailed));
+    }
+
+    /// Characterization: iterative `walk_definitions` must emit the same
+    /// definitions in the same source order with the same parent scopes as
+    /// the former recursive walker on a multi-level, multi-kind fixture.
+    #[test]
+    fn walk_definitions_iterative_matches_recursive_output_on_nested_fixture() {
+        let source = br#"const LIMIT: usize = 10;
+pub mod outer {
+    pub struct Widget {
+        pub id: u64,
+    }
+
+    pub enum Mode {
+        Fast,
+        Slow,
+    }
+
+    pub trait Runner {
+        fn run(&self);
+    }
+
+    pub type WidgetResult<T> = Result<T, Error>;
+
+    impl Widget {
+        pub fn build(id: u64) -> Self {
+            Self { id }
+        }
+    }
+}
+"#;
+
+        let defs = extract_definitions(source, Path::new("lib.rs")).unwrap();
+
+        let expected: &[(&str, DefinitionKind, u32, u32, Option<&str>)] = &[
+            ("LIMIT", DefinitionKind::ConstDecl, 1, 1, None),
+            ("outer", DefinitionKind::Module, 2, 23, None),
+            ("Widget", DefinitionKind::Type, 3, 5, None),
+            ("Mode", DefinitionKind::EnumDef, 7, 10, None),
+            ("Runner", DefinitionKind::Trait, 12, 14, None),
+            ("WidgetResult", DefinitionKind::TypeAlias, 16, 16, None),
+            ("build", DefinitionKind::Function, 19, 21, Some("Widget")),
+        ];
+
+        assert_eq!(defs.len(), expected.len(), "definition count: {defs:?}");
+        for (def, (name, kind, start, end, parent)) in defs.iter().zip(expected.iter()) {
+            assert_eq!(&def.name, name);
+            assert_eq!(def.kind, *kind);
+            assert_eq!(def.start_line, *start);
+            assert_eq!(def.end_line, *end);
+            assert_eq!(def.parent_name.as_deref(), *parent);
+        }
+    }
+
+    // HEDDLE-DR-4 / #876: walk_definitions must not stack-overflow on
+    // deeply-nested but syntactically-valid trees (mirrors symbol_extraction).
+    #[cfg(feature = "lang-rust")]
+    #[test]
+    fn deeply_nested_rust_modules_walk_definitions_does_not_stack_overflow() {
+        let depth = 2000usize;
+        let mut s = String::new();
+        for i in 0..depth {
+            s.push_str(&format!("mod m{i} {{\n"));
+        }
+        s.push_str("fn target() {}\n");
+        for _ in 0..depth {
+            s.push_str("}\n");
+        }
+
+        let source = s.into_bytes();
+        let path = Path::new("nested.rs");
+
+        let handle = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || extract_definitions(&source, path))
+            .expect("spawn");
+        let defs = handle
+            .join()
+            .expect("walk_definitions must not stack-overflow on deeply-nested input")
+            .expect("parse nested modules");
+        assert!(
+            defs.iter().any(|d| d.name == "target"),
+            "deep target fn must be returned, not silently dropped; got {defs:?}"
+        );
     }
 
     fn assert_definition(
