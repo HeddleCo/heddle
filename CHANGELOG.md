@@ -13,6 +13,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.7.0 - 2026-07-02
+
 ### Added
 
 - **`--git-mirror` hosted push + generic progress substrate.** A new
@@ -42,6 +44,19 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - **Homebrew tap moved.** The tap repo is now `HeddleCo/homebrew-tap`, so
   install is `brew install HeddleCo/tap/heddle` instead of the redundant
   `HeddleCo/heddle/heddle` path. (#831)
+- **One status/next-action/advice engine.** Repo status, next-action
+  computation, and contextual advice now come from a single core engine;
+  the CLI only renders. Deletes the per-command copies that had drifted
+  apart. No user-visible behavior change. (#852, #941)
+- **sley substrate bumped to 0.4.0 and adopted deeper.** The git substrate
+  dependency moved to sley 0.4.0 and heddle now uses its purpose-built
+  APIs instead of local re-implementations: ahead/behind counts for
+  remote-tracking status (deleting a hand-rolled ancestry walk), the
+  `ReachablePackPlan` facade for building the hosted git-lane pack, and
+  `HeadState`/`set_head_symref` for reading and writing `.git/HEAD`
+  (deleting literal `ref: refs/heads/` string parsing; HEAD writes are now
+  crash-atomic). Behavior-neutral: identical counts, byte-identical packs
+  and HEAD contents. (#950, #951, #952, #953)
 
 ### Fixed
 
@@ -73,7 +88,23 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - **`SHA256SUMS` checksum aggregation strips Windows CRLF.** The Windows
   build's `.sha256` sidecar used CRLF line endings, which broke the Scoop
   manifest's anchored checksum lookup; aggregation now normalizes to LF so
-  published checksums are consistent across platforms. (#824)
+  published checksums are consistent across platforms. This is the defect
+  that kept 0.6.0 from shipping. (#824)
+- **Concurrent discussion mutations no longer lose writes.** Discussion
+  mutations in the daemon ran read-modify-write without a lock, so two
+  concurrent `discuss` operations could silently drop one side's update;
+  mutations are now serialized per repo. (#875, #947)
+- **Deeply nested code no longer overflows the stack in semantic analysis.**
+  `walk_definitions` switched from recursion to an iterative DFS, so
+  pathologically nested source files can't crash capture/status with a
+  stack overflow. (#876, #945)
+- **Mount write/truncate offsets clamped at the trust boundary.** A hostile
+  or confused FUSE/ProjFS caller could pass offset+length combinations
+  that overflowed internal arithmetic; both are now clamped where the
+  request enters heddle. (#877, #946)
+- **Diff context summaries truncate on character boundaries.** Truncating
+  a context summary mid-multibyte-character panicked on UTF-8 slicing;
+  truncation is now char-boundary-safe. (#879, #944)
 
 ### Performance
 
@@ -93,7 +124,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   already computed at the top of the command, matching the fast-path
   threading `capture` already had. (#829)
 
-## 0.6.0 - Unreleased
+## 0.6.0 - 2026-06-29 [tagged, never shipped]
+
+> The `v0.6.0` tag exists but binaries were never published: the Windows
+> release pipeline produced CRLF-corrupted `SHA256SUMS` (fixed in #824,
+> above). Everything below ships in 0.7.0.
 
 ### Added
 

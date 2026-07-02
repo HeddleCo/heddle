@@ -17,7 +17,7 @@ bytes.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
-heddle-format = { path = "../format", version = "0.6" }
+heddle-format = { path = "../format", version = "0.7" }
 ignore.workspace = true
 libc = "0.2"
 memmap2.workspace = true

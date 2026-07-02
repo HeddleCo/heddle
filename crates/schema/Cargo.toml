@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.6" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.7" }
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true

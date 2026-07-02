@@ -32,32 +32,32 @@ futures.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.6", features = ["memory-backend"] }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.6" }
-daemon = { path = "../daemon", package = "heddle-daemon", version = "0.6" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.7", features = ["memory-backend"] }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.7" }
+daemon = { path = "../daemon", package = "heddle-daemon", version = "0.7" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
-merge = { path = "../merge", package = "heddle-merge", version = "0.6" }
+merge = { path = "../merge", package = "heddle-merge", version = "0.7" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.6" }
-heddle-core = { path = "../core", version = "0.6" }
-heddle-format = { path = "../format", version = "0.6" }
-heddle-client = { path = "../client", version = "0.6", optional = true }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.6" }
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.7" }
+heddle-core = { path = "../core", version = "0.7" }
+heddle-format = { path = "../format", version = "0.7" }
+heddle-client = { path = "../client", version = "0.7", optional = true }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.7" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
 # end-to-end. Without these breaks, every dep's own default-on `zstd`
 # would re-enable compression even when the user explicitly built
 # with `--no-default-features`.
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.6", default-features = false }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.6" }
-wire = { path = "../wire", package = "heddle-wire", version = "0.6", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.6" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.6", default-features = false }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.6", optional = true }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.7", default-features = false }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.7" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.7", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.7" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.7", default-features = false }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.7", optional = true }
 notify.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -106,13 +106,13 @@ walkdir.workspace = true
 # propagate the right per-OS backend without any one platform
 # being forced to drag in another platform's kernel bindings.
 [target.'cfg(target_os = "linux")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.6", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.7", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.6", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.7", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.6", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.7", optional = true }
 
 [features]
 # Keep the default `heddle` build focused on the local invisible-VCS
