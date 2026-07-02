@@ -875,6 +875,15 @@ message BeginRecoveryRequest {
   string client_operation_id = 15;
 }
 
+// Salt + KDF params the recovering client uses to argon2id-hash the typed
+// mnemonic before SubmitRecoveryProof. Populated on BeginRecovery when
+// `kind=paper_code` (declared method material on real attempts; deterministic
+// synthetic material on decoy begins for anti-enumeration). weft#186.
+message PaperCodeKdfMaterial {
+  bytes salt = 1;
+  Argon2idParams params = 2;
+}
+
 message BeginRecoveryResponse {
   // Stable id of the `recovery_attempts` row. Echoed back on
   // SubmitRecoveryProof / VetoRecovery / CompleteRecovery and named inside
@@ -886,6 +895,8 @@ message BeginRecoveryResponse {
   // Wall-clock instant at which CompleteRecovery becomes eligible
   // (started_at + window_secs).
   google.protobuf.Timestamp completes_at = 3;
+  // Present when BeginRecoveryRequest.kind is paper_code.
+  PaperCodeKdfMaterial paper_code_kdf = 4;
 }
 
 // Submit proof against the declared method for an in-flight attempt. The
