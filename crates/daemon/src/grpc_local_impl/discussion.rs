@@ -572,7 +572,6 @@ impl DiscussionService for LocalDiscussionService {
                         ChangeId::try_from_slice(&req.state_id).map_err(|err| {
                             Status::invalid_argument(format!("invalid state_id: {err}"))
                         })?;
-                    let (state, mut blob) = load_discussions_blob(repo, &opened_against)?;
                     let now = now_secs();
                     let principal = principal_for(repo);
                     let visibility = if req.visibility.trim().is_empty() {
@@ -600,6 +599,11 @@ impl DiscussionService for LocalDiscussionService {
                     discussion
                         .validate()
                         .map_err(|err| Status::invalid_argument(err.to_string()))?;
+                    let _lock = repo
+                        .locker()
+                        .write()
+                        .map_err(|err| Status::internal(err.to_string()))?;
+                    let (state, mut blob) = load_discussions_blob(repo, &opened_against)?;
                     blob.discussions.push(discussion.clone());
                     save_discussions_blob(repo, &state, &blob)?;
                     Ok(discussion_to_proto(&discussion))
@@ -639,6 +643,11 @@ impl DiscussionService for LocalDiscussionService {
                     // This local mutation API is HEAD-scoped because the
                     // request carries no state_id. It must not pretend to find
                     // and mutate discussions across the whole repository.
+                    let principal = principal_for(repo);
+                    let _lock = repo
+                        .locker()
+                        .write()
+                        .map_err(|err| Status::internal(err.to_string()))?;
                     let head = head_state(repo)?;
                     let mut blob = decode_blob_for_state(repo, &head)?;
                     let idx = blob
@@ -648,7 +657,6 @@ impl DiscussionService for LocalDiscussionService {
                         .ok_or_else(|| {
                             Status::not_found(format!("discussion {} not found", req.discussion_id))
                         })?;
-                    let principal = principal_for(repo);
                     blob.discussions[idx].turns.push(DiscussionTurn {
                         author: principal,
                         body: req.body.clone(),
@@ -693,6 +701,23 @@ impl DiscussionService for LocalDiscussionService {
                     // This local mutation API is HEAD-scoped because the
                     // request carries no state_id. It must not pretend to find
                     // and mutate discussions across the whole repository.
+                    use grpc::heddle::v1::resolve_discussion_request::Resolution;
+                    let resolution = req
+                        .resolution
+                        .clone()
+                        .ok_or_else(|| Status::invalid_argument("resolution mode is required"))?;
+                    if let Resolution::Dismissed(ref payload) = resolution
+                        && payload.reason.trim().is_empty()
+                    {
+                        return Err(Status::invalid_argument(
+                            "dismissal requires a non-empty reason",
+                        ));
+                    }
+
+                    let _lock = repo
+                        .locker()
+                        .write()
+                        .map_err(|err| Status::internal(err.to_string()))?;
                     let head = head_state(repo)?;
                     let mut blob = decode_blob_for_state(repo, &head)?;
                     let idx = blob
@@ -703,29 +728,8 @@ impl DiscussionService for LocalDiscussionService {
                             Status::not_found(format!("discussion {} not found", req.discussion_id))
                         })?;
 
-                    use grpc::heddle::v1::resolve_discussion_request::Resolution;
-                    let resolution = req
-                        .resolution
-                        .clone()
-                        .ok_or_else(|| Status::invalid_argument("resolution mode is required"))?;
                     match resolution {
                         Resolution::IntoAnnotation(payload) => {
-                            let _lock = repo
-                                .locker()
-                                .write()
-                                .map_err(|err| Status::internal(err.to_string()))?;
-                            let head = head_state(repo)?;
-                            let mut blob = decode_blob_for_state(repo, &head)?;
-                            let idx = blob
-                                .discussions
-                                .iter()
-                                .position(|d| d.id == req.discussion_id)
-                                .ok_or_else(|| {
-                                    Status::not_found(format!(
-                                        "discussion {} not found",
-                                        req.discussion_id
-                                    ))
-                                })?;
                             let updated = resolve_discussion_into_annotation(
                                 repo, &head, &mut blob, idx, payload,
                             )?;
@@ -740,11 +744,6 @@ impl DiscussionService for LocalDiscussionService {
                                 DiscussionResolution::ResolvedByEdit { state_id };
                         }
                         Resolution::Dismissed(payload) => {
-                            if payload.reason.trim().is_empty() {
-                                return Err(Status::invalid_argument(
-                                    "dismissal requires a non-empty reason",
-                                ));
-                            }
                             blob.discussions[idx].resolution = DiscussionResolution::Dismissed {
                                 reason: payload.reason,
                             };
@@ -943,6 +942,47 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(first.turns.len(), 1);
         assert_eq!(second.turns.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn open_discussion_serializes_concurrent_appends() {
+        // Regression for the lost-update race: two OpenDiscussions with
+        // different operation ids could both read the same base
+        // `DiscussionsBlob`, then the second `put_state` would clobber the
+        // first discussion. The fix wraps the read-modify-write in
+        // `repo.locker().write()` and re-loads the blob inside the lock.
+        let (_t, state_id, svc) = fresh_service();
+        let op_a = objects::object::OperationId::new().to_string();
+        let op_b = objects::object::OperationId::new().to_string();
+        let mut req_a = open_request(&state_id, "body a", &op_a);
+        req_a.anchor.as_mut().unwrap().symbol = "sym_a".into();
+        let mut req_b = open_request(&state_id, "body b", &op_b);
+        req_b.anchor.as_mut().unwrap().symbol = "sym_b".into();
+
+        let svc_a = svc.clone();
+        let svc_b = svc.clone();
+        let (a, b) = tokio::join!(
+            svc_a.open_discussion(Request::new(req_a)),
+            svc_b.open_discussion(Request::new(req_b)),
+        );
+        a.expect("first open_discussion");
+        b.expect("second open_discussion");
+
+        let listed = svc
+            .list_by_state(Request::new(ListDiscussionsByStateRequest {
+                repo_path: String::new(),
+                state_id: state_id.as_bytes().to_vec(),
+                status: "all".into(),
+            }))
+            .await
+            .expect("list_by_state");
+        assert_eq!(
+            listed.get_ref().discussions.len(),
+            2,
+            "both concurrent discussions must land — neither should be lost \
+             to a stale-blob clobber"
+        );
     }
 
     #[tokio::test]
