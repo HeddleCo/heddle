@@ -49,6 +49,17 @@ ignore = [
     # CVE, no runtime attack surface. Remove this ignore when biscuit-auth drops
     # proc-macro-error2 upstream.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure, no CVE. Remove when biscuit-auth drops it." },
+
+    # quick-xml 0.26.0: unbounded namespace-declaration allocation in `NsReader`
+    # → memory-exhaustion DoS (RUSTSEC-2026-0194 / -0195). Pulled ONLY via
+    # inferno 0.11 → pprof 0.15 (`flamegraph` feature), which is a
+    # `[dev-dependencies]` of heddle-semantic used exclusively by criterion
+    # benchmarks. It is NOT in any shipped binary, and the vulnerable path
+    # (parsing untrusted XML namespaces with NsReader) is not reachable —
+    # inferno WRITES flamegraph SVGs, it does not parse attacker-controlled XML.
+    # Remove when pprof/inferno bump to a patched quick-xml.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.26 NsReader DoS; dev-only via pprof flamegraph→inferno (benchmark tooling, not shipped); vulnerable NsReader path not reachable. Remove when pprof/inferno bump quick-xml." },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.26 NsReader DoS; dev-only via pprof flamegraph→inferno (benchmark tooling, not shipped); vulnerable NsReader path not reachable. Remove when pprof/inferno bump quick-xml." },
 ]
 
 # ---------------------------------------------------------------------------
