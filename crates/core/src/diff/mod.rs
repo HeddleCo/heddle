@@ -1727,10 +1727,14 @@ fn summarize_context(content: &str) -> String {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    if first_line.len() <= 88 {
+    let char_count = first_line.chars().count();
+    if char_count <= 88 {
         first_line.to_string()
     } else {
-        format!("{}...", &first_line[..85])
+        format!(
+            "{}...",
+            first_line.chars().take(85).collect::<String>()
+        )
     }
 }
 
@@ -2486,7 +2490,7 @@ fn change_file_modes(
 mod tests {
     use super::{
         DiffStats, FileChange, FileEolState, LineCounts, LineDiff, change_line_counts,
-        unified_hunks,
+        summarize_context, unified_hunks,
     };
 
     fn stat_change(kind: &str, counts: LineCounts) -> FileChange {
@@ -2636,6 +2640,35 @@ mod tests {
             Some("@ -1,2 +1,4 @@"),
             "display trim must not rewrite the `@@` header: {display:?}"
         );
+    }
+
+    /// Byte-index truncation at 85 panicked when a multi-byte code point straddled
+    /// that offset (HEDDLE-DR-7 / #879). Summaries must truncate on char boundaries.
+    #[test]
+    fn summarize_context_truncates_on_char_boundary_not_byte_index() {
+        let first_line = format!("{}中中", "a".repeat(83));
+        assert!(first_line.len() > 88);
+        assert!(!first_line.is_char_boundary(85));
+
+        let summary = summarize_context(&format!("{first_line}\nsecond line"));
+        assert_eq!(summary, first_line);
+    }
+
+    #[test]
+    fn summarize_context_char_cap_truncates_multibyte_line() {
+        let first_line = format!("{}中中中", "a".repeat(86));
+        assert!(first_line.chars().count() > 88);
+
+        let summary = summarize_context(&first_line);
+        let expected = format!("{}...", "a".repeat(85));
+        assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn summarize_context_ascii_truncation_unchanged() {
+        let line = "b".repeat(90);
+        let summary = summarize_context(&line);
+        assert_eq!(summary, format!("{}...", "b".repeat(85)));
     }
 
     /// Characterization: core::diff maps minimal-policy not-found failures to
