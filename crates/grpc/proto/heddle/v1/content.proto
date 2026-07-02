@@ -31,10 +31,19 @@ message GetRefsRequest {
   string repo_path = 1;
 }
 
+message MarkerInfo {
+  string name = 1;
+  bytes change_id = 2; // wire convention: ids are bytes
+  // When the ref row last moved — NOT the tag's authored date (annotated-tag
+  // metadata needs tag-object support; deliberately deferred).
+  google.protobuf.Timestamp updated_at = 3;
+}
+
 message GetRefsResponse {
   string head = 1;
   repeated RefEntry threads = 2;
-  repeated string markers = 3;
+  reserved 3;
+  repeated MarkerInfo markers = 4;
 }
 
 message ListStatesRequest {
@@ -66,9 +75,21 @@ message GetTreeRequest {
   string path = 3;
 }
 
+// Closed set matching git's tree object model (unlike deliberately-open string
+// kinds elsewhere, e.g. Bookmark.resource_kind).
+enum TreeEntryKind {
+  TREE_ENTRY_KIND_UNSPECIFIED = 0;
+  TREE_ENTRY_KIND_TREE = 1;
+  TREE_ENTRY_KIND_BLOB = 2;
+  // Symlink target path is stored as blob content; the link is not followed.
+  TREE_ENTRY_KIND_SYMLINK = 3;
+  // Submodule pointer (git submodule commit OID).
+  TREE_ENTRY_KIND_GITLINK = 4;
+}
+
 message TreeEntry {
   string name = 1;
-  string kind = 2;
+  TreeEntryKind kind = 2;
   bytes hash = 3;
 }
 
@@ -97,6 +118,9 @@ message BlobResponse {
   uint64 size = 3;
   bool is_binary = 4;
   string content = 5;
+  // Leaf kinds only (BLOB / SYMLINK / GITLINK). SYMLINK content is the target-
+  // path bytes; the link is NOT followed (heddle#850 semantics).
+  TreeEntryKind kind = 6;
 }
 
 message DiffSpan {

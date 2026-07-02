@@ -271,6 +271,9 @@ message HostedRepository {
   string slug = 3;
   string path = 4;
   string full_path = 5;
+  // Unset when the serving registry has no activity data; populated by weft
+  // from the refs/state tables (weft wiring is a separate weft-side change).
+  google.protobuf.Timestamp last_activity_at = 6;
 }
 
 message Bookmark {
