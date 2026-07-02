@@ -50,7 +50,7 @@ pub use native_pack::{
 };
 pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 pub use object_graph::{
-    ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
+    ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
     StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
     enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_with_options,
     enumerate_state_closure_with_options, is_ancestor, missing_blobs_in_tree,
