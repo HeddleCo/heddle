@@ -198,7 +198,7 @@ fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
             repo::StateResolveError::Failure(repo::StateResolveFailure::NotFound { spec }) => {
                 anyhow!("state '{}' not found", spec)
             }
-            repo::StateResolveError::Failure(other) => anyhow!("{other}"),
+            repo::StateResolveError::Failure(other) => anyhow::Error::from(other),
         })
         .with_context(|| format!("resolve state '{}'", spec))
 }
