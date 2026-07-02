@@ -68,8 +68,7 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
     state::check_states(repo, &mut errors, &mut objects_checked, opts.thorough)?;
 
     if opts.full {
-        objects::check_trees(repo, &mut errors, &mut warnings, &mut objects_checked)?;
-        objects::check_blobs(repo, &mut errors, &mut warnings, &mut objects_checked)?;
+        objects::check_tree_objects(repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
 
     refs::check_refs(repo, &mut errors, &mut warnings)?;

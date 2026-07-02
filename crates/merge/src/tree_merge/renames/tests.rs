@@ -5,7 +5,7 @@ use objects::{
 };
 
 use super::*;
-use crate::cli::commands::merge::rename_matcher::{
+use crate::tree_merge::rename_matcher::{
     DEFAULT_THRESHOLD, RenameMatcherConfig, delta_similarity, detect_renames,
     detect_renames_with_stats, flatten_tree, infer_directory_renames, path_similarity,
 };
@@ -269,7 +269,8 @@ fn bidirectional_rename_detection() {
     );
 
     let rename_map =
-        detect_merge_renames(&store, &base, &ours, &theirs, DEFAULT_RENAME_THRESHOLD).unwrap();
+        detect_merge_renames(&store, &base, &ours, &theirs, DEFAULT_RENAME_THRESHOLD, None)
+            .unwrap();
 
     assert_eq!(rename_map.our_renames.len(), 1);
     assert_eq!(

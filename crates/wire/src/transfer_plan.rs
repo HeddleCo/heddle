@@ -9,8 +9,8 @@
 use objects::{object::ChangeId, store::ObjectStore};
 
 use crate::{
-    ObjectInfo, ObjectType, PlannedObject, Result, StateClosureOptions,
-    enumerate_state_closure_plan_with_options, is_native_packable_object_type,
+    ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, Result, StateClosureOptions,
+    enumerate_state_closure_plan_with_options,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -109,7 +109,7 @@ impl<T> TransferPartitions<T> {
     }
 
     pub fn is_sidecar_object_type(obj_type: ObjectType) -> bool {
-        !is_native_packable_object_type(obj_type)
+        !obj_type.packable()
     }
 }
 
@@ -130,13 +130,13 @@ impl TransferPlanStats {
         } else {
             self.packable_objects += 1;
         }
-        match obj_type {
-            ObjectType::Blob => self.blobs += 1,
-            ObjectType::Tree => self.trees += 1,
-            ObjectType::State => self.states += 1,
-            ObjectType::Action => self.actions += 1,
-            ObjectType::Redaction => self.redactions += 1,
-            ObjectType::StateVisibility => self.state_visibilities += 1,
+        match obj_type.bucket() {
+            ObjectTypeBucket::Blob => self.blobs += 1,
+            ObjectTypeBucket::Tree => self.trees += 1,
+            ObjectTypeBucket::State => self.states += 1,
+            ObjectTypeBucket::Action => self.actions += 1,
+            ObjectTypeBucket::Redaction => self.redactions += 1,
+            ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
         }
     }
 }

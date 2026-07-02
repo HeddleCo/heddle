@@ -9,13 +9,9 @@ use objects::{object::Tree, store::ObjectStore};
 use super::rename_matcher::{
     DEFAULT_THRESHOLD, RenameMatch, RenameMatcherConfig, detect_renames, flatten_tree,
 };
+use super::SemanticSimilarityFn;
 
-// Rename-matcher tests require AST-based semantic similarity to score
-// modified-renames above the threshold. Without `--features semantic`
-// `compute_semantic_similarity` short-circuits to 0 and the composite
-// score never crosses 0.55, so several scenarios fail. Run them with
-// `cargo test -p cli --features semantic` to exercise the full matrix.
-#[cfg(all(test, feature = "semantic"))]
+#[cfg(test)]
 mod tests;
 
 #[derive(Debug, Default)]
@@ -30,8 +26,12 @@ pub(super) fn detect_merge_renames(
     our_tree: &Tree,
     their_tree: &Tree,
     threshold: f64,
+    semantic_similarity: Option<SemanticSimilarityFn>,
 ) -> Result<MergeRenameMap> {
-    let config = RenameMatcherConfig { threshold };
+    let config = RenameMatcherConfig {
+        threshold,
+        semantic_similarity,
+    };
     let base_flat = flatten_tree(store, base_tree, "")?;
     let our_flat = flatten_tree(store, our_tree, "")?;
     let their_flat = flatten_tree(store, their_tree, "")?;

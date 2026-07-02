@@ -11,7 +11,8 @@ use std::{
 use tempfile::NamedTempFile;
 
 use grpc::heddle::v1::{
-    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer, GitRefKind,
+    GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer,
+    GitRefKind as GrpcGitRefKind,
     GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
     RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
@@ -24,7 +25,8 @@ use objects::{
     store::{AnyStore, ObjectStore, PackObjectId},
 };
 use repo::{
-    Repository, RepositoryCapability, RevisionAddress, SyncedThreadMetadata,
+    GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
+    RevisionAddress, SyncedThreadMetadata,
     ThreadManager,
 };
 use sley::{
@@ -34,8 +36,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use wire::{
-    GitLaneTransferIntent, ObjectInfo, ObjectType, PlannedObject, ProtocolError, PullComplete,
-    PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
+    GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, ProtocolError,
+    PullComplete, PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
 };
 
 use super::{
@@ -117,13 +119,13 @@ pub struct HostedRefEntry {
 
 impl PullObjectMix {
     fn record(&mut self, obj_type: ObjectType) {
-        match obj_type {
-            ObjectType::Blob => self.blobs += 1,
-            ObjectType::Tree => self.trees += 1,
-            ObjectType::State => self.states += 1,
-            ObjectType::Action => self.actions += 1,
-            ObjectType::Redaction => self.redactions += 1,
-            ObjectType::StateVisibility => self.state_visibilities += 1,
+        match obj_type.bucket() {
+            ObjectTypeBucket::Blob => self.blobs += 1,
+            ObjectTypeBucket::Tree => self.trees += 1,
+            ObjectTypeBucket::State => self.states += 1,
+            ObjectTypeBucket::Action => self.actions += 1,
+            ObjectTypeBucket::Redaction => self.redactions += 1,
+            ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
         }
     }
 
@@ -219,8 +221,10 @@ impl HostedGrpcClient {
                 .unwrap_or_default(),
             new_value: new_value.to_string_full(),
             thread_metadata: thread_metadata.map(to_proto_thread_metadata),
-            old_revision_address: old_value.map(native_revision_address).unwrap_or_default(),
-            new_revision_address: native_revision_address(new_value),
+            old_revision_address: old_value
+                .map(|value| RevisionAddress::heddle(value).to_string())
+                .unwrap_or_default(),
+            new_revision_address: RevisionAddress::heddle(new_value).to_string(),
             client_operation_id: String::new(),
         });
         self.apply_auth(&mut request)?;
@@ -258,7 +262,7 @@ impl HostedGrpcClient {
             local_state,
             target_thread,
             force,
-            native_revision_address(local_state),
+            RevisionAddress::heddle(local_state).to_string(),
             None,
             &Progress::null(),
         )
@@ -348,16 +352,15 @@ impl HostedGrpcClient {
         } else {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
-        let object_plan = RepositoryTransferPlan::from_planned_objects(
-            wire::enumerate_state_closure_plan(repo.store(), local_state)?,
-            git_lane_intent,
-        );
-        let full_objects =
-            if object_plan.stats.total_objects <= PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD {
-                Some(wire::enumerate_state_closure(repo.store(), local_state)?)
-            } else {
-                None
-            };
+        let closure = wire::enumerate_state_closure_transfer_with_options(
+            repo.store(),
+            local_state,
+            wire::StateClosureOptions::default(),
+            PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD,
+        )?;
+        let object_plan =
+            RepositoryTransferPlan::from_planned_objects(closure.planned_objects, git_lane_intent);
+        let full_objects = closure.full_objects;
         let object_count = full_objects
             .as_ref()
             .map_or(object_plan.stats.total_objects, std::vec::Vec::len);
@@ -833,7 +836,7 @@ impl HostedGrpcClient {
                 fresh_full_pull,
                 target_revision_address: options
                     .target_state
-                    .map(native_revision_address)
+                    .map(|state| RevisionAddress::heddle(state).to_string())
                     .unwrap_or_default(),
                 client_operation_id: String::new(),
             })),
@@ -1283,7 +1286,7 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
         types
             .iter()
             .copied()
-            .find(|obj_type| wire::is_native_packable_object_type(*obj_type))
+            .find(|obj_type| obj_type.packable())
     })
 }
 
@@ -1677,9 +1680,9 @@ fn mark_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree)?;
+    let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root)?);
+        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
     }
     if let Some(discussions_blob) = state.discussions.as_ref()
         && !repo.store().has_blob(discussions_blob)?
@@ -1699,9 +1702,9 @@ fn clear_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree)?;
+    let mut missing = wire::missing_blobs_in_tree(repo.store(), state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root)?);
+        missing.extend(wire::missing_blobs_in_tree(repo.store(), *context_root)?);
     }
     if let Some(discussions_blob) = state.discussions.as_ref() {
         missing.push(*discussions_blob);
@@ -1709,55 +1712,6 @@ fn clear_missing_blobs_for_state(
     missing
         .into_iter()
         .try_for_each(|hash| repo.clear_missing_blob(&hash).map_err(ProtocolError::from))
-}
-
-fn collect_missing_blobs(
-    repo: &Repository,
-    tree_hash: &ContentHash,
-) -> Result<Vec<ContentHash>, ProtocolError> {
-    let mut missing = Vec::new();
-    collect_missing_blobs_recursive(repo, tree_hash, &mut missing)?;
-    Ok(missing)
-}
-
-fn collect_missing_blobs_recursive(
-    repo: &Repository,
-    tree_hash: &ContentHash,
-    missing: &mut Vec<ContentHash>,
-) -> Result<(), ProtocolError> {
-    let Some(tree) = repo.store().get_tree(tree_hash).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "load tree {} while collecting lazy hydration missing blobs: {err}",
-            tree_hash.to_hex()
-        ))
-    })?
-    else {
-        return Ok(());
-    };
-    for entry in tree.entries() {
-        match entry.entry_type() {
-            objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                let Some(hash) = entry.content_hash() else {
-                    continue;
-                };
-                if !repo.store().has_blob(&hash).map_err(|err| {
-                    ProtocolError::InvalidState(format!(
-                        "check blob {} while collecting lazy hydration missing blobs: {err}",
-                        hash.to_hex()
-                    ))
-                })? {
-                    missing.push(hash);
-                }
-            }
-            objects::object::EntryType::Tree => {
-                if let Some(hash) = entry.tree_hash() {
-                    collect_missing_blobs_recursive(repo, &hash, missing)?;
-                }
-            }
-            objects::object::EntryType::Gitlink => {}
-        }
-    }
-    Ok(())
 }
 
 fn partial_fetch_status_for_repo(repo: &Repository) -> i32 {
@@ -1789,14 +1743,6 @@ fn push_transfer_id(repo_path: &str, local_state: ChangeId, target_thread: &str)
         "push:{repo_path}:{}:{target_thread}",
         local_state.to_string_full()
     )
-}
-
-fn native_revision_address(change_id: ChangeId) -> String {
-    RevisionAddress::heddle(change_id).to_string()
-}
-
-fn git_revision_address(commit_oid: &GitObjectId) -> String {
-    RevisionAddress::git_commit(commit_oid.to_hex()).to_string()
 }
 
 /// Build the git-mirror push plan: read ALL refs from the git ODB, resolve
@@ -1861,7 +1807,7 @@ fn build_git_mirror_plan_from_sley(
         // stale `refs/original/*` backup) no longer fails the whole push.
         // Content refs — refs/heads/*, refs/tags/*, refs/notes/* (incl.
         // heddle's `refs/notes/heddle` state metadata) — are kept.
-        if is_local_only_ref(&reference.name) {
+        if GitRefName::new(&reference.name).is_local_only() {
             continue;
         }
 
@@ -1908,7 +1854,7 @@ fn build_git_mirror_plan_from_sley(
             .cloned()
             .unwrap_or(GitRefRemoteExpectation::Missing);
 
-        let kind = git_ref_kind_from_name(&reference.name);
+        let kind = grpc_git_ref_kind(GitRefName::new(&reference.name).wire_kind());
         let mut message =
             git_ref_update_message(&reference.name, kind, target_oid, peeled_oid, None);
         apply_git_ref_expectation_value(&mut message, &expectation)?;
@@ -1926,7 +1872,7 @@ fn build_git_mirror_plan_from_sley(
     // `local_revision_address` is advisory in mirror mode (per-ref
     // expectations are already applied); use the first resolved target.
     let local_revision_address = newest_root
-        .map(|oid| git_revision_address(&oid))
+        .map(|oid| RevisionAddress::git_commit(oid.to_hex()).to_string())
         .unwrap_or_default();
 
     Ok(GitLanePushPlan {
@@ -1936,34 +1882,12 @@ fn build_git_mirror_plan_from_sley(
     })
 }
 
-/// Local-only bookkeeping ref namespaces that the default mirror push must NOT
-/// ship to the hosted server (#846). Denylist rather than allowlist so that
-/// content namespaces we do not enumerate here — heddle's `refs/notes/heddle`,
-/// any future content ref — are pushed by default; only these four purely-local
-/// git-machinery prefixes are dropped.
-///
-///   - `refs/stash`: the local stash reflog stack (exact match — the ref is
-///     `refs/stash`; individual entries live in the reflog).
-///   - `refs/remotes/`: this clone's remote-tracking refs.
-///   - `refs/original/`: filter-branch/-repo backups.
-///   - `refs/replace/`: local object replacements (grafts).
-fn is_local_only_ref(name: &str) -> bool {
-    name == "refs/stash"
-        || name.starts_with("refs/remotes/")
-        || name.starts_with("refs/original/")
-        || name.starts_with("refs/replace/")
-}
-
-/// Classify a full ref name into the wire `GitRefKind` the server expects.
-fn git_ref_kind_from_name(name: &str) -> GitRefKind {
-    if name.starts_with("refs/heads/") {
-        GitRefKind::Branch
-    } else if name.starts_with("refs/tags/") {
-        GitRefKind::Tag
-    } else if name.starts_with("refs/notes/") {
-        GitRefKind::Note
-    } else {
-        GitRefKind::Other
+fn grpc_git_ref_kind(kind: ClassifiedGitRefKind) -> GrpcGitRefKind {
+    match kind {
+        ClassifiedGitRefKind::Branch => GrpcGitRefKind::Branch,
+        ClassifiedGitRefKind::Tag => GrpcGitRefKind::Tag,
+        ClassifiedGitRefKind::Note => GrpcGitRefKind::Note,
+        ClassifiedGitRefKind::Other => GrpcGitRefKind::Other,
     }
 }
 
@@ -2225,7 +2149,7 @@ impl Write for GitPackPushMessageWriter {
 /// is set for annotated-tag refs (the underlying object the tag names).
 fn git_ref_update_message(
     name: &str,
-    kind: GitRefKind,
+    kind: GrpcGitRefKind,
     target_oid: GitObjectId,
     peeled_oid: Option<GitObjectId>,
     checkpoint: Option<GitCheckpointTransfer>,
@@ -2278,23 +2202,21 @@ enum GitRefRemoteExpectation {
 fn parse_git_ref_expectation(
     remote_revision_address: &str,
 ) -> Result<GitRefRemoteExpectation, ProtocolError> {
-    if remote_revision_address.is_empty() || remote_revision_address.starts_with("heddle:") {
+    if remote_revision_address.is_empty() {
         return Ok(GitRefRemoteExpectation::Missing);
     }
-    let Some(hex_oid) = remote_revision_address.strip_prefix("git:") else {
-        return Err(ProtocolError::InvalidState(format!(
-            "server returned unsupported remote_revision_address {remote_revision_address:?}"
-        )));
-    };
-    let oid = hex::decode(hex_oid).map_err(|err| {
-        ProtocolError::InvalidState(format!(
-            "server returned invalid Git remote_revision_address: {err}"
-        ))
-    })?;
-    match oid.len() {
-        20 | 32 => Ok(GitRefRemoteExpectation::Value(oid)),
-        len => Err(ProtocolError::InvalidState(format!(
-            "server returned Git remote_revision_address with {len} bytes; expected SHA-1 or SHA-256"
+
+    match remote_revision_address.parse::<RevisionAddress>() {
+        Ok(RevisionAddress::Heddle(_)) => Ok(GitRefRemoteExpectation::Missing),
+        Ok(RevisionAddress::GitCommit(oid)) => hex::decode(&oid)
+            .map(GitRefRemoteExpectation::Value)
+            .map_err(|err| {
+                ProtocolError::InvalidState(format!(
+                    "server returned invalid Git remote_revision_address: {err}"
+                ))
+            }),
+        Err(err) => Err(ProtocolError::InvalidState(format!(
+            "server returned invalid remote_revision_address {remote_revision_address:?}: {err}"
         ))),
     }
 }
@@ -3019,7 +2941,7 @@ mod tests {
         let state = ChangeId::from_bytes([9u8; 16]);
         let ref_message = git_ref_update_message(
             "refs/heads/main",
-            GitRefKind::Branch,
+            GrpcGitRefKind::Branch,
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
@@ -3036,7 +2958,7 @@ mod tests {
             panic!("expected git ref update message");
         };
         assert_eq!(update.name, "refs/heads/main");
-        assert_eq!(update.kind, GitRefKind::Branch as i32);
+        assert_eq!(update.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(update.target_oid.as_ref(), commit_oid.as_bytes());
         let checkpoint = update.checkpoint.expect("checkpoint");
         assert_eq!(checkpoint.heddle_change_id.as_ref(), state.as_bytes());
@@ -3047,7 +2969,7 @@ mod tests {
     fn sample_ref_update_message(commit_oid: GitObjectId) -> PushMessage {
         git_ref_update_message(
             "refs/heads/main",
-            GitRefKind::Branch,
+            GrpcGitRefKind::Branch,
             commit_oid,
             None,
             Some(GitCheckpointTransfer {
@@ -3153,16 +3075,16 @@ mod tests {
             updates.iter().map(|u| (u.name.as_str(), u)).collect();
 
         let main = by_name["refs/heads/main"];
-        assert_eq!(main.kind, GitRefKind::Branch as i32);
+        assert_eq!(main.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(main.target_oid.as_ref(), main_commit.as_bytes());
         assert!(main.peeled_oid.is_empty(), "commit refs are not peeled");
 
         let feature = by_name["refs/heads/feature"];
-        assert_eq!(feature.kind, GitRefKind::Branch as i32);
+        assert_eq!(feature.kind, GrpcGitRefKind::Branch as i32);
         assert_eq!(feature.target_oid.as_ref(), feature_commit.as_bytes());
 
         let tag_update = by_name["refs/tags/v1"];
-        assert_eq!(tag_update.kind, GitRefKind::Tag as i32);
+        assert_eq!(tag_update.kind, GrpcGitRefKind::Tag as i32);
         assert_eq!(tag_update.target_oid.as_ref(), tag_oid.as_bytes());
         assert_eq!(
             tag_update.peeled_oid.as_ref(),
@@ -3299,7 +3221,7 @@ mod tests {
             .expect("refs/pull/* ref must be mirrored");
         assert_eq!(
             pull.kind,
-            GitRefKind::Other as i32,
+            GrpcGitRefKind::Other as i32,
             "refs/pull/* classifies as Other",
         );
         assert_eq!(pull.target_oid.as_ref(), pr_commit.as_bytes());
@@ -3827,7 +3749,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 1,
-                        remote_revision_address: native_revision_address(state),
+                        remote_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -3875,7 +3797,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(state),
+                        new_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -4207,7 +4129,7 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: 2,
-                        remote_revision_address: native_revision_address(state),
+                        remote_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -4270,7 +4192,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(state),
+                        new_revision_address: RevisionAddress::heddle(state).to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;
@@ -4476,18 +4398,18 @@ mod tests {
     }
 
     #[test]
-    fn collect_missing_blobs_treats_absent_tree_as_empty() {
+    fn missing_blobs_in_tree_treats_absent_tree_as_empty() {
         let (_dir, repo) = temp_repo();
         let absent_tree = ContentHash::from_bytes([99u8; 32]);
 
-        let missing =
-            collect_missing_blobs(&repo, &absent_tree).expect("absent tree is not an error");
+        let missing = wire::missing_blobs_in_tree(repo.store(), absent_tree)
+            .expect("absent tree is not an error");
 
         assert!(missing.is_empty());
     }
 
     #[test]
-    fn collect_missing_blobs_reports_only_genuinely_missing_blobs() {
+    fn missing_blobs_in_tree_reports_only_genuinely_missing_blobs() {
         let (_dir, repo) = temp_repo();
         let present_blob = Blob::from("already local");
         let present_hash = repo.store().put_blob(&present_blob).expect("put blob");
@@ -4498,19 +4420,21 @@ mod tests {
         ]);
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
 
-        let missing = collect_missing_blobs(&repo, &tree_hash).expect("collect missing blobs");
+        let missing =
+            wire::missing_blobs_in_tree(repo.store(), tree_hash).expect("collect missing blobs");
 
         assert_eq!(missing, vec![missing_hash]);
     }
 
     #[test]
-    fn collect_missing_blobs_reports_corrupt_tree_read() {
+    fn missing_blobs_in_tree_reports_corrupt_tree_read() {
         let (_dir, repo) = temp_repo();
         let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
         std::fs::write(loose_tree_path(&repo, &tree_hash), [0xc1]).expect("corrupt tree");
         repo.store().clear_recent_caches();
 
-        let err = collect_missing_blobs(&repo, &tree_hash).expect_err("corrupt tree must fail");
+        let err = wire::missing_blobs_in_tree(repo.store(), tree_hash)
+            .expect_err("corrupt tree must fail");
 
         assert!(matches!(err, ProtocolError::InvalidState(_)));
         assert!(
@@ -4927,7 +4851,8 @@ mod tests {
                         missing_objects: Vec::new(),
                         full_closure_available: false,
                         object_count: objects.len() as u32,
-                        remote_revision_address: native_revision_address(svc.remote_state),
+                        remote_revision_address: RevisionAddress::heddle(svc.remote_state)
+                            .to_string(),
                     })),
                 };
                 if tx.send(Ok(ready)).await.is_err() {
@@ -4972,7 +4897,8 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: native_revision_address(svc.remote_state),
+                        new_revision_address: RevisionAddress::heddle(svc.remote_state)
+                            .to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;

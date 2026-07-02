@@ -15,6 +15,7 @@ mod discussion_anchor_travel;
 mod discussion_snapshot_travel;
 mod ephemeral_thread;
 mod fsmonitor;
+mod git_ref_name;
 pub mod git_worktree_status;
 mod hooks;
 pub mod identity;
@@ -24,6 +25,8 @@ pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
+#[path = "repository_resolve_for_command.rs"]
+mod repository_resolve_for_command;
 mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
@@ -69,6 +72,10 @@ pub mod worktree_walk;
 // Re-export commonly used types from underlying crates.
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{ChangeMonitorReport, run_local_monitor_helper};
+pub use git_ref_name::{
+    GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
+    REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
+};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
 pub use objects::{
@@ -87,6 +94,10 @@ pub use objects::{
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
+pub use repository_resolve_for_command::{
+    EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
+    resolve_state_for_command,
+};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,

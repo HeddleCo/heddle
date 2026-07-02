@@ -489,9 +489,16 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
 }
 
 fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {
-    repo.resolve_state(spec)
-        .with_context(|| format!("resolve state '{}'", spec))?
-        .ok_or_else(|| anyhow!("state '{}' not found", spec))
+    repo::resolve_state_for_command(repo, spec, repo::ResolvePolicy::minimal())
+        .map(|resolved| resolved.change_id)
+        .map_err(|error| match error {
+            repo::StateResolveError::Repository(err) => err.into(),
+            repo::StateResolveError::Failure(repo::StateResolveFailure::NotFound { spec }) => {
+                anyhow!("state '{}' not found", spec)
+            }
+            repo::StateResolveError::Failure(other) => anyhow::Error::from(other),
+        })
+        .with_context(|| format!("resolve state '{}'", spec))
 }
 
 pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> Result<ContentHash> {
