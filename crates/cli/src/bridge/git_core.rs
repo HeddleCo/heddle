@@ -18,8 +18,8 @@ use repo::{GitRefName, Repository as HeddleRepository};
 pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
 pub(crate) use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
 use sley::{
-    BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
-    IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
+    BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
+    IndexEntry, IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
     plumbing::sley_core::ByteString as GitByteString,
     remote::{
@@ -2975,27 +2975,25 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
     Ok(())
 }
 
-/// Atomically write `git_dir/HEAD` as a symbolic ref pointing at
-/// `branch_ref` (e.g. `refs/heads/main`). The content is
-/// `ref: <branch_ref>\n`.
-///
-/// A bare `fs::write(HEAD, ...)` is not crash-atomic: a power loss
-/// mid-write can leave a truncated or empty `HEAD`, which a subsequent
-/// `Repository::open` reads as a detached/garbage symref. We instead
-/// write to `HEAD.tmp` and `fs::rename` it over `HEAD` (rename is
-/// atomic within a directory), mirroring `write_exported_refs_at`.
-/// Both the file and its parent directory are fsync'd so the dirent is
-/// durably committed — a file-level fsync alone doesn't persist the
-/// rename on most filesystems.
+/// Write `HEAD` as a symbolic ref pointing at `branch_ref` (e.g.
+/// `refs/heads/main`) via sley's ref backend.
 pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitResult<()> {
-    let head_path = git_dir.join("HEAD");
-    let tmp = head_path.with_extension("tmp");
-    fs::write(&tmp, format!("ref: {branch_ref}\n"))?;
-    fsync_path(&tmp)?;
-    fs::rename(&tmp, &head_path)?;
-    fsync_path(&head_path)?;
-    fsync_path(git_dir)?;
+    let repo = repo_for_git_dir(git_dir)?;
+    repo.set_head_symref(branch_ref, HeadUpdateOptions::new())
+        .map_err(git_err)?;
     Ok(())
+}
+
+fn repo_for_git_dir(git_dir: &Path) -> GitResult<SleyRepository> {
+    if let Ok(repo) = open_repo(git_dir) {
+        return Ok(repo);
+    }
+    if git_dir.file_name().is_some_and(|name| name == ".git")
+        && let Some(parent) = git_dir.parent()
+    {
+        return open_repo(parent);
+    }
+    open_repo(git_dir)
 }
 
 /// Heddle's exported-refs record for `target_repo` (full ref name → last-published
@@ -3683,13 +3681,9 @@ pub fn clone_url_to_bare(
 
 fn default_branch_from_file_url(url: &str) -> Option<String> {
     let source_path = local_path_from_url(url).ok().flatten()?;
-    let head_path = if source_path.join("HEAD").is_file() {
-        source_path.join("HEAD")
-    } else {
-        source_path.join(".git").join("HEAD")
-    };
-    let head = fs::read_to_string(head_path).ok()?;
-    let branch = head.trim().strip_prefix("ref: refs/heads/")?;
+    let repo = open_repo(&source_path).ok()?;
+    let head = repo.head_state().ok()?;
+    let branch = head.branch_name()?;
     (!branch.is_empty()).then(|| branch.to_string())
 }
 
@@ -4428,37 +4422,68 @@ mod tests {
     }
 
     #[test]
-    fn write_head_symref_is_atomic_and_round_trips() {
+    fn write_head_symref_writes_git_head_bytes() {
         let tmp = tempfile::TempDir::new().unwrap();
         let git_dir = tmp.path();
+        SleyRepository::init_bare(git_dir).expect("init bare");
 
         write_head_symref(git_dir, "refs/heads/feature/x").expect("write HEAD symref");
-
-        // (a) No leftover temp file — the rename consumed it.
-        assert!(
-            !git_dir.join("HEAD.tmp").exists(),
-            "atomic writer must not leave HEAD.tmp behind"
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join("HEAD")).expect("read HEAD"),
+            "ref: refs/heads/feature/x\n"
         );
 
-        // (b) Exact content, including the trailing newline.
-        let contents = std::fs::read_to_string(git_dir.join("HEAD")).expect("read HEAD");
-        assert_eq!(contents, "ref: refs/heads/feature/x\n");
-
-        // (c) Round-trips through the same symref parse `read_git_head_branch`
-        // (clone.rs) and `detect_git_head` use.
-        let branch = contents
-            .trim()
-            .strip_prefix("ref: ")
-            .and_then(|s| s.strip_prefix("refs/heads/"))
-            .expect("HEAD parses as a branch symref");
-        assert_eq!(branch, "feature/x");
-
-        // Overwriting an existing HEAD is also clean.
         write_head_symref(git_dir, "refs/heads/main").expect("rewrite HEAD symref");
-        assert!(!git_dir.join("HEAD.tmp").exists());
         assert_eq!(
             std::fs::read_to_string(git_dir.join("HEAD")).unwrap(),
             "ref: refs/heads/main\n"
+        );
+    }
+
+    /// Characterization: `head_state()` branch/detached/unborn mapping matches
+    /// the legacy `ref: refs/heads/` text parse.
+    #[test]
+    fn head_state_matches_legacy_head_symref_parse() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let git_dir = root.join(".git");
+        SleyRepository::init_bare(&git_dir).expect("init bare overlay");
+
+        fn legacy_branch_parse(head_path: &Path) -> Option<String> {
+            let contents = std::fs::read_to_string(head_path).ok()?;
+            let trimmed = contents.trim();
+            let suffix = trimmed.strip_prefix("ref: ")?;
+            let branch = suffix.strip_prefix("refs/heads/")?;
+            (!branch.is_empty()).then(|| branch.to_string())
+        }
+
+        // Attached symref.
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let repo = open_repo(root).expect("open");
+        assert_eq!(repo.head_state().unwrap().branch_name(), Some("main"));
+        assert_eq!(legacy_branch_parse(&git_dir.join("HEAD")), Some("main".into()));
+
+        // Detached HEAD.
+        let oid =
+            ObjectId::from_hex(ObjectFormat::Sha1, "0000000000000000000000000000000000000001")
+                .unwrap();
+        std::fs::write(git_dir.join("HEAD"), format!("{oid}\n")).unwrap();
+        let repo = open_repo(root).expect("open");
+        let state = repo.head_state().unwrap();
+        assert!(state.is_detached());
+        assert_eq!(state.branch_name(), None);
+        assert_eq!(legacy_branch_parse(&git_dir.join("HEAD")), None);
+
+        // Unborn branch symref (no refs/heads/feature yet).
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+        let repo = open_repo(root).expect("open");
+        assert_eq!(
+            repo.head_state().unwrap().branch_name(),
+            Some("feature")
+        );
+        assert_eq!(
+            legacy_branch_parse(&git_dir.join("HEAD")),
+            Some("feature".into())
         );
     }
 }

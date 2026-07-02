@@ -23,8 +23,8 @@ use repo::{
     refresh_thread_freshness,
 };
 use sley::{
-    DeleteRef, FullName, GitObjectType, GitTime, IndexWriteOptions, ObjectId, RefPrecondition,
-    ReferenceTarget, Repository as SleyRepository, Signature,
+    DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions, ObjectId,
+    RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
     plumbing::sley_core::ByteString as GitByteString,
 };
 
@@ -1392,10 +1392,11 @@ fn attach_git_head_to_branch(repo: &SleyRepository, branch: &str) -> Result<()> 
     if branch == "HEAD" {
         return Ok(());
     }
-    let head_path = repo.git_dir().join("HEAD");
-    fs::write(&head_path, format!("ref: refs/heads/{branch}\n"))
-        .map_err(|error| anyhow!("failed to attach Git HEAD to branch '{branch}': {error}"))?;
-    fsync_file_and_parent(&head_path)?;
+    repo.set_head_symref(
+        format!("refs/heads/{branch}"),
+        HeadUpdateOptions::new(),
+    )
+    .map_err(|error| anyhow!("failed to attach Git HEAD to branch '{branch}': {error}"))?;
     Ok(())
 }
 
@@ -2172,6 +2173,32 @@ impl AtomicMutation for RedoOp {
             updated.push(staged.output);
         }
         Ok(StagedCommit::pure(updated))
+    }
+}
+
+#[cfg(test)]
+mod head_symref_tests {
+    use super::attach_git_head_to_branch;
+    use sley::{HeadUpdateOptions, Repository as SleyRepository};
+
+    #[test]
+    fn attach_git_head_writes_legacy_head_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git_dir = tmp.path().join(".git");
+        let repo = SleyRepository::init_bare(&git_dir).expect("init bare");
+        attach_git_head_to_branch(&repo, "feature").expect("attach HEAD");
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join("HEAD")).expect("read HEAD"),
+            "ref: refs/heads/feature\n"
+        );
+        // Same bytes as the pre-migration `fs::write` path.
+        repo.set_head_symref("refs/heads/other", HeadUpdateOptions::new())
+            .expect("direct symref");
+        attach_git_head_to_branch(&repo, "main").expect("reattach");
+        assert_eq!(
+            std::fs::read_to_string(git_dir.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
+        );
     }
 }
 
