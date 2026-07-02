@@ -267,6 +267,11 @@ pub(crate) fn resolve_target(
 /// disambiguation that `heddle show` and `heddle context list --ref` already do.
 pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects::object::ChangeId> {
     let user_config = UserConfig::load_default().unwrap_or_default();
+    // The bootstrap hook must return a HeddleError, but ensure_current_state's
+    // failure carries CLI-level context (IO/snapshot causes) that must reach
+    // the user unrecategorized. Stash the original error and swap it back in
+    // below; the HeddleError is only a carrier across the typed boundary.
+    let bootstrap_failure = std::cell::RefCell::new(None);
     let bootstrap = |repo: &Repository| {
         ensure_current_state(
             repo,
@@ -274,13 +279,18 @@ pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects:
             Some("Bootstrap git-overlay before resolving HEAD context".to_string()),
         )
         .map(|_| ())
-        .map_err(|err| HeddleError::Conflict(err.to_string()))
+        .map_err(|err| {
+            let carrier = HeddleError::Conflict(err.to_string());
+            *bootstrap_failure.borrow_mut() = Some(err);
+            carrier
+        })
     };
     let policy = ResolvePolicy {
         git_overlay_import_hints: true,
         bootstrap_on_empty_head: Some(&bootstrap),
     };
     resolve_state_id_with_policy(repo, spec, policy)
+        .map_err(|err| bootstrap_failure.borrow_mut().take().unwrap_or(err))
 }
 
 pub(crate) fn target_label(target: &ContextTarget) -> (String, String) {
