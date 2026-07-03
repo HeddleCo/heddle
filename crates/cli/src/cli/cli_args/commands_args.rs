@@ -1355,6 +1355,12 @@ pub struct CloneArgs {
     /// Partial-clone filter spec (`blob:none` only).
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
+
+    /// Clone a whole hosted monorepo: resolve the root spool's child tree and
+    /// clone every child spool at its anchored state into its mount path.
+    /// Hosted/network remotes only. (Alias: --monorepo.)
+    #[arg(long, visible_alias = "monorepo")]
+    pub recursive: bool,
 }
 
 fn parse_clone_filter_spec(s: &str) -> Result<String, String> {

@@ -73,6 +73,8 @@ mod session;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
+#[cfg(feature = "client")]
+mod spool;
 mod start_atomic;
 mod stash;
 mod stash_ops;
@@ -194,6 +196,8 @@ pub use session::{
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
+#[cfg(feature = "client")]
+pub use spool::cmd_spool;
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use thread::{cmd_start, cmd_thread_show};

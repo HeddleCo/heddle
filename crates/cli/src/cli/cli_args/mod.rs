@@ -22,6 +22,8 @@ mod commands_review;
 #[cfg(feature = "semantic")]
 mod commands_semantic;
 mod commands_shell;
+#[cfg(feature = "client")]
+mod commands_spool;
 mod commands_stash;
 mod commands_thread;
 mod commands_visibility;
@@ -85,6 +87,10 @@ pub use commands_review::{
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 pub use commands_shell::{CompletionSubject, ShellCommands, ShellKind};
+#[cfg(feature = "client")]
+pub use commands_spool::{
+    SpoolAttachArgs, SpoolChildrenArgs, SpoolCommands, SpoolDetachArgs, SpoolHistoryArgs,
+};
 pub use commands_stash::StashCommands;
 pub use commands_thread::{
     ThreadCleanupArgs, ThreadCommands, ThreadListArgs, ThreadMarkerCommands,

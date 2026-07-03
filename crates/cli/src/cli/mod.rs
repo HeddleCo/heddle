@@ -35,7 +35,10 @@ pub use cli_args::{
     WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
-pub use cli_args::{AuthCommands, SupportCommands};
+pub use cli_args::{
+    AuthCommands, SpoolAttachArgs, SpoolChildrenArgs, SpoolCommands, SpoolDetachArgs,
+    SpoolHistoryArgs, SupportCommands,
+};
 #[cfg(feature = "git-overlay")]
 pub use cli_args::{BridgeCommands, GitCommands};
 #[cfg(feature = "semantic")]

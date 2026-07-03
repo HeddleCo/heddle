@@ -26,7 +26,7 @@ use crate::cli::{
     render::shell_quote,
 };
 #[cfg(feature = "client")]
-use crate::cli::{AuthCommands, PresenceCommands, SupportCommands};
+use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{BridgeCommands, GitCommands};
 
@@ -1668,6 +1668,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         "output_kind",
                         "clone_connection",
                     ),
+                    // `clone --recursive --output json` (Spool epic P9) emits a
+                    // monorepo summary instead of the single-spool `clone`
+                    // payload: the placed per-spool ops + the skipped (EdgeSkip)
+                    // child edges. Inline object, no separate schema verb.
+                    // Source: `clone::monorepo_clone_output_json`.
+                    json_discriminator_no_schema(
+                        "monorepo clone summary emitted by `clone --recursive` \
+                         (placed spools + skipped child edges; no separate schema)",
+                        "output_kind",
+                        "clone_monorepo",
+                    ),
                 ],
             ),
             220,
@@ -2717,6 +2728,30 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
+    ),
+    entry(
+        &["spool"],
+        category(feature_gated(GROUP, "client"), "repo"),
+    ),
+    entry(
+        &["spool", "attach"],
+        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+    ),
+    entry(
+        &["spool", "detach"],
+        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+    ),
+    entry(
+        &["spool", "children"],
+        category(feature_gated(READ_TEXT, "client"), "repo"),
+    ),
+    entry(
+        &["spool", "governance"],
+        category(feature_gated(READ_TEXT, "client"), "repo"),
+    ),
+    entry(
+        &["spool", "membership"],
+        category(feature_gated(READ_TEXT, "client"), "repo"),
     ),
     entry(
         &["support"],
@@ -4836,6 +4871,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SupportCommands::Grant(_) => vec!["support", "grant"],
             SupportCommands::List(_) => vec!["support", "list"],
             SupportCommands::Revoke(_) => vec!["support", "revoke"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Spool { command } => match command {
+            SpoolCommands::Attach(_) => vec!["spool", "attach"],
+            SpoolCommands::Detach(_) => vec!["spool", "detach"],
+            SpoolCommands::Children(_) => vec!["spool", "children"],
+            SpoolCommands::Governance(_) => vec!["spool", "governance"],
+            SpoolCommands::Membership(_) => vec!["spool", "membership"],
         },
         #[cfg(feature = "git-overlay")]
         Commands::Bridge { command } => match command {

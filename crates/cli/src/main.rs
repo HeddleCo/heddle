@@ -46,6 +46,8 @@ use cli::{
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
+#[cfg(feature = "client")]
+use cli::cli::commands::cmd_spool;
 use tracing::debug;
 
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
@@ -705,6 +707,9 @@ async fn async_main() -> Result<()> {
             hosted.support(&cli, &cmd).await
         }
 
+        #[cfg(feature = "client")]
+        Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
+
         #[cfg(feature = "git-overlay")]
         Commands::Bridge { command } => match command {
             BridgeCommands::Git { command } => cmd_bridge_git(&cli, command.clone()),
@@ -753,6 +758,7 @@ async fn async_main() -> Result<()> {
             depth,
             lazy,
             filter,
+            recursive,
         }) => {
             cmd_clone(
                 &cli,
@@ -762,6 +768,7 @@ async fn async_main() -> Result<()> {
                 *depth,
                 *lazy,
                 filter.clone(),
+                *recursive,
             )
             .await
         }
