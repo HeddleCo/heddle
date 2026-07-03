@@ -107,6 +107,9 @@ mod tests {
                     EntryType::Tree => TreeEntry::directory(name.to_string(), hash),
                     EntryType::Symlink => TreeEntry::symlink(name.to_string(), hash),
                     EntryType::Gitlink => unreachable!("semantic helper does not build gitlinks"),
+                    EntryType::Spoollink => {
+                        unreachable!("semantic helper does not build spoollinks")
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap(),

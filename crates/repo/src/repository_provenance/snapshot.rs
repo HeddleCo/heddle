@@ -138,7 +138,7 @@ impl Repository {
                         entries.push(TreeEntry::file(entry.name(), hash, false)?);
                     }
                 }
-                EntryType::Symlink | EntryType::Gitlink => {}
+                EntryType::Symlink | EntryType::Gitlink | EntryType::Spoollink => {}
             }
         }
 

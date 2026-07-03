@@ -100,6 +100,9 @@ fn refresh_tracked_directory(
                 refresh_tracked_directory(ctx, &child_rel_path, &child_key, &subtree)?
             }
             EntryType::Gitlink => false,
+            // Native child-spool edge: not materialized to the worktree in
+            // this phase, so it never makes the tracked tree dirty.
+            EntryType::Spoollink => true,
         };
         subtree_clean &= child_clean;
     }

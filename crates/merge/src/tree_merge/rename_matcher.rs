@@ -123,7 +123,9 @@ pub(crate) fn flatten_tree(
                     result.extend(flatten_tree(store, &subtree, &path)?);
                 }
             }
-            EntryType::Gitlink => {}
+            // Gitlinks and native child-spool edges carry no comparable
+            // content hash, so they take no part in rename detection.
+            EntryType::Gitlink | EntryType::Spoollink => {}
         }
     }
 

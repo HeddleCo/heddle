@@ -158,6 +158,9 @@ fn mark_all_deleted<S: ObjectStore + ?Sized>(
             EntryType::Symlink | EntryType::Gitlink => {
                 status.deleted.push(path);
             }
+            // Native child-spool edge: not a filesystem leaf, so there is
+            // nothing on disk to report as deleted.
+            EntryType::Spoollink => {}
         }
     }
     Ok(())

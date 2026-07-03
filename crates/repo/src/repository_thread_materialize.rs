@@ -891,6 +891,9 @@ fn collect_tree_leaf_paths(
             EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 out.insert(rel_path);
             }
+            // Native child-spool edge: not a worktree leaf, so it has no
+            // materialized path to collect.
+            EntryType::Spoollink => {}
         }
     }
     Ok(())
@@ -955,6 +958,8 @@ pub(crate) fn populate_manifest_from_tree(
                 );
             }
             EntryType::Gitlink => {}
+            // Native child-spool edge: nothing materialized to disk.
+            EntryType::Spoollink => {}
         }
     }
     Ok(())

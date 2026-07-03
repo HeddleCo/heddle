@@ -323,6 +323,11 @@ pub(crate) fn kind_for_mode(mode: FileMode) -> NodeKind {
     match mode {
         FileMode::Normal | FileMode::Executable | FileMode::Gitlink => NodeKind::File,
         FileMode::Symlink => NodeKind::Symlink,
+        // Native child-spool edges are not exposed in the mount yet
+        // (`entry_from_tree_entry` refuses them before any node is interned),
+        // so this arm is defensive only; classify as a file to keep the map
+        // total without inventing a new node kind.
+        FileMode::Spoollink => NodeKind::File,
     }
 }
 
@@ -466,5 +471,6 @@ mod tests {
         assert_eq!(kind_for_mode(FileMode::Normal), NodeKind::File);
         assert_eq!(kind_for_mode(FileMode::Executable), NodeKind::File);
         assert_eq!(kind_for_mode(FileMode::Symlink), NodeKind::Symlink);
+        assert_eq!(kind_for_mode(FileMode::Spoollink), NodeKind::File);
     }
 }

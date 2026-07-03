@@ -442,6 +442,9 @@ impl Repository {
                     });
                 }
             }
+            // Native child-spool edge: not materialized to the worktree in
+            // this phase, so it plans no filesystem write.
+            EntryType::Spoollink => {}
         }
 
         Ok(())
@@ -458,6 +461,9 @@ impl Repository {
                 plan.stats.changed_count += 1;
                 plan.removals.push(self.root().join(rel_path));
             }
+            // Native child-spool edge: never materialized to the worktree in
+            // this phase, so there is nothing on disk to remove.
+            EntryType::Spoollink => {}
             EntryType::Tree => {
                 let tree_hash = entry.require_content_hash();
                 let subtree = self
@@ -1107,6 +1113,9 @@ fn remove_tracked_descendants_inner(
     for entry in source_subtree.entries() {
         let child = dir.join(entry.name());
         match entry.entry_type() {
+            // Native child-spool edge: never materialized to the worktree in
+            // this phase, so there is no descendant file to remove.
+            EntryType::Spoollink => {}
             EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
                 match fs::symlink_metadata(&child) {
                     Ok(_) => {

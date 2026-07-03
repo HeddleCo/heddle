@@ -242,6 +242,7 @@ fn check_provenance_tree(
             }
             objects::object::EntryType::Symlink => {}
             objects::object::EntryType::Gitlink => {}
+            objects::object::EntryType::Spoollink => {}
         }
     }
 

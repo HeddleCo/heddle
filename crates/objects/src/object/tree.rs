@@ -6,13 +6,17 @@ use std::{fmt, path::Path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
-use super::ContentHash;
+use super::{ChangeId, ContentHash};
 
 const TREE_FORMAT_VERSION: u8 = 2;
 const ENTRY_KIND_BLOB: u8 = 0;
 const ENTRY_KIND_TREE: u8 = 1;
 const ENTRY_KIND_SYMLINK: u8 = 2;
 const ENTRY_KIND_GITLINK: u8 = 3;
+/// Native child-spool edge: the entry's payload is a spool-id + anchored
+/// state-id (both 16-byte [`ChangeId`]s), NOT a git commit OID. This link is
+/// deliberately NOT a git submodule — see [`FileMode::Spoollink`].
+const ENTRY_KIND_SPOOLLINK: u8 = 4;
 const GIT_OBJECT_FORMAT_SHA1: u8 = 1;
 const GIT_OBJECT_FORMAT_SHA256: u8 = 2;
 
@@ -44,6 +48,12 @@ pub enum FileMode {
     Executable,
     Symlink,
     Gitlink,
+    /// Native child-spool edge. This is NOT a git file mode: a spoollink
+    /// points at a spool-id + state-id, not a git object, so it has no valid
+    /// git submodule (`160000`) representation and [`Self::to_unix_mode`]
+    /// returns `0`. Git-boundary code MUST handle it explicitly rather than
+    /// emit a bogus mode.
+    Spoollink,
 }
 
 impl FileMode {
@@ -53,6 +63,7 @@ impl FileMode {
             FileMode::Executable => 1,
             FileMode::Symlink => 2,
             FileMode::Gitlink => 3,
+            FileMode::Spoollink => 4,
         }
     }
 
@@ -62,16 +73,21 @@ impl FileMode {
             1 => Some(FileMode::Executable),
             2 => Some(FileMode::Symlink),
             3 => Some(FileMode::Gitlink),
+            4 => Some(FileMode::Spoollink),
             _ => None,
         }
     }
 
+    /// The git tree/index mode for this entry. A spoollink has no git mode
+    /// (it is not a git object) and returns `0` — callers on a git boundary
+    /// must skip spoollinks rather than treat this as a real mode.
     pub fn to_unix_mode(&self) -> u32 {
         match self {
             FileMode::Normal => 0o100644,
             FileMode::Executable => 0o100755,
             FileMode::Symlink => 0o120000,
             FileMode::Gitlink => 0o160000,
+            FileMode::Spoollink => 0,
         }
     }
 }
@@ -85,6 +101,8 @@ pub enum EntryType {
     Tree,
     Symlink,
     Gitlink,
+    /// Native child-spool edge (see [`TreeEntryTarget::Spoollink`]).
+    Spoollink,
 }
 
 impl EntryType {
@@ -94,6 +112,7 @@ impl EntryType {
             EntryType::Tree => 1,
             EntryType::Symlink => 2,
             EntryType::Gitlink => 3,
+            EntryType::Spoollink => 4,
         }
     }
 
@@ -103,6 +122,7 @@ impl EntryType {
             1 => Some(EntryType::Tree),
             2 => Some(EntryType::Symlink),
             3 => Some(EntryType::Gitlink),
+            4 => Some(EntryType::Spoollink),
             _ => None,
         }
     }
@@ -116,6 +136,15 @@ pub enum TreeEntryTarget {
     Tree { hash: ContentHash },
     Symlink { hash: ContentHash },
     Gitlink { target: GitObjectId },
+    /// Native pointer to a child spool: a spool-id plus an anchored state-id.
+    /// Unlike [`Self::Gitlink`], this is NOT a git object OID and cannot
+    /// round-trip to a git submodule; git-boundary code must handle it
+    /// explicitly (skip on export). The Spool children facet consumes this in
+    /// a later phase.
+    Spoollink {
+        spool_id: ChangeId,
+        state_id: ChangeId,
+    },
 }
 
 impl TreeEntryTarget {
@@ -125,6 +154,7 @@ impl TreeEntryTarget {
             TreeEntryTarget::Tree { .. } => EntryType::Tree,
             TreeEntryTarget::Symlink { .. } => EntryType::Symlink,
             TreeEntryTarget::Gitlink { .. } => EntryType::Gitlink,
+            TreeEntryTarget::Spoollink { .. } => EntryType::Spoollink,
         }
     }
 
@@ -137,6 +167,7 @@ impl TreeEntryTarget {
             TreeEntryTarget::Tree { .. } => FileMode::Normal,
             TreeEntryTarget::Symlink { .. } => FileMode::Symlink,
             TreeEntryTarget::Gitlink { .. } => FileMode::Gitlink,
+            TreeEntryTarget::Spoollink { .. } => FileMode::Spoollink,
         }
     }
 
@@ -145,7 +176,7 @@ impl TreeEntryTarget {
             TreeEntryTarget::Blob { hash, .. }
             | TreeEntryTarget::Tree { hash }
             | TreeEntryTarget::Symlink { hash } => Some(*hash),
-            TreeEntryTarget::Gitlink { .. } => None,
+            TreeEntryTarget::Gitlink { .. } | TreeEntryTarget::Spoollink { .. } => None,
         }
     }
 
@@ -156,12 +187,24 @@ impl TreeEntryTarget {
         }
     }
 
+    /// The child-spool pointer `(spool_id, state_id)` for a spoollink entry,
+    /// or `None` for any other kind.
+    pub fn spoollink_target(&self) -> Option<(ChangeId, ChangeId)> {
+        match self {
+            TreeEntryTarget::Spoollink { spool_id, state_id } => Some((*spool_id, *state_id)),
+            _ => None,
+        }
+    }
+
     fn encoded_payload_len(&self) -> usize {
         match self {
             TreeEntryTarget::Blob { hash, .. }
             | TreeEntryTarget::Tree { hash }
             | TreeEntryTarget::Symlink { hash } => hash.as_bytes().len(),
             TreeEntryTarget::Gitlink { target } => target.as_bytes().len(),
+            TreeEntryTarget::Spoollink { spool_id, state_id } => {
+                spool_id.as_bytes().len() + state_id.as_bytes().len()
+            }
         }
     }
 
@@ -175,6 +218,10 @@ impl TreeEntryTarget {
             TreeEntryTarget::Gitlink { target } => {
                 hasher.update(&[git_format_to_tag(target.format())]);
                 hasher.update(target.as_bytes())
+            }
+            TreeEntryTarget::Spoollink { spool_id, state_id } => {
+                hasher.update(spool_id.as_bytes());
+                hasher.update(state_id.as_bytes())
             }
         };
     }
@@ -267,6 +314,21 @@ impl TreeEntry {
         })
     }
 
+    /// Build a native child-spool edge: a pointer to `spool_id` anchored at
+    /// `state_id`. Not a git submodule (see [`TreeEntryTarget::Spoollink`]).
+    pub fn spoollink(
+        name: impl Into<String>,
+        spool_id: ChangeId,
+        state_id: ChangeId,
+    ) -> Result<Self, TreeError> {
+        let name = name.into();
+        validate_name(&name)?;
+        Ok(Self {
+            name,
+            target: TreeEntryTarget::Spoollink { spool_id, state_id },
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -286,6 +348,7 @@ impl TreeEntry {
             (TreeEntryTarget::Symlink { .. }, FileMode::Symlink)
             | (TreeEntryTarget::Tree { .. }, _)
             | (TreeEntryTarget::Gitlink { .. }, FileMode::Gitlink)
+            | (TreeEntryTarget::Spoollink { .. }, FileMode::Spoollink)
                 if mode == self.mode() =>
             {
                 Ok(self.clone())
@@ -318,7 +381,9 @@ impl TreeEntry {
     pub fn leaf_content_hash(&self) -> Option<ContentHash> {
         match self.target {
             TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => Some(hash),
-            TreeEntryTarget::Tree { .. } | TreeEntryTarget::Gitlink { .. } => None,
+            TreeEntryTarget::Tree { .. }
+            | TreeEntryTarget::Gitlink { .. }
+            | TreeEntryTarget::Spoollink { .. } => None,
         }
     }
 
@@ -352,6 +417,11 @@ impl TreeEntry {
         self.target.gitlink_target()
     }
 
+    /// The `(spool_id, state_id)` pointer for a spoollink entry, else `None`.
+    pub fn spoollink_target(&self) -> Option<(ChangeId, ChangeId)> {
+        self.target.spoollink_target()
+    }
+
     pub fn is_tree(&self) -> bool {
         self.entry_type() == EntryType::Tree
     }
@@ -366,6 +436,10 @@ impl TreeEntry {
 
     pub fn is_gitlink(&self) -> bool {
         self.entry_type() == EntryType::Gitlink
+    }
+
+    pub fn is_spoollink(&self) -> bool {
+        self.entry_type() == EntryType::Spoollink
     }
 
     pub fn is_executable(&self) -> bool {
@@ -497,6 +571,13 @@ struct EncodedTreeEntryV2 {
     executable: Option<bool>,
     git_format: Option<u8>,
     git_oid: Option<Vec<u8>>,
+    // Child-spool pointer for SPOOLLINK entries (16-byte ChangeIds). `default`
+    // keeps the encoding backward-compatible: pre-SPOOLLINK payloads simply
+    // omit these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool_id: Option<ChangeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spool_state_id: Option<ChangeId>,
 }
 
 impl Serialize for Tree {
@@ -555,6 +636,8 @@ impl From<&TreeEntry> for EncodedTreeEntryV2 {
                 executable: Some(*executable),
                 git_format: None,
                 git_oid: None,
+                spool_id: None,
+                spool_state_id: None,
             },
             TreeEntryTarget::Tree { hash } => Self {
                 name: entry.name.clone(),
@@ -563,6 +646,8 @@ impl From<&TreeEntry> for EncodedTreeEntryV2 {
                 executable: None,
                 git_format: None,
                 git_oid: None,
+                spool_id: None,
+                spool_state_id: None,
             },
             TreeEntryTarget::Symlink { hash } => Self {
                 name: entry.name.clone(),
@@ -571,6 +656,8 @@ impl From<&TreeEntry> for EncodedTreeEntryV2 {
                 executable: None,
                 git_format: None,
                 git_oid: None,
+                spool_id: None,
+                spool_state_id: None,
             },
             TreeEntryTarget::Gitlink { target } => Self {
                 name: entry.name.clone(),
@@ -579,6 +666,18 @@ impl From<&TreeEntry> for EncodedTreeEntryV2 {
                 executable: None,
                 git_format: Some(git_format_to_tag(target.format())),
                 git_oid: Some(target.as_bytes().to_vec()),
+                spool_id: None,
+                spool_state_id: None,
+            },
+            TreeEntryTarget::Spoollink { spool_id, state_id } => Self {
+                name: entry.name.clone(),
+                kind: ENTRY_KIND_SPOOLLINK,
+                hash: None,
+                executable: None,
+                git_format: None,
+                git_oid: None,
+                spool_id: Some(*spool_id),
+                spool_state_id: Some(*state_id),
             },
         }
     }
@@ -641,6 +740,15 @@ impl TryFrom<EncodedTreeEntryV2> for TreeEntry {
                 })?;
                 TreeEntry::gitlink(encoded.name, target)
             }
+            ENTRY_KIND_SPOOLLINK => {
+                let spool_id = encoded.spool_id.ok_or_else(|| {
+                    TreeError::InvalidStructure("spoollink entry is missing spool_id".into())
+                })?;
+                let state_id = encoded.spool_state_id.ok_or_else(|| {
+                    TreeError::InvalidStructure("spoollink entry is missing spool_state_id".into())
+                })?;
+                TreeEntry::spoollink(encoded.name, spool_id, state_id)
+            }
             other => Err(TreeError::InvalidStructure(format!(
                 "unknown tree entry kind {other}"
             ))),
@@ -696,5 +804,62 @@ impl<'a> IntoIterator for &'a Tree {
 
     fn into_iter(self) -> Self::IntoIter {
         self.entries.iter()
+    }
+}
+
+#[cfg(test)]
+mod spoollink_tests {
+    use super::*;
+
+    #[test]
+    fn spoollink_entry_shape() {
+        let spool_id = ChangeId::from_bytes([7u8; 16]);
+        let state_id = ChangeId::from_bytes([9u8; 16]);
+        let entry = TreeEntry::spoollink("child", spool_id, state_id).unwrap();
+
+        assert!(entry.is_spoollink());
+        assert_eq!(entry.entry_type(), EntryType::Spoollink);
+        assert_eq!(entry.mode(), FileMode::Spoollink);
+        // Native edge carries no Heddle content hash and no git OID.
+        assert_eq!(entry.content_hash(), None);
+        assert_eq!(entry.leaf_content_hash(), None);
+        assert_eq!(entry.gitlink_target(), None);
+        assert_eq!(entry.spoollink_target(), Some((spool_id, state_id)));
+    }
+
+    #[test]
+    fn spoollink_roundtrips_through_encoded_tree_v2() {
+        let spool_id = ChangeId::from_bytes([1u8; 16]);
+        let state_id = ChangeId::from_bytes([2u8; 16]);
+
+        // Mix a spoollink alongside the existing kinds so the round-trip also
+        // proves existing entries are undisturbed.
+        let blob_hash = ContentHash::compute(b"hello");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("a_blob", blob_hash, false).unwrap(),
+            TreeEntry::spoollink("z_child", spool_id, state_id).unwrap(),
+        ]);
+
+        let bytes = rmp_serde::to_vec(&tree).unwrap();
+        let decoded = Tree::decode_current_msgpack(&bytes).unwrap();
+
+        assert_eq!(decoded, tree, "tree round-trip must be lossless");
+
+        let child = decoded.get("z_child").expect("spoollink survives round-trip");
+        assert_eq!(child.spoollink_target(), Some((spool_id, state_id)));
+        assert_eq!(child.entry_type(), EntryType::Spoollink);
+
+        // Hash is stable and distinct from a same-name gitlink/blob shape.
+        assert_eq!(decoded.hash(), tree.hash());
+    }
+
+    #[test]
+    fn file_mode_spoollink_has_no_git_mode() {
+        // The whole point of a dedicated kind: it must NOT masquerade as a
+        // git submodule (160000) or any other real git mode.
+        assert_eq!(FileMode::Spoollink.to_unix_mode(), 0);
+        assert_ne!(FileMode::Spoollink.to_unix_mode(), 0o160000);
+        assert_eq!(FileMode::from_byte(FileMode::Spoollink.to_byte()), Some(FileMode::Spoollink));
+        assert_eq!(EntryType::from_byte(EntryType::Spoollink.to_byte()), Some(EntryType::Spoollink));
     }
 }

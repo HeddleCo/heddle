@@ -433,12 +433,17 @@ fn write_binary_change<W: Write>(
 
 /// Map a tracked file mode to the git unified-diff mode string. `None`
 /// (mode not resolved) and the regular-file case both render `100644`.
+///
+/// A `Spoollink` is a native child-spool edge, not a file, and does not
+/// participate in git-style textual diffs; it deliberately does NOT render as
+/// a git submodule (`160000`) and falls back to the neutral `100644` if it
+/// ever reaches here.
 fn mode_str(mode: Option<FileMode>) -> &'static str {
     match mode {
         Some(FileMode::Executable) => "100755",
         Some(FileMode::Symlink) => "120000",
         Some(FileMode::Gitlink) => "160000",
-        Some(FileMode::Normal) | None => "100644",
+        Some(FileMode::Normal) | Some(FileMode::Spoollink) | None => "100644",
     }
 }
 

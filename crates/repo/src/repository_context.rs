@@ -345,7 +345,7 @@ impl Repository {
                         results.insert(context_entry_key(&target), (target, context));
                     }
                 }
-                EntryType::Symlink | EntryType::Gitlink => {}
+                EntryType::Symlink | EntryType::Gitlink | EntryType::Spoollink => {}
             }
         }
         Ok(())

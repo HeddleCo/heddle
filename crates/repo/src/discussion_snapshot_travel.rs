@@ -147,6 +147,7 @@ where
                 }
                 EntryType::Symlink => {}
                 EntryType::Gitlink => {}
+                EntryType::Spoollink => {}
             }
         }
         Ok(())
