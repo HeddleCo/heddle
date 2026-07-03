@@ -109,6 +109,7 @@ pub use repository::{
     RefCountsInspection, RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, ResignOutcome, SUGGESTION_WINDOW, SnapshotExecution,
+    SpoolFacet,
     SnapshotProfile, ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet,
     UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
     WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,

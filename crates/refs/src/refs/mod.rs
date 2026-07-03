@@ -2,6 +2,7 @@
 //! References: threads (branches), markers (tags), and HEAD.
 
 mod backend;
+mod facet;
 mod head;
 mod name;
 pub mod operation_index;
@@ -31,6 +32,7 @@ mod refs_packed_tests;
 mod reftable_tests;
 
 pub use backend::CoreRefBackend;
+pub use facet::SpoolFacet;
 pub use head::{Head, HeadParseError};
 pub use heddle_schema::refs::{
     FOOTER_LEN, HEADER_LEN, MAGIC, PackedRefsModel, ReftableError, ReftableModel,
