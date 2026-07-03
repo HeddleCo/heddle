@@ -685,7 +685,7 @@ export interface CloneSchema {
   objects?: number | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "clone" | "clone_connection";
+  output_kind: "clone" | "clone_connection" | "clone_monorepo";
   remote?: string | null;
   replayed?: boolean | null;
   repository_capability?: string | null;

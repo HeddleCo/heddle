@@ -13041,7 +13041,8 @@
         "output_kind": {
           "enum": [
             "clone",
-            "clone_connection"
+            "clone_connection",
+            "clone_monorepo"
           ],
           "type": "string"
         },
