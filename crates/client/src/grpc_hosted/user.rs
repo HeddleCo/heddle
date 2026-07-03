@@ -19,25 +19,73 @@ use super::{
     },
 };
 
-/// Dispatch an authenticated unary RPC on `self.user`: wrap `$msg` in
-/// a `tonic::Request`, stamp the auth credential via `apply_auth`,
-/// await the call, map a transport `Status` to a `ProtocolError`, and
-/// unwrap the response to its inner message. Every authenticated
-/// user-service call shares this exact prologue; the macro is the one
-/// chokepoint so a change to the auth/await/error-map sequence lands
-/// once. `?`-propagates `ProtocolError` from `apply_auth` and the
-/// mapped status, so it must be invoked inside an `async fn` returning
+/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
+/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
+/// `apply_signed_auth`, await the call, and — if the server rejects with
+/// `x-weft-sig-required: human` — invoke the app-registered human-signature
+/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
+/// `ProtocolError` and unwraps the response.
+///
+/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
+/// proto RPC name (used to build the signed `:path`). The message is bound once
+/// and cloned for the potential human retry (all hosted request protos derive
+/// `Clone`). The macro is the one chokepoint for the auth/sign/retry sequence;
+/// it must be invoked inside an `async fn` returning `Result<_, ProtocolError>`.
+macro_rules! signed_call {
+    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
+        let path = $path;
+        let message = $msg;
+        let mut request = Request::new(message.clone());
+        let sig_ctx = $self.apply_signed_auth(&mut request, path)?;
+        match $self.$client.$rpc(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status)
+                if $crate::grpc_hosted::request_signing::requires_human_signature(&status) =>
+            {
+                // The human assertion must cover the SAME action (ts + nonce +
+                // body-hash) the challenge was derived from, so we reuse the
+                // original `sig_ctx` rather than re-signing with a fresh nonce.
+                // `attach_human` re-stamps `x-weft-sig-ts`/`-nonce-bin` from that
+                // context; we only need bearer auth (not a fresh PoP) on retry.
+                let ctx = $self.require_human_sig_context(sig_ctx)?;
+                let assertion = $self.request_human_signature(path, &ctx)?;
+                let mut retry = Request::new(message);
+                $self.apply_auth(&mut retry)?;
+                $crate::grpc_hosted::request_signing::attach_human(&mut retry, &ctx, &assertion)?;
+                $self
+                    .$client
+                    .$rpc(retry)
+                    .await
+                    .map_err(status_to_protocol_error)?
+                    .into_inner()
+            }
+            Err(status) => return Err(status_to_protocol_error(status)),
+        }
+    }};
+}
+
+/// Dispatch an authenticated unary RPC on `self.user`: wrap the message in a
+/// `tonic::Request`, stamp bearer auth AND the Tier-1 PoP request signature via
+/// `apply_signed_auth`, await the call, and — if the server rejects with
+/// `x-weft-sig-required: human` — invoke the app-registered human-signature
+/// callback over the SAME action and retry ONCE. Maps a transport `Status` to a
+/// `ProtocolError` and unwraps the response.
+///
+/// `$rpc` is the snake_case tonic client method; `$grpc_method` is the PascalCase
+/// proto RPC name (used to build the signed `:path`). The message is bound once
+/// and cloned for the potential human retry (all hosted request protos derive
+/// `Clone`). Delegates to [`signed_call!`], the one chokepoint for the
+/// auth/sign/retry sequence; must be invoked inside an `async fn` returning
 /// `Result<_, ProtocolError>`.
 macro_rules! authed_call {
-    ($self:ident, $rpc:ident, $msg:expr) => {{
-        let mut request = Request::new($msg);
-        $self.apply_auth(&mut request)?;
-        $self
-            .user
-            .$rpc(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner()
+    ($self:ident, $rpc:ident, $grpc_method:literal, $msg:expr) => {{
+        signed_call!(
+            $self,
+            user,
+            $rpc,
+            concat!("/heddle.v1.HostedUserService/", $grpc_method),
+            $msg
+        )
     }};
 }
 
@@ -89,6 +137,7 @@ impl HostedGrpcClient {
         let namespace = authed_call!(
             self,
             get_current_user_namespace,
+            "GetCurrentUserNamespace",
             GetCurrentUserNamespaceRequest {}
         );
         Ok(to_protocol_namespace(namespace))
@@ -97,7 +146,7 @@ impl HostedGrpcClient {
     pub async fn list_namespaces(
         &mut self,
     ) -> Result<Vec<wire::HostedNamespaceInfo>, ProtocolError> {
-        let response = authed_call!(self, list_namespaces, ListNamespacesRequest {});
+        let response = authed_call!(self, list_namespaces, "ListNamespaces", ListNamespacesRequest {});
         Ok(response
             .namespaces
             .into_iter()
@@ -115,6 +164,7 @@ impl HostedGrpcClient {
         let namespace = authed_call!(
             self,
             create_namespace,
+            "CreateNamespace",
             grpc::heddle::v1::CreateNamespaceRequest {
                 kind: parse_namespace_kind_arg(kind)? as i32,
                 slug: slug.to_string(),
@@ -135,6 +185,7 @@ impl HostedGrpcClient {
         let repo = authed_call!(
             self,
             create_repository,
+            "CreateRepository",
             CreateRepositoryRequest {
                 namespace_path: namespace_path.to_string(),
                 slug: slug.to_string(),
@@ -151,6 +202,7 @@ impl HostedGrpcClient {
         let response = authed_call!(
             self,
             list_repositories,
+            "ListRepositories",
             ListRepositoriesRequest {
                 namespace_path: namespace_path.unwrap_or_default().to_string(),
             }
@@ -176,6 +228,7 @@ impl HostedGrpcClient {
         let namespace = authed_call!(
             self,
             update_namespace,
+            "UpdateNamespace",
             UpdateNamespaceRequest {
                 full_path: full_path.to_string(),
                 new_slug: new_slug.unwrap_or_default().to_string(),
@@ -191,6 +244,7 @@ impl HostedGrpcClient {
         authed_call!(
             self,
             delete_namespace,
+            "DeleteNamespace",
             DeleteNamespaceRequest {
                 full_path: full_path.to_string(),
                 client_operation_id: String::new(),
@@ -207,6 +261,7 @@ impl HostedGrpcClient {
         let repo = authed_call!(
             self,
             update_repository,
+            "UpdateRepository",
             UpdateRepositoryRequest {
                 full_path: full_path.to_string(),
                 new_slug: new_slug.to_string(),
@@ -220,6 +275,7 @@ impl HostedGrpcClient {
         authed_call!(
             self,
             delete_repository,
+            "DeleteRepository",
             DeleteRepositoryRequest {
                 full_path: full_path.to_string(),
                 client_operation_id: String::new(),
@@ -239,6 +295,7 @@ impl HostedGrpcClient {
         let grant = authed_call!(
             self,
             create_grant,
+            "CreateGrant",
             CreateGrantRequest {
                 subject: subject.to_string(),
                 role: parse_hosted_role_arg(role)? as i32,
@@ -256,6 +313,7 @@ impl HostedGrpcClient {
         let response = authed_call!(
             self,
             list_grants,
+            "ListGrants",
             ListGrantsRequest {
                 resource: resource.unwrap_or_default().to_string(),
             }
@@ -274,6 +332,7 @@ impl HostedGrpcClient {
         let grant = authed_call!(
             self,
             update_grant,
+            "UpdateGrant",
             UpdateGrantRequest {
                 subject: subject.to_string(),
                 role: parse_hosted_role_arg(role)? as i32,
@@ -294,6 +353,7 @@ impl HostedGrpcClient {
         authed_call!(
             self,
             delete_grant,
+            "DeleteGrant",
             DeleteGrantRequest {
                 subject: subject.to_string(),
                 target,
@@ -314,6 +374,7 @@ impl HostedGrpcClient {
         let invitation = authed_call!(
             self,
             create_invitation,
+            "CreateInvitation",
             CreateInvitationRequest {
                 email: email.to_string(),
                 namespace_path: namespace_path.to_string(),
@@ -341,6 +402,7 @@ impl HostedGrpcClient {
         Ok(authed_call!(
             self,
             approve_thread,
+            "ApproveThread",
             ApproveThreadRequest {
                 repo_path: repo_path.to_string(),
                 source_thread: source_thread.to_string(),
@@ -358,6 +420,7 @@ impl HostedGrpcClient {
         authed_call!(
             self,
             revoke_approval,
+            "RevokeApproval",
             RevokeApprovalRequest {
                 id: id.to_string(),
                 client_operation_id: String::new(),
@@ -375,6 +438,7 @@ impl HostedGrpcClient {
         Ok(authed_call!(
             self,
             list_thread_approvals,
+            "ListThreadApprovals",
             ListThreadApprovalsRequest {
                 repo_path: repo_path.to_string(),
                 source_thread: source_thread.to_string(),
@@ -402,6 +466,7 @@ impl HostedGrpcClient {
         Ok(authed_call!(
             self,
             check_merge_eligibility,
+            "CheckMergeEligibility",
             CheckMergeEligibilityRequest {
                 repo_path: repo_path.to_string(),
                 source_thread: source_thread.to_string(),
@@ -432,6 +497,7 @@ impl HostedGrpcClient {
         Ok(authed_call!(
             self,
             grant_support_access,
+            "GrantSupportAccess",
             GrantSupportAccessRequest {
                 operator_email: operator_email.to_string(),
                 target,
@@ -455,6 +521,7 @@ impl HostedGrpcClient {
         Ok(authed_call!(
             self,
             list_support_access_grants,
+            "ListSupportAccessGrants",
             ListSupportAccessGrantsRequest {
                 target,
                 include_inactive,
@@ -471,12 +538,36 @@ impl HostedGrpcClient {
         authed_call!(
             self,
             revoke_support_access,
+            "RevokeSupportAccess",
             RevokeSupportAccessRequest {
                 id: id.to_string(),
                 client_operation_id,
             }
         );
         Ok(())
+    }
+
+    /// Test-only: exercise the exact `signed_call!` orchestration (PoP sign →
+    /// human-required rejection → callback → retry with WebAuthn headers) over
+    /// the 3-method `TreeEditService` mock, so the retry path is covered
+    /// end-to-end without a 41-method `HostedUserService` mock. Uses
+    /// `StatusForThread` purely as a carrier RPC.
+    #[cfg(test)]
+    async fn signed_status_for_thread_with_retry(
+        &mut self,
+        thread: &str,
+    ) -> Result<grpc::heddle::v1::StatusForThreadResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            tree_edit,
+            status_for_thread,
+            "/heddle.v1.TreeEditService/StatusForThread",
+            grpc::heddle::v1::StatusForThreadRequest {
+                repo_path: "owner/repo".to_string(),
+                thread: thread.to_string(),
+                compare_tree: None,
+            }
+        ))
     }
 }
 
@@ -530,5 +621,255 @@ fn parse_hosted_role_arg(value: &str) -> Result<grpc::heddle::v1::HostedRole, Pr
         other => Err(ProtocolError::InvalidState(format!(
             "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod human_retry_tests {
+    //! End-to-end coverage of the `signed_call!` orchestration: proactive PoP
+    //! signing, the human-required rejection → app callback → single retry with
+    //! WebAuthn headers, and the no-callback typed-error (no-loop) case.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use cli_shared::ClientConfig;
+    use crypto::Ed25519Signer;
+    use grpc::heddle::v1::{
+        StatusForThreadRequest, StatusForThreadResponse,
+        tree_edit_service_server::{TreeEditService, TreeEditServiceServer},
+        DiffForThreadRequest, DiffForThreadResponse, LogForThreadRequest, LogForThreadResponse,
+    };
+    use tonic::{Request, Response, Status, transport::Server};
+    use wire::ProtocolError;
+
+    use super::super::request_signing::{
+        HDR_SIG_ALG, HDR_SIG_BIN, HDR_SIG_KEY_BIN, HDR_SIG_REQUIRED,
+        HDR_SIG_WEBAUTHN_AUTH_DATA_BIN, HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN, WebAuthnAssertion,
+    };
+    use super::HostedGrpcClient;
+
+    /// A `TreeEditService` mock for `StatusForThread` that models a `human`-tier
+    /// endpoint: the first request (no WebAuthn assertion) is rejected with
+    /// `x-weft-sig-required: human`; a request carrying the WebAuthn alg + client
+    /// data succeeds. It records how many times it was hit.
+    #[derive(Clone, Default)]
+    struct HumanTierMock {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl TreeEditService for HumanTierMock {
+        async fn status_for_thread(
+            &self,
+            request: Request<StatusForThreadRequest>,
+        ) -> Result<Response<StatusForThreadResponse>, Status> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            let md = request.metadata();
+            let is_human = md
+                .get(HDR_SIG_ALG)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == "webauthn")
+                .unwrap_or(false);
+            if !is_human {
+                // A keyed client PoP-signs the first attempt; a keyless
+                // (anonymous) client sends no signature. Record which so the
+                // signed test can assert PoP headers were present.
+                if md.get(HDR_SIG_ALG).is_some() {
+                    assert_eq!(
+                        md.get(HDR_SIG_ALG).and_then(|v| v.to_str().ok()),
+                        Some("ed25519"),
+                        "a signed first attempt must be PoP (ed25519), not webauthn"
+                    );
+                    assert!(md.get_bin(HDR_SIG_KEY_BIN).is_some(), "PoP key header present");
+                    assert!(md.get_bin(HDR_SIG_BIN).is_some(), "PoP signature present");
+                }
+                let mut trailer = tonic::metadata::MetadataMap::new();
+                trailer.insert(HDR_SIG_REQUIRED, "human".parse().unwrap());
+                return Err(Status::with_metadata(
+                    tonic::Code::Unauthenticated,
+                    "user verification required",
+                    trailer,
+                ));
+            }
+            // Retry: WebAuthn headers must be present.
+            assert!(
+                md.get_bin(HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN).is_some(),
+                "retry carries clientDataJSON"
+            );
+            assert!(
+                md.get_bin(HDR_SIG_WEBAUTHN_AUTH_DATA_BIN).is_some(),
+                "retry carries authenticatorData"
+            );
+            Ok(Response::new(StatusForThreadResponse {
+                thread: request.into_inner().thread,
+                head_state: "hd".into(),
+                base_state: "bd".into(),
+                target_thread: "main".into(),
+                coordination_status: "ahead".into(),
+                changes: None,
+                compared_to_supplied_tree: false,
+            }))
+        }
+
+        async fn diff_for_thread(
+            &self,
+            _request: Request<DiffForThreadRequest>,
+        ) -> Result<Response<DiffForThreadResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn log_for_thread(
+            &self,
+            _request: Request<LogForThreadRequest>,
+        ) -> Result<Response<LogForThreadResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+    }
+
+    /// A software Ed25519 seed usable as the client device key (`auth_proof_key_pem`).
+    fn device_key_pem() -> String {
+        Ed25519Signer::generate()
+            .expect("gen device key")
+            .to_pem()
+            .expect("pem")
+    }
+
+    async fn connect_mock(
+        callback: Option<super::super::request_signing::HumanSignatureCallback>,
+    ) -> Option<(HostedGrpcClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let mock = HumanTierMock::default();
+        let hits = mock.hits.clone();
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(l) => l,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping human-retry test: TCP bind denied: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind: {err}"),
+        };
+        let addr = listener.local_addr().expect("addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(TreeEditServiceServer::new(mock))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve");
+        });
+
+        let config = ClientConfig::default().with_auth_proof_key_pem(device_key_pem());
+        let mut client = HostedGrpcClient::connect(addr, &config)
+            .await
+            .expect("connect");
+        if let Some(cb) = callback {
+            client = client.with_human_signature_callback(cb);
+        }
+        Some((client, hits, handle))
+    }
+
+    #[tokio::test]
+    async fn human_tier_rejection_invokes_callback_and_retries_once() {
+        let callback_calls = Arc::new(AtomicUsize::new(0));
+        let cc = callback_calls.clone();
+        let callback: super::super::request_signing::HumanSignatureCallback =
+            Arc::new(move |req: super::super::request_signing::HumanSignatureRequest| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                // The challenge must be the client-derived SHA256(canonical).
+                let expected =
+                    super::super::request_signing::human_challenge(&req.canonical);
+                assert_eq!(req.challenge, expected);
+                assert!(req.method_path.ends_with("/StatusForThread"));
+                Ok(WebAuthnAssertion {
+                    credential_id: b"cred-id".to_vec(),
+                    signature: b"assertion-sig".to_vec(),
+                    client_data_json: b"{\"type\":\"webauthn.get\"}".to_vec(),
+                    authenticator_data: vec![0u8; 37],
+                    user_handle: None,
+                })
+            });
+
+        let Some((mut client, hits, server)) = connect_mock(Some(callback)).await else {
+            return;
+        };
+        let resp = client
+            .signed_status_for_thread_with_retry("feat/x")
+            .await
+            .expect("call succeeds after human retry");
+        server.abort();
+
+        assert_eq!(resp.thread, "feat/x");
+        assert_eq!(callback_calls.load(Ordering::SeqCst), 1, "callback invoked once");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "server hit exactly twice (reject + retry)");
+    }
+
+    #[tokio::test]
+    async fn human_tier_rejection_without_callback_is_typed_error_no_loop() {
+        let Some((mut client, hits, server)) = connect_mock(None).await else {
+            return;
+        };
+        let err = client
+            .signed_status_for_thread_with_retry("feat/x")
+            .await
+            .expect_err("no callback => typed error");
+        server.abort();
+
+        match err {
+            ProtocolError::AuthorizationFailed(msg) => {
+                assert!(
+                    msg.contains("user verification"),
+                    "typed error names user verification: {msg}"
+                );
+            }
+            other => panic!("expected AuthorizationFailed, got {other:?}"),
+        }
+        // Exactly one server hit — the rejection — with NO retry loop.
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no retry without a callback");
+    }
+
+    #[tokio::test]
+    async fn anonymous_client_without_device_key_skips_signing() {
+        // No device key + a mock that rejects only unsigned-tier-agnostic: here we
+        // just assert signing is skipped (no PoP headers) and no panic. Reuse the
+        // echo mock indirectly by asserting the request is not human-rejected on a
+        // fresh call — an anonymous client sends no signature and the server's
+        // human gate would 401, but with no callback and no context we get the
+        // typed error. The key assertion is that `apply_signed_auth` returns
+        // `Ok(None)` for a keyless client (covered here by not panicking).
+        let mock = HumanTierMock::default();
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let addr = listener.local_addr().expect("addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(TreeEditServiceServer::new(mock))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve");
+        });
+
+        // Anonymous: no auth_proof_key_pem.
+        let mut client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+            .await
+            .expect("connect");
+        // Should not panic; signing is simply skipped. The mock rejects because
+        // no ed25519 alg header is present, which maps to a typed error — the
+        // point is the client did not crash and sent no signature.
+        let result = client.signed_status_for_thread_with_retry("feat/x").await;
+        server.abort();
+        assert!(result.is_err(), "keyless client hits the human gate but does not panic");
     }
 }

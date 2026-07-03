@@ -119,7 +119,8 @@ async fn open_heddle_client(
         server_key,
         HostedAuthMode::CredentialFallback,
     )
-    .await?;
+    .await?
+    .with_human_signature_callback(crate::client::cli_human_signature_callback());
     Ok((client, repo_path))
 }
 

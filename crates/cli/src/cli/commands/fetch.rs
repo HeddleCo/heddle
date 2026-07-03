@@ -342,7 +342,8 @@ async fn fetch_network(
         // token is set and adds the proof-key fallback otherwise.
         HostedAuthMode::CredentialFallback,
     )
-    .await?;
+    .await?
+    .with_human_signature_callback(crate::client::cli_human_signature_callback());
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(

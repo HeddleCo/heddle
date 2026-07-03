@@ -1304,7 +1304,11 @@ fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool
 
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
-    let mut client = options.session.connect(options.addr).await?;
+    let mut client = options
+        .session
+        .connect(options.addr)
+        .await?
+        .with_human_signature_callback(crate::client::cli_human_signature_callback());
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(
