@@ -31,7 +31,7 @@ impl HostedGrpcClient {
             thread: thread.to_string(),
             compare_tree,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.TreeEditService/StatusForThread")?;
         self.tree_edit
             .status_for_thread(request)
             .await
@@ -56,7 +56,7 @@ impl HostedGrpcClient {
             to: Some(to),
             include_semantic,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.TreeEditService/DiffForThread")?;
         self.tree_edit
             .diff_for_thread(request)
             .await
@@ -84,7 +84,7 @@ impl HostedGrpcClient {
             paths,
             agent_model_substring: agent_model_substring.map(str::to_string),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.TreeEditService/LogForThread")?;
         self.tree_edit
             .log_for_thread(request)
             .await

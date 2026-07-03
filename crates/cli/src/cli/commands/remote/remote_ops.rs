@@ -519,7 +519,8 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.server_key,
         HostedAuthMode::CredentialFallback,
     )
-    .await?;
+    .await?
+    .with_human_signature_callback(crate::client::cli_human_signature_callback());
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(

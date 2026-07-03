@@ -19,6 +19,9 @@ pub use auth_requests::AuthCommand;
 // callers using `weft_client::auth::{...}` resolve symbols at the
 // same path the cli used internally pre-move.
 pub use device_flow as auth;
+pub use grpc_hosted::request_signing::{
+    HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion,
+};
 pub use grpc_hosted::{HostedAuthMode, HostedGrpcClient, HostedSession};
 pub use presence::{
     PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,

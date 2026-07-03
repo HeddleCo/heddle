@@ -24,7 +24,7 @@ impl HostedGrpcClient {
             to: to.to_string(),
             include_semantic,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/GetCompare")?;
         self.content
             .get_compare(request)
             .await
@@ -43,7 +43,7 @@ impl HostedGrpcClient {
             r#ref: r#ref.unwrap_or_default().to_string(),
             path: path.to_string(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/GetBlame")?;
         self.content
             .get_blame(request)
             .await
@@ -64,7 +64,7 @@ impl HostedGrpcClient {
             prefix: prefix.map(str::to_string),
             tag_filter: tag_filter.map(str::to_string),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/ListContext")?;
         self.content
             .list_context(request)
             .await
@@ -99,7 +99,7 @@ impl HostedGrpcClient {
             kind: kind as i32,
             client_operation_id: String::new(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/SetContext")?;
         self.content
             .set_context(request)
             .await
@@ -118,7 +118,7 @@ impl HostedGrpcClient {
             r#ref: r#ref.unwrap_or_default().to_string(),
             annotation_id: annotation_id.to_string(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/GetContextHistory")?;
         self.content
             .get_context_history(request)
             .await
@@ -137,7 +137,7 @@ impl HostedGrpcClient {
             r#ref: r#ref.unwrap_or_default().to_string(),
             limit,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/ListContextSuggestions")?;
         self.content
             .list_context_suggestions(request)
             .await
@@ -165,7 +165,7 @@ impl HostedGrpcClient {
             agent_model: agent_model.unwrap_or_default().to_string(),
             kind: kind as i32,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/ReviseContext")?;
         self.content
             .revise_context(request)
             .await
@@ -201,7 +201,7 @@ impl HostedGrpcClient {
                 .map(|id| id.as_bytes().to_vec()),
             kind: kind as i32,
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/SupersedeContext")?;
         self.content
             .supersede_context(request)
             .await

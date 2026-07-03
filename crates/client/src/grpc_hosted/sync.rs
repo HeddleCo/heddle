@@ -178,7 +178,7 @@ impl HostedGrpcClient {
         let mut request = Request::new(ListRefsRequest {
             repo_path: repo_path.to_string(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.RepoSyncService/ListRefs")?;
         let response = self
             .inner
             .list_refs(request)
@@ -227,7 +227,7 @@ impl HostedGrpcClient {
             new_revision_address: RevisionAddress::heddle(new_value).to_string(),
             client_operation_id: String::new(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.RepoSyncService/UpdateRef")?;
         let response = self
             .inner
             .update_ref(request)
@@ -721,7 +721,7 @@ impl HostedGrpcClient {
             r#ref: reference.to_string(),
             path: path.to_string(),
         });
-        self.apply_auth(&mut request)?;
+        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/GetBlob")?;
         let response = self
             .content
             .get_blob(request)

@@ -3,6 +3,7 @@
 mod content;
 mod helpers;
 mod hydration;
+pub mod request_signing;
 mod session;
 mod sync;
 mod tree_edit;
@@ -41,6 +42,11 @@ pub struct HostedGrpcClient {
     /// store.  When set, `auto_rotate_if_needed` will use it to read and
     /// update `~/.heddle/credentials.toml` transparently.
     server_key: Option<String>,
+    /// App-registered WebAuthn signer invoked when a `human`-tier RPC is
+    /// rejected with `x-weft-sig-required: human`. `None` => human-tier RPCs
+    /// surface a typed error rather than looping. See
+    /// [`request_signing::HumanSignatureCallback`].
+    on_human_signature: Option<request_signing::HumanSignatureCallback>,
 }
 
 impl HostedGrpcClient {
@@ -91,7 +97,101 @@ impl HostedGrpcClient {
             transport,
             auth_proof_key_pem: config.auth_proof_key_pem.clone(),
             server_key: config.server_key.clone(),
+            on_human_signature: None,
         })
+    }
+
+    /// Register the app's WebAuthn signer for the destructive (`human`) tier.
+    ///
+    /// Invoked when a signed RPC is rejected with `x-weft-sig-required: human`;
+    /// the callback produces a [`request_signing::WebAuthnAssertion`] over the
+    /// same action and the call is retried once. With no callback registered, a
+    /// human-tier rejection surfaces a typed error (no loop). The CLI wires a
+    /// terminal-prompt implementation; tapestry a browser ceremony.
+    pub fn with_human_signature_callback(
+        mut self,
+        callback: request_signing::HumanSignatureCallback,
+    ) -> Self {
+        self.on_human_signature = Some(callback);
+        self
+    }
+
+    /// The device signer for request PoP, derived from the same
+    /// `auth_proof_key_pem` the client uses for the `x-heddle-proof` bearer
+    /// proof-of-possession. `None` when the client is anonymous / unauthed —
+    /// signing is then skipped (the server defaults to OBSERVE mode and ignores
+    /// missing signatures on unsigned-tier RPCs).
+    fn device_signer(&self) -> Result<Option<Ed25519Signer>, ProtocolError> {
+        match &self.auth_proof_key_pem {
+            Some(pem) => Ed25519Signer::from_pem(pem)
+                .map(Some)
+                .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Stamp bearer auth (token + `x-heddle-proof`) and, for unary requests,
+    /// attach the Tier-1 PoP request signature over the serialized body.
+    ///
+    /// This is the single chokepoint every UNARY authenticated call routes
+    /// through. Streaming call sites (which have no single body to hash) call
+    /// [`Self::apply_auth`] directly instead. Returns the signing context so a
+    /// human-tier retry can re-derive the identical WebAuthn challenge; `None`
+    /// when signing was skipped (anonymous client).
+    pub(in crate::grpc_hosted) fn apply_signed_auth<T: prost::Message>(
+        &self,
+        request: &mut Request<T>,
+        method_path: &str,
+    ) -> Result<Option<request_signing::SignedRequestContext>, ProtocolError> {
+        self.apply_auth(request)?;
+        let Some(signer) = self.device_signer()? else {
+            return Ok(None);
+        };
+        let message_bytes = request.get_ref().encode_to_vec();
+        let ctx = request_signing::attach_pop(request, &signer, method_path, &message_bytes)?;
+        Ok(Some(ctx))
+    }
+
+    /// A human-tier rejection can only be satisfied if the original request was
+    /// PoP-signed (so we have a `SignedRequestContext` to derive the WebAuthn
+    /// challenge from). An anonymous client (no device key) that somehow reaches
+    /// a human-tier RPC has no context — surface a typed error, don't loop.
+    pub(in crate::grpc_hosted) fn require_human_sig_context(
+        &self,
+        ctx: Option<request_signing::SignedRequestContext>,
+    ) -> Result<request_signing::SignedRequestContext, ProtocolError> {
+        ctx.ok_or_else(|| {
+            ProtocolError::AuthorizationFailed(
+                "this action requires user verification, but the client has no device key to \
+                 sign the request; run `heddle auth login` first"
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Invoke the app-registered human-signature callback over the pending
+    /// action. The WebAuthn challenge is client-derived
+    /// (`SHA256(canonical bytes)`) — no server round trip. If no callback is
+    /// registered, surface a typed error rather than looping.
+    pub(in crate::grpc_hosted) fn request_human_signature(
+        &self,
+        method_path: &str,
+        ctx: &request_signing::SignedRequestContext,
+    ) -> Result<request_signing::WebAuthnAssertion, ProtocolError> {
+        let callback = self.on_human_signature.as_ref().ok_or_else(|| {
+            ProtocolError::AuthorizationFailed(format!(
+                "action {method_path} requires user verification, but no WebAuthn signer is \
+                 configured for this client"
+            ))
+        })?;
+        let challenge = request_signing::human_challenge(&ctx.canonical);
+        let req = request_signing::HumanSignatureRequest {
+            method_path: method_path.to_string(),
+            action_summary: format!("Authorize {method_path}"),
+            challenge,
+            canonical: ctx.canonical.clone(),
+        };
+        callback(req)
     }
 
     pub(super) fn apply_auth<T>(&self, request: &mut Request<T>) -> Result<(), ProtocolError> {
