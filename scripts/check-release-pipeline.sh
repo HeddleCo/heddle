@@ -242,23 +242,32 @@ else
   err "missing Scoop manifest publication wiring"
 fi
 
-# apt (Debian/Ubuntu) pool publication — parallel channel on the same
-# substrate (#234). scripts/build-apt-pool.sh builds the amd64 + arm64 .deb
-# (and the heddle-archive-keyring .deb) from the linux-gnu tarballs in
-# SHA256SUMS, then generates + GPG-signs the pool/Packages/Release index in
-# an ephemeral GNUPGHOME (Ed25519 subkey, #328 Decision 2). The
-# publish-manifests job PRs the whole signed tree to apt-heddle via the same
-# composite action + App token, gated stable-only. The App token scope must
-# include apt-heddle alongside the homebrew/scoop taps.
+# apt (Debian/Ubuntu) pool — parallel channel on the same substrate (#234).
+# scripts/build-apt-pool.sh builds the amd64 + arm64 .deb (and the
+# heddle-archive-keyring .deb) from the linux-gnu tarballs in SHA256SUMS, then
+# generates + GPG-signs the pool/Packages/Release index in an ephemeral
+# GNUPGHOME (Ed25519 subkey, #328 Decision 2). The pool is still built every
+# release.
+#
+# PUBLICATION IS DEFERRED until HeddleCo/apt-heddle exists: the "Publish apt
+# pool PR" step and the apt-heddle token scope were removed because scoping the
+# token / PRing to a nonexistent repo failed the whole publish-manifests job
+# and blocked the Homebrew + Scoop pushes. Contract for the deferred state:
+# apt pool is still built + signed, but apt-heddle must NOT be referenced by
+# the workflow (no target-repo, no token scope). Revive both when the repo
+# exists (and restore the apt-heddle assertions here).
+# Grep only for the ACTIVE wiring forms (a `target-repo:` mapping and a
+# `repositories:` token scope) so that revivable comments mentioning
+# apt-heddle don't count as live wiring.
 if [[ -x scripts/build-apt-pool.sh ]] \
    && grep -F "scripts/build-apt-pool.sh" "$WF" >/dev/null \
-   && grep -F "HeddleCo/apt-heddle" "$WF" >/dev/null \
    && grep -F "HEDDLE_APT_GPG_PRIVATE_KEY" "$WF" >/dev/null \
    && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
-   && grep -E "repositories: .*apt-heddle" "$WF" >/dev/null; then
-  ok "apt pool publication wired"
+   && ! grep -E "^[[:space:]]*target-repo: HeddleCo/apt-heddle" "$WF" >/dev/null \
+   && ! grep -E "^[[:space:]]*repositories: .*apt-heddle" "$WF" >/dev/null; then
+  ok "apt pool built + signed; publication deferred (apt-heddle absent)"
 else
-  err "missing apt pool publication wiring"
+  err "apt pool must be built+signed with publication deferred (no apt-heddle references) until HeddleCo/apt-heddle exists"
 fi
 
 if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" "$WF" >/dev/null; then

@@ -715,7 +715,10 @@ jobs:
           app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
           private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}
           owner: HeddleCo
-          repositories: homebrew-tap,scoop-heddle,apt-heddle
+          # apt: deferred until HeddleCo/apt-heddle exists — omit it here so the
+          # token step doesn't scope to a nonexistent repo (which fails the whole
+          # job and blocks the Homebrew/Scoop pushes below).
+          repositories: homebrew-tap,scoop-heddle
 
       - name: Publish Homebrew cask PR
         uses: ./.github/actions/publish-manifest
@@ -737,14 +740,11 @@ jobs:
           channel: scoop
           version: ${{ steps.ver.outputs.version }}
 
-      - name: Publish apt pool PR
-        uses: ./.github/actions/publish-manifest
-        with:
-          target-repo: HeddleCo/apt-heddle
-          # Whole pool + signed index tree, not a single file. manifest-path
-          # '.' syncs onto the apt-heddle repository root (Pages serves it).
-          manifest-path: .
-          rendered-file: rendered/apt
-          token: ${{ steps.app-token.outputs.token }}
-          channel: apt
-          version: ${{ steps.ver.outputs.version }}
+      # apt: deferred until HeddleCo/apt-heddle exists.
+      # The "Publish apt pool PR" step (target-repo HeddleCo/apt-heddle) was
+      # removed for this release — the repo does not exist yet, and scoping the
+      # token / PRing to it failed the whole publish-manifests job, blocking the
+      # Homebrew + Scoop pushes above. Revive this step (and re-add apt-heddle to
+      # the token `repositories:` list) once HeddleCo/apt-heddle is created.
+      # The apt pool is still built by the "Build apt pool + signed index" step
+      # above; only the publish leg is deferred.
