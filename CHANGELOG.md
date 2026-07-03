@@ -13,6 +13,34 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.8.0 - 2026-07-03
+
+### Added
+
+- **Spool facet-lineage primitive.** `OperationScope` generalizes from a
+  fixed set of ref classes to an open facet-lineage set, and a new
+  `SpoolFacet` type (`crates/refs`) names a facet head. `heddle-repo` gains
+  `facet_head` / `set_facet_head` to read and write a facet's head, giving
+  the Spool primitive its own fully-versioned lineage alongside the existing
+  ref heads. Additive: no existing scope or ref semantics change. (Spool
+  epic P2, #961, weft#358)
+- **`Spoollink` tree entry kind.** Trees can now carry a native
+  child-spool edge as a first-class `SPOOLLINK` entry, threaded through the
+  `TreeEntryTarget` / `FileMode` typed tree surface. This lets a spool
+  reference a child spool directly in tree state (the storage substrate for
+  recursive namespace/repository/spool composition). Additive alongside the
+  existing blob/tree/gitlink entry kinds. (Spool epic P5b, #962, weft#358)
+- **Spool gRPC RPCs.** `heddle-grpc` (already published at 0.11.0) grew the
+  Spool epic's child-edge and facet-history surface —
+  `AttachChild` / `DetachChild` / `ListChildren` / `ResolveMonorepo` plus
+  facet history — so hosted consumers can drive the recursive-spool model
+  over the wire. (Spool epic P8a, #963, weft#358)
+
+This is a minor (additive) release: it publishes the Spool-supporting
+surface added since 0.7.0 so downstream consumers (the weft Spool epic) can
+depend on `SpoolFacet` / `facet_head` / `Spoollink` from crates.io. No
+public API was removed or changed in a breaking way.
+
 ## 0.7.0 - 2026-07-02
 
 ### Added

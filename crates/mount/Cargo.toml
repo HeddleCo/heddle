@@ -18,10 +18,10 @@ libc.workspace = true
 # the same blob from the object store on every kernel `read` call.
 # This cache short-circuits that into an `Arc<[u8]>` clone.
 lru = { workspace = true }
-objects = { path = "../objects", package = "heddle-objects", version = "0.7" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.7" }
-refs = { path = "../refs", package = "heddle-refs", version = "0.7" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.7" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.8" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.8" }
+refs = { path = "../refs", package = "heddle-refs", version = "0.8" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.8" }
 # `serde`/`serde_json` carry the framed control-plane messages between
 # the `heddle-fuse-worker` subprocess and its supervisor (CLI or
 # daemon). The framing lives in `src/worker.rs`; both ends of the
@@ -70,7 +70,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 chrono.workspace = true
 criterion = "0.8"
-heddle-format = { path = "../format", version = "0.7" }
+heddle-format = { path = "../format", version = "0.8" }
 # Used by the Linux mount integration tests to exercise the
 # `mmap(MAP_SHARED, ...)` path on mounted files. Required for the
 # `fuse_mount_serves_mmap_readers` regression test, which locks in
