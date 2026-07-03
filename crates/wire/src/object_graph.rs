@@ -343,6 +343,9 @@ fn walk_tree_closure_filtered(
                 walk_tree_closure_filtered(store, *hash, excluded, seen, visit)?;
             }
             TreeEntryTarget::Gitlink { .. } => {}
+            // Native child-spool edge: its target lives in a separate spool
+            // object graph, not this store, so it is not walked here.
+            TreeEntryTarget::Spoollink { .. } => {}
         }
     }
 
@@ -516,6 +519,9 @@ fn collect_missing_blobs_recursive(
                 collect_missing_blobs_recursive(store, hash, missing)?;
             }
             TreeEntryTarget::Gitlink { .. } => {}
+            // Native child-spool edge: its target lives in a separate spool
+            // object graph, not this store, so it is not walked here.
+            TreeEntryTarget::Spoollink { .. } => {}
         }
     }
     Ok(())
@@ -600,6 +606,9 @@ fn collect_tree_hashes(
                 collect_tree_hashes(store, *hash, excluded)?;
             }
             TreeEntryTarget::Gitlink { .. } => {}
+            // Native child-spool edge: its target lives in a separate spool
+            // object graph, not this store, so it is not walked here.
+            TreeEntryTarget::Spoollink { .. } => {}
         }
     }
 

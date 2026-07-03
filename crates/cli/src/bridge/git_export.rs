@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use tracing::debug;
+
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, TreeEntryTarget},
@@ -269,6 +271,21 @@ pub fn export_tree(
             }
             TreeEntryTarget::Symlink { hash } => (EntryKind::Symlink, write_blob_entry(hash)?),
             TreeEntryTarget::Gitlink { target } => (EntryKind::Commit, *target),
+            // A native child-spool edge points at a spool-id + state-id, NOT a
+            // git commit OID, so it has no valid git submodule (mode 160000)
+            // representation. Emitting a `Commit` entry here would fabricate a
+            // bogus submodule pointer, so we deliberately SKIP the entry on
+            // git-export. (Git-import never produces spoollinks — only native
+            // spool operations do — so nothing round-trips back through here.)
+            TreeEntryTarget::Spoollink { spool_id, state_id } => {
+                debug!(
+                    name = entry.name(),
+                    %spool_id,
+                    %state_id,
+                    "skipping SPOOLLINK entry on git-export: no valid git submodule representation"
+                );
+                continue;
+            }
         };
 
         editor.upsert(entry.name(), kind, id);

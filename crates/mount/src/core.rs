@@ -978,7 +978,9 @@ fn prewarm_run<S: ObjectStore + 'static>(
                     }
                     stats.hashes_discovered += 1;
                 }
-                EntryType::Gitlink => {}
+                // Neither gitlinks nor native child-spool edges carry a local
+                // content hash to prefetch.
+                EntryType::Gitlink | EntryType::Spoollink => {}
             }
         }
     }
@@ -1361,6 +1363,17 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
                         path: entry_path,
                     },
                 )
+            }
+            // Native child-spool edges are not yet exposed in the FUSE mount
+            // (no consumer facet wires them in this phase). Refuse explicitly
+            // rather than masquerade one as a gitlink placeholder. Native
+            // spool operations do not produce mounted trees containing these
+            // yet, so this path is not hit in practice today.
+            TreeEntryTarget::Spoollink { .. } => {
+                return Err(MountError::InvalidArgument(format!(
+                    "spoollink entry '{}' is not exposable in the mount yet",
+                    tree_entry.name()
+                )));
             }
         };
         let node = self.intern(record);

@@ -855,6 +855,10 @@ fn walk_tree<S: ObjectStore + ?Sized>(
                 // Gitlinks point at foreign git objects, not Heddle blobs,
                 // so they do not participate in transcript content matching.
             }
+            EntryType::Spoollink => {
+                // Native child-spool edges point at a separate spool graph,
+                // not Heddle blobs, so they carry no transcript content.
+            }
         }
     }
     Ok(())

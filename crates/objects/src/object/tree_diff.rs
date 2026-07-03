@@ -395,6 +395,9 @@ mod tests {
                 EntryType::Tree => TreeEntry::directory(name, hash).unwrap(),
                 EntryType::Symlink => TreeEntry::symlink(name, hash).unwrap(),
                 EntryType::Gitlink => panic!("use TreeEntry::gitlink for gitlink tests"),
+                EntryType::Spoollink => {
+                    panic!("use TreeEntry::spoollink for spoollink tests")
+                }
             })
             .collect();
         let tree = Tree::from_entries(tree_entries);

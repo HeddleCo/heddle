@@ -1499,6 +1499,12 @@ impl<'a> GitBridge<'a> {
             {
                 continue;
             }
+            // Native child-spool edges are not git-tracked files and have no
+            // git index mode: skip them rather than fabricate a 160000
+            // submodule entry.
+            if *mode == FileMode::Spoollink {
+                continue;
+            }
             let mut entry = IndexEntry::intent_to_add(
                 checkout_repo.object_format(),
                 GitBString::from(path.as_str()),
@@ -1508,6 +1514,8 @@ impl<'a> GitBridge<'a> {
                 FileMode::Symlink => 0o120000,
                 FileMode::Gitlink => 0o160000,
                 FileMode::Normal => 0o100644,
+                // Unreachable: spoollinks are skipped above before this map.
+                FileMode::Spoollink => 0o100644,
             };
             changed = true;
             index.entries.push(entry);

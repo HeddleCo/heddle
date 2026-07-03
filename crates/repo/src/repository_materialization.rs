@@ -301,6 +301,9 @@ impl Repository {
                     self.collect_blob_hashes(&subtree, out)?;
                 }
                 TreeEntryTarget::Gitlink { .. } => {}
+                // Native child-spool edge: carries no local blob/tree hash to
+                // promote (its target lives in a separate spool graph).
+                TreeEntryTarget::Spoollink { .. } => {}
             }
         }
         Ok(())
@@ -430,6 +433,9 @@ impl Repository {
                         target: *target,
                     });
                 }
+                // Native child-spool edge: not materialized to the worktree
+                // in this phase, so it contributes no write op.
+                TreeEntryTarget::Spoollink { .. } => {}
             }
         }
 

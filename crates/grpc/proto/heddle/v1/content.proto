@@ -75,8 +75,8 @@ message GetTreeRequest {
   string path = 3;
 }
 
-// Closed set matching git's tree object model (unlike deliberately-open string
-// kinds elsewhere, e.g. Bookmark.resource_kind).
+// Closed set matching git's tree object model, plus the native SPOOLLINK edge
+// (unlike deliberately-open string kinds elsewhere, e.g. Bookmark.resource_kind).
 enum TreeEntryKind {
   TREE_ENTRY_KIND_UNSPECIFIED = 0;
   TREE_ENTRY_KIND_TREE = 1;
@@ -85,6 +85,12 @@ enum TreeEntryKind {
   TREE_ENTRY_KIND_SYMLINK = 3;
   // Submodule pointer (git submodule commit OID).
   TREE_ENTRY_KIND_GITLINK = 4;
+  // Native child-spool edge. The entry's pointer is a spool-id + anchored
+  // state-id (both 16-byte ChangeIds), NOT a git commit OID: the link is not
+  // a git submodule and cannot round-trip to a 160000 tree entry on
+  // git-export. Only native spool operations produce this kind (Spool epic,
+  // weft#358).
+  TREE_ENTRY_KIND_SPOOLLINK = 5;
 }
 
 message TreeEntry {
