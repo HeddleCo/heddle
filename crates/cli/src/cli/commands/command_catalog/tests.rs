@@ -390,6 +390,25 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["support", "revoke"],
         &["support", "revoke", "00000000-0000-0000-0000-000000000000"],
     ),
+    #[cfg(feature = "client")]
+    sample(
+        &["spool", "attach"],
+        &["spool", "attach", "acme/root", "acme/lib"],
+    ),
+    #[cfg(feature = "client")]
+    sample(&["spool", "detach"], &["spool", "detach", "acme/root", "libs"]),
+    #[cfg(feature = "client")]
+    sample(&["spool", "children"], &["spool", "children", "acme/root"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["spool", "governance"],
+        &["spool", "governance", "acme/root"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["spool", "membership"],
+        &["spool", "membership", "acme/root"],
+    ),
     sample(&["switch"], &["switch", "main"]),
     sample(&["sync"], &["sync"]),
     sample(&["thread", "create"], &["thread", "create", "feature"]),
@@ -1330,11 +1349,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // verbs). Any further sweep MUST extend this list and document the
     // addition.
     //
-    // `clone` appears twice because hosted `clone --output json`
-    // emits two JSON records per invocation (a preliminary
-    // `clone_connection` envelope followed by the final `clone`
-    // payload); both discriminator values are advertised so agents
-    // can route on either record. See heddle#272 (PR #281 r3).
+    // `clone` appears three times: hosted `clone --output json` emits a
+    // preliminary `clone_connection` envelope followed by the final `clone`
+    // payload, and `clone --recursive --output json` (Spool epic P9) emits a
+    // `clone_monorepo` summary; all three discriminator values are advertised
+    // so agents can route on any record. See heddle#272 (PR #281 r3).
     let displays = raw_json_discriminator_specs()
         .iter()
         .map(|(path, _)| path.join(" "))
@@ -1379,6 +1398,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "cherry-pick",
             "clean",
             "clone",
+            "clone",
+            // clone_monorepo discriminator: `clone --recursive --output json`
+            // (Spool epic P9) emits a monorepo summary record.
             "clone",
             "expand",
             "commit",
@@ -2048,6 +2070,6 @@ fn op_id_persistence_reads_contract_table() {
 fn feature_gated_command_roots_are_catalog_owned() {
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "presence", "support"]
+        &["auth", "presence", "spool", "support"]
     );
 }

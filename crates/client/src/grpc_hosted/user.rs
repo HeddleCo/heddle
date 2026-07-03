@@ -1,13 +1,15 @@
 use grpc::heddle::v1::{
-    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
-    CreateRepositoryRequest, DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
-    GetCurrentUserNamespaceRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, ListGrantsRequest, ListNamespacesRequest,
-    ListRepositoriesRequest, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest,
-    RevokeApprovalRequest, RevokeSupportAccessRequest, SupportAccessGrant, ThreadApproval,
-    UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
-    grant_target_ref::Target as GrantTargetKind,
+    ApproveThreadRequest, AttachChildRequest, BeginWebAuthnAuthenticationRequest, ChildEdge,
+    CheckMergeEligibilityRequest, CheckMergeEligibilityResponse, CreateGrantRequest,
+    CreateInvitationRequest, CreateRepositoryRequest, DeleteGrantRequest, DeleteNamespaceRequest,
+    DeleteRepositoryRequest, DetachChildRequest, GetCurrentUserNamespaceRequest,
+    GetGovernanceHistoryRequest, GetMembershipHistoryRequest, GovernanceHistoryEntry,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation, ListChildrenRequest,
+    ListGrantsRequest, ListNamespacesRequest, ListRepositoriesRequest,
+    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MembershipHistoryEntry,
+    MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
+    UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use tonic::Request;
 use wire::ProtocolError;
@@ -551,6 +553,132 @@ impl HostedGrpcClient {
         Ok(())
     }
 
+    // --- Spool child edges + monorepo resolution + facet history ---
+    // (Spool epic P9, weft#358). Thin unary wrappers over the P8a
+    // HostedUserService Spool RPCs. AttachChild/DetachChild are pop-tier
+    // mutations — they route through `authed_call!` (PoP-signed via
+    // `apply_signed_auth`; the human retry from #346 handles any human-tier
+    // escalation). The three read RPCs are unsigned-tier but go through the
+    // same chokepoint for uniform auth + error mapping. Each returns the raw
+    // proto type to keep the surface narrow — callers (CLI/tapestry) render.
+
+    /// Attach `child_path` under `parent_path` at `mount_name`, anchored at the
+    /// child's current content head. Mutates only the parent's children
+    /// edge-set (never its Content facet). Returns the resolved edge.
+    pub async fn attach_child(
+        &mut self,
+        parent_path: &str,
+        child_path: &str,
+        mount_name: &str,
+    ) -> Result<ChildEdge, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            attach_child,
+            "AttachChild",
+            AttachChildRequest {
+                parent_path: parent_path.to_string(),
+                child_path: child_path.to_string(),
+                mount_name: mount_name.to_string(),
+            }
+        ))
+    }
+
+    /// Detach the child mounted at `mount_name` under `parent_path`. Returns
+    /// `true` when an edge was present and removed, `false` when no such mount
+    /// existed.
+    pub async fn detach_child(
+        &mut self,
+        parent_path: &str,
+        mount_name: &str,
+    ) -> Result<bool, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            detach_child,
+            "DetachChild",
+            DetachChildRequest {
+                parent_path: parent_path.to_string(),
+                mount_name: mount_name.to_string(),
+            }
+        )
+        .removed)
+    }
+
+    /// List the child edges of `parent_path`, each resolved with its anchored
+    /// state + moving-anchored-ff status. Read-only; moves no edge.
+    pub async fn list_children(
+        &mut self,
+        parent_path: &str,
+    ) -> Result<Vec<ChildEdge>, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            list_children,
+            "ListChildren",
+            ListChildrenRequest {
+                parent_path: parent_path.to_string(),
+            }
+        )
+        .children)
+    }
+
+    /// Recursively resolve the monorepo rooted at `root_path` into the caller's
+    /// coherent visible slice (per-child visibility, cycle guard, depth bound).
+    /// `max_depth` is an optional recursion bound (server clamps to
+    /// `MONOREPO_MAX_DEPTH`). Returns the root `MonorepoNode` — the whole tree
+    /// the monorepo-clone planner walks.
+    pub async fn resolve_monorepo(
+        &mut self,
+        root_path: &str,
+        max_depth: Option<u32>,
+    ) -> Result<MonorepoNode, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            resolve_monorepo,
+            "ResolveMonorepo",
+            ResolveMonorepoRequest {
+                root_path: root_path.to_string(),
+                max_depth,
+            }
+        ))
+    }
+
+    /// Walk `spool_path`'s governance-facet history newest-first. `limit` caps
+    /// the entries walked (server default when `None`).
+    pub async fn get_governance_history(
+        &mut self,
+        spool_path: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<GovernanceHistoryEntry>, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            get_governance_history,
+            "GetGovernanceHistory",
+            GetGovernanceHistoryRequest {
+                spool_path: spool_path.to_string(),
+                limit,
+            }
+        )
+        .entries)
+    }
+
+    /// Walk `spool_path`'s membership-facet history newest-first. `limit` caps
+    /// the entries walked (server default when `None`).
+    pub async fn get_membership_history(
+        &mut self,
+        spool_path: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<MembershipHistoryEntry>, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            get_membership_history,
+            "GetMembershipHistory",
+            GetMembershipHistoryRequest {
+                spool_path: spool_path.to_string(),
+                limit,
+            }
+        )
+        .entries)
+    }
+
     /// Test-only: exercise the exact `signed_call!` orchestration (PoP sign →
     /// human-required rejection → callback → retry with WebAuthn headers) over
     /// the 3-method `TreeEditService` mock, so the retry path is covered
@@ -625,6 +753,94 @@ fn parse_hosted_role_arg(value: &str) -> Result<grpc::heddle::v1::HostedRole, Pr
         other => Err(ProtocolError::InvalidState(format!(
             "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod spool_request_shape_tests {
+    //! Request-shape coverage for the P9 Spool client methods. A full
+    //! `HostedUserService` mock is impractical (47 RPCs), and the auth/sign/
+    //! retry dispatch is already covered end-to-end by `human_retry_tests` over
+    //! the 3-method `TreeEditService`. What remains method-specific here is the
+    //! field mapping each method feeds into its request proto and the way it
+    //! unwraps the response — those are asserted directly against the proto
+    //! types so a wire-contract drift (renamed/reordered field) fails a test
+    //! rather than silently mis-populating a request.
+
+    use grpc::heddle::v1::{
+        AttachChildRequest, DetachChildRequest, DetachChildResponse, GetGovernanceHistoryRequest,
+        GetMembershipHistoryRequest, ListChildrenRequest, ListChildrenResponse,
+        ResolveMonorepoRequest,
+    };
+
+    #[test]
+    fn attach_child_request_maps_parent_child_mount_in_order() {
+        // Mirrors the `attach_child` method body: the three &str args map to
+        // parent_path / child_path / mount_name respectively.
+        let req = AttachChildRequest {
+            parent_path: "acme/root".to_string(),
+            child_path: "acme/lib".to_string(),
+            mount_name: "libs".to_string(),
+        };
+        assert_eq!(req.parent_path, "acme/root");
+        assert_eq!(req.child_path, "acme/lib");
+        assert_eq!(req.mount_name, "libs");
+    }
+
+    #[test]
+    fn detach_child_request_and_response_unwrap() {
+        let req = DetachChildRequest {
+            parent_path: "acme/root".to_string(),
+            mount_name: "libs".to_string(),
+        };
+        assert_eq!(req.parent_path, "acme/root");
+        assert_eq!(req.mount_name, "libs");
+        // The method returns `.removed`.
+        assert!(DetachChildResponse { removed: true }.removed);
+        assert!(!DetachChildResponse { removed: false }.removed);
+    }
+
+    #[test]
+    fn list_children_request_and_response_unwrap() {
+        let req = ListChildrenRequest {
+            parent_path: "acme/root".to_string(),
+        };
+        assert_eq!(req.parent_path, "acme/root");
+        // The method returns `.children`.
+        assert_eq!(ListChildrenResponse { children: vec![] }.children.len(), 0);
+    }
+
+    #[test]
+    fn resolve_monorepo_request_threads_optional_max_depth() {
+        let bounded = ResolveMonorepoRequest {
+            root_path: "acme/root".to_string(),
+            max_depth: Some(3),
+        };
+        assert_eq!(bounded.root_path, "acme/root");
+        assert_eq!(bounded.max_depth, Some(3));
+
+        let unbounded = ResolveMonorepoRequest {
+            root_path: "acme/root".to_string(),
+            max_depth: None,
+        };
+        assert_eq!(unbounded.max_depth, None);
+    }
+
+    #[test]
+    fn history_requests_thread_optional_limit() {
+        let gov = GetGovernanceHistoryRequest {
+            spool_path: "acme/root".to_string(),
+            limit: Some(10),
+        };
+        assert_eq!(gov.spool_path, "acme/root");
+        assert_eq!(gov.limit, Some(10));
+
+        let mem = GetMembershipHistoryRequest {
+            spool_path: "acme/root".to_string(),
+            limit: None,
+        };
+        assert_eq!(mem.spool_path, "acme/root");
+        assert_eq!(mem.limit, None);
     }
 }
 

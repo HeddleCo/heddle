@@ -22,7 +22,7 @@ use super::{
     },
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, SupportCommands};
+use super::{AuthCommands, SpoolCommands, SupportCommands};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -462,6 +462,25 @@ Examples:
     Support {
         #[command(subcommand)]
         command: SupportCommands,
+    },
+
+    /// Manage hosted spool child edges + inspect facet history.
+    ///
+    /// A spool can mount other spools as children to form a monorepo.
+    /// `heddle spool attach/detach/children` manage those edges;
+    /// `governance`/`membership` walk a spool's facet history. Clone the
+    /// whole assembled monorepo with `heddle clone <spool> --recursive`.
+    #[cfg(feature = "client")]
+    #[command(after_help = "\
+Examples:
+  heddle spool attach acme/root acme/lib --as libs   # mount acme/lib under acme/root at ./libs
+  heddle spool children acme/root                    # list mounted children + anchored states
+  heddle spool detach acme/root libs                 # unmount the child at ./libs
+  heddle spool governance acme/root --limit 10       # governance history, newest first
+")]
+    Spool {
+        #[command(subcommand)]
+        command: SpoolCommands,
     },
 
     /// Bridge to other version control systems.

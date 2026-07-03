@@ -3,6 +3,7 @@
 mod content;
 mod helpers;
 mod hydration;
+pub mod monorepo;
 pub mod request_signing;
 mod session;
 mod sync;
@@ -459,5 +460,6 @@ impl HostedGrpcClient {
 }
 
 pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
+pub use monorepo::{MonorepoCloneOp, MonorepoClonePlan, SkippedChild};
 pub use session::{HostedAuthMode, HostedSession};
 pub use sync::HostedRefEntry;
