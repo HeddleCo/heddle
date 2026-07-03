@@ -57,6 +57,12 @@ pub(super) const HDR_SIG_WEBAUTHN_USER_HANDLE_BIN: &str = "x-weft-sig-webauthn-u
 /// Discovery trailer/header the server sets on a signature-required rejection.
 pub(super) const HDR_SIG_REQUIRED: &str = "x-weft-sig-required";
 
+/// Deep-link trailer (weft#338): on a human-tier rejection the server MAY set this to the
+/// tapestry `/verify-action` URL where the user can complete the action. Present only when the
+/// server has a web origin configured; the client surfaces it in the human-signature callback.
+/// MUST match `weft-server`'s `HDR_SIG_ACTION_URL`.
+pub(super) const HDR_SIG_ACTION_URL: &str = "x-weft-sig-action-url";
+
 /// Alg tag values.
 const ALG_ED25519: &str = "ed25519";
 const ALG_WEBAUTHN: &str = "webauthn";
@@ -217,6 +223,13 @@ pub struct HumanSignatureRequest {
     /// The raw canonical bytes the challenge is derived from (for callbacks that
     /// want to re-derive or display the covered action).
     pub canonical: Vec<u8>,
+    /// Deep-link to the surface that CAN complete this action (weft#338), taken
+    /// verbatim from the server's `x-weft-sig-action-url` rejection trailer, e.g.
+    /// `https://app.heddle.sh/verify-action?method=...&challenge=...`. `None` when
+    /// the server did not send it (no web origin configured) — callbacks then fall
+    /// back to generic guidance. It is a display hint only; the challenge the
+    /// callback signs over is still the client-derived [`Self::challenge`].
+    pub action_url: Option<String>,
 }
 
 /// App-registered callback that turns a [`HumanSignatureRequest`] into a
@@ -280,6 +293,18 @@ pub(super) fn requires_human_signature(status: &tonic::Status) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("human"))
         .unwrap_or(false)
+}
+
+/// Extract the server's `x-weft-sig-action-url` deep-link (weft#338) from a rejection
+/// `Status`, if present. `None` when the trailer is absent (server has no web origin
+/// configured) or non-ASCII. Read from the same rejection metadata as
+/// [`requires_human_signature`].
+pub(super) fn action_url_from_status(status: &tonic::Status) -> Option<String> {
+    status
+        .metadata()
+        .get(HDR_SIG_ACTION_URL)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]

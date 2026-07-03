@@ -177,6 +177,7 @@ impl HostedGrpcClient {
         &self,
         method_path: &str,
         ctx: &request_signing::SignedRequestContext,
+        action_url: Option<String>,
     ) -> Result<request_signing::WebAuthnAssertion, ProtocolError> {
         let callback = self.on_human_signature.as_ref().ok_or_else(|| {
             ProtocolError::AuthorizationFailed(format!(
@@ -190,6 +191,9 @@ impl HostedGrpcClient {
             action_summary: format!("Authorize {method_path}"),
             challenge,
             canonical: ctx.canonical.clone(),
+            // Deep-link the server sent on the rejection (weft#338), if any — a display hint
+            // the callback can show; the signed challenge above is unaffected.
+            action_url,
         };
         callback(req)
     }

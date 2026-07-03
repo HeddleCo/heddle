@@ -48,7 +48,11 @@ macro_rules! signed_call {
                 // `attach_human` re-stamps `x-weft-sig-ts`/`-nonce-bin` from that
                 // context; we only need bearer auth (not a fresh PoP) on retry.
                 let ctx = $self.require_human_sig_context(sig_ctx)?;
-                let assertion = $self.request_human_signature(path, &ctx)?;
+                // The server may include a deep-link (weft#338) on the rejection pointing at a
+                // surface that can complete the WebAuthn ceremony; forward it to the callback.
+                let action_url =
+                    $crate::grpc_hosted::request_signing::action_url_from_status(&status);
+                let assertion = $self.request_human_signature(path, &ctx, action_url)?;
                 let mut retry = Request::new(message);
                 $self.apply_auth(&mut retry)?;
                 $crate::grpc_hosted::request_signing::attach_human(&mut retry, &ctx, &assertion)?;
@@ -644,10 +648,15 @@ mod human_retry_tests {
     use wire::ProtocolError;
 
     use super::super::request_signing::{
-        HDR_SIG_ALG, HDR_SIG_BIN, HDR_SIG_KEY_BIN, HDR_SIG_REQUIRED,
+        HDR_SIG_ACTION_URL, HDR_SIG_ALG, HDR_SIG_BIN, HDR_SIG_KEY_BIN, HDR_SIG_REQUIRED,
         HDR_SIG_WEBAUTHN_AUTH_DATA_BIN, HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN, WebAuthnAssertion,
     };
     use super::HostedGrpcClient;
+
+    /// The deep-link the human-tier mock returns on its rejection (weft#338), so the retry test
+    /// can assert the client threads it into `HumanSignatureRequest.action_url`.
+    const MOCK_ACTION_URL: &str =
+        "https://app.heddle.sh/verify-action?method=%2Fheddle.v1.TreeEditService%2FStatusForThread&challenge=CHAL";
 
     /// A `TreeEditService` mock for `StatusForThread` that models a `human`-tier
     /// endpoint: the first request (no WebAuthn assertion) is rejected with
@@ -686,6 +695,12 @@ mod human_retry_tests {
                 }
                 let mut trailer = tonic::metadata::MetadataMap::new();
                 trailer.insert(HDR_SIG_REQUIRED, "human".parse().unwrap());
+                // Emit the weft#338 deep-link trailer so the client-side plumbing that reads it
+                // into `HumanSignatureRequest.action_url` is exercised end-to-end.
+                trailer.insert(
+                    HDR_SIG_ACTION_URL,
+                    MOCK_ACTION_URL.parse().unwrap(),
+                );
                 return Err(Status::with_metadata(
                     tonic::Code::Unauthenticated,
                     "user verification required",
@@ -785,6 +800,8 @@ mod human_retry_tests {
                     super::super::request_signing::human_challenge(&req.canonical);
                 assert_eq!(req.challenge, expected);
                 assert!(req.method_path.ends_with("/StatusForThread"));
+                // The server's deep-link trailer (weft#338) reaches the callback verbatim.
+                assert_eq!(req.action_url.as_deref(), Some(MOCK_ACTION_URL));
                 Ok(WebAuthnAssertion {
                     credential_id: b"cred-id".to_vec(),
                     signature: b"assertion-sig".to_vec(),
