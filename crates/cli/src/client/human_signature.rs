@@ -41,17 +41,33 @@ pub fn cli_human_signature_callback() -> HumanSignatureCallback {
         // Show the consent surface: the user should always learn which action
         // was gated, even though the CLI can't complete the gesture itself.
         eprintln!(
-            "This action requires a hardware user-verification gesture (WebAuthn):\n  {}",
+            "⚠ This action requires user verification (WebAuthn), which the CLI can't perform in \
+             a headless terminal:\n  {}",
             req.action_summary
         );
-        eprintln!(
-            "The `heddle` CLI cannot perform the WebAuthn ceremony in a headless terminal."
-        );
-        Err(ProtocolError::AuthorizationFailed(format!(
-            "user verification required for {}: run this destructive action from a surface with a \
-             WebAuthn authenticator (the web UI), or re-run once CLI authenticator support lands",
-            req.method_path
-        )))
+        // When the server sent a deep-link (weft#338), point the user straight at the surface
+        // that CAN complete the ceremony; otherwise fall back to generic guidance. Either way
+        // we return a typed error and NEVER fabricate an assertion.
+        match req.action_url.as_deref() {
+            Some(url) => {
+                eprintln!("Complete it in the web app:\n  {url}");
+                Err(ProtocolError::AuthorizationFailed(format!(
+                    "user verification required for {}: complete this action in the web app:\n  {}",
+                    req.method_path, url
+                )))
+            }
+            None => {
+                eprintln!(
+                    "The `heddle` CLI cannot perform the WebAuthn ceremony in a headless terminal."
+                );
+                Err(ProtocolError::AuthorizationFailed(format!(
+                    "user verification required for {}: run this destructive action from a surface \
+                     with a WebAuthn authenticator (the web UI), or re-run once CLI authenticator \
+                     support lands",
+                    req.method_path
+                )))
+            }
+        }
     })
 }
 
@@ -59,20 +75,47 @@ pub fn cli_human_signature_callback() -> HumanSignatureCallback {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cli_callback_returns_typed_error_and_never_fakes_an_assertion() {
-        let cb = cli_human_signature_callback();
-        let req = HumanSignatureRequest {
+    fn req_with_action_url(action_url: Option<String>) -> HumanSignatureRequest {
+        HumanSignatureRequest {
             method_path: "/heddle.v1.HostedUserService/DeleteRepository".to_string(),
             action_summary: "Authorize /heddle.v1.HostedUserService/DeleteRepository".to_string(),
             challenge: "abc".to_string(),
             canonical: b"weft-req-sig-v1:...".to_vec(),
-        };
-        let result = cb(req);
+            action_url,
+        }
+    }
+
+    /// Without a server deep-link, the callback keeps the generic guidance and still returns a
+    /// typed error, never an assertion.
+    #[test]
+    fn cli_callback_returns_typed_error_and_never_fakes_an_assertion() {
+        let cb = cli_human_signature_callback();
+        let result = cb(req_with_action_url(None));
         match result {
             Err(ProtocolError::AuthorizationFailed(msg)) => {
                 assert!(msg.contains("user verification required"));
                 assert!(msg.contains("DeleteRepository"));
+                // No URL was provided → generic guidance, no link.
+                assert!(msg.contains("web UI"));
+                assert!(!msg.contains("https://"));
+            }
+            other => panic!("expected a typed AuthorizationFailed error, got {other:?}"),
+        }
+    }
+
+    /// With a server deep-link (weft#338), the typed error message includes the URL so the user
+    /// can open it — and the callback still returns a typed error, never an assertion.
+    #[test]
+    fn cli_callback_includes_action_url_in_typed_error_when_present() {
+        let cb = cli_human_signature_callback();
+        let url = "https://app.heddle.sh/verify-action?method=%2Fheddle.v1.HostedUserService%2FDeleteRepository&challenge=CHAL";
+        let result = cb(req_with_action_url(Some(url.to_string())));
+        match result {
+            Err(ProtocolError::AuthorizationFailed(msg)) => {
+                assert!(msg.contains("user verification required"));
+                assert!(msg.contains("DeleteRepository"));
+                assert!(msg.contains(url), "message must carry the deep-link URL: {msg}");
+                assert!(msg.contains("web app"));
             }
             other => panic!("expected a typed AuthorizationFailed error, got {other:?}"),
         }
