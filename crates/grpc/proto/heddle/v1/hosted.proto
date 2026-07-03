@@ -80,6 +80,36 @@ service HostedUserService {
   rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse);
   rpc UpsertBookmark(UpsertBookmarkRequest) returns (Bookmark);
   rpc DeleteBookmark(DeleteBookmarkRequest) returns (DeleteResponse);
+
+  // --- Spool child edges + monorepo resolution + facet history ---
+  // (Spool epic P8a, weft#358). ADDITIVE: exposes the P4-P7 spool
+  // capabilities. Handlers land in weft P8b against weft's registry methods
+  // (children::{attach_child_tx,detach_child_tx,list_children,resolve_monorepo}
+  // and governance/membership {current_*,*_history}); the messages below mirror
+  // those return types so P8b maps 1:1.
+
+  // Attach a child spool under `parent_path` at `mount_name`, anchored at the
+  // child's current content head. Mutates only the parent's children edge-set
+  // (refs/spool/children/edges), never the parent's Content facet. Mirrors
+  // weft `children::attach_child_tx` -> ChildEdge.
+  rpc AttachChild(AttachChildRequest) returns (ChildEdge);
+  // Detach the child mounted at `mount_name` under `parent_path`. Mirrors weft
+  // `children::detach_child_tx` (bool removed).
+  rpc DetachChild(DetachChildRequest) returns (DetachChildResponse);
+  // List the child edges of `parent_path`, each resolved with its anchored
+  // state + moving-anchored-ff status. Read-only; moves no edge. Mirrors weft
+  // `children::list_children` -> Vec<ChildEdge>.
+  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse);
+  // Recursively resolve the monorepo rooted at `root_path` into the caller's
+  // coherent visible slice (per-child visibility, cycle guard, depth bound).
+  // Mirrors weft `children::resolve_monorepo` -> MonorepoNode.
+  rpc ResolveMonorepo(ResolveMonorepoRequest) returns (MonorepoNode);
+  // Walk `spool_path`'s governance facet history newest-first (first-parent).
+  // Mirrors weft `governance::governance_history` -> Vec<GovernanceHistoryEntry>.
+  rpc GetGovernanceHistory(GetGovernanceHistoryRequest) returns (GetGovernanceHistoryResponse);
+  // Walk `spool_path`'s membership facet history newest-first (first-parent).
+  // Mirrors weft `membership::membership_history` -> Vec<MembershipHistoryEntry>.
+  rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (GetMembershipHistoryResponse);
 }
 
 // Namespace kinds in the hosted control plane. `USER` namespaces are
@@ -459,4 +489,215 @@ message ResolvedPrincipal {
   string handle = 3;
   // False when the subject couldn't be resolved (display_name + handle empty).
   bool resolved = 4;
+}
+
+// ============================================================================
+// Spool child edges + monorepo resolution + facet history (Spool epic P8a,
+// weft#358). ADDITIVE. Message shapes mirror weft's registry return types so
+// the P8b handler phase maps 1:1. State/change ids are `bytes` (16-byte
+// ChangeId), matching the package-wide wire convention.
+// ============================================================================
+
+// Who committed a facet change (audit trail). Mirrors heddle's
+// `objects::Attribution { principal, agent: Option<Agent> }` — a human
+// principal plus an optional AI agent that performed the change on their
+// behalf.
+message SpoolPrincipal {
+  string name = 1;
+  string email = 2;
+}
+
+message SpoolAgent {
+  string provider = 1;
+  string model = 2;
+}
+
+message SpoolAttribution {
+  SpoolPrincipal principal = 1;
+  // Present when an AI agent performed the change on the principal's behalf.
+  optional SpoolAgent agent = 2;
+}
+
+// Ff/divergence status of a child edge vs the child's latest content state
+// (moving-anchored-ff). Mirrors weft `children::ChildEdgeStatus`.
+enum ChildEdgeStatus {
+  CHILD_EDGE_STATUS_UNSPECIFIED = 0;
+  // The edge's anchor already equals the child's latest content state.
+  CHILD_EDGE_STATUS_UP_TO_DATE = 1;
+  // The child advanced linearly past the anchor (anchor is an ancestor of the
+  // child's latest state): the edge can fast-forward to it.
+  CHILD_EDGE_STATUS_FAST_FORWARDABLE = 2;
+  // The child's history diverged from the anchor (non-ff): the edge does not
+  // move; surfaced instead of silently advancing.
+  CHILD_EDGE_STATUS_DIVERGED = 3;
+  // The child has no content head yet (nothing to advance toward).
+  CHILD_EDGE_STATUS_NO_CHILD_HEAD = 4;
+}
+
+// One resolved child edge. Mirrors weft `children::ChildEdge`.
+message ChildEdge {
+  string parent_spool_id = 1;
+  string child_spool_id = 2;
+  string mount_name = 3;
+  // The child content state-id this edge is currently anchored to (16-byte
+  // ChangeId).
+  bytes anchored_state_id = 4;
+  // The child's latest content-facet head, if any (absent = child has no
+  // content head yet).
+  optional bytes child_head = 5;
+  // Moving-anchored-ff status of the anchor vs the child head.
+  ChildEdgeStatus status = 6;
+}
+
+message AttachChildRequest {
+  // The parent spool the child is mounted under.
+  string parent_path = 1;
+  // The child spool to attach.
+  string child_path = 2;
+  // The mount name of the child inside the parent (the SPOOLLINK entry name).
+  string mount_name = 3;
+}
+
+message DetachChildRequest {
+  string parent_path = 1;
+  string mount_name = 2;
+}
+
+message DetachChildResponse {
+  // True if an edge was present and removed; false if no such mount existed.
+  // Mirrors weft `children::detach_child_tx` -> bool.
+  bool removed = 1;
+}
+
+message ListChildrenRequest {
+  string parent_path = 1;
+}
+
+message ListChildrenResponse {
+  repeated ChildEdge children = 1;
+}
+
+// Why a child edge in a resolved monorepo was NOT descended into. A resolved
+// tree is always the caller's coherent visible slice: an omitted child is
+// recorded, never an error. Mirrors weft `children::EdgeSkip`.
+enum EdgeSkip {
+  EDGE_SKIP_UNSPECIFIED = 0;
+  // The caller cannot read the child spool (per-child visibility chain-walk
+  // failed): the edge is withheld from the caller's slice.
+  EDGE_SKIP_UNREADABLE = 1;
+  // The child was already visited on this walk (cycle guard, e.g. A->B->A):
+  // recorded but not re-descended, so the walk terminates.
+  EDGE_SKIP_CYCLE = 2;
+  // The child sits at MONOREPO_MAX_DEPTH: recorded but not descended.
+  EDGE_SKIP_DEPTH_BOUNDED = 3;
+}
+
+// One edge in a resolved monorepo tree: the anchored child + either the
+// recursively-resolved subtree (descended) or the reason it was not descended.
+// Mirrors weft `children::MonorepoEdge`.
+message MonorepoEdge {
+  // The mount name of this child inside its parent (the SPOOLLINK entry name).
+  string mount_name = 1;
+  // The child spool this edge points at.
+  string child_spool_id = 2;
+  // The child content state-id the edge is anchored to (moving-anchored-ff
+  // resolved — the state the caller would materialize for this child).
+  bytes anchored_state_id = 3;
+  // The child's current content head + ff/diverged status vs the anchor
+  // (reused from the ChildEdge resolution, not re-derived).
+  optional bytes child_head = 4;
+  ChildEdgeStatus status = 5;
+  // The recursively-resolved child subtree when descended; absent (with a
+  // `skipped` reason) when the edge was withheld/bounded/cycle-guarded.
+  optional MonorepoNode subtree = 6;
+  // The reason the edge was not descended; absent when `subtree` is present.
+  optional EdgeSkip skipped = 7;
+}
+
+// One spool in a resolved monorepo tree: its content state at the resolved
+// anchor plus its visible child edges. The caller reconstructs the whole
+// monorepo by materializing each node's content at `content_state` and
+// mounting each edge's subtree under its `mount_name`. Mirrors weft
+// `children::MonorepoNode`.
+message MonorepoNode {
+  string spool_id = 1;
+  // The content-facet state this spool is resolved at (absent = no content
+  // head). For the ROOT this is its own content head; for a descendant it is
+  // the anchored state the PARENT's edge pins.
+  optional bytes content_state = 2;
+  // The visible child edges of this spool (unreadable children are recorded
+  // with EDGE_SKIP_UNREADABLE, not silently dropped).
+  repeated MonorepoEdge edges = 3;
+}
+
+message ResolveMonorepoRequest {
+  string root_path = 1;
+  // Optional recursion depth bound; server clamps to MONOREPO_MAX_DEPTH.
+  optional uint32 max_depth = 2;
+}
+
+// One entry in a spool's governance-facet history — a governance commit and
+// the document it captured. Newest-first. Mirrors weft
+// `governance::GovernanceHistoryEntry`.
+message GovernanceHistoryEntry {
+  // The governance-facet commit id (16-byte ChangeId).
+  bytes change_id = 1;
+  // Access-gating visibility (`public`/`private`) as of this state.
+  string visibility = 2;
+  // The full non-visibility governance knobs (write_policy, child_policy,
+  // bootstrap_*, initial_tooling, description, ...), captured verbatim as a
+  // JSON string (weft `GovernanceDocument.settings: serde_json::Value`).
+  string settings_json = 3;
+  // Who committed this governance change (audit trail).
+  SpoolAttribution attribution = 4;
+  // When the governance change was committed.
+  google.protobuf.Timestamp committed_at = 5;
+}
+
+message GetGovernanceHistoryRequest {
+  string spool_path = 1;
+  // Max entries to walk (server default when unset/0).
+  optional uint32 limit = 2;
+}
+
+message GetGovernanceHistoryResponse {
+  repeated GovernanceHistoryEntry entries = 1;
+}
+
+// One grant record captured in a membership document — a `(subject, role)`
+// pair keyed on the immutable `subject_user_id` UUID. Mirrors weft
+// `membership::MembershipGrant`.
+message MembershipGrant {
+  // The immutable `users.id` UUID this grant is keyed on (the security key).
+  string subject_user_id = 1;
+  // The handle as it was at commit time (display/lookup only, not a key).
+  string subject = 2;
+  // The role held, as the on-wire lowercase token
+  // (`reader`/`developer`/`maintainer`/`admin`/`owner`).
+  string role = 3;
+}
+
+// One entry in a spool's membership-facet history — a membership commit and
+// the document (full grant set) it captured. Newest-first. Mirrors weft
+// `membership::MembershipHistoryEntry`.
+message MembershipHistoryEntry {
+  // The membership-facet commit id (16-byte ChangeId).
+  bytes change_id = 1;
+  // Every grant held on the spool as of this state (weft
+  // `MembershipDocument.grants`).
+  repeated MembershipGrant grants = 2;
+  // Who committed this membership change (audit trail).
+  SpoolAttribution attribution = 3;
+  // When the membership change was committed.
+  google.protobuf.Timestamp committed_at = 4;
+}
+
+message GetMembershipHistoryRequest {
+  string spool_path = 1;
+  // Max entries to walk (server default when unset/0).
+  optional uint32 limit = 2;
+}
+
+message GetMembershipHistoryResponse {
+  repeated MembershipHistoryEntry entries = 1;
 }
