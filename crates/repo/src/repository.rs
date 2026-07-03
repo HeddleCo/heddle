@@ -79,6 +79,7 @@ use objects::{
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
+pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 use crate::{GitRefContentNamespace, GitRefName};
@@ -1838,6 +1839,81 @@ impl Repository {
         //   * opaque on disk — the user's home directory and username
         //     never end up serialized into oplog entries
         compute_op_scope(&self.root)
+    }
+
+    /// The oplog scope token for a named facet lineage.
+    ///
+    /// Generalizes [`op_scope`](Self::op_scope) to the open facet set (Spool
+    /// epic P2). The default (content) facet returns the **unchanged** base
+    /// scope, so existing content/Git/Heddle oplog batches, undo records, and
+    /// `IsolationKey::LocalHead` are byte-identical to today. Every other facet
+    /// (`governance`, `membership`, …) gets its own suffixed scope
+    /// (`wt-<digest>/<facet>`), so that facet's batches, undo/redo view, and
+    /// isolation key are fully independent of every other facet's.
+    ///
+    /// Thread this into `record_batch_scoped` / `recent_batches_scoped` /
+    /// `undo_batches_scoped` to run the same `Repository` operations against a
+    /// different facet lineage.
+    pub fn op_scope_for_facet(&self, facet: &SpoolFacet) -> String {
+        facet.scope_token(&self.op_scope())
+    }
+
+    /// Read a named facet's HEAD.
+    ///
+    /// A facet's HEAD is modeled with the existing [`Head`] enum unchanged: it
+    /// attaches to the facet's canonical thread ref
+    /// (`refs/spool/<facet>/threads/<main_thread>`) when that thread exists
+    /// ([`Head::Attached`]), or resolves to a detached state otherwise. The
+    /// **content** facet is the physical `.heddle/HEAD` (delegates to
+    /// [`head_ref`](Self::head_ref)), preserving today's behavior exactly.
+    ///
+    /// This is the heddle-side per-`(repo, facet)` HEAD the Spool model needs;
+    /// the weft `heads` PK change is a later weft phase.
+    pub fn facet_head(&self, facet: &SpoolFacet, main_thread: &str) -> Result<Option<Head>> {
+        if facet.is_default() {
+            return Ok(Some(self.head_ref()?));
+        }
+        let thread = ThreadName::from(facet.thread_ref(main_thread).as_str());
+        match self.refs.get_thread(&thread)? {
+            Some(_) => Ok(Some(Head::Attached { thread })),
+            None => Ok(None),
+        }
+    }
+
+    /// Resolve a named facet's HEAD to a concrete state, if any.
+    pub fn facet_head_state(
+        &self,
+        facet: &SpoolFacet,
+        main_thread: &str,
+    ) -> Result<Option<ChangeId>> {
+        if facet.is_default() {
+            return self.head();
+        }
+        let thread = ThreadName::from(facet.thread_ref(main_thread).as_str());
+        self.refs.get_thread(&thread)
+    }
+
+    /// Advance a named facet's HEAD thread to `state`.
+    ///
+    /// Moves the facet's canonical thread ref
+    /// (`refs/spool/<facet>/threads/<main_thread>`) under the facet's own ref
+    /// prefix — it does **not** touch any other facet's refs. Rejected for the
+    /// default (content) facet, whose HEAD is the physical `.heddle/HEAD` and is
+    /// moved through the existing snapshot/goto write paths.
+    pub fn set_facet_head(
+        &self,
+        facet: &SpoolFacet,
+        main_thread: &str,
+        state: &ChangeId,
+    ) -> Result<()> {
+        if facet.is_default() {
+            return Err(HeddleError::InvalidObject(
+                "set_facet_head is for named facets; the content facet HEAD moves via snapshot/goto"
+                    .to_string(),
+            ));
+        }
+        let thread = ThreadName::from(facet.thread_ref(main_thread).as_str());
+        self.refs.set_thread(&thread, state)
     }
 
     /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying
