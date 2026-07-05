@@ -73,7 +73,7 @@ fn model_help_topic_gives_short_first_time_mental_model() {
 fn bridge_help_topic_teaches_adoption_before_export_notes() {
     let help = heddle_help(&["help", "bridge"]);
     assert!(
-        help.starts_with("Git bridge"),
+        help.starts_with("Git Projection"),
         "bridge topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
@@ -4538,7 +4538,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 }
 
 #[test]
-fn git_adapter_commit_branch_and_switch_shims_work() {
+fn git_projection_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
     SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
@@ -8026,8 +8026,8 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         "curated help should render: stdout={stdout}"
     );
     assert!(
-        !stdout.contains("compatibility"),
-        "default help should not frame Git adapter commands as compatibility: {stdout}"
+        !stdout.contains("compatibility") && !stdout.contains(concat!("Git ", "adapter")),
+        "default help should not frame Git Projection commands as old compatibility wording: {stdout}"
     );
     for verb in ["status", "diff", "commit", "start", "ready", "land"] {
         assert!(
@@ -8108,8 +8108,8 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "advanced help should explain why this surface exists: {advanced}"
     );
     assert!(
-        !advanced.contains("compatibility"),
-        "advanced help should not frame Git adapter commands as compatibility: {advanced}"
+        !advanced.contains("compatibility") && !advanced.contains(concat!("Git ", "adapter")),
+        "advanced help should not frame Git Projection commands as old compatibility wording: {advanced}"
     );
     assert!(
         !advanced.contains("see `heddle help advanced`"),
@@ -8957,8 +8957,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .iter()
         .find(|entry| entry["display"] == "stash push")
         .expect("stash push command should be cataloged");
-    assert_eq!(stash_push["surface"], "git_adapter");
-    assert_eq!(stash_push["help_visibility"], "git_adapter");
+    assert_eq!(stash_push["surface"], "git_projection");
+    assert_eq!(stash_push["help_visibility"], "git_projection");
     assert_eq!(stash_push["canonical_action"]["command"], "capture");
     assert_eq!(stash_push["canonical_action"]["kind"], "workflow");
     assert_eq!(stash_push["canonical_action"]["executable"], false);

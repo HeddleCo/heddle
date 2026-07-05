@@ -846,10 +846,10 @@ next command instead of falling back to raw Git.\n";
 
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
-Supported Git-overlay workflows use native/library paths and are tested with\n\
-`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `import git`,\n\
-`sync git`, and `export git` where implemented,\n\
-`thread list`, `workspace`, `log`, `show`, `diff`, `checkpoint`, `merge`,\n\
+Supported Git Projection workflows use native/library paths and are tested with\n\
+`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `fetch`,\n\
+`push`, `pull`, `import git`, `export git`, `thread list`, `workspace`,\n\
+`log`, `show`, `diff`, `checkpoint`, `merge`,\n\
 `ready`, and `fsck`.\n\
 \n\
 Heddle is Git-compatible, not Git-binary-dependent. Public CLI runtime paths\n\
@@ -867,7 +867,7 @@ fail closed with recovery advice instead of silently invoking a `git` binary.\n\
 \n\
 Run `heddle help --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
-bridge-state problems.\n";
+Git Projection state problems.\n";
 
 const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
 \n\
@@ -905,7 +905,7 @@ const GIT_OVERLAY_TOPIC: &str = "Git-overlay workflow\n\
 \n\
 Use this when you want Heddle's captured states, isolated threads, merge\n\
 previews, undo, provenance, and machine-safe JSON with Git compatibility kept\n\
-behind the bridge/adapter.\n\
+as a projection surface.\n\
 \n\
 Start in an existing Git checkout:\n\
 \n\

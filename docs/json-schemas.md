@@ -387,8 +387,9 @@ These verbs are the everyday loop agents use after discovery through
 `heddle help --output json`: capture state, save it as a
 Git-compatible commit when needed, undo/redo the last logical
 operation, and ask whether a thread is ready. The lower-level
-`checkpoint` command is documented here as an explicit Git-adapter
-surface; the native first-run loop should prefer `commit`.
+`checkpoint` command is documented here as an advanced native surface
+for writing a Git-facing commit boundary; the first-run loop should
+prefer `commit`.
 
 `heddle capture --output json` emits:
 
@@ -2557,8 +2558,8 @@ for the field-level definition. Notable invariants:
 
 Public command catalog for agents, shell integrations, and generated docs.
 Use `heddle help --output json` in automation. The catalog includes
-native commands first and lower-level Git-adapter actions only where a
-command explicitly belongs to that surface.
+native commands first and lower-level Git Projection actions only where
+a command explicitly belongs to that surface.
 
 Agents can bound the response before parsing it:
 
@@ -2884,9 +2885,9 @@ Import emits:
 
 ---
 
-## Git adapter import/export/sync JSON
+## Git Projection import/export/sync JSON
 
-Explicit Git adapter ops emit JSON via `serde_json::json!{}` with consistent
+Explicit Git Projection ops emit JSON via `serde_json::json!{}` with consistent
 key naming:
 
 | Verb | Shape |

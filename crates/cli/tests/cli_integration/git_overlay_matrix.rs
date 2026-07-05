@@ -144,6 +144,15 @@ fn verify_state_for_assertions(value: Value) -> Value {
     state
 }
 
+fn assert_no_legacy_verification_sidecars(value: &Value) {
+    for legacy in ["git_overlay_import_hint", "git_overlay_health"] {
+        assert!(
+            value.get(legacy).is_none(),
+            "JSON output must not expose legacy verification sidecar `{legacy}`: {value}"
+        );
+    }
+}
+
 fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
     // Helper exists to parse JSON; explicit --output json is now
     // required (no more auto-on-pipe). Inject it if the caller
@@ -1037,7 +1046,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     assert_eq!(bridge["verification"]["recommended_action"], "heddle init");
     assert_eq!(bridge["verification"]["import_state"], "git_backed");
     assert_eq!(bridge["verification"]["mapping_state"], "git_backed");
-    assert!(bridge["git_overlay_import_hint"].is_null());
+    assert_no_legacy_verification_sidecars(&bridge);
     let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
         bridge_text.contains("heddle init") && !bridge_text.contains("heddle adopt"),
@@ -1045,7 +1054,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     );
     let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["recommended_action"], "heddle init");
-    assert!(diagnose.get("git_overlay_import_hint").is_none());
+    assert_no_legacy_verification_sidecars(&diagnose);
 
     let failed_adopt = heddle_output(
         &["--output", "json", "adopt", "--ref", "trunk"],
@@ -1156,7 +1165,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(bridge["verification"]["status"], "needs_init");
     assert_eq!(bridge["verification"]["import_state"], "git_backed");
     assert_eq!(bridge["verification"]["mapping_state"], "git_backed");
-    assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge);
     assert_verify_check_rows(&bridge["verification"]);
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -1336,7 +1345,7 @@ fn git_overlay_matrix_adopt_initializes_imports_and_verifies() {
     assert_verify_check_rows(&verify);
     let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["verified"], true);
-    assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge);
 }
 
 #[test]
@@ -1457,7 +1466,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
     let bridge = json(fixture.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["verification"]["status"], "clean");
-    assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge);
 
     std::fs::write(fixture.path().join("scratch.txt"), "scratch\n").unwrap();
     fixture.heddle(&["capture", "-m", "scratch work"]).unwrap();
@@ -4579,7 +4588,7 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
     // thread list) no longer carry it.
     git(&["branch", "support/original"], temp.path());
     let bridge_before = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge_before["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge_before);
     assert_eq!(bridge_before["verification"]["status"], "needs_init");
 
     git(
@@ -4587,18 +4596,15 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         temp.path(),
     );
     let bridge_after_rename = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge_after_rename["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge_after_rename);
 
     git(&["branch", "-D", "support/renamed"], temp.path());
     let bridge_after_delete = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge_after_delete["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge_after_delete);
 
     git(&["branch", "support/recreated"], temp.path());
     let bridge_after_recreate = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        bridge_after_recreate["git_overlay_import_hint"],
-        Value::Null
-    );
+    assert_no_legacy_verification_sidecars(&bridge_after_recreate);
 }
 
 #[test]
@@ -4723,7 +4729,7 @@ fn git_overlay_matrix_auto_adopts_local_branch_tips_without_full_import() {
     // Import-hint information has moved to `heddle status
     // --output json`; per-command outputs no longer carry it.
     let bridge = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge);
 }
 
 #[test]
@@ -5015,7 +5021,7 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     git(&["branch", "support/beta"], temp.path());
 
     let before = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(before["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&before);
     assert_eq!(before["verification"]["status"], "needs_init");
 
     let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
@@ -5048,11 +5054,7 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     git(&["branch", "support/gamma"], temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        status["git_overlay_import_hint"],
-        Value::Null,
-        "renamed or newly-created branches at already imported commits should not reopen import work: {status}"
-    );
+    assert_no_legacy_verification_sidecars(&status);
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     let available = thread_list["available_git_refs"]
         .as_array()
@@ -5320,11 +5322,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     let root_status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(root_status["thread"], "feature/drop-in");
     let root_bridge = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        root_bridge["git_overlay_import_hint"],
-        Value::Null,
-        "a branch alias at an already adopted commit should not reopen import work: {root_bridge}"
-    );
+    assert_no_legacy_verification_sidecars(&root_bridge);
     let root_threads = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert!(
         root_threads["available_git_refs"]
@@ -5340,11 +5338,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     let nested_workspace = json(&nested, &["status", "--output", "json"]);
     assert_eq!(nested_workspace["thread"], "feature/drop-in");
     let nested_bridge = json(&nested, &["status", "--output", "json"]);
-    assert_eq!(
-        nested_bridge["git_overlay_import_hint"],
-        Value::Null,
-        "nested bridge status should agree that branch alias history is already imported: {nested_bridge}"
-    );
+    assert_no_legacy_verification_sidecars(&nested_bridge);
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked after reopen").unwrap();
     let ready = json(
@@ -5370,11 +5364,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
             .is_empty()
     );
     let root_bridge_after = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        root_bridge_after["git_overlay_import_hint"],
-        Value::Null,
-        "captured but uncheckpointed work should ask for a checkpoint, not reopen import work: {root_bridge_after}"
-    );
+    assert_no_legacy_verification_sidecars(&root_bridge_after);
     assert_eq!(
         root_bridge_after["verification"]["status"],
         "needs_checkpoint"
@@ -7220,11 +7210,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["output_kind"], "status");
     assert_eq!(bridge["recommended_action"], Value::Null);
-    assert_eq!(
-        bridge["git_overlay_import_hint"],
-        Value::Null,
-        "a side branch whose tip was already imported through main should not make the bridge report missing import work: {bridge}"
-    );
+    assert_no_legacy_verification_sidecars(&bridge);
 
     let text = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
@@ -7313,10 +7299,10 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     git(&["checkout", "feature/drop-in"], temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&status);
 
     let bridge = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge);
 }
 
 #[test]
@@ -7340,10 +7326,10 @@ fn git_overlay_matrix_imported_branch_delete_and_recreate_same_name_reappears_in
     git(&["checkout", "feature/drop-in"], temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&status);
 
     let bridge_again = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge_again["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&bridge_again);
 }
 
 #[test]
@@ -7920,7 +7906,7 @@ fn git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint() {
     git(&["checkout", "feature/drop-in"], temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["git_overlay_import_hint"], Value::Null);
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
