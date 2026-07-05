@@ -384,7 +384,7 @@ Examples:
 
         /// Include Git projection, mapping, notes, and checkout checks.
         #[arg(long)]
-        bridge: bool,
+        git: bool,
 
         /// Repair a focused integrity surface before checking it.
         #[arg(long, value_enum, value_name = "TARGET")]

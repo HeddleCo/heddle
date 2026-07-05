@@ -1403,7 +1403,7 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
 }
 
 #[test]
-fn git_replacement_matrix_fsck_bridge_validates_mapping_notes_and_checkout_without_git_on_path() {
+fn git_replacement_matrix_fsck_git_projection_validates_mapping_notes_and_checkout_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -1419,14 +1419,14 @@ fn git_replacement_matrix_fsck_bridge_validates_mapping_notes_and_checkout_witho
     )
     .unwrap();
     configure_repo_local_git_identity(&work);
-    std::fs::write(work.join("story.txt"), "fsck bridge\n").unwrap();
-    heddle_without_git(&["capture", "-m", "fsck bridge"], &work).unwrap();
-    heddle_without_git(&["checkpoint", "-m", "fsck bridge checkpoint"], &work).unwrap();
+    std::fs::write(work.join("story.txt"), "git projection fsck\n").unwrap();
+    heddle_without_git(&["capture", "-m", "git projection fsck"], &work).unwrap();
+    heddle_without_git(&["checkpoint", "-m", "git projection fsck checkpoint"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
-    assert_eq!(parsed["valid"], true, "bridge fsck should pass: {fsck}");
-    assert_eq!(parsed["bridge_checked"], true);
+    assert_eq!(parsed["valid"], true, "Git projection fsck should pass: {fsck}");
+    assert_eq!(parsed["git_projection_checked"], true);
 }
 
 #[test]

@@ -11,7 +11,7 @@ pub fn cmd_fsck(
     cli: &Cli,
     full: bool,
     thorough: bool,
-    bridge: bool,
+    git_projection: bool,
     repair: Option<FsckRepairTarget>,
     ref_name: Option<String>,
     prefer: Option<String>,
@@ -27,7 +27,7 @@ pub fn cmd_fsck(
         FsckOptions {
             full,
             thorough,
-            bridge: bridge || repair.is_some(),
+            git_projection: git_projection || repair.is_some(),
         },
     )?;
 

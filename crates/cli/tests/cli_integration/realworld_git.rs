@@ -210,7 +210,7 @@ fn realworld_git_complex_fixture_round_trips_overlay_inventory_without_git_on_pa
     // flag was retired once the default flow was the all-refs path.
     heddle_without_git(&["import", "git"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "complex fixture should fsck: {fsck}");
 
@@ -263,7 +263,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
         metadata.len() > 0,
         "large checkout should materialize a blob or a safety pointer"
     );
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "large fixture should fsck: {fsck}");
 }
@@ -723,8 +723,8 @@ fn realworld_fixtures_clone_and_import_round_trip() {
         heddle_without_git(&["import", "git"], &work)
             .unwrap_or_else(|err| panic!("Git import failed for {}: {err}", entry.name));
 
-        let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work)
-            .unwrap_or_else(|err| panic!("fsck --bridge failed for {}: {err}", entry.name));
+        let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work)
+            .unwrap_or_else(|err| panic!("fsck --git failed for {}: {err}", entry.name));
         let parsed: Value = serde_json::from_str(&fsck)
             .unwrap_or_else(|_| panic!("fsck output should parse for {}: {fsck}", entry.name));
         assert_eq!(

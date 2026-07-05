@@ -7851,7 +7851,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     );
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "fsck", "--bridge"],
+        vec!["--quiet", "--output", "text", "fsck", "--git"],
         &["repository is valid", "Bridge:"],
     );
 

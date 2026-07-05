@@ -18,7 +18,7 @@ use crate::{ExecutionContext, HeddleReport, MachineOutputKind, ReportContract, s
 pub struct FsckOptions {
     pub full: bool,
     pub thorough: bool,
-    pub bridge: bool,
+    pub git_projection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub struct FsckReport {
     pub errors: Vec<FsckError>,
     pub warnings: Vec<String>,
     pub objects_checked: usize,
-    pub bridge_checked: bool,
+    pub git_projection_checked: bool,
     pub repair_target: Option<String>,
     pub repaired: bool,
     pub repairs: Vec<FsckRepair>,
@@ -84,7 +84,7 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
 
     refs::check_refs(repo, &mut errors, &mut warnings)?;
     refs::check_merge_state(repo, &mut warnings)?;
-    if opts.bridge {
+    if opts.git_projection {
         bridge::check_bridge(repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
 
@@ -95,7 +95,7 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
         errors,
         warnings,
         objects_checked,
-        bridge_checked: opts.bridge,
+        git_projection_checked: opts.git_projection,
         repair_target: None,
         repaired: false,
         repairs: Vec::new(),

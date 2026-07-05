@@ -3266,7 +3266,7 @@ Preview or apply a ref reconciliation between Git and Heddle.
   "errors": [],
   "warnings": [],
   "objects_checked": 42,
-  "bridge_checked": true,
+  "git_projection_checked": true,
   "repair_target": "git",
   "repaired": false,
   "repairs": [
@@ -3436,7 +3436,7 @@ nothing to stop — both exit 0):
 `heddle fsck --output json` emits:
 
 ```json
-{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "bridge_checked": false, "repair_target": null, "repaired": false, "repairs": []}
+{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
 `heddle oplog recover --output json` emits an operator recovery report

@@ -18,10 +18,10 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
             "{} repository is valid ({counted} checked)\n",
             style::ok_marker(),
         ));
-        if report.bridge_checked {
+        if report.git_projection_checked {
             text.push_str(&format!(
                 "  {}\n",
-                style::field("Bridge", "mirror and mapping checked")
+                style::field("Git projection", "mapping, notes, and checkout checked")
             ));
         }
     } else {

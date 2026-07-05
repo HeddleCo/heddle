@@ -544,7 +544,7 @@ async fn async_main() -> Result<()> {
         Commands::Fsck {
             full,
             thorough,
-            bridge,
+            git,
             repair,
             ref_name,
             prefer,
@@ -553,7 +553,7 @@ async fn async_main() -> Result<()> {
             &cli,
             *full,
             *thorough,
-            *bridge,
+            *git,
             *repair,
             ref_name.clone(),
             prefer.clone(),

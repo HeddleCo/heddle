@@ -514,7 +514,7 @@ mod fsck {
 
         let output: Value = serde_json::from_str(&result.unwrap()).expect("should be JSON");
         assert_eq!(output["valid"], true);
-        assert_eq!(output["bridge_checked"], true);
+        assert_eq!(output["git_projection_checked"], true);
         assert_eq!(output["repair_target"], "git");
         assert_eq!(output["repaired"], false);
         assert!(
