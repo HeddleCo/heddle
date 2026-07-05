@@ -15,17 +15,17 @@ use serde::Serialize;
 
 use super::{
     action_line::print_next_step,
-    verification_health::{
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
-        build_verification_health, build_plain_git_verification_probe,
-        build_repository_verification_state, primary_recovery_command,
-        remote_tracking_with_verification_action, serialize_empty_action_as_null,
-        trust_visible_worktree_status,
-    },
     operator_loop::primary_next_action,
     thread::{
         CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries,
         thread_workspace_label,
+    },
+    verification_health::{
+        RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
+        action_template, build_plain_git_verification_probe, build_repository_verification_state,
+        build_verification_health, primary_recovery_command,
+        remote_tracking_with_verification_action, serialize_empty_action_as_null,
+        trust_visible_worktree_status,
     },
 };
 use crate::cli::{Cli, DiagnoseArgs, should_output_json, style, worktree_status_options};
@@ -40,7 +40,7 @@ pub(crate) struct DiagnoseOutput {
     #[serde(skip)]
     import_guidance: Option<DiagnoseImportGuidanceOutput>,
     #[serde(skip)]
-    verification_health: GitOverlayHealth,
+    verification_health: RepositoryVerificationHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     operation: Option<RepositoryOperationStatus>,
@@ -175,7 +175,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         total: probe.changes.change_count(),
     };
     let trust = probe.trust.clone();
-    let verification_health = GitOverlayHealth {
+    let verification_health = RepositoryVerificationHealth {
         status: trust.status.clone(),
         clean: trust.verified,
         summary: trust.summary.clone(),
@@ -183,7 +183,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         checks: trust
             .checks
             .iter()
-            .map(|check| GitOverlayHealthCheck {
+            .map(|check| RepositoryVerificationCheck {
                 name: check.name.clone(),
                 status: check.status.clone(),
                 summary: check.summary.clone(),
@@ -368,14 +368,14 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
-        import_guidance: import_hint.clone().map(|hint| {
-            DiagnoseImportGuidanceOutput {
+        import_guidance: import_hint
+            .clone()
+            .map(|hint| DiagnoseImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
                 recommended_command: hint.recommended_command,
-            }
-        }),
+            }),
         verification_health,
         trust: trust.clone(),
         operation: operation.clone(),
