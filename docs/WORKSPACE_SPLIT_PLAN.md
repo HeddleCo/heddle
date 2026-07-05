@@ -69,7 +69,7 @@ Move these first because they are the most reusable and least server-specific:
 - `src/lock/**`
 - `src/hooks/**`
 - `src/worktree/**`
-- `src/bridge/**`
+- `src/git_projection_engine/**`
 - `src/refs/**` except `src/refs/pg_refs.rs`
 - `src/oplog/**` except `src/oplog/pg_oplog.rs`
 - `src/store/**` except:
