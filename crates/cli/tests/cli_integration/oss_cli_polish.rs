@@ -349,11 +349,15 @@ fn core_json_surfaces_use_verification_not_trust() {
         assert_no_json_key_named(&value, "trust", label);
     }
 
-    let verify = json_value(temp.path(), &["verify", "--output", "json"]);
+    let verify = raw_json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["output_kind"], "verify", "{verify}");
     assert!(
-        verify.get("verified").is_some(),
-        "verify flattens the proof state instead of nesting it: {verify}"
+        verify.get("verification").is_some(),
+        "verify should nest the proof state under verification: {verify}"
+    );
+    assert!(
+        verify.get("verified").is_none(),
+        "verify should not expose flattened verification fields at the top level: {verify}"
     );
     assert_no_json_key_named(&verify, "trust", "verify");
 }
@@ -3536,7 +3540,7 @@ fn verify_reports_machine_contract_coverage() {
     assert_eq!(verify["recovery_commands"], serde_json::json!([]));
     assert!(
         verify.get("verification").is_none(),
-        "verify JSON should be the canonical flattened proof, not a nested wrapper: {verify}"
+        "json_value normalizes verify JSON to the proof state for verification assertions: {verify}"
     );
     assert!(
         coverage["catalog_commands_total"]
@@ -4119,6 +4123,54 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
     }
 }
 
+fn verify_state_for_assertions(value: Value) -> Value {
+    let Some(verification) = value.get("verification") else {
+        return value;
+    };
+    let mut state = verification.clone();
+    if let Some(object) = state.as_object_mut() {
+        object
+            .entry("output_kind".to_string())
+            .or_insert_with(|| Value::String("verify".to_string()));
+        if let Some(clean) = value.get("clean") {
+            object
+                .entry("clean".to_string())
+                .or_insert_with(|| clean.clone());
+        }
+    }
+    state
+}
+
+fn raw_json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
+    let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    if !args.iter().any(|arg| *arg == "json" || *arg == "text") {
+        full_args.push("--output");
+        full_args.push("json");
+    }
+    full_args.extend_from_slice(args);
+    let output = heddle_output(&full_args, Some(cwd))
+        .unwrap_or_else(|err| panic!("heddle {full_args:?}: {err}"));
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
+    if output.status.success() || !stdout.trim().is_empty() {
+        return parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
+            panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
+        });
+    }
+    if args.contains(&"verify") {
+        return serde_json::from_str(stderr).unwrap_or_else(|err| {
+            panic!("heddle {args:?} should emit a verify error envelope: {err}: {stderr}")
+        });
+    }
+    panic!(
+        "heddle {:?} failed: code={:?}\nstdout: {}\nstderr: {}",
+        args,
+        output.status.code(),
+        stdout,
+        stderr
+    );
+}
+
 fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
     let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
     if !args.iter().any(|arg| *arg == "json" || *arg == "text") {
@@ -4134,6 +4186,9 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
         let parsed = parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
             panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
         });
+        if args.contains(&"verify") {
+            return verify_state_for_assertions(parsed);
+        }
         return inject_post_verification_at(cwd, args, parsed);
     }
     if args.contains(&"verify") {
@@ -4194,6 +4249,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, args: &[&str], mut value: 
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -12125,18 +12182,16 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
 
     let json = heddle(&["--output", "json", "verify"], Some(&work)).expect("verify JSON");
     let parsed: Value = serde_json::from_str(&json).expect("verify JSON parses");
+    assert_eq!(parsed["output_kind"], "verify", "{json}");
+    let verification = &parsed["verification"];
     assert_eq!(
-        parsed["clone_verification"], "verified",
+        verification["clone_verification"], "verified",
         "git-overlay verify should treat a clean mapped checkout as clone-verified: {json}"
     );
-    assert_eq!(parsed["recommended_action"], Value::Null);
-    assert_eq!(parsed["recommended_action_argv"], Value::Null);
-    assert_eq!(parsed["recovery_commands"], serde_json::json!([]));
-    assert!(
-        parsed.get("verification").is_none(),
-        "verify JSON should not duplicate itself under a nested verify object: {json}"
-    );
-    let checks = parsed["checks"].as_array().expect("checks array");
+    assert_eq!(verification["recommended_action"], Value::Null);
+    assert_eq!(verification["recommended_action_argv"], Value::Null);
+    assert_eq!(verification["recovery_commands"], serde_json::json!([]));
+    let checks = verification["checks"].as_array().expect("checks array");
     let clone = checks
         .iter()
         .find(|check| check["name"] == "Clone")

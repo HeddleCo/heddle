@@ -126,6 +126,24 @@ fn raw_git_preservation_action() -> &'static str {
     "heddle bridge git status"
 }
 
+fn verify_state_for_assertions(value: Value) -> Value {
+    let Some(verification) = value.get("verification") else {
+        return value;
+    };
+    let mut state = verification.clone();
+    if let Some(object) = state.as_object_mut() {
+        object
+            .entry("output_kind".to_string())
+            .or_insert_with(|| Value::String("verify".to_string()));
+        if let Some(clean) = value.get("clean") {
+            object
+                .entry("clean".to_string())
+                .or_insert_with(|| clean.clone());
+        }
+    }
+    state
+}
+
 fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
     // Helper exists to parse JSON; explicit --output json is now
     // required (no more auto-on-pipe). Inject it if the caller
@@ -143,6 +161,9 @@ fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
     if output.status.success() || !stdout.trim().is_empty() {
         let parsed: Value = serde_json::from_str(stdout)
             .unwrap_or_else(|err| panic!("expected JSON for {:?}: {}", args, err));
+        if args.contains(&"verify") {
+            return verify_state_for_assertions(parsed);
+        }
         return inject_post_verification(cwd, args, parsed);
     }
     if args.contains(&"verify") {
@@ -212,9 +233,9 @@ fn inject_post_verification(cwd: &std::path::Path, args: &[&str], mut value: Val
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
-        // Clean verify flattens the proof; reconstruct as a nested
-        // object by dropping verify's own wrapper keys.
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
         obj_map.remove("repository_label");
@@ -2134,7 +2155,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
     assert_verify_check_rows(&workspace["verification"]);
     assert!(
         !temp.path().join(".heddle").exists(),
-        "workspace show in a plain Git repo must be observe-only"
+        "status in a plain Git repo must be observe-only"
     );
 }
 

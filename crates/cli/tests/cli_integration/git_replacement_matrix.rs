@@ -22,6 +22,24 @@ fn heddle_output_without_git(args: &[&str], cwd: &std::path::Path) -> Output {
         .expect("invoke heddle without git")
 }
 
+fn verify_state_for_assertions(value: Value) -> Value {
+    let Some(verification) = value.get("verification") else {
+        return value;
+    };
+    let mut state = verification.clone();
+    if let Some(object) = state.as_object_mut() {
+        object
+            .entry("output_kind".to_string())
+            .or_insert_with(|| Value::String("verify".to_string()));
+        if let Some(clean) = value.get("clean") {
+            object
+                .entry("clean".to_string())
+                .or_insert_with(|| clean.clone());
+        }
+    }
+    state
+}
+
 fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value {
     let output = heddle_output_without_git(args, cwd);
     let stdout = str::from_utf8(&output.stdout).unwrap_or("");
@@ -36,6 +54,9 @@ fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value 
     );
     let value: Value = serde_json::from_str(stdout)
         .unwrap_or_else(|err| panic!("{args:?} should emit parseable JSON: {err}: {stdout}"));
+    if args.contains(&"verify") {
+        return verify_state_for_assertions(value);
+    }
     inject_post_verification_without_git(cwd, value)
 }
 
@@ -65,6 +86,8 @@ fn inject_post_verification_without_git(cwd: &std::path::Path, mut value: Value)
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");

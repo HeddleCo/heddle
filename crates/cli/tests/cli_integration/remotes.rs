@@ -21,7 +21,11 @@ fn verify_json(cwd: &std::path::Path) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
-        return serde_json::from_str(&stdout).expect("verify JSON should parse");
+        let parsed: Value = serde_json::from_str(&stdout).expect("verify JSON should parse");
+        return parsed
+            .get("verification")
+            .cloned()
+            .unwrap_or(parsed);
     }
     let envelope: Value =
         serde_json::from_str(&stderr).expect("verify failure envelope should parse");
@@ -80,6 +84,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");

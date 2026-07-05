@@ -99,7 +99,7 @@ pub struct VerifyReport {
     pub repository_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_context: Option<RepositoryContextInfo>,
-    #[serde(flatten)]
+    #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     #[serde(skip)]
     #[schemars(skip)]

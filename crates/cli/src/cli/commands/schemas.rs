@@ -3457,6 +3457,25 @@ mod tests {
     }
 
     #[test]
+    fn verify_schema_nests_repository_verification_state() {
+        let schema = schema_for_verb("verify").expect("verify schema");
+        let properties = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("verify schema has properties");
+        assert!(
+            properties.contains_key("verification"),
+            "verify schema must expose nested verification state"
+        );
+        for flattened in ["verified", "status", "checks", "recommended_action"] {
+            assert!(
+                !properties.contains_key(flattened),
+                "verify schema must not expose flattened verification property `{flattened}`"
+            );
+        }
+    }
+
+    #[test]
     fn action_template_agent_may_fill_schema_describes_false_semantics() {
         let schema = schema_for_verb("verify").expect("verify schema");
         let action_template = schema

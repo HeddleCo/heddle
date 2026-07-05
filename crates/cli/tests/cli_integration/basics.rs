@@ -135,6 +135,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -586,12 +588,13 @@ fn test_cli_status_after_manual_git_commit_keeps_direct_git_backed_ref_clean() {
 
     let verify = heddle(&["verify", "--output", "json"], Some(temp.path())).unwrap();
     let parsed_verify: Value = serde_json::from_str(&verify).unwrap();
-    assert_eq!(parsed_verify["status"], "clean", "{parsed_verify}");
+    let verification = &parsed_verify["verification"];
+    assert_eq!(verification["status"], "clean", "{parsed_verify}");
     assert_eq!(
-        parsed_verify["mapping_state"], "git_backed",
+        verification["mapping_state"], "git_backed",
         "{parsed_verify}"
     );
-    assert_eq!(parsed_verify["worktree_state"], "clean", "{parsed_verify}");
+    assert_eq!(verification["worktree_state"], "clean", "{parsed_verify}");
 }
 
 #[test]

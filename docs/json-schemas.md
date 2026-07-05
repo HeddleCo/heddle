@@ -336,39 +336,41 @@ blocked verification state on stdout.
   "output_kind": "verify",
   "clean": true,
   "repository_label": "Git + Heddle",
-  "verified": true,
-  "status": "clean",
-  "repository_mode": "git-overlay",
-  "heddle_initialized": true,
-  "git_branch": "main",
-  "heddle_thread": "main",
-  "worktree_dirty": false,
-  "worktree_state": "clean",
-  "import_state": "clean",
-  "mapping_state": "clean",
-  "remote_drift": "clean",
-  "active_operation": null,
-  "default_remote": null,
-  "clone_verification": "not_applicable",
-  "machine_contract": "available",
-  "workflow_status": "idle",
-  "workflow_summary": "No ready thread is waiting to merge",
-  "summary": "Git overlay and Heddle agree",
-  "checks": [
-    {
-      "name": "Git",
-      "status": "clean",
-      "clean": true,
-      "summary": "Git worktree is clean",
-      "recommended_action": null,
-      "recovery_commands": [],
-      "details": {}
-    }
-  ],
-  "recommended_action": null,
-  "recommended_action_template": null,
-  "recovery_commands": [],
-  "recovery_action_templates": []
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "git-overlay",
+    "heddle_initialized": true,
+    "git_branch": "main",
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "worktree_state": "clean",
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "workflow_status": "idle",
+    "workflow_summary": "No ready thread is waiting to merge",
+    "summary": "Git overlay and Heddle agree",
+    "checks": [
+      {
+        "name": "Git",
+        "status": "clean",
+        "clean": true,
+        "summary": "Git worktree is clean",
+        "recommended_action": null,
+        "recovery_commands": [],
+        "details": {}
+      }
+    ],
+    "recommended_action": null,
+    "recommended_action_template": null,
+    "recovery_commands": [],
+    "recovery_action_templates": []
+  }
 }
 ```
 
@@ -376,20 +378,21 @@ blocked verification state on stdout.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload without a wrapper object. |
+| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload. |
 | `repository_label` | string | required | Human-facing repository identity; managed Git-overlay child checkouts use `"Git + Heddle isolated checkout"`. |
 | `repository_context` | object | optional | Present for managed child checkouts; includes `kind`, `parent_repository`, and any recorded `target_thread` / `parent_thread`. |
-| `verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
-| `clean` | bool | required | Alias of `verified` for agents that sort command results into clean/blocked buckets. |
-| `status` | string | required | Overall verification status, e.g. `clean`, `needs_import`, or `dirty_worktree`. |
-| `repository_mode`, `heddle_initialized`, `git_branch`, `heddle_thread`, `worktree_dirty`, `worktree_state`, `import_state`, `mapping_state`, `remote_drift`, `active_operation`, `default_remote`, `clone_verification`, `machine_contract`, `machine_contract_coverage`, `workflow_status`, `workflow_summary` | mixed | required except nullable fields | The flattened `RepositoryVerificationState`; `heddle verify --output json` is the canonical verification state, not a wrapper around another `verification` object. |
-| `summary` | string | required | Human-sized explanation of the top verification state. |
-| `checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
-| `recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
-| `recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
-| `recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
-| `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
-| `checks[].recommended_action_template`, `checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
+| `clean` | bool | required | Alias of `verification.verified` for agents that sort command results into clean/blocked buckets. |
+| `verification` | object | required | Full `RepositoryVerificationState`; this is the canonical verification proof shared with status, doctor, and post-operation reports. |
+| `verification.verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
+| `verification.status` | string | required | Overall verification status, e.g. `clean`, `needs_import`, or `dirty_worktree`. |
+| `verification.repository_mode`, `verification.heddle_initialized`, `verification.git_branch`, `verification.heddle_thread`, `verification.worktree_dirty`, `verification.worktree_state`, `verification.import_state`, `verification.mapping_state`, `verification.remote_drift`, `verification.active_operation`, `verification.default_remote`, `verification.clone_verification`, `verification.machine_contract`, `verification.machine_contract_coverage`, `verification.workflow_status`, `verification.workflow_summary` | mixed | required except nullable fields | Repository verification dimensions. |
+| `verification.summary` | string | required | Human-sized explanation of the top verification state. |
+| `verification.checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
+| `verification.recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
+| `verification.recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
+| `verification.recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
+| `verification.recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
+| `verification.checks[].recommended_action_template`, `verification.checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
 
 ### Blocked JSON verify
 
