@@ -59,13 +59,6 @@ pub enum GitCommands {
     /// is the canonical place to consume bridge-status information for
     /// scripts; other `--output json` outputs intentionally omit it.
     Status,
-    /// Initialize Git mirror.
-    Init {
-        /// Path to existing Git repository (optional).
-        #[arg(long)]
-        path: Option<std::path::PathBuf>,
-    },
-
     /// Export Heddle states to Git.
     ///
     /// Writes a complete bare git repository at `--destination` containing

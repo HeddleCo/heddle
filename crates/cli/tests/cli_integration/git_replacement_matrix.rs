@@ -739,10 +739,6 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     .unwrap();
     configure_repo_local_git_identity(&work);
 
-    let bridge_init =
-        assert_clean_json_without_git(&["--output", "json", "bridge", "git", "init"], &work);
-    assert_eq!(bridge_init["initialized"], true);
-
     let origin_arg = origin.to_str().expect("origin path should be utf8");
     let import = assert_clean_json_without_git(
         &[

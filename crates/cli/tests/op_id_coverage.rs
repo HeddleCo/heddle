@@ -157,7 +157,6 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         "clone",
         "thread switch",
         "thread drop",
-        "bridge git init",
         "bridge git export",
         "bridge git import",
         "context set",

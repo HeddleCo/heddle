@@ -295,7 +295,7 @@ C-or-lower or hard-gate findings remain open.
 |---|---:|---|---|
 | `status` | A | JSON/text/no-git/error cases sampled; machine-stream no-git regression pass; large dirty long-path `git-shaped` probe pass; narrow/no-color text pass; TTY auto/text and explicit JSON pass | Low residual risk. |
 | `thread` | A | `thread list --output json` no-git real fixtures pass; public help paths pass; cleanup safety suite pass; narrow/no-color text pass; unknown-thread recovery points at `heddle thread list` | Low residual risk on rare subcommands. |
-| `bridge` | A | `bridge import` no-git real fixtures pass; bridge init/export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Runtime `git` subprocesses are forbidden and linted. |
+| `bridge` | A | `bridge import` no-git real fixtures pass; bridge export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Runtime `git` subprocesses are forbidden and linted. |
 | `diagnose` | A | JSON no-git pass; narrow/no-color text pass; plain-Git baseline and branch-switch coverage pass; recovery shape sampled | Low residual risk. |
 | `help` | A | All rubric everyday commands and visible public command paths have `help`, `--help`, and `-h` coverage; typo suggestions and unknown-topic recovery sampled | Low residual risk. |
 | `clone` | A | no-git real fixtures pass; local/bare clone path with `PATH=""` pass; unsupported lazy/depth/filter/file-url flags reject cleanly; text completion names next step | Remote-network progress remains an optional long-running polish area. |

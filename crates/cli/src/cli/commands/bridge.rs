@@ -647,34 +647,6 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             cmd_bridge_git_status(cli, &repo)?;
         }
 
-        GitCommands::Init { path } => {
-            // Until the bridge gains a persisted mirror-location config, the
-            // mirror always lives at `.heddle/git/`. Reject `--path` outright
-            // rather than silently dropping it on the floor (which is what
-            // the old handler did, hiding the misuse).
-            if path.is_some() {
-                return Err(anyhow!(
-                    "--path is not yet supported for `bridge init`; the bridge \
-                     mirror is always at .heddle/git. To export to a different \
-                     location, use `bridge export --destination PATH`."
-                ));
-            }
-            bridge.init_mirror()?;
-
-            if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "initialized": true,
-                    "path": bridge.mirror_path().display().to_string(),
-                });
-                println!("{out}");
-            } else {
-                println!(
-                    "Initialized Git mirror at: {}",
-                    bridge.mirror_path().display()
-                );
-            }
-        }
-
         GitCommands::Export { destination } => {
             let destination = destination.ok_or_else(|| {
                 anyhow!(

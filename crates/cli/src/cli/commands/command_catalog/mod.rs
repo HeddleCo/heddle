@@ -1443,10 +1443,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["bridge", "git", "init"],
-        git_adapter_alias(documented_schemas(INIT, &["bridge git init"]), "init"),
-    ),
-    entry(
         &["bridge", "git", "export"],
         git_adapter_alias(
             documented_schemas(
@@ -4884,7 +4880,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Bridge { command } => match command {
             BridgeCommands::Git { command } => match command {
                 GitCommands::Status => vec!["bridge", "git", "status"],
-                GitCommands::Init { .. } => vec!["bridge", "git", "init"],
                 GitCommands::Export { .. } => vec!["bridge", "git", "export"],
                 GitCommands::Import { .. } => vec!["bridge", "git", "import"],
                 GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],

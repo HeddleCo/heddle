@@ -1925,41 +1925,12 @@ fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
 }
 
 #[test]
-fn op_id_replays_bridge_git_init_and_export() {
+fn op_id_replays_bridge_git_export() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "export me\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["adopt"], Some(temp.path())).unwrap();
-
-    let init_op_id = objects::object::OperationId::new().to_string();
-    let init_first = json_value(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "--op-id",
-            &init_op_id,
-            "bridge",
-            "git",
-            "init",
-        ],
-    );
-    assert_eq!(init_first["op_id"], init_op_id);
-    assert_eq!(init_first["idempotency_status"], "executed");
-    let init_replay = json_value(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "--op-id",
-            &init_op_id,
-            "bridge",
-            "git",
-            "init",
-        ],
-    );
-    assert_eq!(init_replay["idempotency_status"], "replayed");
 
     let export_dest = temp.path().join("export.git");
     let export_dest_arg = export_dest.display().to_string();

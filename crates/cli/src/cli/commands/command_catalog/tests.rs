@@ -122,8 +122,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "init"], &["bridge", "git", "init"]),
-    #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "export"], &["bridge", "git", "export"]),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
@@ -1222,7 +1220,6 @@ fn native_only_catalog_excludes_git_overlay_commands() {
         "bridge",
         "bridge git",
         "bridge git status",
-        "bridge git init",
         "bridge git import",
         "bridge git export",
         "bridge git sync",
@@ -2032,7 +2029,6 @@ fn op_id_persistence_reads_contract_table() {
         ("init", false, "bootstrap"),
         ("adopt", false, "bootstrap"),
         ("clone", false, "bootstrap"),
-        ("bridge git init", false, "bootstrap"),
     ] {
         let entry = catalog
             .commands

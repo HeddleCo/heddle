@@ -191,16 +191,16 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "catalog_commands_total": 220,
-      "json_commands_total": 176,
-      "json_commands_with_schema": 129,
+      "catalog_commands_total": 219,
+      "json_commands_total": 175,
+      "json_commands_with_schema": 128,
       "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 43,
       "verified_scope_json_commands_with_schema": 43,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 133,
+      "advanced_scope_json_commands_total": 132,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
@@ -209,8 +209,8 @@ in-progress operation.
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 182,
-      "documented_schema_verbs_total": 182,
+      "schema_verbs_total": 181,
+      "documented_schema_verbs_total": 181,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 47,
       "accepted_opaque_schema_verbs_total": 47,
@@ -2943,21 +2943,11 @@ key naming:
 
 | Verb | Shape |
 |------|-------|
-| `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
 | `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
-
-## `heddle bridge git init --output json`
-
-Bridge init emits a bridge mirror path, not the
-active Git-overlay `.git`:
-
-```json
-{"initialized": true, "path": "/work/project/.heddle/git"}
-```
 
 ## `heddle bridge git export --output json`
 
@@ -3126,26 +3116,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 133,
+    "advanced_scope_json_commands_total": 132,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 81,
+    "advanced_scope_mutating_commands_total": 80,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 220,
-    "catalog_mutating_commands_total": 112,
-    "json_commands_total": 176,
+    "catalog_commands_total": 219,
+    "catalog_mutating_commands_total": 111,
+    "json_commands_total": 175,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 129,
+    "json_commands_with_schema": 128,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 107,
+    "json_mutating_commands_total": 106,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 107,
+    "mutating_commands_total": 106,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 80,
+    "mutating_commands_with_schema": 79,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "220 command(s), 176 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "219 command(s), 175 JSON command(s), 111 mutating command(s), 106 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3183,7 +3173,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "220 command(s), 176 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "219 command(s), 175 JSON command(s), 111 mutating command(s), 106 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

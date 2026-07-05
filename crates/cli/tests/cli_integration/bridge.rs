@@ -444,17 +444,20 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_dir() {
 }
 
 #[test]
-fn test_cli_bridge_git_init() {
+fn test_cli_bridge_git_init_leaf_removed() {
     let temp = TempDir::new().unwrap();
 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
 
-    assert!(heddle(&["bridge", "git", "init"], Some(temp.path())).is_ok());
     assert!(
-        temp.path().join(".heddle/git").exists(),
-        "Git mirror should exist"
+        heddle(&["bridge", "git", "init"], Some(temp.path())).is_err(),
+        "public bridge git init leaf should be removed"
+    );
+    assert!(
+        !temp.path().join(".heddle/git").exists(),
+        "removed public command must not initialize the Git mirror"
     );
 }
 

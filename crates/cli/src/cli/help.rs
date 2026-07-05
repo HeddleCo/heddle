@@ -838,8 +838,8 @@ Core loop:\n\
 Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
 paths depending on the workflow. Top-level `fetch`, `push`, and `pull` use the\n\
 default remote unless a positional remote name is supplied, for example\n\
-`heddle fetch backup`. `heddle bridge git status` shows Git-overlay mapping and\n\
-drift before a sync operation changes refs.\n\
+`heddle fetch backup`. `heddle verify` reports repository verification state\n\
+before and after remote operations.\n\
 \n\
 When a remote action is unsafe, Heddle reports the blocker and one primary\n\
 next command instead of falling back to raw Git.\n";
@@ -972,10 +972,9 @@ Daily loop:\n\
 \n\
 Recovery and inspection:\n\
 \n\
-    heddle bridge git status\n\
-    heddle bridge git reconcile --ref <branch> --preview\n\
-    heddle doctor\n\
+    heddle status\n\
     heddle verify --output json\n\
+    heddle doctor\n\
 \n\
 Export metadata for Git readers:\n\
 \n\

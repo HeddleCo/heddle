@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
-Heddle is an AI-native version control CLI written in Rust. It keeps its own state model and uses the Git bridge/adapter when you want to adopt an existing Git repository, adding:
+Heddle is an AI-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures and Git-compatible commits with explicit human and agent attribution
@@ -15,7 +15,7 @@ Heddle is an AI-native version control CLI written in Rust. It keeps its own sta
 cargo install heddle-cli
 cd /path/to/your/git/repo
 heddle status              # inspect Git safely; Heddle prints the exact next command
-heddle adopt --ref main    # create the sidecar if needed and import the branch
+heddle adopt --ref main    # initialize Heddle metadata and map the branch
 heddle verify
 ```
 
@@ -46,7 +46,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Semantic diff and compare
 - Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
-- Git adapter/bridge: sidecar overlay, explicit native adoption, import, export, sync
+- Git overlay/adapter: direct `.git` integration, explicit native adoption, import, export, sync
 - Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 

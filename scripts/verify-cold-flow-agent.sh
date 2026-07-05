@@ -282,6 +282,8 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected clean verified report, got {data!r}")
 PYJSON
@@ -300,6 +302,8 @@ if data.get("kind") == "verify_failed":
     if not isinstance(verification, dict):
         raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
     data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 branch = sys.argv[2]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
@@ -324,7 +328,12 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 if data.get("kind") == "verify_failed":
-    data = data.get("verification") or {}
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
+    data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
@@ -572,6 +581,8 @@ assert_current_verify_clean_json() {
 import json
 import sys
 data = json.loads(sys.argv[1])
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected recommended action to restore clean verify, got {data!r}")
 PYJSON
@@ -585,6 +596,8 @@ assert_current_worktree_clean_json() {
 import json
 import sys
 data = json.loads(sys.argv[1])
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 checks = {
     check.get("name"): check
     for check in data.get("checks", [])
@@ -798,8 +811,6 @@ PYJSON
   run_json "$transcript" "$repo" "$shape.04.verify-clean-after-adopt" verify
   run_json "$transcript" "$repo" "$shape.06.status-clean" status
   run_json "$transcript" "$repo" "$shape.07.doctor" doctor
-  run_json "$transcript" "$repo" "$shape.08.bridge-status" bridge git status
-  run_json "$transcript" "$repo" "$shape.09.reconcile-preview" bridge git reconcile --prefer heddle --ref main --preview
   run_json "$transcript" "$repo" "$shape.10.thread-list" thread list
   run_json "$transcript" "$repo" "$shape.11.thread-show" thread show
   run_json "$transcript" "$repo" "$shape.12.status-workspace" status

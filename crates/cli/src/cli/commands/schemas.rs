@@ -126,7 +126,6 @@ schema_registry! {
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
-    (&["bridge git init"], BridgeInitSchema),
     (&["bridge git export"], BridgeExportSchema),
     (&["bridge git import"], BridgeImportSchema),
     (&["bridge git sync"], BridgeSyncSchema),
@@ -2826,12 +2825,6 @@ pub struct TrySchema {
 // ---- bridge ops -----------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeInitSchema {
-    pub initialized: bool,
-    pub path: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct ExportedRefSchema {
     pub name: String,
     pub tip: String,
@@ -3384,7 +3377,6 @@ mod tests {
         let catalog = command_catalog::build_command_catalog();
         for verb in [
             "bridge git status",
-            "bridge git init",
             "bridge git import",
             "bridge git export",
             "bridge git sync",

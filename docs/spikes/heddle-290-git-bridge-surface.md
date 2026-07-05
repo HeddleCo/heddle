@@ -19,7 +19,6 @@ enum declaration order (`crates/cli/src/cli/cli_args/commands_bridge.rs:54-192`)
 ```
 Commands:
   status     Show the current state of the Git overlay bridge
-  init       Initialize Git mirror
   export     Export Heddle states to Git
   import     Import Git commits to Heddle
   sync       Bidirectional sync with Git (export + import)
@@ -99,7 +98,6 @@ which is catalogued `surface(...)`-only and carries no
 | bridge verb | tier | canonical → | kind |
 |---|---|---|---|
 | `bridge git status` | advanced | `status` | direct_command |
-| `bridge git init` | advanced | `init` | direct_command |
 | `bridge git export` | advanced | `push` | direct_command |
 | `bridge git import` | advanced | `adopt` | workflow |
 | `bridge git sync` | advanced | `adopt` | workflow |

@@ -231,6 +231,8 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected clean verified report, got {data!r}")
 PYJSON
@@ -244,6 +246,13 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("kind") == "verify_failed":
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
+    data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 branch = sys.argv[2]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
@@ -264,6 +273,13 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("kind") == "verify_failed":
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
+    data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
@@ -532,6 +548,8 @@ assert_current_verify_clean() {
 import json
 import sys
 data = json.loads(sys.argv[1])
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected recommended action to restore clean verify, got {data!r}")
 PYJSON
