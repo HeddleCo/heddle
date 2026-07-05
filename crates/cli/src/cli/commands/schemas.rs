@@ -2877,30 +2877,6 @@ pub struct RevertSchema {
 
 // ---- git overlay diagnostics ---------------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayImportHintSchema {
-    pub current_branch: String,
-    pub missing_branch_count: usize,
-    pub missing_branches: Vec<String>,
-    pub recommended_command: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthSchema {
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recovery_commands: Vec<String>,
-    pub checks: Vec<GitOverlayHealthCheckSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthCheckSchema {
-    pub name: String,
-    pub status: String,
-    pub summary: String,
-}
-
 // ---- diagnose -------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2910,8 +2886,6 @@ pub struct DiagnoseSchema {
     pub repository_capability: String,
     pub storage_model: String,
     pub hosted_enabled: bool,
-    pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
-    pub git_overlay_health: GitOverlayHealthSchema,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
     pub operation: OpaqueObject,

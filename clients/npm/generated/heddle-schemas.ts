@@ -823,8 +823,6 @@ export interface DaemonStopSchema {
 
 export interface DiagnoseSchema {
   changes: unknown;
-  git_overlay_health: GitOverlayHealthSchema;
-  git_overlay_import_hint?: GitOverlayImportHintSchema | null;
   health: unknown;
   hosted_enabled: boolean;
   operation?: unknown;
@@ -1172,27 +1170,6 @@ export interface GitOverlayGuideSchema {
   steps: string[];
   summary: string;
   topic: string;
-}
-
-export interface GitOverlayHealthCheckSchema {
-  name: string;
-  status: string;
-  summary: string;
-}
-
-export interface GitOverlayHealthSchema {
-  checks: GitOverlayHealthCheckSchema[];
-  clean: boolean;
-  recovery_commands: string[];
-  status: string;
-  summary: string;
-}
-
-export interface GitOverlayImportHintSchema {
-  current_branch: string;
-  missing_branch_count: number;
-  missing_branches: string[];
-  recommended_command: string;
 }
 
 export interface GitRemoteConfiguredSchema {

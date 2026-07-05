@@ -2141,8 +2141,8 @@ first-run flows should use the `heddle adopt --ref <branch>` recommendation
 from `status`, `init`, and `verification`.
 
 `verification` is the public proof block. Legacy `git_overlay_import_hint`
-and `git_overlay_health` sidecars are not emitted by `status`; use `doctor`
-for explicit diagnostic detail.
+and `git_overlay_health` sidecars are internal render data, not public JSON
+contract fields.
 
 ### Sample
 
@@ -2954,10 +2954,9 @@ List every runtime schema verb and the subset enforced by
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
-verification report and the primary recovery command. This diagnostic
-surface keeps `git_overlay_import_hint` in its JSON contract because doctor is
-the catch-all health surface and its job
-is to surface every relevant signal for the operator.
+verification report and the primary recovery command. Public proof lives in
+`verification`; legacy Git-overlay health/import sidecars are internal render
+data, not JSON contract fields.
 
 ```json
 {
@@ -2966,8 +2965,6 @@ is to surface every relevant signal for the operator.
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "hosted_enabled": false,
-  "git_overlay_import_hint": null,
-  "git_overlay_health": {"status": "clean", "clean": true, "summary": "Git overlay and Heddle agree", "recovery_commands": [], "checks": []},
   "verification": {"verified": true, "status": "clean", "checks": [], "recommended_action": "", "recovery_commands": []},
   "operation": null,
   "remote_tracking": null,

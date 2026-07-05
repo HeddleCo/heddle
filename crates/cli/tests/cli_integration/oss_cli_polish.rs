@@ -500,11 +500,10 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
     let doctor = json_value(&checkout, &["doctor", "--output", "json"]);
     assert_eq!(doctor["verification"]["verified"], true);
     assert_eq!(doctor["verification"]["status"], "clean");
+    assert_eq!(doctor["verification"]["repository_mode"], "heddle-native");
     assert!(
-        doctor["git_overlay_health"]["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("Heddle-native repository")),
-        "native doctor JSON should summarize non-overlay mode positively: {doctor}"
+        doctor.get("git_overlay_health").is_none(),
+        "native doctor JSON should use verification rather than legacy Git-overlay health: {doctor}"
     );
 }
 

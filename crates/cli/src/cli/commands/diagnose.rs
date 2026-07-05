@@ -37,7 +37,9 @@ pub(crate) struct DiagnoseOutput {
     repository_capability: String,
     storage_model: String,
     hosted_enabled: bool,
+    #[serde(skip)]
     git_overlay_import_hint: Option<DiagnoseGitOverlayImportHintOutput>,
+    #[serde(skip)]
     git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,

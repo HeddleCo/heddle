@@ -1045,7 +1045,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     );
     let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["recommended_action"], "heddle init");
-    assert_eq!(diagnose["git_overlay_import_hint"], Value::Null);
+    assert!(diagnose.get("git_overlay_import_hint").is_none());
 
     let failed_adopt = heddle_output(
         &["--output", "json", "adopt", "--ref", "trunk"],

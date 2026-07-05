@@ -1703,7 +1703,7 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["verification"]["status"], "needs_init");
-    assert!(parsed["git_overlay_import_hint"].is_null());
+    assert!(parsed.get("git_overlay_import_hint").is_none());
     assert!(
         !temp.path().join(".heddle").exists(),
         "diagnose should not bootstrap plain Git before explicit init"
