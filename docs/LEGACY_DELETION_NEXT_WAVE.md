@@ -6,8 +6,10 @@ but durable signed data still needs a deletion path that preserves verification.
 
 Active cleanup plan: `docs/VERIFICATION_CLEANUP_PLAN.md` tracks the staged
 removal of duplicate CLI/core verification ownership and stale bridge-mirror
-language. The null-only plain-Git import hint sidecar has been deleted; public
-`git_overlay_import_hint` JSON cleanup remains tracked in the verification plan.
+language. The null-only plain-Git import hint sidecar has been deleted, and
+public `status` / `doctor` JSON no longer emits legacy
+`git_overlay_import_hint` / `git_overlay_health` sidecars. Remaining work is
+core/CLI verification ownership and internal naming cleanup.
 
 ## Deleted In The Current Wave
 

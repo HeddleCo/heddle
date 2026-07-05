@@ -32,7 +32,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 ### Plain Git
 
-- `PlainGitImportHint` is deleted as a null-only sidecar; the broader initialized-repo `git_overlay_import_hint` contract remains until the public JSON migration slice.
+- `PlainGitImportHint` is deleted as a null-only sidecar; public `status` and `doctor` JSON no longer emits legacy `git_overlay_import_hint` sidecars. Internal callers may still compute import-hint data for text/advice until the core verification migration absorbs it.
 - Useful observe-only plain-Git context belongs in a shared core `PlainGitProbe`: root, active branch, dirty/index summary, commit/ref shape, and recommended setup action.
 - Existing committed plain-Git repositories recommend `heddle adopt --ref <branch>` or `heddle adopt`; unborn Git recommends `heddle init`.
 
@@ -40,7 +40,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - Heddle is alpha, so cleanup may break JSON field names when it produces the better model.
 - Public JSON should use `verification` as the canonical Repository Verification State field.
-- `git_overlay_health` should be removed from public JSON during migration rather than preserved as a compatibility alias.
+- `git_overlay_health` has been removed from public `status` and `doctor` JSON; remaining internal uses should migrate behind Repository Verification State rather than re-exporting compatibility aliases.
 - Avoid `trust` in public JSON because it is overloaded.
 - Code, schemas, docs, and tests should move together by command-family slice.
 - Action selection takes an explicit audience input, such as `ActionAudience::Human`, `Agent`, or `Script`; do not infer action semantics from TTY/JSON mode alone.
@@ -110,7 +110,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 ### Track A: Verification Cleanup
 
 1. Establish the core verification shape: `MachineContractInput`, `ActionAudience`, structured actions, richer `PlainGitProbe`, `verification` naming, and command-catalog proof injection.
-2. Migrate `status` and `verify` as the primary proof surfaces. Their public JSON moves to `verification`; `git_overlay_health` disappears from those outputs; schemas/docs/tests update in the same slice.
+2. Shipped for `status`, `verify`, and `doctor`: public JSON uses `verification`; legacy `git_overlay_health` / `git_overlay_import_hint` sidecars are internal render/advice data rather than JSON contract fields.
 3. Migrate remaining CLI callers from CLI-owned proof builders to the core proof interface: `diagnose`, `ready`, `thread`, remote commands, merge/rebase/operator preflights, and post-operation envelopes.
 4. Split and rename modules by cohesive responsibility after ownership is stable.
 5. Delete old CLI proof builders by migrated slice. Temporary equivalence tests may exist during migration, then should be removed or inverted into reachability tests proving no CLI-owned proof builder remains reachable.
