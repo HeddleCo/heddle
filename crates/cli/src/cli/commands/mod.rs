@@ -113,8 +113,10 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+pub use bridge::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
-pub use bridge::{cmd_bridge_git, cmd_export_git, cmd_import_git, cmd_sync_git};
+pub use bridge::{cmd_export_git, cmd_import_git, cmd_sync_git};
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;

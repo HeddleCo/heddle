@@ -78,11 +78,9 @@ use objects::{
     worktree::WorktreeStatus,
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
-pub use refs::RefSummaryIndexInspection;
-pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
+pub use refs::{RefSummaryIndexInspection, SpoolFacet};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
-use crate::{GitRefContentNamespace, GitRefName};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.
@@ -112,6 +110,8 @@ use sley::{
     Repository as SleyRepository, ShortStatusOptions as SleyShortStatusOptions,
     StatusUntrackedMode as SleyStatusUntrackedMode, StreamControl as SleyStreamControl,
 };
+
+use crate::{GitRefContentNamespace, GitRefName};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
@@ -471,7 +471,7 @@ impl Repository {
             Err(err) => {
                 // Hydrator construction failed (factory error or
                 // malformed metadata). Surface as a warning rather
-                // than blocking `open` — eager `heddle status` calls
+                // than blocking `open` — eager `heddle verify` calls
                 // shouldn't fail just because a stale hosted
                 // endpoint is unreachable; the user will get the real
                 // error on the first `require_blob` that needs it.
@@ -576,7 +576,7 @@ impl Repository {
     ///
     /// Unlike [`Repository::init_default`], this keeps the repo unseeded and
     /// mirrors the current Git branch attachment into Heddle's HEAD so
-    /// commands like `heddle status` can immediately reflect the user's
+    /// commands like `heddle verify` can immediately reflect the user's
     /// current branch and dirty worktree.
     pub fn bootstrap_git_overlay(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref();
@@ -1702,7 +1702,7 @@ impl Repository {
         }
 
         let git_dir = resolve_git_dir(&self.root)?;
-        let raw_git_next_action = "heddle bridge git status";
+        let raw_git_next_action = "heddle verify";
         let candidates = [
             (
                 git_dir.join("rebase-merge"),
@@ -2384,7 +2384,7 @@ impl Repository {
     ///
     /// Use this whenever a hash recorded in a `State.tree` field or as
     /// a subtree `TreeEntry` MUST resolve to an object: presentation
-    /// paths (`heddle status`, `heddle ready`, `heddle stash show`),
+    /// paths (`heddle verify`, `heddle ready`, `heddle stash show`),
     /// mutation paths (`heddle revert`, `heddle cherry-pick`,
     /// `heddle goto`, `heddle resolve`), and inspection paths
     /// (semantic diff, harness baseline) all qualify.
@@ -2877,7 +2877,12 @@ mod tests {
             .args(args)
             .status()
             .expect("spawn git");
-        assert!(status.success(), "git {:?} failed in {}", args, root.display());
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            root.display()
+        );
     }
 
     fn git_output(root: &Path, args: &[&str]) -> String {
@@ -2980,10 +2985,6 @@ mod tests {
         assert_eq!(status.ahead, 0);
         assert_eq!(status.behind, 0);
         assert!(status.upstream.is_empty());
-        assert!(
-            status
-                .message
-                .contains("has no upstream tracking branch")
-        );
+        assert!(status.message.contains("has no upstream tracking branch"));
     }
 }

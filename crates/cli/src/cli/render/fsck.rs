@@ -48,7 +48,11 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
         }
     }
     if let Some(target) = &report.repair_target {
-        let status = if report.repaired { "repaired" } else { "no changes" };
+        let status = if report.repaired {
+            "repaired"
+        } else {
+            "no changes"
+        };
         text.push_str(&format!(
             "  {}\n",
             style::field("Repair", &format!("{target}: {status}"))

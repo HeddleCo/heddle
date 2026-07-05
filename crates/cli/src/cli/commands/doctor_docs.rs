@@ -572,8 +572,8 @@ fn check_invocation(
     // Greedily descend through nested subcommands while the next token
     // looks like an identifier (not a flag, placeholder, or path). We
     // stop at the first non-identifier or when the current command has
-    // no more subcommands. This handles cases like `heddle bridge git
-    // import --ref <…>` where the leaf is two levels below the
+    // no more subcommands. This handles cases like `heddle context reason
+    // git --path <…>` where the leaf is two levels below the
     // top-level verb.
     let mut resolved_cmd = verb_cmd;
     let mut tokens_used = 1;

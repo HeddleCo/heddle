@@ -123,7 +123,7 @@ fn setup_linear_imported_git_ref(path: &std::path::Path) {
 }
 
 fn raw_git_preservation_action() -> &'static str {
-    "heddle bridge git status"
+    "heddle verify"
 }
 
 fn verify_state_for_assertions(value: Value) -> Value {
@@ -457,7 +457,7 @@ fn git_overlay_imported_ref_ready_and_ship_fail_closed() {
             "{envelope}"
         );
         assert_eq!(
-            envelope["primary_command"], "heddle bridge git reconcile --ref feature --preview",
+            envelope["primary_command"], "heddle fsck --repair git --ref feature --preview",
             "{envelope}"
         );
     }
@@ -1032,23 +1032,16 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
             && !verify_text.contains("connect this branch with heddle adopt"),
         "unborn verify text should describe initialization, not adoption: {verify_text}"
     );
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["recommended_action"], "heddle init");
     assert_eq!(bridge["verification"]["recommended_action"], "heddle init");
     assert_eq!(bridge["verification"]["import_state"], "git_backed");
     assert_eq!(bridge["verification"]["mapping_state"], "git_backed");
     assert!(bridge["git_overlay_import_hint"].is_null());
-    let bridge_text = heddle(
-        &["bridge", "git", "status", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        bridge_text.contains("run `heddle init`") && !bridge_text.contains("run `heddle adopt`"),
-        "unborn bridge status text should not recommend invalid adoption: {bridge_text}"
+        bridge_text.contains("heddle init") && !bridge_text.contains("heddle adopt"),
+        "unborn status text should not recommend invalid adoption: {bridge_text}"
     );
     let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["recommended_action"], "heddle init");
@@ -1159,11 +1152,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         "plain Git status should name initialization, not adoption: {status_text}"
     );
 
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
-    assert_eq!(bridge["git_overlay_health"]["status"], "needs_init");
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "needs_init");
     assert_eq!(bridge["verification"]["import_state"], "git_backed");
     assert_eq!(bridge["verification"]["mapping_state"], "git_backed");
@@ -1171,7 +1160,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_verify_check_rows(&bridge["verification"]);
     assert!(
         !temp.path().join(".heddle").exists(),
-        "bridge git status in a plain Git repo must be observe-only"
+        "status in a plain Git repo must be observe-only"
     );
 
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -1242,18 +1231,11 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
                 .is_some_and(|command| !command.contains("heddle adopt"))),
         "clean direct-backed diagnostics should not require adoption: {diagnose}"
     );
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["recommended_action"], Value::Null);
     assert!(bridge["recovery_commands"].as_array().unwrap().is_empty());
-    let bridge_text = heddle(
-        &["bridge", "git", "status", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
         !bridge_text.contains("heddle bridge git init"),
         "initialized-but-unimported bridge status should not recommend stale bridge init ceremony: {bridge_text}"
@@ -1304,11 +1286,8 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(thread_list["verification"]["status"], "clean");
     assert_eq!(thread_list["recommended_action"], Value::Null);
     assert_verify_check_rows(&thread_list["verification"]);
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
-    assert_eq!(bridge["output_kind"], "bridge_git_status");
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(bridge["output_kind"], "status");
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["recommended_action"], Value::Null);
@@ -1355,10 +1334,7 @@ fn git_overlay_matrix_adopt_initializes_imports_and_verifies() {
     assert_eq!(verify["verified"], true);
     assert_eq!(verify["status"], "clean");
     assert_verify_check_rows(&verify);
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
 }
@@ -1478,10 +1454,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
         "status text should agree with the checked-out Git branch without repeating setup copy: {status_text}"
     );
 
-    let bridge = json(
-        fixture.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(fixture.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
@@ -2171,10 +2144,7 @@ fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
         ("status", &["status", "--output", "json"]),
         ("doctor", &["doctor", "--output", "json"]),
         ("doctor", &["doctor", "--output", "json"]),
-        (
-            "bridge git status",
-            &["bridge", "git", "status", "--output", "json"],
-        ),
+        ("status", &["status", "--output", "json"]),
         ("verify", &["verify", "--output", "json"]),
         ("thread list", &["thread", "list", "--output", "json"]),
         (
@@ -2367,16 +2337,15 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
     let reconcile = json(
         temp.path(),
         &[
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            "git",
-            "--ref",
-            "main",
+            "fsck", "--repair", "git", "--prefer", "git", "--ref", "main",
         ],
     );
-    assert_eq!(reconcile["status"], "completed");
+    assert_eq!(reconcile["repair_target"], "git");
+    assert_eq!(reconcile["valid"], true);
+    assert_eq!(
+        reconcile["repairs"][0]["name"],
+        "git_projection_ref_prefer_git"
+    );
 
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["status"], "clean");
@@ -2393,15 +2362,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
 
     let output = heddle_output(
         &[
-            "--output",
-            "json",
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            "heddle",
-            "--ref",
-            "main",
+            "--output", "json", "fsck", "--repair", "git", "--prefer", "heddle", "--ref", "main",
         ],
         Some(temp.path()),
     )
@@ -2418,7 +2379,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).expect("missing Heddle thread should emit JSON envelope");
-    assert_eq!(envelope["kind"], "reconcile_missing_heddle_thread");
+    assert_eq!(envelope["kind"], "git_repair_missing_heddle_thread");
     assert!(
         envelope["error"]
             .as_str()
@@ -2429,7 +2390,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle adopt --ref main")
-                && hint.contains("heddle bridge git reconcile --prefer git --ref main")),
+                && hint.contains("heddle fsck --repair git --prefer git --ref main")),
         "reconcile hint should offer import and prefer-git recovery: {stderr}"
     );
 }
@@ -2570,7 +2531,7 @@ fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle bridge git status")
+            .is_some_and(|hint| hint.contains("heddle verify")
                 && hint.contains("finish or abort it with the Git-compatible tool")),
         "verify-blocked no-op commit should name the verify recovery command: {stderr}"
     );
@@ -3379,7 +3340,7 @@ fn git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle() 
     );
     assert_eq!(
         preview_envelope["primary_command"],
-        "heddle bridge git reconcile --prefer heddle --ref main --preview"
+        "heddle fsck --repair git --prefer heddle --ref main --preview"
     );
     assert_eq!(
         git_ref_snapshot(temp.path()),
@@ -3737,11 +3698,11 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         &["--output", "json", "import", "git", "--ref", "origin/main"],
     );
 
-    let merge_action = "heddle bridge git reconcile --ref origin/main --preview";
+    let merge_action = "heddle fsck --repair git --ref origin/main --preview";
     let merge_argv = Some(heddle_argv_json([
-        "bridge",
+        "fsck",
+        "--repair",
         "git",
-        "reconcile",
         "--ref",
         "origin/main",
         "--preview",
@@ -3750,13 +3711,7 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         ("status", json(temp.path(), &["--output", "json", "status"])),
         ("verify", json(temp.path(), &["--output", "json", "verify"])),
         ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        (
-            "bridge git status",
-            json(
-                temp.path(),
-                &["--output", "json", "bridge", "git", "status"],
-            ),
-        ),
+        ("status", json(temp.path(), &["--output", "json", "status"])),
     ] {
         assert_remote_divergence_surface(
             label,
@@ -3794,13 +3749,7 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         ("status", json(temp.path(), &["--output", "json", "status"])),
         ("verify", json(temp.path(), &["--output", "json", "verify"])),
         ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        (
-            "bridge git status",
-            json(
-                temp.path(),
-                &["--output", "json", "bridge", "git", "status"],
-            ),
-        ),
+        ("status", json(temp.path(), &["--output", "json", "status"])),
     ] {
         assert_remote_divergence_surface(
             label,
@@ -3827,13 +3776,7 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         ("status", json(temp.path(), &["--output", "json", "status"])),
         ("verify", json(temp.path(), &["--output", "json", "verify"])),
         ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
-        (
-            "bridge git status",
-            json(
-                temp.path(),
-                &["--output", "json", "bridge", "git", "status"],
-            ),
-        ),
+        ("status", json(temp.path(), &["--output", "json", "status"])),
     ] {
         assert_remote_divergence_surface(
             label,
@@ -4380,23 +4323,16 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "verify text should treat direct Git-backed commits as clean: {verify_text}"
     );
 
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["git_overlay_health"]["status"], "clean");
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["recommended_action"], Value::Null);
-    let bridge_text = heddle(
-        &["bridge", "git", "status", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        bridge_text.contains("Git overlay and Heddle agree")
+        (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
             && !bridge_text.contains("Recovery: heddle adopt --ref feature/drop-in")
             && !bridge_text.contains("Setup needed"),
-        "bridge git status text should treat direct Git-backed commits as clean: {bridge_text}"
+        "status text should treat direct Git-backed commits as clean: {bridge_text}"
     );
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
@@ -4546,11 +4482,11 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(status["changes"]["deleted"].as_array().unwrap().is_empty());
     assert_eq!(
         status["recommended_action"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["bridge", "git", "reconcile", "--ref", "main", "--preview"])
+        heddle_argv_json(["fsck", "--repair", "git", "--ref", "main", "--preview"])
     );
     assert!(
         status["blockers"]
@@ -4581,17 +4517,14 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert_eq!(verify["status"], "needs_reconcile");
     assert_eq!(
         verify["recommended_action"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
 
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "needs_reconcile");
     assert_eq!(
         bridge["recommended_action"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
 
     let refused = heddle_output(
@@ -4621,7 +4554,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
@@ -4642,14 +4575,11 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    // Import-hint information has moved to `heddle bridge git status
+    // Import-hint information has moved to `heddle status
     // --output json`; per-command outputs (status, log, show, workspace,
     // thread list) no longer carry it.
     git(&["branch", "support/original"], temp.path());
-    let bridge_before = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge_before = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge_before["git_overlay_import_hint"], Value::Null);
     assert_eq!(bridge_before["verification"]["status"], "needs_init");
 
@@ -4657,24 +4587,15 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         &["branch", "-m", "support/original", "support/renamed"],
         temp.path(),
     );
-    let bridge_after_rename = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge_after_rename = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge_after_rename["git_overlay_import_hint"], Value::Null);
 
     git(&["branch", "-D", "support/renamed"], temp.path());
-    let bridge_after_delete = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge_after_delete = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge_after_delete["git_overlay_import_hint"], Value::Null);
 
     git(&["branch", "support/recreated"], temp.path());
-    let bridge_after_recreate = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge_after_recreate = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
         bridge_after_recreate["git_overlay_import_hint"],
         Value::Null
@@ -4800,12 +4721,9 @@ fn git_overlay_matrix_auto_adopts_local_branch_tips_without_full_import() {
             .any(|git_ref| git_ref["name"] == "support/alpha")
     );
 
-    // Import-hint information has moved to `heddle bridge git status
+    // Import-hint information has moved to `heddle status
     // --output json`; per-command outputs no longer carry it.
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
 }
 
@@ -5097,10 +5015,7 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     git(&["branch", "support/alpha"], temp.path());
     git(&["branch", "support/beta"], temp.path());
 
-    let before = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let before = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(before["git_overlay_import_hint"], Value::Null);
     assert_eq!(before["verification"]["status"], "needs_init");
 
@@ -5133,10 +5048,7 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     git(&["branch", "-D", "support/beta"], temp.path());
     git(&["branch", "support/gamma"], temp.path());
 
-    let status = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
         status["git_overlay_import_hint"],
         Value::Null,
@@ -5408,10 +5320,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
 
     let root_status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(root_status["thread"], "feature/drop-in");
-    let root_bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let root_bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
         root_bridge["git_overlay_import_hint"],
         Value::Null,
@@ -5431,7 +5340,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     std::fs::create_dir_all(&nested).unwrap();
     let nested_workspace = json(&nested, &["status", "--output", "json"]);
     assert_eq!(nested_workspace["thread"], "feature/drop-in");
-    let nested_bridge = json(&nested, &["bridge", "git", "status", "--output", "json"]);
+    let nested_bridge = json(&nested, &["status", "--output", "json"]);
     assert_eq!(
         nested_bridge["git_overlay_import_hint"],
         Value::Null,
@@ -5461,10 +5370,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
             .unwrap()
             .is_empty()
     );
-    let root_bridge_after = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let root_bridge_after = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
         root_bridge_after["git_overlay_import_hint"],
         Value::Null,
@@ -7310,13 +7216,10 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         "status JSON should leave optional Git-only refs on thread list: {workspace}"
     );
 
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["verified"], true);
     assert_eq!(bridge["verification"]["status"], "clean");
-    assert_eq!(bridge["output_kind"], "bridge_git_status");
+    assert_eq!(bridge["output_kind"], "status");
     assert_eq!(bridge["recommended_action"], Value::Null);
     assert_eq!(
         bridge["git_overlay_import_hint"],
@@ -7346,13 +7249,9 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
             && !status_text.contains("Next step: heddle adopt --ref side"),
         "current-branch status should stay focused on the verified checkout: {status_text}"
     );
-    let bridge_text = heddle(
-        &["bridge", "git", "status", "--output", "text"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        bridge_text.contains("Git import: in sync")
+        (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
             && !bridge_text.contains("heddle adopt --ref side")
             && !bridge_text.contains("Next step: heddle adopt --ref side"),
         "bridge status should report imported history as in sync and leave optional branch adoption to thread/workspace views: {bridge_text}"
@@ -7414,16 +7313,10 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     git_commit_all(temp.path(), "alpha two");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let status = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["git_overlay_import_hint"], Value::Null);
 
-    let bridge = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["git_overlay_import_hint"], Value::Null);
 }
 
@@ -7447,16 +7340,10 @@ fn git_overlay_matrix_imported_branch_delete_and_recreate_same_name_reappears_in
     git_commit_all(temp.path(), "second reborn");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let status = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["git_overlay_import_hint"], Value::Null);
 
-    let bridge_again = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let bridge_again = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge_again["git_overlay_import_hint"], Value::Null);
 }
 
@@ -7635,12 +7522,12 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     let envelope: Value =
         serde_json::from_str(stderr).expect("raw Git capture refusal should be JSON");
     assert_eq!(envelope["kind"], "raw_git_operation_in_progress");
-    assert_eq!(envelope["primary_command"], "heddle bridge git status");
+    assert_eq!(envelope["primary_command"], raw_git_preservation_action());
     assert!(
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("Git-compatible tool that started it")
-                && hint.contains("heddle verify")
+                && hint.contains(raw_git_preservation_action())
                 && !hint.contains("heddle adopt --ref <branch>")),
         "raw Git capture refusal should explain the external sequencer recovery: {stderr}"
     );
@@ -8033,10 +7920,7 @@ fn git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint() {
     );
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let status = json(
-        temp.path(),
-        &["bridge", "git", "status", "--output", "json"],
-    );
+    let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["git_overlay_import_hint"], Value::Null);
 }
 
@@ -8068,7 +7952,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     assert_eq!(status["operation"]["kind"], "rebase");
     assert_eq!(
         status["operation"]["next_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["operation"]["kind"], "rebase");
@@ -8109,7 +7993,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     assert_eq!(revert_status["operation"]["kind"], "revert");
     assert_eq!(
         revert_status["operation"]["next_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     git(&["revert", "--abort"], revert_repo.path());
 
@@ -8487,7 +8371,7 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     assert_eq!(continued_git_merge["status"], "blocked");
     assert_eq!(
         continued_git_merge["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(
         continued_git_merge["message"]
@@ -8530,7 +8414,7 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     assert_eq!(continued_git_cherry["status"], "blocked");
     assert_eq!(
         continued_git_cherry["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_cherry.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8553,7 +8437,7 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     assert_eq!(continued_git_revert["status"], "blocked");
     assert_eq!(
         continued_git_revert["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_revert.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8584,7 +8468,7 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     assert_eq!(blocked_git_bisect["status"], "blocked");
     assert_eq!(
         blocked_git_bisect["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
 }
 
@@ -8629,7 +8513,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     assert_eq!(aborted_git_rebase["status"], "blocked");
     assert_eq!(
         aborted_git_rebase["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_rebase.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8655,7 +8539,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     assert_eq!(aborted_git_merge["status"], "blocked");
     assert_eq!(
         aborted_git_merge["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_merge.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8689,7 +8573,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     assert_eq!(aborted_git_cherry["status"], "blocked");
     assert_eq!(
         aborted_git_cherry["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_cherry.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8710,7 +8594,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     assert_eq!(aborted_git_revert["status"], "blocked");
     assert_eq!(
         aborted_git_revert["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_revert.path(), &["status", "--output", "json"])["operation"].is_null());
 
@@ -8730,7 +8614,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     assert_eq!(aborted_git_bisect["status"], "blocked");
     assert_eq!(
         aborted_git_bisect["recommended_action"],
-        "heddle bridge git status"
+        raw_git_preservation_action()
     );
     assert!(!json(git_bisect.path(), &["status", "--output", "json"])["operation"].is_null());
 }

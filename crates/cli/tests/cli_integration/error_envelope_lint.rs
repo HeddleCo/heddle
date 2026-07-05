@@ -18,8 +18,9 @@
 //! (cli_integration/output_kind_invariant.rs): like that test it drives a
 //! curated set of representative invocations rather than every verb, since
 //! most error conditions need a hand-built fixture. The swept set is the
-//! `init`/`status`/`verify`/`commit`/`merge`/`push`/`pull` + `bridge git`
-//! subset whose codes `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
+//! `init`/`status`/`verify`/`commit`/`merge`/`push`/`pull` plus the current
+//! Git projection import/sync/repair surfaces whose codes
+//! `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
 //! guards that each is exercised here.
 
 use std::path::Path;
@@ -42,7 +43,7 @@ const SWEPT_COVERAGE: &[&str] = &[
     "pull",
     "import git",
     "sync git",
-    "bridge git reconcile",
+    "fsck --repair git",
 ];
 
 /// One representative error case: the swept command it covers, the argv
@@ -159,8 +160,7 @@ fn cases() -> Vec<ErrorCase> {
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            // `sync` has its own handler (bridge.rs `GitCommands::Sync`)
-            // that builds the error envelope independently of reconcile —
+            // `sync git` has its own Git projection error-envelope path —
             // exercise it directly so a regression that drops Sync's `Next:`
             // fields fails the lint. A `--path` at a nonexistent source
             // reaches the handler (export runs, then the import half fails).
@@ -170,9 +170,9 @@ fn cases() -> Vec<ErrorCase> {
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            covers: &["bridge git reconcile"],
-            label: "bridge git reconcile without a --prefer side",
-            argv: &["bridge", "git", "reconcile", "--ref", "main"],
+            covers: &["fsck --repair git"],
+            label: "fsck --repair git without a --prefer side",
+            argv: &["fsck", "--repair", "git", "--ref", "main"],
             fixture: adopted_git_overlay,
         },
     ]

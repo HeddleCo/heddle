@@ -150,5 +150,3 @@ pub(super) fn lookup_tree_entry(repo: &Repository, tree: &Tree, path: &Path) -> 
         .flatten()
         .map(|target| target.entry)
 }
-
-

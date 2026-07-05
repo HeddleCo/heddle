@@ -62,8 +62,7 @@ const SWEPT: &[&str] = &[
     "import git",
     "export git",
     "sync git",
-    "bridge git status",
-    "bridge git reconcile",
+    "status",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
     "actor spawn",
     "actor list",
@@ -195,7 +194,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "agent list",
     "agent release",
     "agent reserve",
-    "bridge git reason",
+    "context reason git",
     "collapse",
     "daemon serve",
     "daemon status",

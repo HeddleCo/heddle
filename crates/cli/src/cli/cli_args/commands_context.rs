@@ -33,6 +33,12 @@ pub enum ContextCommands {
 
     /// Audit stale, superseded, and duplicate context.
     Audit(ContextAuditArgs),
+
+    /// Mine external sources for context annotations.
+    Reason {
+        #[command(subcommand)]
+        command: ContextReasonCommands,
+    },
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -44,6 +50,48 @@ pub struct ContextTargetArgs {
     /// State/change ID for broader guidance.
     #[arg(long, conflicts_with = "path")]
     pub state: Option<String>,
+}
+
+#[derive(Clone, Debug, clap::Subcommand)]
+pub enum ContextReasonCommands {
+    /// Mine Git-agent transcripts and attach reasoning as context annotations.
+    Git(ContextReasonGitArgs),
+}
+
+#[cfg(feature = "ingest")]
+#[derive(Clone, Debug, clap::Args)]
+pub struct ContextReasonGitArgs {
+    /// Source git repository the transcripts are about.
+    #[arg(long)]
+    pub path: std::path::PathBuf,
+
+    /// Cap candidates per commit. Higher = more coverage at the cost of cross-attribution.
+    #[arg(long, default_value_t = 5)]
+    pub max_sessions_per_commit: usize,
+
+    /// Drop sessions below this confidence.
+    #[arg(long, default_value_t = 0.20)]
+    pub min_match_confidence: f32,
+
+    /// Limit how many commits the reason pass walks.
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Override the Claude transcript store. Empty string disables.
+    #[arg(long = "claude-home")]
+    pub claude_home: Option<String>,
+
+    /// Override the Codex transcript store. Empty string disables.
+    #[arg(long = "codex-home")]
+    pub codex_home: Option<String>,
+
+    /// Override the OpenCode data dir. Empty string disables.
+    #[arg(long = "opencode-home")]
+    pub opencode_home: Option<String>,
+
+    /// Do not write annotations; only report what would happen.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `heddle context set`.

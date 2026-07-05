@@ -212,7 +212,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     for args in [
         &["doctor", "--output", "json"][..],
         &["doctor", "--output", "json"],
-        &["bridge", "git", "status", "--output", "json"],
+        &["status", "--output", "json"],
         &["thread", "list", "--output", "json"],
         &["status", "--output", "json"],
     ] {
@@ -390,7 +390,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
     let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
     assert_eq!(status["operation"]["scope"], "git");
     assert_eq!(status["operation"]["kind"], "merge");
-    assert_eq!(status["recommended_action"], "heddle bridge git status");
+    assert_eq!(status["recommended_action"], "heddle status");
 
     let continued_output =
         heddle_output_without_git(&["--output", "json", "continue"], temp.path());
@@ -415,7 +415,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
             .is_some_and(|message| message.contains("no-git runtime")),
         "continue handoff should explain the no-git contract: {continued}"
     );
-    assert_eq!(continued["recommended_action"], "heddle bridge git status");
+    assert_eq!(continued["recommended_action"], "heddle status");
 }
 
 #[test]
@@ -783,26 +783,28 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
             "--preview",
         ],
         &work,
     );
-    assert_eq!(reconcile["status"], "preview");
-    assert_eq!(reconcile["preview"], true);
-    assert!(
-        reconcile["verification"].is_object(),
-        "bridge reconcile should embed verification proof: {reconcile}"
+    assert_eq!(reconcile["valid"], true);
+    assert_eq!(reconcile["repair_target"], "git");
+    assert_eq!(reconcile["repaired"], false);
+    assert_eq!(
+        reconcile["repairs"].as_array().map(Vec::len),
+        Some(2),
+        "fsck git repair preview should report both local repair choices: {reconcile}"
     );
 
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(
         verify["verified"], true,
-        "explicit bridge operations should leave verification clean without git on PATH: {verify}"
+        "explicit explicit Git adapter operations should leave verification clean without git on PATH: {verify}"
     );
 }
 

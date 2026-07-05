@@ -82,18 +82,11 @@ pub(crate) fn primary_recovery_command(health: &GitOverlayHealth) -> Option<&str
     health.recovery_commands.first().map(String::as_str)
 }
 
-pub(crate) fn repository_verification_state_from_health(
-    repo: &Repository,
-    health: GitOverlayHealth,
-) -> RepositoryVerificationState {
-    repository_verification_state_from_health_inner(repo, health, None)
-}
-
 /// Verification-state build that reuses an already-computed git-overlay
 /// worktree status instead of re-walking + re-SHA-1ing every tracked file.
 /// `worktree_status` must be the exact `Result` from
 /// `git_overlay_worktree_status()` so the dirty/clean classification stays
-/// byte-identical to [`repository_verification_state_from_health`]. Callers
+/// byte-identical to the normal repository verification build. Callers
 /// that already hold the status thread it through here to avoid a second full
 /// walk.
 pub(crate) fn repository_verification_state_from_health_with_worktree_status(
@@ -1134,7 +1127,7 @@ pub(crate) fn raw_git_operation_mutation_advice(
     if !matches!(operation.scope, OperationScope::Git) {
         return Ok(None);
     }
-    let primary_command = "heddle bridge git status".to_string();
+    let primary_command = "heddle verify".to_string();
     let hint = raw_git_operation_recovery_hint(&operation.kind, &primary_command, action);
     Ok(Some(RecoveryAdvice::safety_refusal(
         "raw_git_operation_in_progress",

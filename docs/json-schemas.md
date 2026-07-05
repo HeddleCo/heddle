@@ -15,7 +15,7 @@ Schema for any verb with:
     heddle schemas <verb>             # e.g. heddle schemas status
     heddle schemas log --reflog       # subcommands taking --flags work too
     heddle schemas merge --preview --output text
-    heddle schemas bridge git status
+    heddle schemas status
 
 (Indented as plain text rather than a fenced block so the
 `heddle doctor docs` flag-checker doesn't flag `--reflog` as
@@ -48,7 +48,7 @@ and assume the discipline holds.
    itself carries meaning (e.g. `git_commit_preview`, only present in
    `--preview` mode); those are documented as conditional.
 3. **No leakage of unrelated context.** Bridge import-hint information
-   lives only in `heddle bridge git status --output json` (and the
+   lives only in `heddle status --output json` (and the
    comprehensive `heddle doctor --output json`). Per-command outputs do not
    carry it. Transports do not silently piggy-back state.
 4. **Empty collections serialize as `[]` / `{}`, not omitted.** An
@@ -259,7 +259,7 @@ in-progress operation.
 | `changes` | object | required | Worktree status: `{modified: [], added: [], deleted: []}`. |
 
 **Note:** Bridge import-hint information is not part of this output.
-Use `heddle bridge git status --output json`.
+Use `heddle status --output json`.
 
 ---
 
@@ -2133,29 +2133,24 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 ---
 
-## `heddle bridge git status --output json`
+## `heddle status --output json`
 
-Canonical surface for the Git-overlay bridge state. This is the
-advanced Git-adapter surface, so its recovery actions intentionally
-name `heddle import git ...`. Native first-run flows should use
-the `heddle adopt --ref <branch>` recommendation from `status`,
-`init`, and `verification`. This is the only command whose JSON output
-carries `git_overlay_import_hint`.
+Canonical surface for Git-overlay state. Recovery actions intentionally
+name `heddle import git ...` for imported Heddle repositories; native
+first-run flows should use the `heddle adopt --ref <branch>` recommendation
+from `status`, `init`, and `verification`.
 
-The bridge mirror is an explicit import/export/sync artifact. It is not the
-active Git-overlay store: normal `status`, `commit`, `checkpoint`, branch
-movement, index, and worktree operations read and write the checkout's real
-`.git`.
+This is the machine-readable home for `git_overlay_import_hint` and
+`git_overlay_health`; normal Git-overlay operations read and write the
+checkout's real `.git`.
 
 ### Sample
 
 ```json
 {
-  "output_kind": "bridge_git_status",
+  "output_kind": "status",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "mirror_path": "/repo/.heddle/git",
-  "mirror_initialized": true,
   "git_overlay_import_hint": {
     "current_branch": "main",
     "missing_branch_count": 1,
@@ -2906,9 +2901,9 @@ Import emits:
 
 ---
 
-## `heddle bridge git --output json`
+## Git adapter import/export/sync JSON
 
-All bridge ops emit JSON via `serde_json::json!{}` with consistent
+Explicit Git adapter ops emit JSON via `serde_json::json!{}` with consistent
 key naming:
 
 | Verb | Shape |
@@ -2977,7 +2972,7 @@ List every runtime schema verb and the subset enforced by
 
 Doctor is the comprehensive health report; it includes the shared
 verification report and the primary recovery command. This is the one
-place outside `bridge git status` where `git_overlay_import_hint` is part
+place outside `status` where `git_overlay_import_hint` is part
 of the JSON contract — doctor is the catch-all health surface and its job
 is to surface every relevant signal for the operator.
 
@@ -3068,26 +3063,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 130,
+    "advanced_scope_json_commands_total": 128,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 79,
+    "advanced_scope_mutating_commands_total": 78,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 219,
-    "catalog_mutating_commands_total": 110,
-    "json_commands_total": 173,
+    "catalog_commands_total": 216,
+    "catalog_mutating_commands_total": 109,
+    "json_commands_total": 171,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 126,
+    "json_commands_with_schema": 124,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 105,
+    "json_mutating_commands_total": 104,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 105,
+    "mutating_commands_total": 104,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 78,
+    "mutating_commands_with_schema": 77,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "219 command(s), 173 JSON command(s), 110 mutating command(s), 105 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3125,7 +3120,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "219 command(s), 173 JSON command(s), 110 mutating command(s), 105 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3280,21 +3275,32 @@ shape when the target resolves as a state rather than a thread.
 
 ---
 
-## `heddle bridge git reconcile --output json`
+## `heddle fsck --repair git --output json`
 
 Preview or apply a ref reconciliation between Git and Heddle.
 
 ```json
 {
-  "output_kind": "bridge_git_reconcile",
-  "status": "preview",
-  "prefer": null,
-  "ref_name": "main",
-  "preview": true,
-  "summary": "Preview: local Git/Heddle repair choices for 'main'. This does not push, pull, rewrite remotes, move refs, update the index, or change worktree files",
-  "recovery_commands": [
-    "heddle bridge git reconcile --prefer heddle --ref main --preview",
-    "heddle bridge git reconcile --prefer git --ref main --preview"
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "objects_checked": 42,
+  "bridge_checked": true,
+  "repair_target": "git",
+  "repaired": false,
+  "repairs": [
+    {
+      "name": "git_projection_ref_reconcile_preview",
+      "repaired": false,
+      "detail": "heddle fsck --repair git --prefer heddle --ref main --preview",
+      "count": 0
+    },
+    {
+      "name": "git_projection_ref_reconcile_preview",
+      "repaired": false,
+      "detail": "heddle fsck --repair git --prefer git --ref main --preview",
+      "count": 0
+    }
   ]
 }
 ```
@@ -3380,7 +3386,7 @@ required:
 {"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
-`heddle bridge git reason --output json` emits:
+`heddle context reason git --output json` emits:
 
 ```json
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
@@ -3632,7 +3638,7 @@ Each of these:
 - Serializes `Option<...>` semantic fields as explicit `null`.
 - Serializes empty collections as `[]` / `{}`.
 - Does not carry `git_overlay_import_hint` or `missing_branches`
-  payloads; those live only in `heddle bridge git status` and
+  payloads; those live only in `heddle status` and
   `heddle doctor`.
 
 ---

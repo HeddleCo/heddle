@@ -353,11 +353,11 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle bridge git reconcile --ref feature/drop-in --preview"
+        "heddle fsck --repair git --ref feature/drop-in --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle bridge git reconcile --ref feature/drop-in --preview"])
+        serde_json::json!(["heddle fsck --repair git --ref feature/drop-in --preview"])
     );
 }
 
@@ -806,11 +806,7 @@ fn test_cli_status_surfaces_git_import_hint_for_many_branches() {
     }
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(
         parsed["verification"]["import_state"], "git_backed",
@@ -1259,11 +1255,7 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert!(
         bridge["git_overlay_import_hint"].is_null(),
@@ -1293,11 +1285,7 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
     );
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert!(
         bridge["git_overlay_import_hint"].is_null(),
@@ -1335,11 +1323,7 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert!(
         bridge["git_overlay_import_hint"].is_null(),
@@ -1409,14 +1393,9 @@ fn test_cli_import_git_clears_import_hint_for_existing_branches() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/import-me"], temp.path());
 
-    let before: Value = serde_json::from_str(
-        &heddle(
-            &["bridge", "git", "status", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let before: Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(
         before["git_overlay_import_hint"].is_null(),
         "direct Git-backed refs should not require import before bridge sync: {before}"
@@ -1431,14 +1410,9 @@ fn test_cli_import_git_clears_import_hint_for_existing_branches() {
         "bridge import should sync local branches: {import_output}"
     );
 
-    let after: Value = serde_json::from_str(
-        &heddle(
-            &["bridge", "git", "status", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let after: Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(
         after["git_overlay_import_hint"].is_null(),
         "importing Git branches should clear the import hint: {after}"

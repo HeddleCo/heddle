@@ -847,8 +847,8 @@ next command instead of falling back to raw Git.\n";
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
 Supported Git-overlay workflows use native/library paths and are tested with\n\
-`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `bridge git\n\
-import`, `bridge git status`, `sync git`, and `export git` where implemented,\n\
+`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `import git`,\n\
+`sync git`, and `export git` where implemented,\n\
 `thread list`, `workspace`, `log`, `show`, `diff`, `checkpoint`, `merge`,\n\
 `ready`, and `fsck`.\n\
 \n\

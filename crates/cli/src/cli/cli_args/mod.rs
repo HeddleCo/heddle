@@ -54,14 +54,12 @@ pub use commands_args::{
     WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_bridge::{
-    BridgeCommands, ExportCommands, GitCommands, GitSource, ImportCommands, SyncCommands,
-};
+pub use commands_bridge::{ExportCommands, GitSource, ImportCommands, SyncCommands};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
 };
-pub use commands_context::ContextCommands;
+pub use commands_context::{ContextCommands, ContextReasonCommands};
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
     DiscussShowArgs, ResolveModeArg,

@@ -691,7 +691,7 @@ fn raw_git_operation_handoff(
 }
 
 fn raw_git_preservation_command() -> String {
-    "heddle bridge git status".to_string()
+    "heddle verify".to_string()
 }
 
 fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) -> String {
@@ -852,10 +852,7 @@ mod tests {
         let output =
             raw_git_operation_handoff("continue", &operation, vec!["conflict.txt".to_string()]);
         assert_eq!(output.status, "blocked");
-        assert_eq!(
-            output.recommended_action.as_deref(),
-            Some("heddle bridge git status")
-        );
+        assert_eq!(output.recommended_action.as_deref(), Some("heddle verify"));
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
         assert!(

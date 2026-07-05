@@ -90,21 +90,21 @@ as the routine catch-up**, not just a one-time conversion — the name connotes
 This is the key finding. The command-contract catalog
 (`crates/cli/src/cli/commands/command_catalog.rs`) already encodes a
 de-emphasis tier for every bridge verb, and a redirect to the native canonical
-command for most of them. The remaining exception is `bridge git reason`,
+command for most of them. The remaining exception is `context reason git`,
 which is catalogued `surface(...)`-only and carries no
 `canonical_command` (the `—` rows below). Verified live via `heddle help
 --command "bridge git" --output json`:
 
 | bridge verb | tier | canonical → | kind |
 |---|---|---|---|
-| `bridge git status` | advanced | `status` | direct_command |
+| `status` | advanced | `status` | direct_command |
 | `export git` | advanced | `push` | direct_command |
 | `import git` | advanced | `adopt` | workflow |
 | `sync git` | advanced | `adopt` | workflow |
-| `bridge git reconcile` | advanced | `adopt` | workflow |
+| `fsck --repair git` | advanced | `adopt` | workflow |
 | `bridge git push` | advanced | `push` | direct_command |
 | `bridge git pull` | advanced | `pull` | direct_command |
-| `bridge git reason` | advanced | — | — |
+| `context reason git` | advanced | — | — |
 
 Source: the redirecting bridge verbs are built with `git_adapter_action` /
 `git_adapter_alias`, which stamp `help_visibility: "git_adapter"` and a
@@ -113,7 +113,7 @@ entries explicitly carry `canonical_command = "adopt"` with note "Use adopt
 for the guided Git-to-Heddle conversion workflow"
 (`command_catalog.rs:1238-1240`, `:1261-1263`, `:1284-1286`); export is
 aliased to `push` (`command_catalog.rs:1214-1224`). The two exceptions —
-`bridge git reason` after the public deep-import verb was removed — are
+`context reason git` after the public deep-import verb was removed — are
 registered with `surface(…, "git_adapter")` only (`command_catalog.rs:1323-1335`), so they get the
 `git_adapter` visibility but no `canonical_command` (it is `None`).
 `help_visibility: "git_adapter"` falls through to tier `"advanced"`
@@ -128,7 +128,7 @@ remote repository") — verified via `--help`.
 
 The agent/JSON surface is **already correct**: every bridge verb is tiered to
 `advanced`, and each verb that has a `canonical_command` redirects to its
-native canonical. The remaining exception — `bridge git reason` — is
+native canonical. The remaining exception — `context reason git` — is
 surface-only (`canonical_command: None`, `command_catalog.rs:1323-1335`):
 still `advanced`-tiered, but with no canonical to redirect to. The defect is
 confined to two **human-facing** surfaces that

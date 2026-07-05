@@ -2945,8 +2945,8 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     assert_eq!(
         neutral_preview["recovery_commands"],
         serde_json::json!([
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
-            "heddle bridge git reconcile --prefer git --ref main --preview"
+            "heddle fsck --repair git --prefer heddle --ref main --preview",
+            "heddle fsck --repair git --prefer git --ref main --preview"
         ]),
         "{neutral_preview}"
     );
@@ -2980,8 +2980,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         "{no_direction_envelope}"
     );
     assert_eq!(
-        no_direction_envelope["primary_command"],
-        "heddle bridge git reconcile --ref main --preview",
+        no_direction_envelope["primary_command"], "heddle fsck --repair git --ref main --preview",
         "{no_direction_envelope}"
     );
     let import_remote_json = heddle(
@@ -2994,8 +2993,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     assert_eq!(import_remote["branches_synced"], 1, "{import_remote}");
     let after_import = verify_json(&local);
     assert_eq!(
-        after_import["recommended_action"],
-        "heddle bridge git reconcile --ref origin/main --preview",
+        after_import["recommended_action"], "heddle fsck --repair git --ref origin/main --preview",
         "after importing the upstream tip, verify should recommend upstream integration, not local Git/Heddle reconcile: {after_import}"
     );
     let thread_list_json = heddle(&["thread", "list", "--output", "json"], Some(&local))
@@ -3015,15 +3013,14 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         "{thread_list}"
     );
     assert_eq!(
-        origin_main["recommended_action"],
-        "heddle bridge git reconcile --ref origin/main --preview",
+        origin_main["recommended_action"], "heddle fsck --repair git --ref origin/main --preview",
         "remote-tracking refs should be presented as upstream integration previews: {thread_list}"
     );
     assert!(
         origin_main["recommended_action"]
             .as_str()
             .is_some_and(|action| !action.contains("land")
-                && action.contains("bridge git reconcile --ref origin/main --preview")),
+                && action.contains("fsck --repair git --ref origin/main --preview")),
         "remote-tracking refs must avoid dead-end land advice: {thread_list}"
     );
     let merge_preview = heddle(

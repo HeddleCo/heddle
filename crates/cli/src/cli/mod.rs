@@ -19,21 +19,20 @@ pub use cli_args::{
     Commands, CommitArgs, CompletionSubject, ContextCommands, DaemonCommands, DiagnoseArgs,
     DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs,
     FsckRepairTarget, HookCommands, HookInstallSource, InitArgs, IntegrationCommands,
-    IntegrationInstallArgs,
-    IntegrationRelayArgs, IntegrationTargetArgs, LogArgs, MaintenanceCommands, MergeArgs,
-    OplogCommands, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs,
-    ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
-    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands, ResolveArgs,
-    RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
-    SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
-    StashCommands, SwitchArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs,
-    ThreadListArgs, ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs,
-    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
-    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
-    TimelineTargetArgs, TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs,
-    VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs,
-    WorkspaceModeArg,
+    IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs, LogArgs,
+    MaintenanceCommands, MergeArgs, OplogCommands, OutputMode, PullArgs, PurgeApplyArgs,
+    PurgeCommands, PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs, RedactCommands,
+    RedactListArgs, RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
+    RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
+    SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs, StashCommands, SwitchArgs,
+    ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs,
+    ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs, TimelineCommands,
+    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
+    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, TryArgs,
+    UndoArgs, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
+    VisibilityShowArgs, VisibilityTierArg, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{
@@ -41,7 +40,7 @@ pub use cli_args::{
     SpoolHistoryArgs, SupportCommands,
 };
 #[cfg(feature = "git-overlay")]
-pub use cli_args::{BridgeCommands, ExportCommands, GitCommands, ImportCommands};
+pub use cli_args::{ExportCommands, ImportCommands};
 #[cfg(feature = "semantic")]
 pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 use repo::{Config, OutputFormat};

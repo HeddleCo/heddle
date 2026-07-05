@@ -488,45 +488,6 @@ export interface BridgeExportSchema {
   threads_synced: number;
 }
 
-export interface BridgeGitReasonSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
-export interface BridgeGitReconcileSchema {
-  action?: string | null;
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "bridge_git_reconcile";
-  prefer?: string | null;
-  preview: boolean;
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_commands: string[];
-  ref_name: string;
-  replayed?: boolean | null;
-  status: string;
-  summary: string;
-}
-
-export interface BridgeGitStatusSchema {
-  git_overlay_health: GitOverlayHealthSchema;
-  git_overlay_import_hint?: GitOverlayImportHintSchema | null;
-  mirror_initialized: boolean;
-  mirror_path?: string | null;
-  output_kind: "bridge_git_status";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_commands: string[];
-  repository_capability: string;
-  storage_model: string;
-  verification: RepositoryVerificationStateSchema;
-}
-
 export interface BridgeImportSchema {
   action?: string | null;
   already_in_sync: boolean;
@@ -780,6 +741,14 @@ export interface ContextHistorySchema {
 
 export interface ContextListSchema {
   output_kind: "context_list";
+  [key: string]: unknown;
+}
+
+export interface ContextReasonGitSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -1152,7 +1121,18 @@ export interface FsckRepair {
   repaired: boolean;
 }
 
-export interface FsckReport {
+export interface FsckRepairGitSchema {
+  bridge_checked: boolean;
+  errors: FsckError[];
+  objects_checked: number;
+  repair_target?: string | null;
+  repaired: boolean;
+  repairs: FsckRepair[];
+  valid: boolean;
+  warnings: string[];
+}
+
+export interface FsckSchema {
   bridge_checked: boolean;
   errors: FsckError[];
   objects_checked: number;
@@ -1194,6 +1174,21 @@ export interface GitOverlayGuideSchema {
   topic: string;
 }
 
+export interface GitOverlayHealth {
+  checks: GitOverlayHealthCheck[];
+  clean: boolean;
+  recovery_commands: string[];
+  status: string;
+  summary: string;
+}
+
+export interface GitOverlayHealthCheck {
+  details?: Record<string, string>;
+  name: string;
+  status: string;
+  summary: string;
+}
+
 export interface GitOverlayHealthCheckSchema {
   name: string;
   status: string;
@@ -1206,6 +1201,13 @@ export interface GitOverlayHealthSchema {
   recovery_commands: string[];
   status: string;
   summary: string;
+}
+
+export interface GitOverlayImportHintReport {
+  current_branch: string;
+  missing_branch_count: number;
+  missing_branches: string[];
+  recommended_command: string;
 }
 
 export interface GitOverlayImportHintSchema {
@@ -2305,6 +2307,8 @@ export interface StatusSchema {
   freshness?: string | null;
   git_checkpoint?: GitCheckpointInfo | null;
   git_index?: GitIndexPlan | null;
+  git_overlay_health: GitOverlayHealth;
+  git_overlay_import_hint?: GitOverlayImportHintReport | null;
   harness?: string | null;
   heavy_impact_paths: string[];
   heddle_session_id?: string | null;
@@ -3347,9 +3351,6 @@ export interface HeddleVerbOutputs {
   "auth create-service-token": AuthCreateServiceTokenSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
-  "bridge git reason": BridgeGitReasonSchema;
-  "bridge git reconcile": BridgeGitReconcileSchema;
-  "bridge git status": BridgeGitStatusSchema;
   capture: CaptureSchema;
   checkpoint: CheckpointSchema;
   "cherry-pick": CherryPickSchema;
@@ -3363,6 +3364,7 @@ export interface HeddleVerbOutputs {
   "context get": ContextGetSchema;
   "context history": ContextHistorySchema;
   "context list": ContextListSchema;
+  "context reason git": ContextReasonGitSchema;
   "context rm": ContextRmSchema;
   "context set": ContextSetSchema;
   "context suggest": ContextSuggestSchema;
@@ -3384,7 +3386,8 @@ export interface HeddleVerbOutputs {
   expand: ExpandSchema;
   "export git": BridgeExportSchema;
   fetch: FetchSchema;
-  fsck: FsckReport;
+  fsck: FsckSchema;
+  "fsck --repair git": FsckRepairGitSchema;
   "git-overlay": GitOverlayGuideSchema;
   help: HelpSchema;
   "hook events": HookEventsSchema;
@@ -3532,9 +3535,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "auth create-service-token",
   "auth logout",
   "auth status",
-  "bridge git reason",
-  "bridge git reconcile",
-  "bridge git status",
   "capture",
   "checkpoint",
   "cherry-pick",
@@ -3548,6 +3548,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "context get",
   "context history",
   "context list",
+  "context reason git",
   "context rm",
   "context set",
   "context suggest",
@@ -3570,6 +3571,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "export git",
   "fetch",
   "fsck",
+  "fsck --repair git",
   "git-overlay",
   "help",
   "hook events",

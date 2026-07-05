@@ -72,7 +72,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 - Normal Git Overlay flows should never create `.heddle/git`.
 - Public `bridge git` commands should retire in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` should be removed; it exists to initialize the persistent mirror that the target model deletes.
-- `bridge git status` should be removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
+- Legacy bridge status should be removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
 - `import git` becomes `import git`; `export git` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
 - `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` is removed in favor of `sync git` for explicit bidirectional Git projection.
 - `export git` must require an explicit destination or named remote target. It must not create hidden repo-local Git state.
@@ -135,7 +135,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 ## Git Repair Surface
 
-- The replacement for `bridge git reconcile` is a Git repair mode on `fsck`; target spelling is `fsck --repair git`. The current implementation is metadata-only and does not import history, reconcile refs, or write the worktree.
+- The Git repair surface is `fsck --repair git`. The current implementation is metadata-only and does not import history, reconcile refs, or write the worktree.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
@@ -171,7 +171,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Export/write-through can use residuals instead of the mirror for lossy objects.
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
 5. Retire public bridge/mirror workflow
-   - Public `bridge git init/push/pull/import/export/sync` are removed; `status`, `reconcile`, and `reason` remain until replacement diagnostics, repair, and ingest surfaces are complete.
+   - The public bridge-git workflow is removed; diagnostics, repair, and ingest behavior live on replacement surfaces.
    - Top-level `push`/`pull`/`sync` route Git remotes.
    - Normal flows no longer create persistent `.heddle/git`.
    - Maintenance cleanup can remove migrated mirrors.

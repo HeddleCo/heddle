@@ -576,7 +576,7 @@ fn prepare_sources(args: &Args) -> Result<Sources> {
     let heddle_source = if need_heddle {
         let hs = args.out_dir.join("heddle-source");
         if !hs.exists() {
-            // `heddle bridge git import` adopts a git branch as a heddle
+            // `heddle import git` adopts a git branch as a heddle
             // lane. We import from git_source.
             sh(
                 &args.heddle_bin,

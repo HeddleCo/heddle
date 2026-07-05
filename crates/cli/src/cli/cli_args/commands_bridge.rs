@@ -41,15 +41,6 @@ pub(crate) fn parse_git_source(s: &str) -> Result<GitSource, String> {
 }
 
 #[derive(Subcommand, Clone)]
-pub enum BridgeCommands {
-    /// Git bridge operations.
-    Git {
-        #[command(subcommand)]
-        command: GitCommands,
-    },
-}
-
-#[derive(Subcommand, Clone)]
 pub enum ImportCommands {
     /// Import Git commits to Heddle.
     ///
@@ -94,70 +85,5 @@ pub enum SyncCommands {
         /// Local path or git URL to sync with.
         #[arg(short, long, value_parser = parse_git_source)]
         path: Option<GitSource>,
-    },
-}
-
-#[derive(Subcommand, Clone)]
-pub enum GitCommands {
-    /// Show the current state of the Git overlay bridge.
-    ///
-    /// Reports the import-hint surface (which Git branches are visible
-    /// only on the Git side and need a `bridge import` run), the active
-    /// branch on the Git side, and any pending bridge operation. This
-    /// is the canonical place to consume bridge-status information for
-    /// scripts; other `--output json` outputs intentionally omit it.
-    Status,
-    /// Preview a recovery path when a Git branch and Heddle thread diverge.
-    Reconcile {
-        /// Which local side should be treated as authoritative when applying.
-        ///
-        /// Omit with `--preview` to inspect both local repair choices without
-        /// changing refs, remotes, index, or worktree files.
-        #[arg(long, value_parser = ["git", "heddle"])]
-        prefer: Option<String>,
-        /// Branch/ref to reconcile.
-        #[arg(long = "ref", value_name = "BRANCH")]
-        ref_name: String,
-        /// Show the planned recovery without changing refs.
-        #[arg(long)]
-        preview: bool,
-    },
-
-    /// Mine local AI-coding-agent sessions (Claude / Codex / OpenCode)
-    /// for reasoning notecards and attach them as `context` annotations
-    /// to the matching imported states. Requires `import git` to have
-    /// already run (needs the SHA map sidecar).
-    /// Requires the `ingest` feature (on by default).
-    #[cfg(feature = "ingest")]
-    Reason {
-        /// Source git repository the transcripts are about.
-        #[arg(long)]
-        path: std::path::PathBuf,
-        /// Cap candidates per commit. Higher = more coverage at the cost
-        /// of cross-attribution. Default tuned for typical dogfood runs.
-        #[arg(long, default_value_t = 5)]
-        max_sessions_per_commit: usize,
-        /// Drop sessions below this confidence (file-overlap × 0.65 +
-        /// time-fit × 0.25 + provider-hint × 0.10). Below ~0.20 the
-        /// matcher trips false positives; above ~0.50 it filters out
-        /// borderline-but-correct matches.
-        #[arg(long, default_value_t = 0.20)]
-        min_match_confidence: f32,
-        /// Limit how many commits the reason pass walks. Useful while
-        /// tuning extraction knobs against a small recent window.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Override the Claude transcript store. Empty string disables.
-        #[arg(long = "claude-home")]
-        claude_home: Option<String>,
-        /// Override the Codex transcript store. Empty string disables.
-        #[arg(long = "codex-home")]
-        codex_home: Option<String>,
-        /// Override the OpenCode data dir. Empty string disables.
-        #[arg(long = "opencode-home")]
-        opencode_home: Option<String>,
-        /// Don't write annotations — just report what would happen.
-        #[arg(long)]
-        dry_run: bool,
     },
 }

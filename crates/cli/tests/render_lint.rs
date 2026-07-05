@@ -54,8 +54,8 @@ use std::{
 // `status.rs` had ten `print_status_*` helpers renamed to `render_*`,
 // `thread.rs` had two more (`print_thread_sections` /
 // `print_thread_entry` → `render_*`), `fork.rs` got a
-// `render_fork` extraction, and `bridge.rs::cmd_bridge_git_status`
-// hoisted its render body into `render_bridge_git_status`. The rule
+// `render_fork` extraction, and `bridge.rs::cmd_status`
+// hoisted its render body into `render_status`. The rule
 // is purely scope-shape: those println sites already lived inside
 // helpers, they just needed the function name to match the
 // lint-exempt prefix.

@@ -30,7 +30,7 @@ use crate::cli::{
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
-use crate::cli::{BridgeCommands, ExportCommands, GitCommands, ImportCommands};
+use crate::cli::{ExportCommands, ImportCommands};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOutput {
@@ -1480,51 +1480,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["bridge"], surface(GROUP, "git_adapter")),
-    entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
-    entry(
-        &["bridge", "git", "status"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["bridge git status"]),
-                &[json_discriminator(
-                    Some("bridge git status"),
-                    "output_kind",
-                    "bridge_git_status",
-                )],
-            ),
-            "status",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "reconcile"],
-        exits(
-            git_adapter_action(
-                json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
-                    &[json_discriminator(
-                        Some("bridge git reconcile"),
-                        "output_kind",
-                        "bridge_git_reconcile",
-                    )],
-                ),
-                "adopt",
-                "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
-            ),
-            &[
-                (0, "ok"),
-                (65, "unmergeable divergence; manual resolution required"),
-            ],
-        ),
-    ),
-    entry(
-        &["bridge", "git", "reason"],
-        surface(
-            opaque_schemas(DATA_MUTATION, &["bridge git reason"]),
-            "git_adapter",
-        ),
-    ),
     entry(
         &["capture"],
         category(
@@ -1801,6 +1756,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(feature = "ingest")]
+    entry(&["context", "reason"], category(GROUP, "context")),
+    #[cfg(feature = "ingest")]
+    entry(
+        &["context", "reason", "git"],
+        surface(
+            opaque_schemas(DATA_MUTATION, &["context reason git"]),
+            "git_adapter",
+        ),
+    ),
     entry(&["daemon"], surface(GROUP, "admin")),
     entry(
         &["daemon", "serve"],
@@ -1945,16 +1910,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
-            documented_core_report_schema(
-                CommandContract {
-                    mutates: true,
-                    observe_only: false,
-                    supports_op_id: false,
-                    may_move_ref: false,
-                    writes_heddle_refs: false,
-                    ..READ_JSON
-                },
-                FsckReport::CONTRACT,
+            documented_schemas(
+                documented_core_report_schema(
+                    CommandContract {
+                        mutates: true,
+                        observe_only: false,
+                        supports_op_id: false,
+                        may_move_ref: false,
+                        writes_heddle_refs: false,
+                        ..READ_JSON
+                    },
+                    FsckReport::CONTRACT,
+                ),
+                &["fsck --repair git"],
             ),
             "recovery",
         ),
@@ -4819,6 +4787,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ContextCommands::Check(_) => vec!["context", "check"],
             ContextCommands::Suggest(_) => vec!["context", "suggest"],
             ContextCommands::Audit(_) => vec!["context", "audit"],
+            #[cfg(feature = "ingest")]
+            ContextCommands::Reason { command } => match command {
+                crate::cli::cli_args::ContextReasonCommands::Git(_) => {
+                    vec!["context", "reason", "git"]
+                }
+            },
         },
         Commands::Integration { command } => match command {
             IntegrationCommands::List => vec!["integration", "list"],
@@ -4850,15 +4824,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SpoolCommands::Children(_) => vec!["spool", "children"],
             SpoolCommands::Governance(_) => vec!["spool", "governance"],
             SpoolCommands::Membership(_) => vec!["spool", "membership"],
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::Bridge { command } => match command {
-            BridgeCommands::Git { command } => match command {
-                GitCommands::Status => vec!["bridge", "git", "status"],
-                GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
-                #[cfg(feature = "ingest")]
-                GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
-            },
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {

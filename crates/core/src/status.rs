@@ -9,6 +9,8 @@ use std::{
     time::Instant,
 };
 
+use chrono::Utc;
+use cli_shared::remote::RemoteConfig;
 use objects::{
     HeddleError,
     error::Result,
@@ -16,21 +18,28 @@ use objects::{
     store::{AgentEntry, AgentRegistry, AgentStatus},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
-use chrono::Utc;
-use cli_shared::remote::RemoteConfig;
+use refs::Head;
 use repo::{
     AgentUsageSummary, CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint,
     GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
-    RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness,
-    ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
+    RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
+    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
     describe_thread_advice_with_initial, is_synthetic_root, refresh_thread_freshness,
 };
-use refs::Head;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
-use sley::{Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode, StreamControl};
+use sley::{
+    Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
+    StreamControl,
+};
 
+use self::next_action::{
+    NextActionInput, canonical_adopt_ref_command, canonical_bridge_import_ref_command,
+    canonical_bridge_reconcile_ref_preview_command, contextual_thread_action,
+    effective_next_action, heddle_action, non_empty_action, remote_tracking_next_action,
+    remote_tracking_status,
+};
 use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,
     ReportContract, RepositoryContextInfo, RepositoryVerificationState, VerificationCheck,
@@ -40,13 +49,6 @@ use crate::{
         build_repository_verification_state_with_worktree_status_and_machine_contract,
         serialize_empty_action_as_null,
     },
-};
-
-use self::next_action::{
-    NextActionInput, canonical_adopt_ref_command, canonical_bridge_import_ref_command,
-    canonical_bridge_reconcile_ref_preview_command, contextual_thread_action,
-    effective_next_action, heddle_action, non_empty_action, remote_tracking_next_action,
-    remote_tracking_status,
 };
 
 #[derive(Clone)]
@@ -120,11 +122,7 @@ pub struct StatusReport {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     pub git_index: Option<GitIndexPlan>,
-    #[serde(skip)]
-    #[schemars(skip)]
     pub git_overlay_import_hint: Option<GitOverlayImportHintReport>,
-    #[serde(skip_serializing)]
-    #[schemars(skip)]
     pub git_overlay_health: GitOverlayHealth,
     pub thread: Option<String>,
     pub base_state: Option<String>,
@@ -642,27 +640,36 @@ pub fn build_git_overlay_health_with_worktree_status(
                         summary: error.to_string(),
                         details: BTreeMap::new(),
                     });
-                    return degraded_health(checks, "Could not inspect Git/Heddle branch agreement");
+                    return degraded_health(
+                        checks,
+                        "Could not inspect Git/Heddle branch agreement",
+                    );
                 }
             }
             if !head_mapping_is_git_backed(&checks)
                 && let Ok(Some(state)) = repo.current_state()
                 && let Ok(tree) = repo.require_tree(&state.tree)
-                && let Ok(status) =
-                    repo.compare_worktree_cached_with_options(&tree, &core_worktree_status_options(repo))
+                && let Ok(status) = repo.compare_worktree_cached_with_options(
+                    &tree,
+                    &core_worktree_status_options(repo),
+                )
                 && !status.is_clean()
             {
                 let changed = status.modified.len() + status.added.len() + status.deleted.len();
                 checks.push(GitOverlayHealthCheck {
                     name: "heddle_worktree".to_string(),
                     status: "dirty_worktree".to_string(),
-                    summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
+                    summary: format!(
+                        "{changed} Heddle worktree path(s) differ from the current state"
+                    ),
                     details: dirty_details(&status),
                 });
                 return GitOverlayHealth {
                     status: "dirty_worktree".to_string(),
                     clean: false,
-                    summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
+                    summary: format!(
+                        "{changed} Heddle worktree path(s) differ from the current state"
+                    ),
                     recovery_commands: vec![
                         "heddle commit -m \"...\"".to_string(),
                         "heddle capture -m \"...\"".to_string(),
@@ -725,7 +732,10 @@ pub fn build_git_overlay_health_with_worktree_status(
                         summary: error.to_string(),
                         details: BTreeMap::new(),
                     });
-                    return degraded_health(checks, "Could not inspect thread integration metadata");
+                    return degraded_health(
+                        checks,
+                        "Could not inspect thread integration metadata",
+                    );
                 }
             }
             match repo.git_remote_tracking_status() {
@@ -762,7 +772,10 @@ pub fn build_git_overlay_health_with_worktree_status(
     }
 }
 
-fn needs_import(mut checks: Vec<GitOverlayHealthCheck>, hint: GitOverlayImportHint) -> GitOverlayHealth {
+fn needs_import(
+    mut checks: Vec<GitOverlayHealthCheck>,
+    hint: GitOverlayImportHint,
+) -> GitOverlayHealth {
     checks.push(GitOverlayHealthCheck {
         name: "import".to_string(),
         status: "needs_import".to_string(),
@@ -805,7 +818,10 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
         return Ok(None);
     }
     let mut details = BTreeMap::new();
-    details.insert("mismatched_tag_count".to_string(), mismatched.len().to_string());
+    details.insert(
+        "mismatched_tag_count".to_string(),
+        mismatched.len().to_string(),
+    );
     details.insert("mismatched_tags".to_string(), mismatched.join(", "));
     Ok(Some(GitOverlayHealthCheck {
         name: "tag_mapping".to_string(),
@@ -1159,7 +1175,10 @@ fn remote_drift_recovery_commands(
             }
         }
         "remote_contains_undone_checkpoint" => {
-            vec!["heddle push --force".to_string(), "heddle undo --redo".to_string()]
+            vec![
+                "heddle push --force".to_string(),
+                "heddle undo --redo".to_string(),
+            ]
         }
         _ => remote_tracking_next_action(remote).into_iter().collect(),
     }
@@ -1188,7 +1207,10 @@ fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) ->
         .is_some_and(|mapped_tip| mapped_tip == thread_tip)
 }
 
-fn clean_health(summary: impl Into<String>, checks: Vec<GitOverlayHealthCheck>) -> GitOverlayHealth {
+fn clean_health(
+    summary: impl Into<String>,
+    checks: Vec<GitOverlayHealthCheck>,
+) -> GitOverlayHealth {
     GitOverlayHealth {
         status: "clean".to_string(),
         clean: true,
@@ -1649,9 +1671,7 @@ fn thread_summary_from_thread(
         report_flush_state: primary.and_then(|entry| entry.report_flush_state.clone()),
         attach_reason: primary
             .and_then(|entry| entry.attach_reason.clone())
-            .or_else(|| {
-                git_backed_tip.then(|| "using Git-backed branch tip".to_string())
-            }),
+            .or_else(|| git_backed_tip.then(|| "using Git-backed branch tip".to_string())),
         thread_mode: Some(thread.mode),
         thread_state: Some(thread_state),
         freshness: Some(thread.freshness),
@@ -1689,7 +1709,9 @@ fn coordination_status_for_thread_state(state: &ThreadState) -> CoordinationStat
         ThreadState::Blocked => CoordinationStatus::Blocked,
         ThreadState::Ready => CoordinationStatus::MergeReady,
         ThreadState::Merged | ThreadState::Abandoned => CoordinationStatus::Clean,
-        ThreadState::Active | ThreadState::Draft | ThreadState::Promoted => CoordinationStatus::Clean,
+        ThreadState::Active | ThreadState::Draft | ThreadState::Promoted => {
+            CoordinationStatus::Clean
+        }
     }
 }
 
@@ -2104,8 +2126,13 @@ struct ShortPathInputs<'a> {
 
 fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
     let recommended_action = effective_next_action(
-        NextActionInput::default(input.operation.as_ref(), input.remote_tracking.as_ref(), None, None)
-            .with_verification(&input.trust),
+        NextActionInput::default(
+            input.operation.as_ref(),
+            input.remote_tracking.as_ref(),
+            None,
+            None,
+        )
+        .with_verification(&input.trust),
     );
     let worktree_clean = input.changes.is_empty();
     let recommended_action =
@@ -2272,7 +2299,9 @@ fn apply_status_advice(
         && output.operation.is_none()
         && trust.verified
     {
-        let dirty_paths = changes_paths(&output.changes).into_iter().collect::<Vec<_>>();
+        let dirty_paths = changes_paths(&output.changes)
+            .into_iter()
+            .collect::<Vec<_>>();
         let dirty_summary = format!(
             "{} Heddle worktree path(s) are not captured in the current state",
             dirty_paths.len()
@@ -2287,7 +2316,10 @@ fn apply_status_advice(
         trust.recovery_commands = vec![trust.recommended_action.clone()];
         trust.recovery_action_templates = action_templates(&trust.recovery_commands);
         let mut details = BTreeMap::new();
-        details.insert("dirty_path_count".to_string(), dirty_paths.len().to_string());
+        details.insert(
+            "dirty_path_count".to_string(),
+            dirty_paths.len().to_string(),
+        );
         if !dirty_paths.is_empty() {
             details.insert("dirty_paths".to_string(), dirty_paths.join(", "));
         }
@@ -2302,7 +2334,11 @@ fn apply_status_advice(
             recovery_action_templates: trust.recovery_action_templates.clone(),
             details,
         };
-        if let Some(check) = trust.checks.iter_mut().find(|check| check.name == "Worktree") {
+        if let Some(check) = trust
+            .checks
+            .iter_mut()
+            .find(|check| check.name == "Worktree")
+        {
             *check = worktree_check;
         } else {
             trust.checks.insert(0, worktree_check);
@@ -2360,22 +2396,21 @@ fn apply_status_advice(
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
-    let recommended_action = if git_backed_mapping
-        && trust.status != "needs_checkpoint"
-        && output.operation.is_none()
-    {
-        if has_changes {
-            "heddle commit -m \"...\"".to_string()
+    let recommended_action =
+        if git_backed_mapping && trust.status != "needs_checkpoint" && output.operation.is_none() {
+            if has_changes {
+                "heddle commit -m \"...\"".to_string()
+            } else {
+                String::new()
+            }
         } else {
-            String::new()
-        }
-    } else {
-        if output.operation.is_some() {
-            recommended_action
-        } else {
-            first_save_recommendation(repo, current_state, !has_changes).unwrap_or(recommended_action)
-        }
-    };
+            if output.operation.is_some() {
+                recommended_action
+            } else {
+                first_save_recommendation(repo, current_state, !has_changes)
+                    .unwrap_or(recommended_action)
+            }
+        };
     let thread_health = if trust.verified {
         if git_backed_mapping {
             if has_changes {
@@ -2463,10 +2498,7 @@ fn apply_status_advice(
     }
 }
 
-fn override_trust_recommended_action(
-    trust: &mut RepositoryVerificationState,
-    action: String,
-) {
+fn override_trust_recommended_action(trust: &mut RepositoryVerificationState, action: String) {
     let template = action_template(&action);
     trust.recommended_action = action.clone();
     trust.recommended_action_template = template.clone();
@@ -2969,9 +3001,7 @@ mod tests {
     fn status_default_core_path_produces_complete_embedder_report() {
         let temp = tempfile::tempdir().expect("temp repo");
         repo::Repository::init_default(temp.path()).expect("init repo");
-        let ctx = ExecutionContext::builder()
-            .start_path(temp.path())
-            .build();
+        let ctx = ExecutionContext::builder().start_path(temp.path()).build();
 
         let report = status(
             &ctx,
@@ -3002,9 +3032,7 @@ mod tests {
     fn verify_default_core_path_produces_complete_embedder_report() {
         let temp = tempfile::tempdir().expect("temp repo");
         repo::Repository::init_default(temp.path()).expect("init repo");
-        let ctx = ExecutionContext::builder()
-            .start_path(temp.path())
-            .build();
+        let ctx = ExecutionContext::builder().start_path(temp.path()).build();
 
         let report = crate::verify::verify(
             &ctx,

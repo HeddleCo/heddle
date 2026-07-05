@@ -127,30 +127,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["export", "git", "--destination", "out.git"],
     ),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
-    #[cfg(feature = "git-overlay")]
-    #[cfg(feature = "git-overlay")]
-    #[cfg(feature = "git-overlay")]
     sample(&["sync", "git"], &["sync", "git"]),
-    #[cfg(feature = "git-overlay")]
+    #[cfg(feature = "ingest")]
     sample(
-        &["bridge", "git", "reconcile"],
-        &[
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            "heddle",
-            "--ref",
-            "main",
-        ],
-    ),
-    #[cfg(feature = "git-overlay")]
-    #[cfg(feature = "git-overlay")]
-    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
-    sample(
-        &["bridge", "git", "reason"],
-        &["bridge", "git", "reason", "--path", "."],
+        &["context", "reason", "git"],
+        &["context", "reason", "git", "--path", "."],
     ),
     sample(&["capture"], &["capture"]),
     sample(&["checkpoint"], &["checkpoint"]),
@@ -547,8 +528,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
             "heddle import git --ref main",
             "heddle import git --ref origin/main",
             "heddle merge origin/main --preview",
-            "heddle bridge git reconcile --ref main --preview",
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
+            "heddle fsck --repair git --ref main --preview",
+            "heddle fsck --repair git --prefer heddle --ref main --preview",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -1224,10 +1205,9 @@ fn native_only_catalog_excludes_git_overlay_commands() {
     for display in [
         "bridge",
         "bridge git",
-        "bridge git status",
+        "status",
         "sync git",
-        "bridge git reconcile",
-        "bridge git reason",
+        "context reason git",
         "git-overlay",
     ] {
         assert!(
@@ -1388,8 +1368,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "import git",
             "export git",
             "sync git",
-            "bridge git status",
-            "bridge git reconcile",
             "capture",
             "checkpoint",
             "cherry-pick",

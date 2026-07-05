@@ -190,28 +190,22 @@ pub fn canonical_bridge_reconcile_ref_preview_command(
 ) -> String {
     match prefer {
         Some(prefer) => heddle_action([
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--prefer",
             prefer,
             "--ref",
             ref_name,
             "--preview",
         ]),
-        None => heddle_action(["bridge", "git", "reconcile", "--ref", ref_name, "--preview"]),
+        None => heddle_action(["fsck", "--repair", "git", "--ref", ref_name, "--preview"]),
     }
 }
 
 pub fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
-        "bridge",
-        "git",
-        "reconcile",
-        "--prefer",
-        prefer,
-        "--ref",
-        ref_name,
+        "fsck", "--repair", "git", "--prefer", prefer, "--ref", ref_name,
     ])
 }
 

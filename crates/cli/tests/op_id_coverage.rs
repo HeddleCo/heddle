@@ -121,7 +121,7 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         "thread list",
         "thread show",
         "status",
-        "bridge git status",
+        "status",
         "hook list",
         "remote list",
         "context get",

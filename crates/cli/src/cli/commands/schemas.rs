@@ -68,6 +68,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 }
 
 schema_registry! {
+    (&["fsck --repair git"], FsckReport),
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
@@ -106,7 +107,6 @@ schema_registry! {
     (&["fetch"], FetchSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
-    (&["bridge git status"], BridgeGitStatusSchema),
     (&["expand"], ExpandSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
@@ -129,7 +129,6 @@ schema_registry! {
     (&["export git"], BridgeExportSchema),
     (&["import git"], BridgeImportSchema),
     (&["sync git"], BridgeSyncSchema),
-    (&["bridge git reconcile"], BridgeGitReconcileSchema),
     (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
@@ -2203,50 +2202,6 @@ pub struct ActionTemplateSchema {
     pub agent_may_fill: bool,
 }
 
-// ---- bridge git status ----------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeGitStatusSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub mirror_path: Option<String>,
-    pub mirror_initialized: bool,
-    pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
-    pub git_overlay_health: GitOverlayHealthSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayImportHintSchema {
-    pub current_branch: String,
-    pub missing_branch_count: usize,
-    pub missing_branches: Vec<String>,
-    pub recommended_command: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthSchema {
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recovery_commands: Vec<String>,
-    pub checks: Vec<GitOverlayHealthCheckSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthCheckSchema {
-    pub name: String,
-    pub status: String,
-    pub summary: String,
-}
-
-// ---- log ------------------------------------------------------------------
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LogSchema {
     pub output_kind: Option<String>,
@@ -2882,20 +2837,6 @@ pub struct BridgeSyncSchema {
     pub recovery_commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeGitReconcileSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: Option<String>,
-    pub prefer: Option<String>,
-    pub ref_name: String,
-    pub preview: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-}
-
 // ---- stash / revert -------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2932,6 +2873,32 @@ pub struct RevertSchema {
     pub reverted_state: String,
     pub files_affected: Vec<String>,
     pub message: String,
+}
+
+// ---- git overlay diagnostics ---------------------------------------------
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitOverlayImportHintSchema {
+    pub current_branch: String,
+    pub missing_branch_count: usize,
+    pub missing_branches: Vec<String>,
+    pub recommended_command: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitOverlayHealthSchema {
+    pub status: String,
+    pub clean: bool,
+    pub summary: String,
+    pub recovery_commands: Vec<String>,
+    pub checks: Vec<GitOverlayHealthCheckSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitOverlayHealthCheckSchema {
+    pub name: String,
+    pub status: String,
+    pub summary: String,
 }
 
 // ---- diagnose -------------------------------------------------------------
@@ -3351,12 +3318,10 @@ mod tests {
     fn native_only_schema_registry_excludes_git_overlay_verbs() {
         let catalog = command_catalog::build_command_catalog();
         for verb in [
-            "bridge git status",
             "import git",
             "export git",
             "sync git",
-            "bridge git reconcile",
-            "bridge git reason",
+            "context reason git",
             "git-overlay",
         ] {
             assert!(
@@ -3415,10 +3380,12 @@ mod tests {
                 "status schema missing property '{required}'"
             );
         }
-        assert!(
-            !properties.contains_key("git_overlay_health"),
-            "status schema must not expose legacy git_overlay_health alias"
-        );
+        for promoted in &["git_overlay_import_hint", "git_overlay_health"] {
+            assert!(
+                properties.contains_key(*promoted),
+                "status schema missing promoted Git overlay diagnostic property '{promoted}'"
+            );
+        }
     }
 
     #[test]

@@ -997,8 +997,8 @@ fn is_plausible_verb_phrase(s: &str) -> bool {
 
 /// `## heddle status --output json` matches the verb `"status"`. Strips
 /// the `heddle ` prefix, output-mode selectors, and any `<state>`-style
-/// placeholders. Pipe-separated headings (e.g. `heddle bridge git
-/// init|export|import|sync|push|pull --output json`) match every variant.
+/// placeholders. Pipe-separated headings (e.g. `heddle schemas
+/// status|log|verify --output json`) match every variant.
 fn sample_matches_verb(heading: &str, verb: &str) -> bool {
     let stripped = heading.trim_start_matches('`').trim_end_matches('`').trim();
     let stripped = stripped.trim_start_matches("heddle ").trim();
@@ -1122,8 +1122,8 @@ Some prose.
             "status"
         ));
         assert!(sample_matches_verb(
-            "`heddle bridge git status --output json`",
-            "bridge git status"
+            "`heddle status --output json`",
+            "status"
         ));
         assert!(sample_matches_verb(
             "`heddle show <state> --output json`",

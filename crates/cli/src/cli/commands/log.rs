@@ -64,7 +64,7 @@ struct LogOutput {
     states: Vec<StateEntry>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --output json` instead.
+    /// `heddle status --output json` instead.
     #[serde(skip)]
     git_overlay_import_hint: Option<LogGitOverlayImportHintOutput>,
 }

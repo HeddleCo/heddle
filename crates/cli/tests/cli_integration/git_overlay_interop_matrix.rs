@@ -185,7 +185,7 @@ fn git_overlay_interop_git_conflict_routes_to_no_git_handoff() {
 
     let status = status_json(temp.path());
     assert_eq!(status["operation"]["scope"], "git");
-    assert_eq!(status["recommended_action"], "heddle bridge git status");
+    assert_eq!(status["recommended_action"], "heddle status");
 
     let cont = heddle(&["--output", "text", "continue"], Some(temp.path())).unwrap_err();
     assert!(

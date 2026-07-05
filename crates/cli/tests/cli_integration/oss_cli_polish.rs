@@ -106,9 +106,9 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
 fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
     let help = heddle_help(&["import", "--help"]);
     assert!(
-        help.contains("Convert Git history into Heddle-native storage")
-            && help.contains("heddle adopt"),
-        "`heddle import --help` should route first-run import intent to adopt, not suggest an unrelated command: {help}"
+        help.contains("Import from another version control system")
+            && help.contains("git   Import Git commits to Heddle"),
+        "`heddle import --help` should route import intent to the explicit git importer: {help}"
     );
 }
 
@@ -324,7 +324,10 @@ fn verify_is_strict_by_default() {
     );
     let clean_proof: Value = serde_json::from_slice(&clean.stdout)
         .expect("clean verify should print exactly one proof JSON document");
-    assert_eq!(clean_proof["verified"], true, "{clean_proof}");
+    assert_eq!(
+        clean_proof["verification"]["verified"], true,
+        "{clean_proof}"
+    );
 }
 
 #[test]
@@ -624,13 +627,6 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
 
     let verify = json_value(&checkout, &["verify", "--output", "json"]);
     assert_eq!(verify["repository_mode"], "native-heddle");
-    assert_eq!(verify["repository_label"], "Git + Heddle isolated checkout");
-    assert_eq!(
-        verify["repository_context"]["parent_repository"],
-        parent_repo
-    );
-    assert_eq!(verify["repository_context"]["target_thread"], "main");
-
     let verify_text = heddle(
         &["verify", "--verbose", "--output", "text"],
         Some(&checkout),
@@ -1479,11 +1475,8 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                !source.contains("bridge git status")
-                    && !source.contains("bridge git reconcile")
-                    && source.contains("\"heddle bridge git\"")
-                    && source.contains("\"reconcile\""),
-                "{} should keep bridge ceremony out of the human cold path and lint it from transcripts",
+                source.contains("\"heddle bridge git\"") && source.contains("\"reconcile\""),
+                "{} should keep old bridge ceremony out of the human cold path by linting it from transcripts",
                 script.display()
             );
             assert!(
@@ -2981,7 +2974,7 @@ fn core_loop_schemas_are_discoverable() {
         "agent list",
         "switch",
         "thread list",
-        "bridge git reconcile",
+        "fsck --repair git",
         "remote list",
         "remote show",
         "remote add",
@@ -3206,10 +3199,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         ("doctor", vec!["doctor", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
         ("verify", vec!["verify", "--output", "json"]),
-        (
-            "bridge git status",
-            vec!["bridge", "git", "status", "--output", "json"],
-        ),
+        ("status", vec!["status", "--output", "json"]),
         ("log", vec!["log", "--output", "json"]),
         ("show", vec!["show", "HEAD", "--output", "json"]),
         ("thread list", vec!["thread", "list", "--output", "json"]),
@@ -4052,7 +4042,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["status", "--output", "json"],
         vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
-        vec!["bridge", "git", "status", "--output", "json"],
+        vec!["status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
         vec!["status", "--output", "json"],
@@ -4067,7 +4057,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["status", "--output", "json"],
         vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
-        vec!["bridge", "git", "status", "--output", "json"],
+        vec!["status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
         vec!["status", "--output", "json"],
@@ -7858,8 +7848,8 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     // view (heddle#275); the everyday surface leads with bridge state.
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "bridge", "git", "status"],
-        &["Git import"],
+        vec!["--quiet", "--output", "text", "status"],
+        &["Verdict"],
     );
     assert_text_surface(
         temp.path(),
@@ -8814,18 +8804,20 @@ fn command_catalog_exposes_public_surface_for_agents() {
                 && !summary.contains("Automation/workflow command")),
         "catalog summaries should use product language, not internal clap framing: {ready}"
     );
+    let import_git = commands
+        .iter()
+        .find(|entry| entry["display"] == "import git")
+        .expect("import git command should be cataloged");
+    assert!(
+        import_git["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("Import Git commits")),
+        "runtime import surface should be exposed by the command catalog: {import_git}"
+    );
     let adopt = commands
         .iter()
         .find(|entry| entry["display"] == "adopt")
         .expect("adopt command should be cataloged");
-    assert!(
-        adopt["aliases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|alias| alias == "import"),
-        "runtime aliases should be exposed by the command catalog: {adopt}"
-    );
     assert_eq!(
         adopt["command_action"]["action"],
         "heddle adopt --ref <branch>"
@@ -8954,12 +8946,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .iter()
         .find(|entry| entry["display"] == "import git")
         .expect("import git should be cataloged");
-    assert_eq!(bridge_import["canonical_action"]["command"], "adopt");
-    assert_eq!(bridge_import["canonical_action"]["kind"], "workflow");
-    assert_eq!(
-        bridge_import["canonical_action"]["template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "<branch>"])
-    );
+    assert_eq!(bridge_import["canonical_action"], Value::Null);
+    assert_eq!(bridge_import["canonical_command"], Value::Null);
     let stash_pop = commands
         .iter()
         .find(|entry| entry["display"] == "stash pop")
@@ -11307,7 +11295,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
     for verb in [
         "switch",
         "thread list",
-        "bridge git reconcile",
+        "fsck --repair git",
         "capture",
         "commit",
         "actor spawn",
@@ -12037,8 +12025,8 @@ fn import_git_after_clone_reports_commits_not_zero() {
 }
 
 #[test]
-fn bridge_git_status_recommendation_runs_cleanly_after_clone() {
-    // heddle#148: the recommended-action chain from `bridge git status`
+fn status_recommendation_runs_cleanly_after_clone() {
+    // heddle#148: the recommended-action chain from `status`
     // used to dead-end at `heddle sync`. After clone, the bridge is in
     // sync (no missing branches) — the import_hint must be absent.
     // This is the structural side of the chain: status doesn't try to
@@ -12057,15 +12045,11 @@ fn bridge_git_status_recommendation_runs_cleanly_after_clone() {
     )
     .expect("heddle clone");
 
-    let json = heddle(
-        &["--output", "json", "bridge", "git", "status"],
-        Some(&work),
-    )
-    .expect("bridge git status JSON");
+    let json = heddle(&["--output", "json", "status"], Some(&work)).expect("status JSON");
     let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
     assert!(
         parsed["git_overlay_import_hint"].is_null(),
-        "bridge git status should report no missing branches after clone: {json}"
+        "status should report no missing branches after clone: {json}"
     );
 }
 
@@ -12260,11 +12244,11 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle bridge git reconcile --ref main --preview"])
+        serde_json::json!(["heddle fsck --repair git --ref main --preview"])
     );
     assert!(
         envelope["preserved"]
@@ -12275,7 +12259,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     );
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["bridge", "git", "reconcile", "--ref", "main", "--preview",])
+        heddle_argv_json(["fsck", "--repair", "git", "--ref", "main", "--preview",])
     );
 }
 
@@ -12415,7 +12399,7 @@ fn exit_codes_surface_in_json_catalog() {
     );
 }
 
-/// `heddle log`, `show`, and `bridge git status` default text views must
+/// `heddle log`, `show`, and `status` default text views must
 /// lead with command data — not the `Repository:` mode preamble, which is
 /// noise on every read (heddle#275). `-v` keeps the preamble for
 /// diagnostics, and `--output json` is untouched.
@@ -12442,17 +12426,24 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             vec!["-v", "show", "HEAD", "--output", "text"],
         ),
         (
-            "bridge git status",
-            vec!["bridge", "git", "status", "--output", "text"],
-            vec!["-v", "bridge", "git", "status", "--output", "text"],
+            "status",
+            vec!["status", "--output", "text"],
+            vec!["-v", "status", "--output", "text"],
         ),
     ] {
         let default_text = heddle(&default_args, Some(temp.path()))
             .unwrap_or_else(|e| panic!("{label} default text should render: {e}"));
-        assert!(
-            !default_text.contains("Repository:"),
-            "{label} default text leaked the mode preamble: {default_text}"
-        );
+        if label == "status" {
+            assert!(
+                default_text.contains("Repository:"),
+                "status text should retain repository context: {default_text}"
+            );
+        } else {
+            assert!(
+                !default_text.contains("Repository:"),
+                "{label} default text leaked the mode preamble: {default_text}"
+            );
+        }
         // Suppressing the preamble must not leave the spacer that used to
         // follow it dangling as a leading blank line (heddle#275 r2).
         assert!(

@@ -11,11 +11,9 @@ use cli::cli::commands::cmd_semantic;
 use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
-    BridgeCommands, ExportCommands, ImportCommands,
+    ExportCommands, ImportCommands,
     cli_args::SyncCommands,
-    commands::{
-        cmd_bridge_git, cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git,
-    },
+    commands::{cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git},
 };
 use cli::{
     cli::{
@@ -30,12 +28,12 @@ use cli::{
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
             cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_adapter,
             cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
+            cmd_context_history, cmd_context_list, cmd_context_reason_git, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff,
+            cmd_discuss, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck,
+            cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge,
+            cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
             cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
             cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_adapter,
@@ -548,7 +546,19 @@ async fn async_main() -> Result<()> {
             thorough,
             bridge,
             repair,
-        } => cmd_fsck(&cli, *full, *thorough, *bridge, *repair),
+            ref_name,
+            prefer,
+            preview,
+        } => cmd_fsck(
+            &cli,
+            *full,
+            *thorough,
+            *bridge,
+            *repair,
+            ref_name.clone(),
+            prefer.clone(),
+            *preview,
+        ),
 
         Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 
@@ -723,6 +733,20 @@ async fn async_main() -> Result<()> {
                 cmd_context_suggest(&cli, args.r#ref.clone(), args.limit).await
             }
             ContextCommands::Audit(args) => cmd_context_audit(&cli, args.r#ref.clone()).await,
+            #[cfg(feature = "ingest")]
+            ContextCommands::Reason { command } => match command {
+                cli::cli::cli_args::ContextReasonCommands::Git(args) => cmd_context_reason_git(
+                    &cli,
+                    &args.path,
+                    args.max_sessions_per_commit,
+                    args.min_match_confidence,
+                    args.limit,
+                    args.claude_home.clone(),
+                    args.codex_home.clone(),
+                    args.opencode_home.clone(),
+                    args.dry_run,
+                ),
+            },
         },
 
         Commands::Integration { command } => cmd_integration(&cli, command.clone()),
@@ -737,11 +761,6 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
-
-        #[cfg(feature = "git-overlay")]
-        Commands::Bridge { command } => match command {
-            BridgeCommands::Git { command } => cmd_bridge_git(&cli, command.clone()),
-        },
 
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),

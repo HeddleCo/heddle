@@ -121,7 +121,7 @@ pub fn filter_for_audience<'a>(
 }
 
 /// Same as [`filter_for_audience`] but also reports per-scope drop
-/// counts. Used by `bridge git export` to populate
+/// counts. Used by `export git` to populate
 /// `Heddle-Annotations-Omitted` and the optional notes breakdown.
 pub fn filter_for_audience_with_drops<'a>(
     annotations: &'a [Annotation],
