@@ -1,7 +1,7 @@
 # Sley Integration Contract
 
 Status: current Heddle hardening note. Heddle now treats Sley as the Git-format
-engine for Git overlay, Git bridge, plain-Git inspection, and no-`git` runtime
+engine for Git Overlay, Git Projection, plain-Git inspection, and no-`git` runtime
 paths. This page records the Sley-side ergonomics Heddle wants next and the
 Heddle-side gates that should stay required while the integration settles.
 
@@ -51,7 +51,7 @@ let head = git.require_reference("refs/remotes/origin/main")?;
 ```
 
 Heddle would use `reference_exists` in health/verify checks and
-`require_reference` in import/export paths where absence is a hard Git boundary.
+`require_reference` in import/export paths where absence is a hard Git projection boundary.
 
 ### Separate Ref Resolution From Object Peeling
 

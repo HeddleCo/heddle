@@ -22,7 +22,7 @@ struct RuntimeContractParseSample {
 // Representative parseable invocations for every runtime leaf command in
 // CONTRACTS. The only intentionally skipped rows are non-runtime grouping
 // contracts whose Clap variants require a subcommand, e.g. `thread`,
-// `bridge git`, and `redact trust`.
+// Git projection grouping rows, and `redact trust`.
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
@@ -1204,7 +1204,6 @@ fn native_only_catalog_excludes_git_overlay_commands() {
     let catalog = build_command_catalog();
     for display in [
         "bridge",
-        "bridge git",
         "status",
         "sync git",
         "context reason git",

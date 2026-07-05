@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
-Heddle is an AI-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
+Heddle is an agent-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures and Git-compatible commits with explicit human and agent attribution
@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to adopt the repo
 
-Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. Use `heddle import git`, `heddle export git`, `heddle sync git`, and `heddle fsck --repair git` for explicit Git-adapter work; they operate on the checkout's real `.git` and do not create a hidden local mirror.
+Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. Use `heddle import git`, `heddle export git`, `heddle sync git`, and `heddle fsck --repair git` for explicit Git projection work; they operate on the checkout's real `.git` and do not create a hidden local mirror.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -71,7 +71,7 @@ The 1.0 stability criterion — coverage thresholds, performance budgets, format
 cargo install heddle-cli
 ```
 
-The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git-adapter-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
+The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git projection-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
 
 ### From source
 

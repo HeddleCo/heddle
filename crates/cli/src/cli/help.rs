@@ -4,7 +4,7 @@
 //!
 //! The Heddle CLI's default `heddle help` lists only the native loop
 //! from the command contract table. Advanced affordances, automation,
-//! admin commands, and Git adapter commands are reachable
+//! admin commands, and Git projection commands are reachable
 //! via `heddle help advanced` or `heddle help <topic>`. Per-verb help
 //! via `heddle <verb> --help` continues to derive from clap
 //! doc-comments.
@@ -100,7 +100,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
     match topic {
         [] => {
             let catalog = crate::cli::commands::build_command_catalog();
-            let _ = writeln!(out, "Heddle — AI-native version control");
+            let _ = writeln!(out, "Heddle — agent-native version control");
             let _ = writeln!(out);
             let _ = writeln!(out, "Common loop:");
             for name in primary_loop_verbs(&catalog) {
@@ -500,7 +500,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
-        "bridge" | "footer" | "notes" => BRIDGE_TOPIC,
+        "bridge" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
         _ => return None,
     })
@@ -510,8 +510,8 @@ const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automati
 \n\
 The default `heddle help` curates the native loop: init/adopt/clone,\n\
 status/diff/commit/start, ready/land/push/pull, resolve/continue/abort,\n\
-doctor/verify. Power nouns such as thread/workspace/remote/bridge/agent and\n\
-Git adapter commands live behind this topic. Use `heddle help\n\
+doctor/verify. Power nouns such as thread/workspace/remote/Git projection/agent and\n\
+Git projection commands live behind this topic. Use `heddle help\n\
 <verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
 docs.\n\
 \n\
@@ -641,7 +641,7 @@ Core nouns:
   Use it for risky edits, agent work, or parallel experiments without stash
   juggling.
 - Capture: a cheap recoverable save point on the current thread.
-- Commit: the normal save path; Git-overlay repos also write the Git boundary.
+- Commit: the normal save path; Git-overlay repos also write the Git Checkpoint.
 - Checkpoint: the advanced Git-overlay boundary for already-captured work.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
@@ -671,7 +671,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 
 | Git concept | Heddle concept + semantic difference |
 |-------------|--------------------------------------|
-| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git boundary. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
+| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git Checkpoint. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
 | Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
@@ -916,7 +916,7 @@ Start in an existing Git checkout:\n\
 Save and sync ordinary work:\n\
 \n\
     heddle diff\n\
-    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
     # advanced split: heddle capture -m \"...\" && heddle checkpoint -m \"...\"\n\
     heddle push\n\
 \n\
@@ -940,9 +940,9 @@ State-specific recovery:\n\
     Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
     Convert Git history to native Heddle storage: heddle adopt --ref <branch>\n";
 
-const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
+const GIT_PROJECTION_TOPIC: &str = "Git Projection — adopt existing Git repos without a hidden mirror.\n\
 \n\
-Use the bridge when you are standing in a normal Git checkout and want Heddle's\n\
+Use Git Projection when you are standing in a normal Git checkout and want Heddle's\n\
 captured states, isolated threads, merge previews, undo, and machine-safe JSON\n\
 while keeping Git remotes and commits available as interoperability surfaces.\n\
 \n\
@@ -964,7 +964,7 @@ Explicit conversion to native Heddle storage:\n\
 Daily loop:\n\
 \n\
     heddle status\n\
-    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
     heddle push                               # Git-overlay remotes use the top-level verb\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\

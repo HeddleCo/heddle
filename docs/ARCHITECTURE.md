@@ -4,7 +4,7 @@ This document describes Heddle's current architecture at a high level. It focuse
 
 ## System Model
 
-Heddle is an AI-native version control system built around three core ideas:
+Heddle is an agent-native version control system built around three core ideas:
 
 1. **Content-addressed storage** - immutable objects addressed by BLAKE3 content hash
 2. **Stable change identity** - logical changes keep stable identifiers even when history is rewritten
@@ -16,7 +16,7 @@ Heddle is an AI-native version control system built around three core ideas:
 
 - local repository model with immutable states
 - threads, markers, refs, oplog, and working tree management
-- remote sync and Git bridge
+- remote sync and Git projection
 - provenance-backed local blame and rewrite preservation
 - semantic diff support
 - multi-agent worktrees and agent registry
@@ -257,7 +257,7 @@ Hosted Heddle has two major layers.
 - repository object access
 - refs and oplog behavior
 - content inspection APIs
-- sync and Git bridge support
+- sync and Git projection support
 
 ### Control plane
 
