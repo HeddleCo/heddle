@@ -77,9 +77,8 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
         // Peel off hosted-network remotes; the rest fetch via the overlay
         // exporter. A repo with a mixed set gets each remote routed by scheme.
-        let (hosted_remotes, overlay_remotes): (Vec<String>, Vec<String>) = remotes
-            .into_iter()
-            .partition(|name| {
+        let (hosted_remotes, overlay_remotes): (Vec<String>, Vec<String>) =
+            remotes.into_iter().partition(|name| {
                 super::remote::push_target_is_hosted_network(&repo, Some(name.as_str()))
             });
 

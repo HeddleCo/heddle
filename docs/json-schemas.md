@@ -187,69 +187,6 @@ in-progress operation.
     "default_remote": null,
     "clone_verification": "not_applicable",
     "machine_contract": "available",
-    "machine_contract_coverage": {
-      "status": "available",
-      "verified_scope": "everyday_and_agent",
-      "advanced_scope": "advanced_internal_admin",
-      "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 221,
-      "catalog_mutating_commands_total": 112,
-      "json_commands_total": 175,
-      "json_mutating_commands_total": 107,
-      "json_commands_with_schema": 128,
-      "json_commands_with_accepted_opaque_schema": 47,
-      "json_commands_without_schema": 0,
-      "verified_scope_json_commands_total": 43,
-      "verified_scope_json_commands_with_schema": 43,
-      "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-      "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 132,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-      "mutating_commands_total": 107,
-      "mutating_commands_with_schema": 80,
-      "mutating_commands_with_accepted_opaque_schema": 27,
-      "mutating_commands_without_schema": 0,
-      "verified_scope_mutating_commands_total": 26,
-      "verified_scope_mutating_commands_with_schema": 26,
-      "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-      "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 81,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 181,
-      "documented_schema_verbs_total": 181,
-      "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 47,
-      "accepted_opaque_schema_verbs_total": 47,
-      "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 97,
-      "jsonl_commands_total": 4,
-      "missing_schema_examples": [],
-      "missing_mutating_schema_examples": [],
-      "verified_scope_missing_schema_examples": [],
-      "verified_scope_accepted_opaque_schema_examples": [],
-      "advanced_scope_accepted_opaque_schema_examples": [
-        "help",
-        "transaction begin",
-        "transaction abort",
-        "transaction status",
-        "redact apply",
-        "redact list",
-        "redact show",
-        "redact trust add"
-      ],
-      "accepted_opaque_schema_examples": [
-        "help",
-        "transaction begin",
-        "transaction abort",
-        "transaction status",
-        "redact apply",
-        "redact list",
-        "redact show",
-        "redact trust add"
-      ],
-      "unaccepted_opaque_schema_examples": [],
-      "undocumented_schema_examples": []
-    },
     "summary": "Git overlay and Heddle agree",
     "recommended_action": null,
     "recovery_commands": [],
@@ -2200,7 +2137,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 Canonical surface for the Git-overlay bridge state. This is the
 advanced Git-adapter surface, so its recovery actions intentionally
-name `heddle bridge git import ...`. Native first-run flows should use
+name `heddle import git ...`. Native first-run flows should use
 the `heddle adopt --ref <branch>` recommendation from `status`,
 `init`, and `verification`. This is the only command whose JSON output
 carries `git_overlay_import_hint`.
@@ -2223,13 +2160,13 @@ movement, index, and worktree operations read and write the checkout's real
     "current_branch": "main",
     "missing_branch_count": 1,
     "missing_branches": ["support/import-me"],
-    "recommended_command": "heddle bridge git import --ref support/import-me"
+    "recommended_command": "heddle import git --ref support/import-me"
   },
   "git_overlay_health": {
     "status": "needs_import",
     "clean": false,
     "summary": "1 Git branch tip(s) still need Heddle import",
-    "recovery_commands": ["heddle bridge git import --ref support/import-me"],
+    "recovery_commands": ["heddle import git --ref support/import-me"],
     "checks": [
       {
         "name": "import",
@@ -2238,8 +2175,8 @@ movement, index, and worktree operations read and write the checkout's real
       }
     ]
   },
-  "recommended_action": "heddle bridge git import --ref support/import-me",
-  "recovery_commands": ["heddle bridge git import --ref support/import-me"]
+  "recommended_action": "heddle import git --ref support/import-me",
+  "recovery_commands": ["heddle import git --ref support/import-me"]
 }
 ```
 
@@ -2255,7 +2192,7 @@ movement, index, and worktree operations read and write the checkout's real
 | `git_overlay_import_hint.current_branch` | string | required when hint is present | Active branch on the Git side. |
 | `git_overlay_import_hint.missing_branch_count` | int | required when hint is present | Length of `missing_branches`. |
 | `git_overlay_import_hint.missing_branches` | array<string> | required when hint is present | Branch names visible only on the Git side. |
-| `git_overlay_import_hint.recommended_command` | string | required when hint is present | Suggested `heddle bridge git import …` invocation. |
+| `git_overlay_import_hint.recommended_command` | string | required when hint is present | Suggested `heddle import git …` invocation. |
 | `git_overlay_health` | object | required | Health summary derived from the shared verification engine. |
 | `recommended_action` | string | required | Top-level mirror of the verification engine's primary next command. |
 | `recommended_action_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for the primary action; `null` when none. |
@@ -2976,34 +2913,34 @@ key naming:
 
 | Verb | Shape |
 |------|-------|
-| `export` | `{"output_kind": "bridge_git_export", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
-| `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
+| `export` | `{"output_kind": "export_git", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
+| `import` | `{"output_kind": "import_git", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
+| `sync` | `{"output_kind": "sync_git", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 
-## `heddle bridge git export --output json`
+## `heddle export git --output json`
 
 Export emits:
 
 ```json
-{"output_kind": "bridge_git_export", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
+{"output_kind": "export_git", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
 
 Export requires an explicit destination and does not default to `.heddle/git`.
 
-## `heddle bridge git import --output json`
+## `heddle import git --output json`
 
 Import emits:
 
 ```json
-{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
+{"output_kind": "import_git", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
-## `heddle bridge git sync --output json`
+## `heddle sync git --output json`
 
 Sync emits:
 
 ```json
-{"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
+{"output_kind": "sync_git", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
 ### Bridge Git Import Fields
@@ -3131,26 +3068,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 132,
+    "advanced_scope_json_commands_total": 130,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 81,
+    "advanced_scope_mutating_commands_total": 79,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 221,
-    "catalog_mutating_commands_total": 112,
-    "json_commands_total": 175,
+    "catalog_commands_total": 219,
+    "catalog_mutating_commands_total": 110,
+    "json_commands_total": 173,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 128,
+    "json_commands_with_schema": 126,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 107,
+    "json_mutating_commands_total": 105,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 107,
+    "mutating_commands_total": 105,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 80,
+    "mutating_commands_with_schema": 78,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "219 command(s), 173 JSON command(s), 110 mutating command(s), 105 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3188,7 +3125,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "219 command(s), 173 JSON command(s), 110 mutating command(s), 105 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

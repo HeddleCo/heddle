@@ -24,8 +24,8 @@ use objects::{
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus,
-    Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
+    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
+    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
     ThreadView, describe_thread_advice, shell_quote,
@@ -39,9 +39,8 @@ use super::{
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state,
-        git_overlay_mutation_preflight_advice, override_trust_recommended_action,
-        serialize_empty_action_as_null,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        override_trust_recommended_action, serialize_empty_action_as_null,
     },
     mount_lifecycle,
     next_action::{NextActionValidationContext, write_full_command_json},

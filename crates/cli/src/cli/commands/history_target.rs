@@ -19,17 +19,14 @@
 //! [`resolve_state_id_bytes`] when you need the wire-form 16-byte
 //! representation (e.g. when handing it to a gRPC service stub).
 
-use heddle_core::status::next_action::canonical_adopt_ref_command;
-
 use anyhow::{Result, anyhow};
+use heddle_core::status::next_action::canonical_adopt_ref_command;
 use objects::{
     error::HeddleError,
     object::{ChangeId, State},
     store::ObjectStore,
 };
-use repo::{
-    ResolvePolicy, StateResolveFailure, resolve_state_for_command, Repository,
-};
+use repo::{Repository, ResolvePolicy, StateResolveFailure, resolve_state_for_command};
 
 use super::advice::RecoveryAdvice;
 

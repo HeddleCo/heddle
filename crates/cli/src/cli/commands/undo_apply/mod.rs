@@ -1392,11 +1392,8 @@ fn attach_git_head_to_branch(repo: &SleyRepository, branch: &str) -> Result<()> 
     if branch == "HEAD" {
         return Ok(());
     }
-    repo.set_head_symref(
-        format!("refs/heads/{branch}"),
-        HeadUpdateOptions::new(),
-    )
-    .map_err(|error| anyhow!("failed to attach Git HEAD to branch '{branch}': {error}"))?;
+    repo.set_head_symref(format!("refs/heads/{branch}"), HeadUpdateOptions::new())
+        .map_err(|error| anyhow!("failed to attach Git HEAD to branch '{branch}': {error}"))?;
     Ok(())
 }
 
@@ -2178,8 +2175,9 @@ impl AtomicMutation for RedoOp {
 
 #[cfg(test)]
 mod head_symref_tests {
-    use super::attach_git_head_to_branch;
     use sley::{HeadUpdateOptions, Repository as SleyRepository};
+
+    use super::attach_git_head_to_branch;
 
     #[test]
     fn attach_git_head_writes_legacy_head_bytes() {

@@ -3,8 +3,6 @@
 
 use std::collections::HashSet;
 
-use tracing::debug;
-
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, TreeEntryTarget},
@@ -15,6 +13,7 @@ use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
+use tracing::debug;
 
 use crate::bridge::{
     git_core::{
@@ -162,7 +161,7 @@ pub(crate) fn export_state(
     // durable across remotes; per-scope breakdowns ride on the opt-in
     // git note. For first-pass we audit nothing about the state's
     // annotation set (the audience defaults to "public"); a follow-up
-    // landed with `bridge git export --audience` threads the count
+    // landed with `export git --audience` threads the count
     // through here. See `git_util::build_commit_message_with_footer`.
     let hosted_url = heddle_repo
         .config()

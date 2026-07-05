@@ -142,26 +142,18 @@ fn merge_preview_exits_zero() {
 }
 
 #[test]
-fn bridge_git_import_exits_zero() {
+fn import_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
 }
 
 #[test]
-fn bridge_git_sync_exits_zero() {
+fn sync_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
-    assert_exit(&["bridge", "git", "sync"], repo.path(), 0);
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
+    assert_exit(&["sync", "git"], repo.path(), 0);
 }
 
 #[test]
@@ -170,11 +162,7 @@ fn bridge_git_reconcile_without_side_is_data_err() {
     // `reconcile_direction_required` refusal (no `--prefer` side) was the
     // `74 IoErr` catch-all before HeddleCo/heddle#252.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
     assert_exit(
         &["bridge", "git", "reconcile", "--ref", "main"],
         repo.path(),

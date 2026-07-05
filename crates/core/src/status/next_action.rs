@@ -95,7 +95,11 @@ fn ready_next_action(input: NextActionInput<'_>) -> String {
 fn current_thread_next_action(input: NextActionInput<'_>) -> String {
     let thread_action = non_empty_action(input.fallback);
     if input.operation.is_none()
-        && thread_recovery_precedes_publish(input.remote_tracking, input.thread_health, thread_action)
+        && thread_recovery_precedes_publish(
+            input.remote_tracking,
+            input.thread_health,
+            thread_action,
+        )
     {
         return thread_action.unwrap_or_default().to_string();
     }
@@ -177,7 +181,7 @@ pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
 }
 
 pub fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
-    heddle_action(["bridge", "git", "import", "--ref", ref_name])
+    heddle_action(["import", "git", "--ref", ref_name])
 }
 
 pub fn canonical_bridge_reconcile_ref_preview_command(
@@ -387,7 +391,7 @@ mod tests {
         assert_eq!(
             remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
                 .as_deref(),
-            Some("heddle bridge git import --ref origin/main")
+            Some("heddle import git --ref origin/main")
         );
         assert_eq!(
             remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
@@ -399,13 +403,8 @@ mod tests {
     fn current_thread_recovery_precedes_publish_when_thread_action_is_primary() {
         let remote = remote("feature", "origin/feature", 1, 0, "heddle push");
         let action = effective_next_action(
-            NextActionInput::default(
-                None,
-                Some(&remote),
-                None,
-                Some("heddle commit -m \"...\""),
-            )
-            .current_thread(Some("dirty_worktree")),
+            NextActionInput::default(None, Some(&remote), None, Some("heddle commit -m \"...\""))
+                .current_thread(Some("dirty_worktree")),
         );
         assert_eq!(action, "heddle commit -m \"...\"");
     }

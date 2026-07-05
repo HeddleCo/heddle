@@ -40,12 +40,12 @@ use super::{
     },
     next_action::{NextActionValidationContext, write_command_json},
 };
+#[cfg(feature = "client")]
+use crate::config::UserConfig;
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-#[cfg(feature = "client")]
-use crate::config::UserConfig;
 
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
@@ -1399,7 +1399,7 @@ fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupAct
         StatusRepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         StatusRepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
+    } else if action.starts_with("heddle import git") {
         StatusRepositorySetupActionKind::BridgeImport
     } else {
         StatusRepositorySetupActionKind::Other

@@ -373,7 +373,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn bridge_ingest_required(map_path: &str, git_path: &str) -> Self {
-        let command = format!("heddle bridge git import --path {git_path}");
+        let command = format!("heddle import git --path {git_path}");
         Self::safety_refusal(
             "bridge_ingest_required",
             format!("No Git SHA map exists at {map_path}"),
@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn git_bridge_shallow_clone_returns_typed_advice() {
-        let retry_command = "heddle bridge git import --ref main";
+        let retry_command = "heddle import git --ref main";
         let error = GitBridgeError::ShallowClone {
             repository: std::path::PathBuf::from("/tmp/shallow"),
             retry_command: retry_command.to_string(),

@@ -40,8 +40,8 @@ const SWEPT_COVERAGE: &[&str] = &[
     "merge",
     "push",
     "pull",
-    "bridge git import",
-    "bridge git sync",
+    "import git",
+    "sync git",
     "bridge git reconcile",
 ];
 
@@ -98,12 +98,11 @@ fn adopted_git_overlay() -> TempDir {
     git(&["add", "a.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
     heddle_output(&["adopt"], Some(dir)).expect("heddle adopt");
-    heddle_output(&["bridge", "git", "import", "--ref", "main"], Some(dir))
-        .expect("heddle bridge git import");
+    heddle_output(&["import", "git", "--ref", "main"], Some(dir)).expect("heddle import git");
     temp
 }
 
-/// `init` / `status` / `verify` / `merge` / `bridge git import|sync` exit
+/// `init` / `status` / `verify` / `merge` / `import git|sync` exit
 /// `0` on their documented happy paths, so this lint covers them through
 /// adjacent error conditions: an unparseable invocation (`init`), a
 /// missing-state lookup (`status`/`verify`/`merge` share the
@@ -154,9 +153,9 @@ fn cases() -> Vec<ErrorCase> {
             fixture: init_repo,
         },
         ErrorCase {
-            covers: &["bridge git import"],
-            label: "bridge git import of a missing ref",
-            argv: &["bridge", "git", "import", "--ref", "no-such-branch"],
+            covers: &["import git"],
+            label: "import git of a missing ref",
+            argv: &["import", "git", "--ref", "no-such-branch"],
             fixture: adopted_git_overlay,
         },
         ErrorCase {
@@ -165,9 +164,9 @@ fn cases() -> Vec<ErrorCase> {
             // exercise it directly so a regression that drops Sync's `Next:`
             // fields fails the lint. A `--path` at a nonexistent source
             // reaches the handler (export runs, then the import half fails).
-            covers: &["bridge git sync"],
-            label: "bridge git sync against a missing source",
-            argv: &["bridge", "git", "sync", "--path", "/heddle/no/such/source"],
+            covers: &["sync git"],
+            label: "sync git against a missing source",
+            argv: &["sync", "git", "--path", "/heddle/no/such/source"],
             fixture: adopted_git_overlay,
         },
         ErrorCase {

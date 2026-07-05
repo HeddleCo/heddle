@@ -63,9 +63,8 @@ fn git_overlay_imports_explicit_remote_tracking_branch_ref() {
         &[
             "--output",
             "json",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             ".",
             "--ref",
@@ -99,9 +98,8 @@ fn git_overlay_import_missing_local_branch_suggests_remote_tracking_ref() {
 
     let err = heddle(
         &[
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             ".",
             "--ref",

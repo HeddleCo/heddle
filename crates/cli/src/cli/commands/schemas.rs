@@ -128,9 +128,7 @@ schema_registry! {
     (&["transaction commit"], TransactionCommitSchema),
     (&["export git"], BridgeExportSchema),
     (&["import git"], BridgeImportSchema),
-    (&["bridge git export"], BridgeExportSchema),
-    (&["bridge git import"], BridgeImportSchema),
-    (&["bridge git sync"], BridgeSyncSchema),
+    (&["sync git"], BridgeSyncSchema),
     (&["bridge git reconcile"], BridgeGitReconcileSchema),
     (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
     (&["stash list"], StashListSchema),
@@ -3354,9 +3352,9 @@ mod tests {
         let catalog = command_catalog::build_command_catalog();
         for verb in [
             "bridge git status",
-            "bridge git import",
-            "bridge git export",
-            "bridge git sync",
+            "import git",
+            "export git",
+            "sync git",
             "bridge git reconcile",
             "bridge git reason",
             "git-overlay",

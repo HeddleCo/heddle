@@ -36,7 +36,7 @@ fn commit_file(path: &std::path::Path, file: &str, body: &str, message: &str) ->
 }
 
 #[test]
-fn git_overlay_interop_bridge_git_import_imports_current_branch() {
+fn git_overlay_interop_import_git_imports_current_branch() {
     let temp = TempDir::new().unwrap();
     init_git(temp.path());
     commit_file(temp.path(), "story.txt", "one\n", "seed");
@@ -47,9 +47,7 @@ fn git_overlay_interop_bridge_git_import_imports_current_branch() {
     assert!(parsed["current_state"].is_null());
 
     let import = heddle(
-        &[
-            "--output", "json", "bridge", "git", "import", "--ref", "main",
-        ],
+        &["--output", "json", "import", "git", "--ref", "main"],
         Some(temp.path()),
     )
     .unwrap();
@@ -57,7 +55,7 @@ fn git_overlay_interop_bridge_git_import_imports_current_branch() {
     assert!(
         parsed_import["branches_synced"].as_u64() == Some(1)
             || import.contains("Synced 1 branches to threads"),
-        "bridge git import should import branch: {import}"
+        "import git should import branch: {import}"
     );
 
     let status = status_json(temp.path());
@@ -73,11 +71,7 @@ fn git_overlay_interop_native_git_commit_stays_direct_backed_until_import() {
     init_git(temp.path());
     let first_tip = commit_file(temp.path(), "story.txt", "one\n", "seed");
     heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     let first_state = status_json(temp.path())["current_state"]
         .as_str()
         .unwrap()
@@ -93,11 +87,7 @@ fn git_overlay_interop_native_git_commit_stays_direct_backed_until_import() {
     );
     assert_eq!(before_import["verification"]["status"], "clean");
 
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     let after_import = status_json(temp.path());
     assert_ne!(after_import["current_state"], first_state);
     assert_eq!(
@@ -135,7 +125,7 @@ fn git_overlay_interop_fetch_sync_then_heddle_status_stays_clean() {
     configure_git(&work);
     git(&work, &["switch", "main"]);
     heddle(&["status", "--output", "json"], Some(&work)).unwrap();
-    heddle(&["bridge", "git", "import", "--ref", "main"], Some(&work)).unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(&work)).unwrap();
 
     git(
         temp.path(),
@@ -174,11 +164,7 @@ fn git_overlay_interop_git_conflict_routes_to_no_git_handoff() {
     init_git(temp.path());
     commit_file(temp.path(), "clash.txt", "base\n", "seed");
     heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     git(temp.path(), &["switch", "-c", "side"]);
     commit_file(temp.path(), "clash.txt", "side\n", "side change");

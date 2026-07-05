@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared merge planning seam for preview and apply flows.
 
-use anyhow::{Result, anyhow};
 use ::merge::{ConflictLabels, TreeMergeResult, merge_trees};
+use anyhow::{Result, anyhow};
 use objects::{object::ChangeId, store::ObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{
+    RepositoryMergeBlobSource, map_tree_merge_error,
     merge_relation::{MergeRelation, MergeRelationKind},
-    map_tree_merge_error, tree_merge_options, RepositoryMergeBlobSource,
+    tree_merge_options,
 };
 use crate::cli::commands::RecoveryAdvice;
 

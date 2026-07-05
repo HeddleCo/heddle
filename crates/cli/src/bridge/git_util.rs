@@ -142,7 +142,7 @@ pub struct ExportedRef {
 /// `commits_imported` counts every commit visited by the ancestry walk;
 /// `states_created` counts only the commits whose heddle state did not
 /// yet exist in the store. They diverge whenever a ref is re-imported
-/// (the second `bridge git import --ref X` against the same source
+/// (the second `import git --ref X` against the same source
 /// reports `commits_imported = N` and `states_created = 0`) — that
 /// distinction is what surfaces "already in sync" instead of leaving
 /// the operator staring at a misleading `commits_imported: 0`

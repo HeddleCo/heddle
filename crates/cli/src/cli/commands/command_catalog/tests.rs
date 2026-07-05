@@ -129,11 +129,9 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "export"], &["bridge", "git", "export"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "sync"], &["bridge", "git", "sync"]),
+    sample(&["sync", "git"], &["sync", "git"]),
     #[cfg(feature = "git-overlay")]
     sample(
         &["bridge", "git", "reconcile"],
@@ -536,7 +534,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
         "heddle clone /tmp/source <path> --thread main",
-        "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        "heddle import git --path <full-git-repo> --ref <ref>",
         "heddle thread promote main",
         "heddle thread resolve main",
     ] {
@@ -546,8 +544,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
     #[cfg(feature = "git-overlay")]
     {
         for action in [
-            "heddle bridge git import --ref main",
-            "heddle bridge git import --ref origin/main",
+            "heddle import git --ref main",
+            "heddle import git --ref origin/main",
             "heddle merge origin/main --preview",
             "heddle bridge git reconcile --ref main --preview",
             "heddle bridge git reconcile --prefer heddle --ref main --preview",
@@ -646,15 +644,14 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert!(!dynamic_clone.agent_may_fill);
 
     let import =
-        recommended_action_template("heddle bridge git import --path <full-git-repo> --ref <ref>")
+        recommended_action_template("heddle import git --path <full-git-repo> --ref <ref>")
             .expect("shallow import recovery placeholder should resolve");
     assert_eq!(
         import.argv_template,
         vec![
             "heddle",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -1228,9 +1225,7 @@ fn native_only_catalog_excludes_git_overlay_commands() {
         "bridge",
         "bridge git",
         "bridge git status",
-        "bridge git import",
-        "bridge git export",
-        "bridge git sync",
+        "sync git",
         "bridge git reconcile",
         "bridge git reason",
         "git-overlay",
@@ -1392,12 +1387,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth create-service-token",
             "import git",
             "export git",
+            "sync git",
             "bridge git status",
-            "bridge git export",
-            "bridge git import",
-            "bridge git sync",
             "bridge git reconcile",
-                    "capture",
+            "capture",
             "checkpoint",
             "cherry-pick",
             "clean",

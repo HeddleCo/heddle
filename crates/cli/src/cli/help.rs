@@ -460,7 +460,7 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     }
 
     // `heddle <path> --help` pre-parse direct help (e.g. `clone --help`,
-    // `bridge git import --help`).
+    // `import git --help`).
     if let Some(rendered) = render_direct_help_for_raw(&command, &raw) {
         return Some(rendered);
     }
@@ -848,7 +848,7 @@ const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works
 \n\
 Supported Git-overlay workflows use native/library paths and are tested with\n\
 `PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `bridge git\n\
-import`, `bridge git status`, `bridge git sync/export` where implemented,\n\
+import`, `bridge git status`, `sync git`, and `export git` where implemented,\n\
 `thread list`, `workspace`, `log`, `show`, `diff`, `checkpoint`, `merge`,\n\
 `ready`, and `fsck`.\n\
 \n\
@@ -955,7 +955,7 @@ First run:\n\
 Manual setup, when you want one ref at a time:\n\
 \n\
     heddle init\n\
-    heddle bridge git import --ref <branch>\n\
+    heddle import git --ref <branch>\n\
 \n\
 Explicit conversion to native Heddle storage:\n\
 \n\

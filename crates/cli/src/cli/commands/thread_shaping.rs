@@ -558,13 +558,14 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
             vec![details.primary_command.to_string()],
         )),
         ThreadShapingError::ThreadNotFound { thread_id, action } => {
-            anyhow!(super::thread_cmd::thread_not_found_advice(&thread_id, action))
+            anyhow!(super::thread_cmd::thread_not_found_advice(
+                &thread_id, action
+            ))
         }
         ThreadShapingError::ImportedGitRefNotManaged { thread_id } => {
             let reconcile_preview =
                 heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command(
-                    None,
-                    &thread_id,
+                    None, &thread_id,
                 );
             anyhow!(RecoveryAdvice::safety_refusal(
                 "imported_git_ref_not_managed_thread",
@@ -572,7 +573,9 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
                 format!(
                     "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
                 ),
-                format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
+                format!(
+                    "thread ref '{thread_id}' exists, but no managed thread metadata exists for it"
+                ),
                 "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
                 "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
                 reconcile_preview.clone(),
@@ -789,10 +792,8 @@ mod tests {
             heddle_core::NoPathsMatchedDetails {
                 action: "thread move",
                 error: "No captured paths matched the requested prefixes",
-                unsafe_condition:
-                    "the source thread has no captured paths under the requested prefixes",
-                would_change:
-                    "thread move would not move any captured files into the target thread",
+                unsafe_condition: "the source thread has no captured paths under the requested prefixes",
+                would_change: "thread move would not move any captured files into the target thread",
                 primary_command: "heddle thread show",
             },
         ));

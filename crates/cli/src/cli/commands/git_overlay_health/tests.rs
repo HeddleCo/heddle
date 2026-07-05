@@ -5,18 +5,18 @@
 //! the `mod tests` body moved into this sibling file unchanged (de-indented
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
-use objects::object::ThreadName;
 use heddle_core::status::next_action::{
     canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
     remote_tracking_next_action,
 };
+use objects::object::ThreadName;
 use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
 
 use super::{
-    RepositoryVerificationState, VerificationActionPlan, action_template,
-    clean_health, machine_contract_coverage, remote_drift_decision,
-    repository_setup_guidance, repository_verification_blocked_advice,
+    RepositoryVerificationState, VerificationActionPlan, action_template, clean_health,
+    machine_contract_coverage, remote_drift_decision, repository_setup_guidance,
+    repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;
 
@@ -91,7 +91,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
         action_template(&import)
             .expect("import command should expose a template")
             .argv_template[1..],
-        ["bridge", "git", "import", "--ref", "feature with spaces"]
+        ["import", "git", "--ref", "feature with spaces"]
     );
 
     let reconcile =
@@ -167,8 +167,8 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 #[test]
 fn repository_verification_blocked_advice_keeps_primary_override_first() {
     let trust = verification_state(
-        "heddle bridge git import --ref origin/main",
-        vec!["heddle bridge git import --ref origin/main".to_string()],
+        "heddle import git --ref origin/main",
+        vec!["heddle import git --ref origin/main".to_string()],
     );
 
     let advice = repository_verification_blocked_advice(
@@ -246,7 +246,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
     assert_eq!(
         remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
             .as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
@@ -263,12 +263,12 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     assert_eq!(unimported.status, "remote_diverged");
     assert_eq!(
         unimported.primary_action.as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         unimported.recovery_commands,
         vec![
-            "heddle bridge git import --ref origin/main",
+            "heddle import git --ref origin/main",
             "heddle bridge git reconcile --ref origin/main --preview"
         ]
     );
@@ -280,12 +280,12 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     let stale_thread = remote_drift_decision(&repo, &diverged);
     assert_eq!(
         stale_thread.primary_action.as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         stale_thread.recovery_commands,
         vec![
-            "heddle bridge git import --ref origin/main",
+            "heddle import git --ref origin/main",
             "heddle bridge git reconcile --ref origin/main --preview"
         ]
     );

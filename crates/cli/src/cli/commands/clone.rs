@@ -1595,8 +1595,12 @@ fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "monorepo_clone_option_unsupported",
             format!("{flag} is not supported with --recursive monorepo clones"),
-            format!("Run the monorepo clone without `{flag}`, or clone the individual spool with `{flag}` non-recursively."),
-            format!("`{flag}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk"),
+            format!(
+                "Run the monorepo clone without `{flag}`, or clone the individual spool with `{flag}` non-recursively."
+            ),
+            format!(
+                "`{flag}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk"
+            ),
             "accepting the flag could leave nodes materialized under mismatched fetch semantics",
             "no destination directory or spool content was written",
             "heddle clone <hosted-spool> <path> --recursive",

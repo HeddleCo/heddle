@@ -81,8 +81,8 @@ fn reject_shallow_source(source: &Path, refs: &[String]) -> GitResult<()> {
 
 fn shallow_import_retry_command(wanted_refs: Option<&HashSet<String>>) -> String {
     match wanted_refs.and_then(|refs| refs.iter().next()) {
-        Some(_) => "heddle bridge git import --path <full-git-repo> --ref <ref>".to_string(),
-        None => "heddle bridge git import --path <full-git-repo>".to_string(),
+        Some(_) => "heddle import git --path <full-git-repo> --ref <ref>".to_string(),
+        None => "heddle import git --path <full-git-repo>".to_string(),
     }
 }
 

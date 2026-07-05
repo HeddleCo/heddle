@@ -46,12 +46,12 @@ mod merge_algo;
 mod merge_plan;
 mod merge_relation;
 
-use git_commit::{GitCommitInfo, GitCommitPreview};
 use ::merge::{
     ConflictLabels, MergeBlobSource, MergeError, MergeOptions, MergeStrategy, RenameMatcherStats,
     RenameOptions, SemanticMergeFn, SemanticSimilarityFn, detect_renames_between_trees,
     merge_trees,
 };
+use git_commit::{GitCommitInfo, GitCommitPreview};
 use merge_algo::apply_merged_tree;
 use merge_plan::MergePlan;
 use merge_relation::MergeRelationKind;
@@ -1865,8 +1865,7 @@ pub(crate) fn bench_detect_renames(
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> Result<(usize, RenameMatcherStats)> {
-    let detection =
-        detect_renames_between_trees(store, base_tree, branch_tree, rename_options())?;
+    let detection = detect_renames_between_trees(store, base_tree, branch_tree, rename_options())?;
     Ok((detection.renames.len(), detection.stats))
 }
 
@@ -1877,12 +1876,8 @@ fn fast_forward_renames(
 ) -> Result<(Vec<RenameEntry>, Vec<RenameEntry>)> {
     let from_tree = load_state_tree(repo, from)?;
     let to_tree = load_state_tree(repo, to)?;
-    let detection = detect_renames_between_trees(
-        repo.store(),
-        &from_tree,
-        &to_tree,
-        rename_options(),
-    )?;
+    let detection =
+        detect_renames_between_trees(repo.store(), &from_tree, &to_tree, rename_options())?;
 
     let renames: Vec<RenameEntry> = detection
         .renames

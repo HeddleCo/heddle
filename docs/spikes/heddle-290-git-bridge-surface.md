@@ -46,7 +46,7 @@ called inline by both `heddle commit`
 (`crates/cli/src/cli/commands/workflow.rs:375`, `:536`). The user never runs a bridge verb to get their own
 Heddle work onto the git side — it is there the moment they commit.
 
-Consequence: in overlay, `bridge git export` has (almost) nothing to mirror,
+Consequence: in overlay, `export git` has (almost) nothing to mirror,
 because the states are already on the git side. That is the "exported 0
 states" surprise #289 addresses.
 
@@ -68,14 +68,14 @@ and its `recovery_commands` is `canonical_adopt_ref_command(&tip.branch)`
 (`crates/cli/src/cli/cli_args/commands_args.rs:41-56`), not a `bridge git`
 verb.
 
-### `adopt` and `bridge git import` share one engine
+### `adopt` and `import git` share one engine
 
 `heddle adopt` is not a separate import path. It calls the same
-`import_all` / `import_selected_refs` functions that `bridge git import`
+`import_all` / `import_selected_refs` functions that `import git`
 calls:
 
 - `adopt`: `crates/cli/src/cli/commands/adopt.rs:82-86`.
-- `bridge git import`: `crates/cli/src/cli/commands/bridge.rs:659-662`.
+- `import git`: `crates/cli/src/cli/commands/bridge.rs:659-662`.
 
 `adopt` wraps them with an init-if-needed bootstrap: it runs
 `Repository::bootstrap_git_overlay` only when `.heddle` is absent, otherwise
@@ -98,9 +98,9 @@ which is catalogued `surface(...)`-only and carries no
 | bridge verb | tier | canonical → | kind |
 |---|---|---|---|
 | `bridge git status` | advanced | `status` | direct_command |
-| `bridge git export` | advanced | `push` | direct_command |
-| `bridge git import` | advanced | `adopt` | workflow |
-| `bridge git sync` | advanced | `adopt` | workflow |
+| `export git` | advanced | `push` | direct_command |
+| `import git` | advanced | `adopt` | workflow |
+| `sync git` | advanced | `adopt` | workflow |
 | `bridge git reconcile` | advanced | `adopt` | workflow |
 | `bridge git push` | advanced | `push` | direct_command |
 | `bridge git pull` | advanced | `pull` | direct_command |

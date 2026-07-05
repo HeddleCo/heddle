@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Named argument structs for top-level CLI commands.
 
+#[cfg(feature = "git-overlay")]
+use super::commands_bridge::SyncCommands;
+
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -949,6 +952,11 @@ pub struct ReadyArgs {
 /// Arguments for the `sync` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct SyncArgs {
+    /// Optional sync target. Omit for operator/thread sync.
+    #[cfg(feature = "git-overlay")]
+    #[command(subcommand)]
+    pub command: Option<SyncCommands>,
+
     /// Thread to refresh (default: current thread).
     #[arg(long = "thread")]
     pub thread: Option<String>,

@@ -473,7 +473,7 @@ export interface BlameSchema {
   status?: string | null;
 }
 
-export interface BridgeGitExportSchema {
+export interface BridgeExportSchema {
   branches: ExportedRefSchema[];
   commits_total: number;
   destination: string;
@@ -481,32 +481,11 @@ export interface BridgeGitExportSchema {
   markers_synced: number;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "bridge_git_export";
+  output_kind: "export_git";
   replayed?: boolean | null;
   states_exported: number;
   tags: ExportedRefSchema[];
   threads_synced: number;
-}
-
-export interface BridgeGitImportSchema {
-  action?: string | null;
-  already_in_sync: boolean;
-  branches_synced: number;
-  commits_imported: number;
-  idempotency_status?: string | null;
-  lossy_entries: LossyImportEntrySchema[];
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "bridge_git_import";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_commands: string[];
-  replayed?: boolean | null;
-  skipped_non_commit_refs: number;
-  states_created: number;
-  status: string;
-  summary: string;
-  tags_synced: number;
 }
 
 export interface BridgeGitReasonSchema {
@@ -548,6 +527,27 @@ export interface BridgeGitStatusSchema {
   verification: RepositoryVerificationStateSchema;
 }
 
+export interface BridgeImportSchema {
+  action?: string | null;
+  already_in_sync: boolean;
+  branches_synced: number;
+  commits_imported: number;
+  idempotency_status?: string | null;
+  lossy_entries: LossyImportEntrySchema[];
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "import_git";
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  recovery_commands: string[];
+  replayed?: boolean | null;
+  skipped_non_commit_refs: number;
+  states_created: number;
+  status: string;
+  summary: string;
+  tags_synced: number;
+}
+
 export interface BridgeSyncSchema {
   action?: string | null;
   commits_exported_total: number;
@@ -556,7 +556,7 @@ export interface BridgeSyncSchema {
   markers_synced: number;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "bridge_git_sync";
+  output_kind: "sync_git";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
@@ -1100,21 +1100,6 @@ export interface ExpandedCollapseSchema {
   thread?: string | null;
 }
 
-export interface ExportGitSchema {
-  branches: ExportedRefSchema[];
-  commits_total: number;
-  destination: string;
-  idempotency_status?: string | null;
-  markers_synced: number;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "export_git";
-  replayed?: boolean | null;
-  states_exported: number;
-  tags: ExportedRefSchema[];
-  threads_synced: number;
-}
-
 export interface ExportedRefSchema {
   name: string;
   tip: string;
@@ -1263,27 +1248,6 @@ export interface HookUninstallSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   replayed?: boolean | null;
   [key: string]: unknown;
-}
-
-export interface ImportGitSchema {
-  action?: string | null;
-  already_in_sync: boolean;
-  branches_synced: number;
-  commits_imported: number;
-  idempotency_status?: string | null;
-  lossy_entries: LossyImportEntrySchema[];
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "import_git";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_commands: string[];
-  replayed?: boolean | null;
-  skipped_non_commit_refs: number;
-  states_created: number;
-  status: string;
-  summary: string;
-  tags_synced: number;
 }
 
 export interface IndexSchema {
@@ -3383,12 +3347,9 @@ export interface HeddleVerbOutputs {
   "auth create-service-token": AuthCreateServiceTokenSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
-  "bridge git export": BridgeGitExportSchema;
-  "bridge git import": BridgeGitImportSchema;
   "bridge git reason": BridgeGitReasonSchema;
   "bridge git reconcile": BridgeGitReconcileSchema;
   "bridge git status": BridgeGitStatusSchema;
-  "bridge git sync": BridgeSyncSchema;
   capture: CaptureSchema;
   checkpoint: CheckpointSchema;
   "cherry-pick": CherryPickSchema;
@@ -3421,7 +3382,7 @@ export interface HeddleVerbOutputs {
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;
   expand: ExpandSchema;
-  "export git": ExportGitSchema;
+  "export git": BridgeExportSchema;
   fetch: FetchSchema;
   fsck: FsckReport;
   "git-overlay": GitOverlayGuideSchema;
@@ -3430,7 +3391,7 @@ export interface HeddleVerbOutputs {
   "hook install": HookInstallSchema;
   "hook list": HookListSchema;
   "hook uninstall": HookUninstallSchema;
-  "import git": ImportGitSchema;
+  "import git": BridgeImportSchema;
   init: InitSchema;
   "integration doctor": IntegrationDoctorSchema;
   "integration install": IntegrationInstallSchema;
@@ -3497,6 +3458,7 @@ export interface HeddleVerbOutputs {
   "support revoke": SupportRevokeSchema;
   switch: SwitchCheckoutSchema;
   sync: SyncSchema;
+  "sync git": BridgeSyncSchema;
   "thread absorb": ThreadAbsorbSchema;
   "thread approvals": Array_of_ThreadApprovalSchema;
   "thread approve": ThreadApprovalSchema2;
@@ -3570,12 +3532,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "auth create-service-token",
   "auth logout",
   "auth status",
-  "bridge git export",
-  "bridge git import",
   "bridge git reason",
   "bridge git reconcile",
   "bridge git status",
-  "bridge git sync",
   "capture",
   "checkpoint",
   "cherry-pick",
@@ -3684,6 +3643,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "support revoke",
   "switch",
   "sync",
+  "sync git",
   "thread absorb",
   "thread approvals",
   "thread approve",

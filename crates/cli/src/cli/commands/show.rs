@@ -190,7 +190,10 @@ fn render_plain_git_show(
         if let Some(branch) = &probe.git_branch
             && probe.trust.recommended_action != canonical_adopt_ref_command(branch)
         {
-            println!("Then: {}", style::bold(&canonical_adopt_ref_command(branch)));
+            println!(
+                "Then: {}",
+                style::bold(&canonical_adopt_ref_command(branch))
+            );
         }
     }
     Ok(())

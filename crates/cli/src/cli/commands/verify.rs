@@ -10,10 +10,7 @@ use heddle_core::{
 };
 use repo::Repository;
 
-use super::{
-    RecoveryAdvice,
-    action_line::print_next,
-};
+use super::{RecoveryAdvice, action_line::print_next};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -531,7 +528,7 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
         RepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
+    } else if action.starts_with("heddle import git") {
         RepositorySetupActionKind::BridgeImport
     } else {
         RepositorySetupActionKind::Other

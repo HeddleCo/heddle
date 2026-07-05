@@ -1086,9 +1086,8 @@ fn try_three_way_merge_refresh(
     thread: &Thread,
     target_thread_name: &str,
 ) -> Result<ThreeWayMergeRefresh> {
-    use objects::object::Attribution;
-
     use ::merge::{ConflictLabels, MergeStrategy};
+    use objects::object::Attribution;
 
     use super::merge::{ThreeWayMergeOutcome, try_three_way_merge_between_tips};
 

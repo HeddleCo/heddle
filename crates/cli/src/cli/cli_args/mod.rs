@@ -54,7 +54,9 @@ pub use commands_args::{
     WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_bridge::{BridgeCommands, ExportCommands, GitCommands, GitSource, ImportCommands};
+pub use commands_bridge::{
+    BridgeCommands, ExportCommands, GitCommands, GitSource, ImportCommands, SyncCommands,
+};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
@@ -71,8 +73,7 @@ pub use commands_integration::{
 #[cfg(feature = "client")]
 pub use commands_main::PresenceCommands;
 pub use commands_main::{
-    ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands,
-    SessionCommands,
+    ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands, SessionCommands,
 };
 pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;

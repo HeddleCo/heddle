@@ -3,9 +3,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::status::next_action::{
-    NextActionInput, effective_next_action, non_empty_action,
-};
+use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 use objects::object::Tree;
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
@@ -878,10 +876,11 @@ fn trust_blocked_report_for(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli::commands::git_overlay_health;
     use heddle_core::status::next_action as core_next_action;
     use repo::{OperationKind, OperationScope};
+
+    use super::*;
+    use crate::cli::commands::git_overlay_health;
 
     fn report(merge_relation: &str, recommended_action: &str) -> ThreadPreviewReport {
         ThreadPreviewReport {
@@ -946,10 +945,25 @@ mod tests {
         let hint = import_hint();
 
         for (operation, remote_tracking, import_hint, fallback) in [
-            (Some(&operation), None, None, Some("heddle land --thread feature --no-push")),
-            (None, Some(&remote_ahead), None, Some("heddle land --thread feature --no-push")),
+            (
+                Some(&operation),
+                None,
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
+            (
+                None,
+                Some(&remote_ahead),
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
             (None, Some(&remote_diverged), None, None),
-            (None, None, None, Some("heddle land --thread feature --no-push")),
+            (
+                None,
+                None,
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
             (None, None, Some(&hint), None),
         ] {
             let cli_action =

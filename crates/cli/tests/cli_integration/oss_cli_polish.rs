@@ -80,12 +80,11 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
         "heddle status",
         "heddle adopt",
         "heddle init",
-        "heddle bridge git import --ref <branch>",
+        "heddle import git --ref <branch>",
         "heddle verify",
         "heddle commit -m",
         "heddle push",
         "heddle land --thread <name> --no-push",
-        "heddle bridge git reconcile --ref <branch> --preview",
         "Export metadata for Git readers",
     ] {
         assert!(
@@ -1412,7 +1411,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
         }
         assert!(
             source.contains("adopt")
-                || source.contains("bridge git import")
+                || source.contains("import git")
                 || source.contains("run_verify_recommended_action"),
             "{} should run one-command adoption, explicit import, or verify's recommended action",
             script.display()
@@ -1925,7 +1924,7 @@ fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
 }
 
 #[test]
-fn op_id_replays_bridge_git_export() {
+fn op_id_replays_export_git() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "export me\n").unwrap();
@@ -1942,9 +1941,8 @@ fn op_id_replays_bridge_git_export() {
             "json",
             "--op-id",
             &export_op_id,
-            "bridge",
-            "git",
             "export",
+            "git",
             "--destination",
             &export_dest_arg,
         ],
@@ -1958,9 +1956,8 @@ fn op_id_replays_bridge_git_export() {
             "json",
             "--op-id",
             &export_op_id,
-            "bridge",
-            "git",
             "export",
+            "git",
             "--destination",
             &export_dest_arg,
         ],
@@ -3195,11 +3192,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     json_value(
         temp.path(),
@@ -3258,11 +3251,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     let capture_text = heddle(
         &[
@@ -3689,11 +3678,7 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     let commit_text = heddle(
@@ -3785,9 +3770,7 @@ fn core_mutations_emit_post_verification_in_json() {
     heddle(&["init"], Some(temp.path())).unwrap();
     let import = json_value(
         temp.path(),
-        &[
-            "bridge", "git", "import", "--ref", "main", "--output", "json",
-        ],
+        &["import", "git", "--ref", "main", "--output", "json"],
     );
     assert!(
         import["already_in_sync"].as_bool().is_some(),
@@ -8969,8 +8952,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
     );
     let bridge_import = commands
         .iter()
-        .find(|entry| entry["display"] == "bridge git import")
-        .expect("bridge git import should be cataloged");
+        .find(|entry| entry["display"] == "import git")
+        .expect("import git should be cataloged");
     assert_eq!(bridge_import["canonical_action"]["command"], "adopt");
     assert_eq!(bridge_import["canonical_action"]["kind"], "workflow");
     assert_eq!(
@@ -11995,8 +11978,8 @@ fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::
 }
 
 #[test]
-fn bridge_git_import_after_clone_reports_commits_not_zero() {
-    // heddle#147: rerunning `bridge git import --ref master --path .`
+fn import_git_after_clone_reports_commits_not_zero() {
+    // heddle#147: rerunning `import git --ref master --path .`
     // after `heddle clone` used to land at `commits_imported: 0` even
     // though every commit on master had been imported during clone —
     // visually indistinguishable from "your import did nothing".
@@ -12020,11 +12003,11 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
 
     let json = heddle(
         &[
-            "--output", "json", "bridge", "git", "import", "--ref", "master", "--path", ".",
+            "--output", "json", "import", "git", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
-    .expect("rerun bridge git import");
+    .expect("rerun import git");
     let parsed: Value = serde_json::from_str(&json).expect("import JSON parses");
     assert_eq!(
         parsed["commits_imported"], 3,
@@ -12042,7 +12025,7 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
 
     let text = heddle(
         &[
-            "--output", "text", "bridge", "git", "import", "--ref", "master", "--path", ".",
+            "--output", "text", "import", "git", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
@@ -12257,12 +12240,10 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     git_commit_all_for_json_contract(temp.path(), "git side");
 
     let output = heddle_output(
-        &[
-            "--output", "json", "bridge", "git", "import", "--ref", "main",
-        ],
+        &["--output", "json", "import", "git", "--ref", "main"],
         Some(temp.path()),
     )
-    .expect("invoke bridge git import");
+    .expect("invoke import git");
     assert!(
         !output.status.success(),
         "diverged import should fail closed"
@@ -12299,14 +12280,13 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
 }
 
 #[test]
-fn bridge_git_import_schema_declares_already_in_sync() {
+fn import_git_schema_declares_already_in_sync() {
     // heddle#147 added `already_in_sync: bool` to the JSON output of
-    // `bridge git import`. The schema contract surfaced via
-    // `heddle schemas "bridge git import"` must list the field, or
+    // `import git`. The schema contract surfaced via
+    // `heddle schemas "import git"` must list the field, or
     // automation that validates against the schema will reject the
     // new payload shape.
-    let schema = heddle(&["schemas", "bridge git import"], None)
-        .expect("heddle schemas \"bridge git import\"");
+    let schema = heddle(&["schemas", "import git"], None).expect("heddle schemas \"import git\"");
     let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
     let props = parsed["properties"]
         .as_object()
@@ -12322,9 +12302,9 @@ fn bridge_git_import_schema_declares_already_in_sync() {
 }
 
 #[test]
-fn bridge_git_sync_after_clone_reports_zero_imported() {
+fn sync_git_after_clone_reports_zero_imported() {
     // heddle#147 made the import walker count every walked commit in
-    // `commits_imported`. `bridge git sync` re-uses the importer, so
+    // `commits_imported`. `sync git` re-uses the importer, so
     // a no-op sync of an already-synced overlay used to report the
     // full walked history as `commits_imported` — exactly the signal
     // operators rely on sync to suppress. Sync must keep its
@@ -12344,16 +12324,15 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
     )
     .expect("heddle clone");
 
-    let json = heddle(&["--output", "json", "bridge", "git", "sync"], Some(&work))
-        .expect("bridge git sync JSON");
+    let json = heddle(&["--output", "json", "sync", "git"], Some(&work)).expect("sync git JSON");
     let parsed: Value = inject_post_verification_at(
         &work,
-        &["bridge", "git", "sync"],
+        &["sync", "git"],
         serde_json::from_str(&json).expect("sync JSON parses"),
     );
-    assert_eq!(parsed["output_kind"], "bridge_git_sync");
+    assert_eq!(parsed["output_kind"], "sync_git");
     assert_eq!(parsed["status"], "completed");
-    assert_eq!(parsed["action"], "bridge git sync");
+    assert_eq!(parsed["action"], "sync git");
     assert_eq!(
         parsed["commits_imported"], 0,
         "no-op sync should report zero newly-imported commits, not the \
@@ -12361,11 +12340,10 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
     );
     assert_eq!(
         parsed["verification"]["verified"], true,
-        "bridge git sync JSON should include the post-sync verification contract: {json}"
+        "sync git JSON should include the post-sync verification contract: {json}"
     );
 
-    let text = heddle(&["--output", "text", "bridge", "git", "sync"], Some(&work))
-        .expect("bridge git sync text");
+    let text = heddle(&["--output", "text", "sync", "git"], Some(&work)).expect("sync git text");
     assert!(
         text.contains("imported: 0 commits") || text.contains("imported: 0"),
         "text output should also report zero imported on a no-op sync: {text}"
@@ -12429,11 +12407,11 @@ fn exit_codes_surface_in_json_catalog() {
     let bridge_import = catalog
         .commands
         .iter()
-        .find(|c| c.display == "bridge git import")
-        .expect("bridge git import command in catalog");
+        .find(|c| c.display == "import git")
+        .expect("import git command in catalog");
     assert!(
         bridge_import.exit_codes.iter().any(|c| c.code == 65),
-        "bridge git import must surface DataErr (65) for malformed repos"
+        "import git must surface DataErr (65) for malformed repos"
     );
 }
 
@@ -12448,11 +12426,7 @@ fn read_commands_gate_repository_preamble_on_verbose() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();
 

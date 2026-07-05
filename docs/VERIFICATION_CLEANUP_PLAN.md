@@ -73,8 +73,8 @@ Use the glossary terms in `CONTEXT.md` exactly.
 - Public `bridge git` commands should retire in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` should be removed; it exists to initialize the persistent mirror that the target model deletes.
 - `bridge git status` should be removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
-- `bridge git import` becomes `import git`; `bridge git export` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
-- `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` remains until top-level sync fully covers the explicit bidirectional bridge workflow.
+- `import git` becomes `import git`; `export git` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
+- `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` is removed in favor of `sync git` for explicit bidirectional Git projection.
 - `export git` must require an explicit destination or named remote target. It must not create hidden repo-local Git state.
 - `import git` and `export git` should both support dry-run JSON.
 - Lossy import must stay explicit with strong naming, such as `--allow-lossy`. If byte-identical Git export is expected, import captures residuals rather than silently degrading fidelity.
@@ -118,7 +118,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 ### Track B: Bridge Mirror Retirement
 
 1. Add Raw Git Object Residual durable objects and fsck checks without deleting `.heddle/git` yet.
-2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers while legacy `bridge git import/export` remain available for transition.
+2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers, then removed legacy `bridge git import/export` during cleanup.
 3. Route top-level Git remote `push` / `pull` / `sync` by remote capability.
 4. Teach checkout write-through, export, push, sync, clone, and reconstruction paths to compose reconstructed Heddle state plus residuals without requiring a persistent bare mirror.
 5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck --repair git` performs explicit metadata-only Git Projection Mapping repair and reruns bridge checks; residual validation remains follow-on work.
@@ -171,7 +171,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Export/write-through can use residuals instead of the mirror for lossy objects.
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
 5. Retire public bridge/mirror workflow
-   - Public `bridge git init/push/pull` are removed; `status` and `sync` remain until replacement diagnostics and bidirectional sync routing are complete.
+   - Public `bridge git init/push/pull/import/export/sync` are removed; `status`, `reconcile`, and `reason` remain until replacement diagnostics, repair, and ingest surfaces are complete.
    - Top-level `push`/`pull`/`sync` route Git remotes.
    - Normal flows no longer create persistent `.heddle/git`.
    - Maintenance cleanup can remove migrated mirrors.

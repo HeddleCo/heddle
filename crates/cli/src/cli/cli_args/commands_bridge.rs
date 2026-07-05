@@ -36,7 +36,7 @@ impl GitSource {
     }
 }
 
-fn parse_git_source(s: &str) -> Result<GitSource, String> {
+pub(crate) fn parse_git_source(s: &str) -> Result<GitSource, String> {
     GitSource::parse(s)
 }
 
@@ -87,6 +87,16 @@ pub enum ExportCommands {
     },
 }
 
+#[derive(Subcommand, Clone, Debug)]
+pub enum SyncCommands {
+    /// Bidirectional sync with Git (export + import).
+    Git {
+        /// Local path or git URL to sync with.
+        #[arg(short, long, value_parser = parse_git_source)]
+        path: Option<GitSource>,
+    },
+}
+
 #[derive(Subcommand, Clone)]
 pub enum GitCommands {
     /// Show the current state of the Git overlay bridge.
@@ -97,59 +107,6 @@ pub enum GitCommands {
     /// is the canonical place to consume bridge-status information for
     /// scripts; other `--output json` outputs intentionally omit it.
     Status,
-    /// Export Heddle states to Git.
-    ///
-    /// Writes a complete bare git repository at `--destination` containing
-    /// every reachable Heddle state as a git commit, with branches and tags
-    /// mirroring Heddle's threads and markers.
-    Export {
-        /// Destination path for the exported git repository. Must be writable;
-        /// will be initialized as a bare repo if it does not already exist.
-        #[arg(short, long)]
-        destination: Option<std::path::PathBuf>,
-    },
-
-    /// Import Git commits to Heddle.
-    ///
-    /// Walks local branches and tags by default. To import remote-tracking
-    /// refs (`refs/remotes/*`), name them explicitly with `--ref`.
-    /// Reflog-only history is not part of the public bridge import surface.
-    ///
-    /// `--path` accepts either a local filesystem path
-    /// (`/tmp/some-repo`, `./.git`) or a git URL — `https://...`,
-    /// `ssh://...`, `git://...`, `git@host:owner/repo.git`, or
-    /// `file://...`. URL imports are cloned into a heddle-managed temp
-    /// directory and then imported the same way local imports are.
-    /// Authentication for private URL sources uses Git-compatible
-    /// credential files/config and the host SSH agent when available.
-    Import {
-        /// Local path or git URL to import from.
-        #[arg(short, long, value_parser = parse_git_source)]
-        path: Option<GitSource>,
-
-        /// Ref names to import (repeatable). Scopes the import to the
-        /// listed branches, tags, or remote-tracking refs; omit to
-        /// import all branches and tags.
-        #[arg(long = "ref", value_name = "REF")]
-        refs: Vec<String>,
-
-        /// Accept git tree entries Heddle cannot represent losslessly.
-        ///
-        /// By default import fails on the first unrepresentable tree entry
-        /// and names the offending path. With this flag, import restores the
-        /// historical drop/convert behavior and prints an end-of-run summary
-        /// of every affected entry.
-        #[arg(long)]
-        lossy: bool,
-    },
-
-    /// Bidirectional sync with Git (export + import).
-    Sync {
-        /// Local path or git URL to sync with.
-        #[arg(short, long, value_parser = parse_git_source)]
-        path: Option<GitSource>,
-    },
-
     /// Preview a recovery path when a Git branch and Heddle thread diverge.
     Reconcile {
         /// Which local side should be treated as authoritative when applying.
@@ -168,8 +125,8 @@ pub enum GitCommands {
 
     /// Mine local AI-coding-agent sessions (Claude / Codex / OpenCode)
     /// for reasoning notecards and attach them as `context` annotations
-    /// to the matching imported states. Requires `bridge git import` to
-    /// have already run (needs the SHA map sidecar).
+    /// to the matching imported states. Requires `import git` to have
+    /// already run (needs the SHA map sidecar).
     /// Requires the `ingest` feature (on by default).
     #[cfg(feature = "ingest")]
     Reason {

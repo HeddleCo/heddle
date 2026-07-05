@@ -1495,7 +1495,7 @@ fn assert_only_state_is_lossy_with_fidelity(repo: &Repository, surface: &str) {
     );
 }
 
-/// `bridge git import --lossy` records the canonical `git_lossy` marker for
+/// `import git --lossy` records the canonical `git_lossy` marker for
 /// genuinely unrepresentable tree entries.
 #[test]
 fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {

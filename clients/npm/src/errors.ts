@@ -60,7 +60,7 @@ export class HeddleError extends Error {
   readonly stderr: string;
   /** Raw stdout (usually empty on failure). */
   readonly stdout: string;
-  /** The verb that was invoked, e.g. "bridge git export". */
+  /** The verb that was invoked, e.g. "export git". */
   readonly verb: string;
 
   constructor(args: {

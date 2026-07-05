@@ -23,7 +23,7 @@ fn help_render_matches_spawned_binary() {
         vec!["capture", "--help-agent"],
         vec!["push", "--help"],
         vec!["log", "--help"],
-        vec!["bridge", "git", "import", "--help"],
+        vec!["import", "git", "--help"],
         // Alias resolution: `import` is an alias that resolves to `adopt`.
         vec!["import", "--help"],
         // Curated topic page + `heddle help <verb>` clap fall-through.

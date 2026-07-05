@@ -1385,7 +1385,9 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 // Single git-overlay mirror push covers every ref/thread.
                 println!(
                     "{}",
-                    style::dim("mirror push covers all threads (every ref shipped in one transfer)")
+                    style::dim(
+                        "mirror push covers all threads (every ref shipped in one transfer)"
+                    )
                 );
             }
             if let Some(new_state) = result.new_state {
@@ -1482,10 +1484,7 @@ async fn push_network_all_threads(
                     if let Some(new_state) = result.new_state {
                         println!(
                             "{}",
-                            style::field(
-                                "remote state",
-                                &style::change_id(&new_state.to_string())
-                            )
+                            style::field("remote state", &style::change_id(&new_state.to_string()))
                         );
                     }
                 }

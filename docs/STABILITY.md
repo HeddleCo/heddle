@@ -262,7 +262,7 @@ Tradeoffs:
   runner as `rust-tests.yml`. Cheaper than a dedicated runner; the
   runner cost dominates over the rare cancellation.
 - **What's exercised.** Proposed: commit/undo/redo loop plus a
-  `bridge git sync` loop against a fixture upstream. The bridge is the
+  `sync git` loop against a fixture upstream. The bridge is the
   most state-rich adapter code path and benefits most from a long run.
 
 ## 2. API stability commitment

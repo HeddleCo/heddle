@@ -51,7 +51,6 @@ impl ResolvedSource {
     }
 }
 
-
 /// Owned scratch directory that removes itself on drop. Hand-rolled rather
 /// than pulling `tempfile` into the cli's runtime deps just for this.
 struct ScratchDir {
@@ -383,7 +382,7 @@ fn render_bridge_git_status(
     Ok(())
 }
 
-fn render_bridge_git_import(
+fn render_import_git(
     cli: &Cli,
     repo: &Repository,
     output: &BridgeGitImportOutput,
@@ -565,6 +564,20 @@ pub fn cmd_import_git(
     )
 }
 
+pub fn cmd_sync_git(cli: &Cli, path: Option<GitSource>) -> Result<()> {
+    let repo = open_repo_for_cli(cli)?;
+    let mut bridge = GitBridge::new(&repo);
+    run_git_sync(
+        cli,
+        &repo,
+        &mut bridge,
+        path,
+        "sync_git",
+        "sync git",
+        &["sync", "git"],
+    )
+}
+
 fn run_git_export(
     cli: &Cli,
     repo: &Repository,
@@ -705,7 +718,132 @@ fn run_git_import(
         recovery_commands: trust.recovery_commands.clone(),
         trust,
     };
-    render_bridge_git_import(cli, repo, &output, command_path)
+    render_import_git(cli, repo, &output, command_path)
+}
+
+fn run_git_sync(
+    cli: &Cli,
+    repo: &Repository,
+    bridge: &mut GitBridge,
+    path: Option<GitSource>,
+    output_kind: &'static str,
+    action: &'static str,
+    command_path: &[&str],
+) -> Result<()> {
+    let resolved = match path {
+        Some(source) => Some(resolve_source(repo, source)?),
+        None => None,
+    };
+
+    let export_stats = export_all(bridge)?;
+    let import_stats = match &resolved {
+        Some(source) => import_git_history(
+            bridge,
+            Some(source.path()),
+            &[],
+            ImportOptions::default(),
+            None,
+        )?,
+        None => import_git_history(
+            bridge,
+            Some(repo.root()),
+            &[],
+            ImportOptions::default(),
+            None,
+        )?,
+    };
+
+    // Sync reports commits that produced new Heddle states on this run,
+    // not every Git commit walked by the importer.
+    let sync_commits_imported = import_stats.states_created;
+    let threads_synced = export_stats.threads_synced + import_stats.branches_synced;
+    let markers_synced = export_stats.markers_synced + import_stats.tags_synced;
+    let trust = build_repository_verification_state(repo);
+    let sync_output = BridgeGitSyncOutput {
+        output_kind,
+        status: if trust.verified {
+            "completed".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        action,
+        summary: if trust.verified {
+            "Synced Git overlay; repository verification is clean".to_string()
+        } else {
+            format!(
+                "Synced Git overlay, but repository verification is blocked: {}",
+                trust.summary
+            )
+        },
+        states_exported: export_stats.states_exported,
+        commits_exported_total: export_stats.commits_total,
+        commits_imported: sync_commits_imported,
+        threads_synced,
+        markers_synced,
+        recommended_action: trust.recommended_action.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        trust,
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        write_full_command_json(
+            &sync_output,
+            NextActionValidationContext::new(command_path, repo.capability()),
+        )?;
+    } else {
+        println!("{} synced Git overlay", style::ok_marker());
+        println!(
+            "  {}",
+            style::field(
+                "exported",
+                &export_commits_summary(
+                    sync_output.commits_exported_total,
+                    sync_output.states_exported,
+                ),
+            ),
+        );
+        println!(
+            "  {}",
+            style::field(
+                "imported",
+                &style::count(sync_output.commits_imported, "commit"),
+            ),
+        );
+        println!(
+            "  {}",
+            style::field(
+                "threads",
+                &format!(
+                    "{} synced with branches",
+                    style::bold(&sync_output.threads_synced.to_string()),
+                ),
+            ),
+        );
+        println!(
+            "  {}",
+            style::field(
+                "markers",
+                &format!(
+                    "{} synced with tags",
+                    style::bold(&sync_output.markers_synced.to_string()),
+                ),
+            ),
+        );
+        if !sync_output.trust.verified {
+            println!();
+            println!("{}", style::section("Verification"));
+            println!(
+                "  {}",
+                style::field("status", &style::thread_state(&sync_output.trust.status)),
+            );
+            println!("  {}", sync_output.trust.summary);
+        }
+        if !sync_output.recommended_action.is_empty() {
+            println!();
+            print_next(&sync_output.recommended_action);
+        }
+    }
+    Ok(())
 }
 
 pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
@@ -762,268 +900,6 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
     match command {
         GitCommands::Status => {
             cmd_bridge_git_status(cli, &repo)?;
-        }
-
-        GitCommands::Export { destination } => {
-            let destination = destination.ok_or_else(|| {
-                anyhow!(
-                    "no destination specified. Use `--destination PATH` to write a bare \
-                     git repository, or `bridge push <remote>` to push to a \
-                     configured remote."
-                )
-            })?;
-            let stats = bridge.export_to_path(&destination)?;
-
-            if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "output_kind": "bridge_git_export",
-                    "states_exported": stats.states_exported,
-                    "commits_total": stats.commits_total,
-                    "threads_synced": stats.threads_synced,
-                    "markers_synced": stats.markers_synced,
-                    "branches": exported_refs_json(&stats.branches),
-                    "tags": exported_refs_json(&stats.tags),
-                    "destination": destination.display().to_string(),
-                });
-                println!("{out}");
-            } else {
-                println!(
-                    "{} exported to {}",
-                    style::ok_marker(),
-                    style::dim(&destination.display().to_string())
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "commits",
-                        &export_commits_summary(stats.commits_total, stats.states_exported)
-                    )
-                );
-                println!(
-                    "  {}",
-                    style::field("branches", &exported_refs_summary(&stats.branches))
-                );
-                println!(
-                    "  {}",
-                    style::field("tags", &exported_refs_summary(&stats.tags))
-                );
-            }
-        }
-
-        GitCommands::Import { path, refs, lossy } => {
-            let resolved = match path {
-                Some(source) => Some(resolve_source(&repo, source)?),
-                None => None,
-            };
-            let default_source = repo.root();
-            let source_label = resolved
-                .as_ref()
-                .map(|source| source.path().display().to_string())
-                .unwrap_or_else(|| default_source.display().to_string());
-            let scope = if refs.is_empty() {
-                "all refs".to_string()
-            } else {
-                format!("{} ref(s): {}", refs.len(), refs.join(", "))
-            };
-            let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
-            progress.begin_commit_import();
-            let import_options = ImportOptions { lossy };
-            let mut on_commit = |event| progress.commit_tick(event);
-            let source_path = resolved
-                .as_ref()
-                .map(ResolvedSource::path)
-                .unwrap_or(default_source);
-            let attached_before = match repo.head_ref()? {
-                Head::Attached { thread } => repo
-                    .refs()
-                    .get_thread(&thread)?
-                    .map(|state| (thread, state)),
-                Head::Detached { .. } => None,
-            };
-            let stats = import_git_history(
-                &mut bridge,
-                Some(source_path),
-                &refs,
-                import_options,
-                Some(&mut on_commit),
-            )?;
-            progress.begin_ref_write();
-            progress.finish();
-            materialize_imported_attached_thread(&mut bridge, attached_before.as_ref())?;
-
-            let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
-            let trust = build_repository_verification_state(&repo);
-            let summary = if already_in_sync {
-                if trust.verified {
-                    format!(
-                        "Git import already in sync with {source_label}: every commit already imported; repository verification is clean"
-                    )
-                } else {
-                    format!(
-                        "Git import already in sync with {source_label}: every commit already imported, but repository verification is blocked: {}",
-                        trust.summary
-                    )
-                }
-            } else if trust.verified {
-                format!(
-                    "Imported Git history from {source_label}; repository verification is clean"
-                )
-            } else {
-                format!(
-                    "Imported Git history from {source_label}, but repository verification is blocked: {}",
-                    trust.summary
-                )
-            };
-            let output = BridgeGitImportOutput {
-                output_kind: "bridge_git_import",
-                status: if trust.verified {
-                    "completed".to_string()
-                } else {
-                    "blocked".to_string()
-                },
-                action: "bridge git import",
-                summary,
-                commits_imported: stats.commits_imported,
-                states_created: stats.states_created,
-                branches_synced: stats.branches_synced,
-                tags_synced: stats.tags_synced,
-                skipped_non_commit_refs: stats.skipped_non_commit_refs,
-                lossy_entries: bridge_lossy_import_entries(&stats.lossy_entries),
-                already_in_sync,
-                recommended_action: trust.recommended_action.clone(),
-                recommended_action_template: trust.recommended_action_template.clone(),
-                recovery_commands: trust.recovery_commands.clone(),
-                trust,
-            };
-            render_bridge_git_import(cli, &repo, &output, &["bridge", "git", "import"])?;
-        }
-
-        GitCommands::Sync { path } => {
-            let resolved = match path {
-                Some(source) => Some(resolve_source(&repo, source)?),
-                None => None,
-            };
-
-            // First export Heddle states to Git
-            let export_stats = export_all(&mut bridge)?;
-
-            // Then import any new Git commits
-            let import_stats = match &resolved {
-                Some(r) => import_git_history(
-                    &mut bridge,
-                    Some(r.path()),
-                    &[],
-                    ImportOptions::default(),
-                    None,
-                )?,
-                None => import_git_history(
-                    &mut bridge,
-                    Some(repo.root()),
-                    &[],
-                    ImportOptions::default(),
-                    None,
-                )?,
-            };
-
-            // sync's `commits_imported` keeps the historical "newly
-            // imported commits" meaning. After heddle#147, the import
-            // walker's `commits_imported` counts every commit it
-            // visited (mirroring the ingest-backed import path so a re-import
-            // doesn't read 0). That would make a no-op sync of an
-            // already-synced overlay look like it pulled the whole
-            // history again — exactly the operator signal sync is
-            // there to provide. Use `states_created` instead: it is
-            // the count of commits that produced a new heddle state
-            // on this sync, which is what callers reading
-            // `commits_imported` from a sync result actually want.
-            let sync_commits_imported = import_stats.states_created;
-            let threads_synced = export_stats.threads_synced + import_stats.branches_synced;
-            let markers_synced = export_stats.markers_synced + import_stats.tags_synced;
-            let trust = build_repository_verification_state(&repo);
-            let sync_output = BridgeGitSyncOutput {
-                output_kind: "bridge_git_sync",
-                status: if trust.verified {
-                    "completed".to_string()
-                } else {
-                    "blocked".to_string()
-                },
-                action: "bridge git sync",
-                summary: if trust.verified {
-                    "Synced Git overlay; repository verification is clean".to_string()
-                } else {
-                    format!(
-                        "Synced Git overlay, but repository verification is blocked: {}",
-                        trust.summary
-                    )
-                },
-                states_exported: export_stats.states_exported,
-                commits_exported_total: export_stats.commits_total,
-                commits_imported: sync_commits_imported,
-                threads_synced,
-                markers_synced,
-                recommended_action: trust.recommended_action.clone(),
-                recommended_action_template: trust.recommended_action_template.clone(),
-                recovery_commands: trust.recovery_commands.clone(),
-                trust,
-            };
-            if should_output_json(cli, Some(repo.config())) {
-                write_full_command_json(
-                    &sync_output,
-                    NextActionValidationContext::new(&["bridge", "git", "sync"], repo.capability()),
-                )?;
-            } else {
-                println!("{} synced Git overlay", style::ok_marker());
-                println!(
-                    "  {}",
-                    style::field(
-                        "exported",
-                        &export_commits_summary(
-                            sync_output.commits_exported_total,
-                            sync_output.states_exported
-                        )
-                    )
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "imported",
-                        &style::count(sync_output.commits_imported, "commit")
-                    )
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "threads",
-                        &format!(
-                            "{} synced with branches",
-                            style::bold(&sync_output.threads_synced.to_string())
-                        )
-                    )
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "markers",
-                        &format!(
-                            "{} synced with tags",
-                            style::bold(&sync_output.markers_synced.to_string())
-                        )
-                    )
-                );
-                if !sync_output.trust.verified {
-                    println!();
-                    println!("{}", style::section("Verification"));
-                    println!(
-                        "  {}",
-                        style::field("status", &style::thread_state(&sync_output.trust.status))
-                    );
-                    println!("  {}", sync_output.trust.summary);
-                }
-                if !sync_output.recommended_action.is_empty() {
-                    println!();
-                    print_next(&sync_output.recommended_action);
-                }
-            }
         }
 
         GitCommands::Reconcile {

@@ -6,12 +6,12 @@ const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 /**
  * One CLI invocation, transport-neutral. The `verb` is the canonical
- * space-joined verb (e.g. `"bridge git export"`); the executor is
+ * space-joined verb (e.g. `"export git"`); the executor is
  * responsible for splitting it into argv tokens for a subprocess, or
  * routing it however a daemon/napi backend prefers.
  */
 export interface ExecRequest {
-  /** Canonical verb, space-joined (e.g. "bridge git export"). */
+  /** Canonical verb, space-joined (e.g. "export git"). */
   verb: string;
   /** Verb-specific arguments appended after the global flags. */
   args: readonly string[];

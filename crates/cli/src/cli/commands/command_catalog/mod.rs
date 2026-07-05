@@ -14,6 +14,8 @@ use serde::Serialize;
 
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
+#[cfg(feature = "git-overlay")]
+use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
@@ -382,8 +384,8 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle clone <remote> <fresh-path>",
     "heddle clone <remote> <path> --thread <thread>",
     // Shallow Git import recovery requires choosing a complete checkout.
-    "heddle bridge git import --path <full-git-repo>",
-    "heddle bridge git import --path <full-git-repo> --ref <ref>",
+    "heddle import git --path <full-git-repo>",
+    "heddle import git --path <full-git-repo> --ref <ref>",
     // Detached Git-overlay recovery requires the caller to choose the
     // branch to reattach before retrying branch-writing operations.
     "heddle switch <branch>",
@@ -630,25 +632,17 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle bridge git import --path <full-git-repo>",
-        &[
-            "heddle",
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            "<full-git-repo>",
-        ],
+        "heddle import git --path <full-git-repo>",
+        &["heddle", "import", "git", "--path", "<full-git-repo>"],
         &["path"],
         false,
     ),
     (
-        "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        "heddle import git --path <full-git-repo> --ref <ref>",
         &[
             "heddle",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -1456,7 +1450,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 },
                 &["export git"],
             ),
-            &[json_discriminator(Some("export git"), "output_kind", "export_git")],
+            &[json_discriminator(
+                Some("export git"),
+                "output_kind",
+                "export_git",
+            )],
+        ),
+    ),
+    entry(
+        &["sync", "git"],
+        exits(
+            git_adapter_action(
+                json_discriminators(
+                    documented_schemas(IMPORTING_MUTATION, &["sync git"]),
+                    &[json_discriminator(
+                        Some("sync git"),
+                        "output_kind",
+                        "sync_git",
+                    )],
+                ),
+                "adopt",
+                "workflow",
+                "Use adopt for the guided Git-to-Heddle conversion workflow.",
+            ),
+            &[
+                (0, "ok"),
+                (75, "remote unreachable; safe to retry"),
+                (76, "remote rejected payload"),
+            ],
         ),
     ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
@@ -1473,72 +1494,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 )],
             ),
             "status",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "export"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        ..MUTATING
-                    },
-                    &["bridge git export"],
-                ),
-                &[json_discriminator(
-                    Some("bridge git export"),
-                    "output_kind",
-                    "bridge_git_export",
-                )],
-            ),
-            "push",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "import"],
-        exits(
-            git_adapter_action(
-                json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
-                    &[json_discriminator(
-                        Some("bridge git import"),
-                        "output_kind",
-                        "bridge_git_import",
-                    )],
-                ),
-                "adopt",
-                "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
-            ),
-            &[
-                (0, "ok"),
-                (65, "malformed git repo or unimportable refs"),
-                (74, "io reading git refs"),
-            ],
-        ),
-    ),
-    entry(
-        &["bridge", "git", "sync"],
-        exits(
-            git_adapter_action(
-                json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
-                    &[json_discriminator(
-                        Some("bridge git sync"),
-                        "output_kind",
-                        "bridge_git_sync",
-                    )],
-                ),
-                "adopt",
-                "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
-            ),
-            &[
-                (0, "ok"),
-                (75, "remote unreachable; safe to retry"),
-                (76, "remote rejected payload"),
-            ],
         ),
     ),
     entry(
@@ -4711,7 +4666,15 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
         Commands::Run(_) => vec!["run"],
-        Commands::Sync(_) => vec!["sync"],
+        Commands::Sync(args) => {
+            #[cfg(feature = "git-overlay")]
+            {
+                if matches!(args.command, Some(SyncCommands::Git { .. })) {
+                    return vec!["sync", "git"];
+                }
+            }
+            vec!["sync"]
+        }
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
         Commands::Land(_) => vec!["land"],
@@ -4892,9 +4855,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Bridge { command } => match command {
             BridgeCommands::Git { command } => match command {
                 GitCommands::Status => vec!["bridge", "git", "status"],
-                GitCommands::Export { .. } => vec!["bridge", "git", "export"],
-                GitCommands::Import { .. } => vec!["bridge", "git", "import"],
-                GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
                 GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
                 #[cfg(feature = "ingest")]
                 GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],

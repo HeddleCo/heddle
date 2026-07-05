@@ -6,15 +6,15 @@ use std::{
     path::Path,
 };
 
-pub(crate) use heddle_core::{
-    ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
-    MachineContractInput, PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck,
-    verify::serialize_empty_action_as_null,
-};
 use heddle_core::status::next_action::{
     canonical_adopt_ref_command, canonical_bridge_import_ref_command,
     canonical_bridge_reconcile_ref_preview_command, heddle_action as core_heddle_action,
     import_hint_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
+};
+pub(crate) use heddle_core::{
+    ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
+    MachineContractInput, PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck,
+    verify::serialize_empty_action_as_null,
 };
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
@@ -1504,7 +1504,7 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
         RepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
+    } else if action.starts_with("heddle import git") {
         RepositorySetupActionKind::BridgeImport
     } else {
         RepositorySetupActionKind::Other
@@ -1652,10 +1652,12 @@ fn dirty_details(status: &WorktreeStatus) -> BTreeMap<String, String> {
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
-    Ok(heddle_core::verify::build_plain_git_verification_probe_with_machine_contract(
-        start,
-        &MachineContractInput::from_coverage(machine_contract_coverage()),
-    )?)
+    Ok(
+        heddle_core::verify::build_plain_git_verification_probe_with_machine_contract(
+            start,
+            &MachineContractInput::from_coverage(machine_contract_coverage()),
+        )?,
+    )
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {

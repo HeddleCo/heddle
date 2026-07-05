@@ -113,20 +113,14 @@ fn seed_unrepresentable_tree_name_repo(path: &std::path::Path) {
 const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 #[test]
-fn bridge_git_import_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes() {
+fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes() {
     let source = TempDir::new().unwrap();
     seed_unrepresentable_tree_name_repo(source.path());
 
     let default_target = TempDir::new().unwrap();
     heddle(&["init"], Some(default_target.path())).expect("init default target");
     let default_output = heddle_output(
-        &[
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            source.path().to_str().unwrap(),
-        ],
+        &["import", "git", "--path", source.path().to_str().unwrap()],
         Some(default_target.path()),
     )
     .expect("run default import");
@@ -148,9 +142,8 @@ fn bridge_git_import_refuses_unrepresentable_tree_name_by_default_and_lossy_summ
     heddle(&["init"], Some(lossy_target.path())).expect("init lossy target");
     let lossy = heddle(
         &[
-            "bridge",
-            "git",
             "import",
+            "git",
             "--lossy",
             "--path",
             source.path().to_str().unwrap(),
@@ -171,8 +164,8 @@ fn bridge_git_import_refuses_unrepresentable_tree_name_by_default_and_lossy_summ
 }
 
 #[test]
-fn bridge_git_import_help_documents_lossy_flag() {
-    let output = heddle_help(&["bridge", "git", "import", "--help"]);
+fn import_git_help_documents_lossy_flag() {
+    let output = heddle_help(&["import", "git", "--help"]);
 
     assert!(output.contains("--lossy"), "help should document --lossy");
 }
@@ -462,9 +455,10 @@ fn test_cli_bridge_git_init_leaf_removed() {
 }
 
 #[test]
-fn test_cli_bridge_git_export_and_pull_roundtrip() {
+fn test_cli_export_git_and_clone_roundtrip() {
     let source = TempDir::new().unwrap();
-    let target = TempDir::new().unwrap();
+    let target_holder = TempDir::new().unwrap();
+    let target = target_holder.path().join("clone");
     let dest_holder = TempDir::new().unwrap();
     let dest = dest_holder.path().join("export");
 
@@ -472,32 +466,25 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     std::fs::write(source.path().join("file.txt"), "bridge export").unwrap();
     heddle(&["capture", "-m", "Bridge source"], Some(source.path())).unwrap();
 
-    // Phase A: `bridge git export` requires `--destination`. Pre-Phase-A
+    // Phase A: `export git` requires `--destination`. Pre-Phase-A
     // it silently no-op'd if no flag was given (writing only the sidecar
     // mapping, not actually exporting any git objects). Now it errors.
     let export = heddle(
-        &[
-            "bridge",
-            "git",
-            "export",
-            "--destination",
-            dest.to_str().unwrap(),
-        ],
+        &["export", "git", "--destination", dest.to_str().unwrap()],
         Some(source.path()),
     );
-    assert!(export.is_ok(), "bridge export failed: {:?}", export.err());
+    assert!(export.is_ok(), "export git failed: {:?}", export.err());
 
     let dest_repo = open_git(&dest).unwrap();
     assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
 
-    heddle(&["init"], Some(target.path())).unwrap();
-    let pull = heddle(
-        &["bridge", "git", "pull", dest.to_str().unwrap()],
-        Some(target.path()),
+    let clone = heddle(
+        &["clone", dest.to_str().unwrap(), target.to_str().unwrap()],
+        Some(dest_holder.path()),
     );
-    assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
+    assert!(clone.is_ok(), "clone failed: {:?}", clone.err());
 
-    let target_repo = Repository::open(target.path()).unwrap();
+    let target_repo = Repository::open(&target).unwrap();
     assert!(
         target_repo
             .refs()
@@ -552,42 +539,6 @@ fn test_cli_import_git_from_external_repo() {
         Some(heddle_repo_dir.path()),
     );
     assert!(result.is_ok(), "import git failed: {:?}", result.err());
-
-    let repo = Repository::open(heddle_repo_dir.path()).unwrap();
-    assert!(
-        repo.refs()
-            .get_thread(&ThreadName::new("main"))
-            .unwrap()
-            .is_some()
-    );
-}
-
-#[test]
-fn test_cli_bridge_git_import_from_external_repo() {
-    let heddle_repo_dir = TempDir::new().unwrap();
-    let git_repo_dir = TempDir::new().unwrap();
-    let git_repo = SleyRepository::init(git_repo_dir.path()).unwrap();
-    let tree_oid = git_empty_tree_oid(&git_repo);
-    git_commit_with_tree(
-        &git_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        "Imported commit",
-        &[],
-    );
-
-    heddle(&["init"], Some(heddle_repo_dir.path())).unwrap();
-    let result = heddle(
-        &[
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            git_repo_dir.path().to_str().unwrap(),
-        ],
-        Some(heddle_repo_dir.path()),
-    );
-    assert!(result.is_ok(), "Bridge import failed: {:?}", result.err());
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
     assert!(
@@ -911,11 +862,8 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     // Bootstrap the heddle overlay sidecar so the bridge has content
     // to push. Without an imported state, `bridge.push` silently
     // succeeds but copies nothing — masking the real --mirror bug.
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(source.path()),
-    )
-    .expect("bridge git import should bootstrap the overlay sidecar");
+    heddle(&["import", "git", "--ref", "main"], Some(source.path()))
+        .expect("import git should bootstrap the overlay sidecar");
 
     let primary_path = primary_remote.path().to_string_lossy().to_string();
     let mirror_path = mirror_remote.path().to_string_lossy().to_string();

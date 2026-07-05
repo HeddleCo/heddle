@@ -111,7 +111,9 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
 
 #[cfg(not(feature = "git-overlay"))]
 fn repair_git_metadata(_repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
-    Err(anyhow!("fsck --repair git requires the git-overlay feature"))
+    Err(anyhow!(
+        "fsck --repair git requires the git-overlay feature"
+    ))
 }
 
 fn fsck_integrity_error_advice(error_count: usize) -> RecoveryAdvice {

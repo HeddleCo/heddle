@@ -76,7 +76,7 @@ Today, only a representative subset of commands has populated
 `exit_codes`:
 
 - `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
-- `bridge git import`, `bridge git reconcile`, `bridge git sync`
+- `import git`, `bridge git reconcile`, `sync git`
 
 Commands not yet swept implicitly contract to `0` on success and an
 unspecified non-zero on failure — currently always mapped through

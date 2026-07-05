@@ -103,7 +103,7 @@ Match the pattern in `cli/src/cli/cli_args/commands_review.rs` for arg structs +
 
 - The shared object/wire model stays in this repo: `crates/wire/src/object_graph.rs` defines `ObjectType::Redaction` and `crates/wire/src/native_pack.rs` carries the redaction pack handling. The local object store gets a new content type for `Redaction` objects. Same loose+packed strategy as Blob/Tree/State.
 - Sync protocol (only the replication/server wire format moved — it now lives in the sibling **weft** repo at `crates/weft-server/src/server/grpc_hosted_impl/sync.rs`) needs to handle `Redaction` propagation. Pulling a state pulls any redactions on its blobs.
-- `bridge git export` (in `crates/cli/src/bridge/git_export.rs`) must replace redacted-blob materialization with the stub when exporting to Git. The downstream Git commit then carries the stub, not the secret — even on push to GitHub.
+- `export git` (in `crates/cli/src/bridge/git_export.rs`) must replace redacted-blob materialization with the stub when exporting to Git. The downstream Git commit then carries the stub, not the secret — even on push to GitHub.
 - `heddle maintenance gc --prune` should NEVER GC a `Redaction` even if its referenced blob has been purged. The tombstone is structurally permanent.
 
 ## Signing
@@ -127,7 +127,7 @@ Property tests in `tests/property/redact_purge.rs`:
 1. `Redact` is idempotent — redacting a blob that's already redacted is a no-op (or returns a "supersedes" chain).
 2. After `Redact`, reading the file from the state yields the stub. Reading the blob directly via hash still returns bytes (until `Purge`).
 3. After `Purge`, reading via blob hash returns `BlobMissing(blake3::Hash, redaction_id)`. The state is still readable; its tree still resolves; only that one blob materializes as the stub.
-4. `bridge git export` of a state with redactions exports the stub, never the underlying bytes — even if the bytes are still on disk pre-purge.
+4. `export git` of a state with redactions exports the stub, never the underlying bytes — even if the bytes are still on disk pre-purge.
 5. Signing roundtrip: a `Redaction` written, serialized, deserialized, verified.
 6. Capability rejection: a maintainer-token attempting `purge` is denied at the verifier; the attempt is logged in the oplog as a refused operation.
 
@@ -149,7 +149,7 @@ A reviewer can answer "yes" to all of:
 1. `heddle redact apply <state> --path <file>` runs, writes a `Redaction` object, the state's `read_file` returns the stub.
 2. `heddle redact purge apply <state> --path <file>` requires `purge:repo` capability, removes the blob bytes from the local store, writes a `Purge` oplog entry.
 3. Both operations are signed (Ed25519), and `heddle review show <state>` displays the redaction + purge in the verification strip alongside the merge signature.
-4. `bridge git export` of a redacted state exports the stub, not the secret.
+4. `export git` of a redacted state exports the stub, not the secret.
 5. Property tests + integration tests pass.
 6. `heddle maintenance gc --prune` does not collect `Redaction` or `Purge` objects even when their referenced blobs are gone.
 

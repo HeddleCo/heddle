@@ -12,7 +12,10 @@ use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands, ExportCommands, ImportCommands,
-    commands::{cmd_bridge_git, cmd_export_git, cmd_git_overlay_guide, cmd_import_git},
+    cli_args::SyncCommands,
+    commands::{
+        cmd_bridge_git, cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git,
+    },
 };
 use cli::{
     cli::{
@@ -76,7 +79,7 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     // Install the ring crypto provider as the rustls default. Without this,
-    // any rustls TLS handshake (gRPC, GitHub REST, `bridge git import
+    // any rustls TLS handshake (gRPC, GitHub REST, `import git
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to
     // keep the 80s aws-lc-sys C build out of release builds. Measured
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
@@ -342,18 +345,30 @@ async fn async_main() -> Result<()> {
 
         Commands::Try(args) => cmd_try(&cli, args.clone()),
 
-        Commands::Sync(SyncArgs { thread }) => {
-            // Codex's enhanced sync (rebase-aware fast-forward path);
-            // main wired `cmd_sync` here pre-rebase. The smart variant
-            // is a strict superset, so we use it on the merged
-            // branch.
-            cmd_sync_smart(
-                &cli,
-                SyncArgs {
-                    thread: thread.clone(),
-                },
-            )
-            .await
+        Commands::Sync(args) => {
+            #[cfg(feature = "git-overlay")]
+            {
+                if let Some(SyncCommands::Git { path }) = &args.command {
+                    cmd_sync_git(&cli, path.clone())
+                } else {
+                    // Codex's enhanced sync (rebase-aware fast-forward path);
+                    // main wired `cmd_sync` here pre-rebase. The smart variant
+                    // is a strict superset, so we use it on the merged
+                    // branch.
+                    cmd_sync_smart(
+                        &cli,
+                        SyncArgs {
+                            command: None,
+                            thread: args.thread.clone(),
+                        },
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "git-overlay"))]
+            {
+                cmd_sync_smart(&cli, args.clone()).await
+            }
         }
 
         Commands::Continue => cmd_continue(&cli).await,
