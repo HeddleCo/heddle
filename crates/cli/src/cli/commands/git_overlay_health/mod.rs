@@ -3,12 +3,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 pub(crate) use heddle_core::{
     ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
-    RepositoryVerificationState, VerificationCheck, verify::serialize_empty_action_as_null,
+    MachineContractInput, PlainGitVerifyProbe, RepositoryVerificationState, VerificationCheck,
+    verify::serialize_empty_action_as_null,
 };
 use heddle_core::status::next_action::{
     canonical_adopt_ref_command, canonical_bridge_import_ref_command,
@@ -20,9 +21,9 @@ use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
     GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager, ThreadState,
-    describe_thread_advice, git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
+    describe_thread_advice, refresh_thread_freshness,
 };
-use sley::{BString as GitBString, Index, Repository as SleyRepository};
+use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -33,13 +34,7 @@ use super::{
 };
 use crate::{cli::worktree_status_options, remote::RemoteConfig};
 
-#[derive(Debug)]
-pub(crate) struct PlainGitVerificationProbe {
-    pub root: PathBuf,
-    pub git_branch: Option<String>,
-    pub changes: WorktreeStatus,
-    pub trust: RepositoryVerificationState,
-}
+pub(crate) type PlainGitVerificationProbe = PlainGitVerifyProbe;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositorySetupActionKind {
@@ -1657,373 +1652,10 @@ fn dirty_details(status: &WorktreeStatus) -> BTreeMap<String, String> {
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
-    let git_repo = match SleyRepository::discover(start) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(None),
-    };
-    let Some(workdir) = git_repo.workdir() else {
-        return Ok(None);
-    };
-    let root = workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf());
-    if root.join(".heddle").exists() {
-        return Ok(None);
-    }
-
-    let git_branch = plain_git_current_branch(&git_repo);
-    let git_branches = plain_git_local_branches(&git_repo);
-    let git_tags = plain_git_local_tags(&git_repo);
-    let changes = plain_git_worktree_status(&root, &git_repo)?;
-
-    let default_remote = git_default_remote_name_from_repo(&git_repo);
-    let init = "heddle init".to_string();
-    let setup_action = init.clone();
-    let setup_recovery_commands = vec![init.clone()];
-    let machine_contract_coverage = machine_contract_coverage();
-    let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
-    let action_plan = VerificationActionPlan {
-        primary_action: setup_action.clone(),
-        recovery_commands: setup_recovery_commands.clone(),
-        remote_action: None,
-        workflow_action: None,
-        machine_contract_action: (!machine_contract_clean)
-            .then(|| "heddle doctor schemas --output json".to_string()),
-    };
-    let mut details = BTreeMap::new();
-    details.insert("path".to_string(), root.display().to_string());
-    if let Some(branch) = &git_branch {
-        details.insert("git_branch".to_string(), branch.clone());
-    }
-    if let Some(remote) = &default_remote {
-        details.insert("default_remote".to_string(), remote.clone());
-    }
-    details.insert(
-        "git_branch_count".to_string(),
-        git_branches.len().to_string(),
-    );
-    details.insert("git_tag_count".to_string(), git_tags.len().to_string());
-    let setup_action_fields = ActionFields::from_action(&setup_action);
-    let mut checks = vec![
-        VerificationCheck {
-            name: "Git".to_string(),
-            status: "present".to_string(),
-            clean: true,
-            summary: "plain Git repository found".to_string(),
-            recommended_action: None,
-            recommended_action_template: None,
-            recovery_commands: Vec::new(),
-            recovery_action_templates: Vec::new(),
-            details,
-        },
-        VerificationCheck {
-            name: "Heddle".to_string(),
-            status: "needs_init".to_string(),
-            clean: false,
-            summary: "Heddle data is not initialized".to_string(),
-            recommended_action: Some(setup_action.clone()),
-            recommended_action_template: setup_action_fields.template.clone(),
-            recovery_commands: setup_recovery_commands.clone(),
-            recovery_action_templates: action_templates(&setup_recovery_commands),
-            details: BTreeMap::new(),
-        },
-        VerificationCheck {
-            name: "Mapping".to_string(),
-            status: "git_backed".to_string(),
-            clean: true,
-            summary: "Git refs will stay in Git storage after Heddle initialization".to_string(),
-            recommended_action: None,
-            recommended_action_template: None,
-            recovery_commands: Vec::new(),
-            recovery_action_templates: Vec::new(),
-            details: BTreeMap::new(),
-        },
-    ];
-    checks.push(verification_check(
-        "Worktree",
-        changes.is_clean(),
-        if changes.is_clean() {
-            "clean"
-        } else {
-            "dirty_worktree"
-        },
-        if changes.is_clean() {
-            "Git worktree is clean"
-        } else {
-            "Git worktree has uncommitted changes"
-        },
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Remote",
-        false,
-        "unknown",
-        "remote drift is checked after Heddle initialization",
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Operation",
-        true,
-        "clean",
-        "no Heddle operation in progress",
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Workflow",
-        false,
-        "not_checked",
-        "workflow readiness is checked after Heddle initialization",
-        None,
-        Vec::new(),
-    ));
-    checks.push(machine_contract_verification_check(
-        &machine_contract_coverage,
-        Some(&action_plan),
-    ));
-    checks.push(verification_check(
-        "Clone",
-        true,
-        "not_applicable",
-        "clone verification is not applicable to this checkout",
-        None,
-        Vec::new(),
-    ));
-    let setup_action_fields = ActionFields::from_action(&setup_action);
-    let trust = RepositoryVerificationState {
-        verified: false,
-        status: "needs_init".to_string(),
-        repository_mode: "plain-git".to_string(),
-        heddle_initialized: false,
-        git_branch: git_branch.clone(),
-        heddle_thread: None,
-        worktree_dirty: !changes.is_clean(),
-        worktree_state: if changes.is_clean() { "clean" } else { "dirty" }.to_string(),
-        import_state: "git_backed".to_string(),
-        mapping_state: "git_backed".to_string(),
-        remote_drift: "unknown".to_string(),
-        active_operation: None,
-        default_remote,
-        clone_verification: "not_applicable".to_string(),
-        machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
-        machine_contract_coverage,
-        workflow_status: "not_checked".to_string(),
-        workflow_summary: "workflow readiness is checked after Heddle initialization".to_string(),
-        summary: "Git repository has not been initialized for Heddle".to_string(),
-        recommended_action_template: setup_action_fields.template,
-        recovery_action_templates: action_templates(&setup_recovery_commands),
-        recommended_action: setup_action,
-        recovery_commands: setup_recovery_commands,
-        checks,
-    };
-    Ok(Some(PlainGitVerificationProbe {
-        root,
-        git_branch,
-        changes,
-        trust,
-    }))
-}
-
-fn plain_git_current_branch(git_repo: &SleyRepository) -> Option<String> {
-    git_repo.head().ok()?.branch_name().map(str::to_string)
-}
-
-fn plain_git_local_branches(git_repo: &SleyRepository) -> Vec<String> {
-    let Ok(branches) = git_repo.references().list_refs() else {
-        return Vec::new();
-    };
-    let mut names = branches
-        .into_iter()
-        .filter_map(|branch| branch.name.strip_prefix("refs/heads/").map(str::to_string))
-        .filter(|branch| !branch.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn plain_git_local_tags(git_repo: &SleyRepository) -> Vec<String> {
-    let Ok(tags) = git_repo.references().list_refs() else {
-        return Vec::new();
-    };
-    let mut names = tags
-        .into_iter()
-        .filter_map(|tag| tag.name.strip_prefix("refs/tags/").map(str::to_string))
-        .filter(|tag| !tag.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn plain_git_worktree_status(
-    root: &Path,
-    git_repo: &SleyRepository,
-) -> anyhow::Result<WorktreeStatus> {
-    let index = plain_git_index_or_empty(git_repo).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to inspect Git index at '{}': {error}",
-            root.display()
-        )
-    })?;
-    let head_index = plain_git_head_index_or_empty(git_repo).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to inspect Git HEAD tree at '{}': {error}",
-            root.display()
-        )
-    })?;
-
-    let mut head_entries = BTreeMap::new();
-    for entry in &head_index.entries {
-        head_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-    let mut index_entries = BTreeMap::new();
-    for entry in &index.entries {
-        index_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-
-    let mut added = BTreeSet::new();
-    let mut modified = BTreeSet::new();
-    let mut deleted = BTreeSet::new();
-
-    for (path, (oid, mode)) in &index_entries {
-        match head_entries.get(path) {
-            None => {
-                added.insert(PathBuf::from(path));
-            }
-            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                modified.insert(PathBuf::from(path));
-            }
-            Some(_) => {}
-        }
-    }
-    for path in head_entries.keys() {
-        if !index_entries.contains_key(path) {
-            deleted.insert(PathBuf::from(path));
-        }
-    }
-
-    for (path, (oid, mode)) in &index_entries {
-        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode, None)? {
-            GitWorktreeEntryState::Clean => {}
-            GitWorktreeEntryState::Deleted => {
-                deleted.insert(PathBuf::from(path));
-            }
-            GitWorktreeEntryState::Modified => {
-                modified.insert(PathBuf::from(path));
-            }
-        }
-    }
-
-    let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
-    for path in plain_git_untracked_paths(root, &tracked_paths)? {
-        added.insert(PathBuf::from(path));
-    }
-
-    // `git rm --cached path` produces both an index-vs-HEAD deletion
-    // and a fresh untracked entry for the same path; both signals are
-    // load-bearing for `heddle status`/`diff`/verification. Only
-    // suppress `modified` duplicates here — `added` and `deleted` for
-    // the same path are two different views (worktree-vs-index and
-    // index-vs-HEAD) of the same intentional change.
-    for path in &added {
-        modified.remove(path);
-    }
-    for path in &deleted {
-        modified.remove(path);
-    }
-
-    Ok(WorktreeStatus {
-        modified: modified.into_iter().collect(),
-        added: added.into_iter().collect(),
-        deleted: deleted.into_iter().collect(),
-    })
-}
-
-fn plain_git_untracked_paths(
-    root: &Path,
-    tracked_paths: &BTreeSet<&str>,
-) -> anyhow::Result<Vec<String>> {
-    let mut paths = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .filter_entry(|entry| !plain_git_excluded_walk_entry(entry.path()))
-        .build();
-    for entry in walker {
-        let entry = entry?;
-        let file_type = entry.file_type();
-        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
-            continue;
-        }
-        let path = plain_git_repo_relative_path(root, entry.path())?;
-        if !tracked_paths.contains(path.as_str()) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn plain_git_excluded_walk_entry(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".git" || name == ".heddle")
-}
-
-fn plain_git_repo_relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
-    let relative = path.strip_prefix(root).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to relativize Git worktree path '{}': {}",
-            path.display(),
-            error
-        )
-    })?;
-    Ok(path_to_plain_git_path(relative))
-}
-
-fn path_to_plain_git_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn plain_git_empty_index() -> Index {
-    Index {
-        version: 2,
-        entries: Vec::new(),
-        extensions: Vec::new(),
-        checksum: None,
-    }
-}
-
-fn plain_git_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    git_repo
-        .open_index()
-        .map(|index| index.unwrap_or_else(plain_git_empty_index))
-}
-
-fn plain_git_head_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    let head = git_repo.head()?;
-    let Some(oid) = head.oid else {
-        return Ok(plain_git_empty_index());
-    };
-    let commit = git_repo.read_commit(&oid)?;
-    git_repo.index_from_tree(&commit.tree)
-}
-
-fn plain_git_path(path: &GitBString) -> String {
-    String::from_utf8_lossy(path.as_bytes()).into_owned()
+    Ok(heddle_core::verify::build_plain_git_verification_probe_with_machine_contract(
+        start,
+        &MachineContractInput::from_coverage(machine_contract_coverage()),
+    )?)
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
