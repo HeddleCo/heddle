@@ -2921,7 +2921,7 @@ Sync emits:
 {"output_kind": "sync_git", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
-### Bridge Git Import Fields
+### Import Git Fields
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|

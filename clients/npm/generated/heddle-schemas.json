@@ -14912,7 +14912,7 @@
         "destination",
         "output_kind"
       ],
-      "title": "BridgeExportSchema",
+      "title": "ExportGitSchema",
       "type": "object"
     },
     "fetch": {
@@ -15572,7 +15572,7 @@
         "recovery_commands",
         "output_kind"
       ],
-      "title": "BridgeImportSchema",
+      "title": "ImportGitSchema",
       "type": "object"
     },
     "init": {
@@ -24921,7 +24921,7 @@
         "recovery_commands",
         "output_kind"
       ],
-      "title": "BridgeSyncSchema",
+      "title": "SyncGitSchema",
       "type": "object"
     },
     "thread absorb": {

@@ -176,7 +176,7 @@ struct GitUpstreamConfiguredOutput {
 ///
 /// `mirror` is an ad-hoc dual-push escape hatch (heddle#25): after the
 /// primary push to the Heddle/git-overlay remote succeeds, also push to
-/// the named git-bridge remote. Best-effort — mirror failure surfaces
+/// the named Git remote. Best-effort — mirror failure surfaces
 /// as a warning and does NOT abort the primary push.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_push(

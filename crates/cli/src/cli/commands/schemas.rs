@@ -126,9 +126,9 @@ schema_registry! {
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
-    (&["export git"], BridgeExportSchema),
-    (&["import git"], BridgeImportSchema),
-    (&["sync git"], BridgeSyncSchema),
+    (&["export git"], ExportGitSchema),
+    (&["import git"], ImportGitSchema),
+    (&["sync git"], SyncGitSchema),
     (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
@@ -2775,7 +2775,7 @@ pub struct TrySchema {
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
-// ---- bridge ops -----------------------------------------------------------
+// ---- git projection ops -----------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExportedRefSchema {
@@ -2784,7 +2784,7 @@ pub struct ExportedRefSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeExportSchema {
+pub struct ExportGitSchema {
     pub output_kind: Option<String>,
     pub states_exported: u64,
     pub commits_total: u64,
@@ -2796,7 +2796,7 @@ pub struct BridgeExportSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeImportSchema {
+pub struct ImportGitSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: Option<String>,
@@ -2822,7 +2822,7 @@ pub struct LossyImportEntrySchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeSyncSchema {
+pub struct SyncGitSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: Option<String>,

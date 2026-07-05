@@ -22,7 +22,7 @@ pub enum RemoteCommands {
         name: String,
     },
 
-    /// Set the default remote for pull, push, fetch, and Git-overlay bridge operations.
+    /// Set the default remote for pull, push, fetch, and Git projection operations.
     SetDefault {
         /// Existing remote name.
         name: String,
