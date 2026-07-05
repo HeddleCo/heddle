@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bridge command implementations.
+//! Git projection import/export/sync command implementations.
 
 use std::{
     path::{Path, PathBuf},
@@ -101,7 +101,7 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
 }
 
 #[derive(Serialize)]
-struct BridgeGitImportOutput {
+struct GitProjectionImportOutput {
     output_kind: &'static str,
     status: String,
     action: &'static str,
@@ -111,7 +111,7 @@ struct BridgeGitImportOutput {
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
-    lossy_entries: Vec<BridgeLossyImportEntryOutput>,
+    lossy_entries: Vec<GitProjectionLossyImportEntryOutput>,
     already_in_sync: bool,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
@@ -123,7 +123,7 @@ struct BridgeGitImportOutput {
 }
 
 #[derive(Serialize)]
-struct BridgeLossyImportEntryOutput {
+struct GitProjectionLossyImportEntryOutput {
     path: String,
     action: String,
     reason: String,
@@ -131,7 +131,7 @@ struct BridgeLossyImportEntryOutput {
 }
 
 #[derive(Serialize)]
-struct BridgeGitSyncOutput {
+struct GitProjectionSyncOutput {
     output_kind: &'static str,
     status: String,
     action: &'static str,
@@ -202,7 +202,7 @@ fn exported_refs_json(refs: &[ExportedRef]) -> serde_json::Value {
 fn render_import_git(
     cli: &Cli,
     repo: &Repository,
-    output: &BridgeGitImportOutput,
+    output: &GitProjectionImportOutput,
     command_path: &[&str],
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
@@ -287,10 +287,10 @@ fn render_import_git(
     Ok(())
 }
 
-fn bridge_lossy_import_entries(entries: &[LossyImportEntry]) -> Vec<BridgeLossyImportEntryOutput> {
+fn git_projection_lossy_import_entries(entries: &[LossyImportEntry]) -> Vec<GitProjectionLossyImportEntryOutput> {
     entries
         .iter()
-        .map(|entry| BridgeLossyImportEntryOutput {
+        .map(|entry| GitProjectionLossyImportEntryOutput {
             path: entry.path.clone(),
             action: entry.action.as_str().to_string(),
             reason: entry.reason.clone(),
@@ -299,7 +299,7 @@ fn bridge_lossy_import_entries(entries: &[LossyImportEntry]) -> Vec<BridgeLossyI
         .collect()
 }
 
-/// Execute bridge subcommands.
+/// Execute Git projection subcommands.
 fn open_repo_for_cli(cli: &Cli) -> Result<Repository> {
     match &cli.repo {
         Some(path) => Ok(Repository::open(path)?),
@@ -473,7 +473,7 @@ fn run_git_import(
             trust.summary
         )
     };
-    let output = BridgeGitImportOutput {
+    let output = GitProjectionImportOutput {
         output_kind,
         status: if trust.verified {
             "completed".to_string()
@@ -487,7 +487,7 @@ fn run_git_import(
         branches_synced: stats.branches_synced,
         tags_synced: stats.tags_synced,
         skipped_non_commit_refs: stats.skipped_non_commit_refs,
-        lossy_entries: bridge_lossy_import_entries(&stats.lossy_entries),
+        lossy_entries: git_projection_lossy_import_entries(&stats.lossy_entries),
         already_in_sync,
         recommended_action: trust.recommended_action.clone(),
         recommended_action_template: trust.recommended_action_template.clone(),
@@ -535,7 +535,7 @@ fn run_git_sync(
     let threads_synced = export_stats.threads_synced + import_stats.branches_synced;
     let markers_synced = export_stats.markers_synced + import_stats.tags_synced;
     let trust = build_repository_verification_state(repo);
-    let sync_output = BridgeGitSyncOutput {
+    let sync_output = GitProjectionSyncOutput {
         output_kind,
         status: if trust.verified {
             "completed".to_string()

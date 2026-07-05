@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bridge command definitions.
+//! Git projection command definitions.
 
 use std::path::PathBuf;
 

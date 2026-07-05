@@ -6,7 +6,7 @@ mod commands_advanced;
 mod commands_agent;
 mod commands_args;
 #[cfg(feature = "git-overlay")]
-mod commands_bridge;
+mod commands_git_projection;
 #[cfg(feature = "client")]
 mod commands_client;
 mod commands_context;
@@ -54,7 +54,7 @@ pub use commands_args::{
     WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_bridge::{ExportCommands, GitSource, ImportCommands, SyncCommands};
+pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, SyncCommands};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,

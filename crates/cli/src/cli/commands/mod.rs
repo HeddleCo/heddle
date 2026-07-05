@@ -10,7 +10,7 @@ mod agent_cmd;
 mod auto_capture;
 mod blame;
 #[cfg(feature = "git-overlay")]
-mod bridge;
+mod git_projection_io;
 mod checkpoint;
 mod cherry_pick;
 mod child_env;
@@ -114,9 +114,9 @@ pub use agent_cmd::{
     cmd_agent_release, cmd_agent_reserve,
 };
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
-pub use bridge::cmd_context_reason_git;
+pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
-pub use bridge::{cmd_export_git, cmd_import_git, cmd_sync_git};
+pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;

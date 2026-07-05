@@ -463,8 +463,8 @@ fn test_cli_export_git_and_clone_roundtrip() {
     let dest = dest_holder.path().join("export");
 
     heddle(&["init"], Some(source.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "bridge export").unwrap();
-    heddle(&["capture", "-m", "Bridge source"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "git projection export").unwrap();
+    heddle(&["capture", "-m", "Git projection source"], Some(source.path())).unwrap();
 
     // Phase A: `export git` requires `--destination`. Pre-Phase-A
     // it silently no-op'd if no flag was given (writing only the sidecar
@@ -564,7 +564,7 @@ fn test_cli_bridge_git_push_pull_leaves_removed() {
 }
 
 /// `heddle push --mirror=<git-remote>` performs the primary push to the
-/// heddle remote AND a git-bridge push to the configured mirror, in one
+/// heddle remote AND a Git projection push to the configured mirror, in one
 /// invocation.
 #[test]
 fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
@@ -859,8 +859,8 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
         .status()
         .unwrap();
 
-    // Bootstrap the heddle overlay sidecar so the bridge has content
-    // to push. Without an imported state, `bridge.push` silently
+    // Bootstrap the heddle overlay sidecar so Git projection has content
+    // to push. Without an imported state, `push` silently
     // succeeds but copies nothing — masking the real --mirror bug.
     heddle(&["import", "git", "--ref", "main"], Some(source.path()))
         .expect("import git should bootstrap the overlay sidecar");

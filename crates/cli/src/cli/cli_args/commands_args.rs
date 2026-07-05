@@ -2,7 +2,7 @@
 //! Named argument structs for top-level CLI commands.
 
 #[cfg(feature = "git-overlay")]
-use super::commands_bridge::SyncCommands;
+use super::commands_git_projection::SyncCommands;
 
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
