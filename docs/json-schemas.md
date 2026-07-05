@@ -2936,7 +2936,7 @@ human-readable dump text in `dump` instead of writing a second stdout payload.
 }
 ```
 
-## `heddle bridge git init|export|import|sync|push|pull --output json`
+## `heddle bridge git --output json`
 
 All bridge ops emit JSON via `serde_json::json!{}` with consistent
 key naming:
@@ -2950,14 +2950,18 @@ key naming:
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
-`heddle bridge git init --output json` emits a bridge mirror path, not the
+## `heddle bridge git init --output json`
+
+Bridge init emits a bridge mirror path, not the
 active Git-overlay `.git`:
 
 ```json
 {"initialized": true, "path": "/work/project/.heddle/git"}
 ```
 
-`heddle bridge git export --destination /work/project.git --output json` emits:
+## `heddle bridge git export --output json`
+
+Export emits:
 
 ```json
 {"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
@@ -2965,25 +2969,33 @@ active Git-overlay `.git`:
 
 Export requires an explicit destination and does not default to the repo-local Bridge Mirror.
 
-`heddle bridge git import --output json` emits:
+## `heddle bridge git import --output json`
+
+Import emits:
 
 ```json
 {"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
-`heddle bridge git sync --output json` emits:
+## `heddle bridge git sync --output json`
+
+Sync emits:
 
 ```json
 {"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
-`heddle bridge git push --output json` emits:
+## `heddle bridge git push --output json`
+
+Push emits:
 
 ```json
 {"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}
 ```
 
-`heddle bridge git pull --output json` emits:
+## `heddle bridge git pull --output json`
+
+Pull emits:
 
 ```json
 {"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}
