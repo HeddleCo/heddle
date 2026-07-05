@@ -118,7 +118,7 @@ fn known_recovery_phrases_stay_in_typed_advice() {
 }
 
 #[test]
-fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
+fn git_import_recovery_policy_stays_out_of_error_renderer() {
     let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let envelope = src_dir.join(ALLOWED_ENVELOPE_FILE);
     let source = fs::read_to_string(&envelope)
@@ -140,7 +140,7 @@ fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "{ALLOWED_ENVELOPE_FILE} should render Git bridge recovery advice, not own policy `{forbidden}`"
+            "{ALLOWED_ENVELOPE_FILE} should render retired Git import recovery advice, not own policy `{forbidden}`"
         );
     }
 }

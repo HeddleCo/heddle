@@ -788,7 +788,7 @@ fn mapping_verification_check(
             "Mapping",
             true,
             "not_applicable",
-            "native Heddle refs do not require Git-overlay mapping",
+            "native Heddle refs do not require Git Projection Mapping",
             None,
             Vec::new(),
         );

@@ -901,9 +901,9 @@ impl RecoveryAdvice {
     pub(crate) fn git_overlay_mapping_conflict() -> Self {
         Self::safety_refusal(
             "git_overlay_mapping_conflict",
-            "Git-overlay mapping metadata disagrees with refs/notes/heddle",
-            "The local sidecar and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
-            "one Git commit maps to different Heddle change ids across the sidecar and refs/notes/heddle",
+            "Git Projection Mapping metadata disagrees with refs/notes/heddle",
+            "Git Projection Mapping and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
+            "one Git commit maps to different Heddle change ids across Git Projection Mapping and refs/notes/heddle",
             "continuing would corrupt or hide the Git/Heddle identity mapping",
             "the command stopped before applying the requested ref or worktree update",
             "heddle clone <remote> <fresh-path>",

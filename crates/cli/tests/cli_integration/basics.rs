@@ -1392,7 +1392,7 @@ fn test_cli_import_git_clears_import_hint_for_existing_branches() {
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
     assert!(
         synced >= 1 || import_output.contains("Synced") || import_output.contains("branches"),
-        "bridge import should sync local branches: {import_output}"
+        "Git import should sync local branches: {import_output}"
     );
 
     let after: Value =
@@ -3114,7 +3114,7 @@ fn test_cli_undo_redo() {
 /// We bypass the `cmd_snapshot` path on purpose: that path layers in
 /// the user-config / repo-defaults fallback (0.8), so a `None`
 /// confidence can only originate from a non-snapshot writer such as
-/// the git bridge import. Putting the state directly via the object
+/// Git import. Putting the state directly via the object
 /// store is the smallest reliable way to reproduce that scenario in
 /// a CLI integration test.
 #[test]

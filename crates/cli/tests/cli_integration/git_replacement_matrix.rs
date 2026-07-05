@@ -709,7 +709,7 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
     );
     assert!(
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
-        "file:// bridge import should copy locally without Git helpers: {import}"
+        "file:// Git import should copy locally without Git helpers: {import}"
     );
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &import_work);
     assert_eq!(
@@ -719,7 +719,7 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
 }
 
 #[test]
-fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_path() {
+fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -745,12 +745,12 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     );
     assert!(
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
-        "explicit bridge import should walk Git commits natively: {import}"
+        "explicit Git import should walk Git commits natively: {import}"
     );
     assert_eq!(import["output_kind"], "import_git");
     assert_eq!(
         import["verification"]["verified"], true,
-        "bridge import should embed post-operation verification: {import}"
+        "Git import should embed post-operation verification: {import}"
     );
 
     let export_path = temp.path().join("exported.git");
@@ -804,7 +804,7 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(
         verify["verified"], true,
-        "explicit explicit Git adapter operations should leave verification clean without git on PATH: {verify}"
+        "explicit Git import operations should leave verification clean without git on PATH: {verify}"
     );
 }
 

@@ -3,7 +3,7 @@
 //!
 //! `docs/exit-codes.md` promises a sysexits-style taxonomy for the swept
 //! commands (`init`, `status`, `verify`, `commit`, `merge`, `push`,
-//! `pull`, and the three `bridge git` verbs). Agents branch on these
+//! `pull`, and the Git import/sync/repair verbs). Agents branch on these
 //! codes without parsing stderr, so a divergence between the documented
 //! code and the runtime exit silently mis-handles a failure path.
 //!

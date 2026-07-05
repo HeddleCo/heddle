@@ -281,7 +281,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
 // -----------------------------------------------------------------
 
 /// R1: a five-commit linear chain rebased onto a new base must
-/// round-trip every commit through heddle bridge import and surface
+/// round-trip every commit through `heddle import git` and surface
 /// the rebased tip as the active branch. Verifies the import path
 /// preserves rewritten history rather than collapsing it.
 #[test]
@@ -393,9 +393,9 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
 }
 
 /// R3: divergent origin + upstream remotes both expose `main` at
-/// different tips. Heddle's bridge import + remote listing must
+/// different tips. Heddle Git import and remote listing must
 /// surface both remotes and treat them as distinct sources. The
-/// `heddle bridge import --ref origin/main` form picks origin
+/// `heddle import git --ref origin/main` form picks origin
 /// explicitly; the upstream tip remains imported but not the active
 /// thread.
 #[test]
@@ -446,7 +446,7 @@ fn realworld_git_multi_remote_divergent_main_resolves_origin_first() {
 }
 
 /// R4: an annotated tag retargeted to a new commit and re-annotated
-/// must round-trip through heddle bridge import without losing the
+/// must round-trip through `heddle import git` without losing the
 /// tag message or moving the original commit.
 #[test]
 #[ignore = "nightly real-world matrix: annotated tag rename + re-annotate"]
@@ -696,7 +696,7 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
 // -----------------------------------------------------------------
 
 /// Clone each of the four vendored fixtures via `heddle clone`, run
-/// `bridge import` to materialize the git refs as overlay threads, and
+/// `import git` to materialize the git refs as overlay threads, and
 /// assert the heddle workspace lines up with the bare repo it came from.
 /// Heavier than a unit test (untars ~28 MB across four extracts), so it
 /// is gated `#[ignore]` for the nightly realworld matrix run.
@@ -717,11 +717,11 @@ fn realworld_fixtures_clone_and_import_round_trip() {
         )
         .unwrap_or_else(|err| panic!("heddle clone failed for {}: {err}", entry.name));
 
-        // The default `bridge import` walks every ref; the synthetic
+        // The default `import git` walks every ref; the synthetic
         // tests above use the same form. We do not need the legacy
         // `--all` flag.
         heddle_without_git(&["import", "git"], &work)
-            .unwrap_or_else(|err| panic!("bridge import failed for {}: {err}", entry.name));
+            .unwrap_or_else(|err| panic!("Git import failed for {}: {err}", entry.name));
 
         let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work)
             .unwrap_or_else(|err| panic!("fsck --bridge failed for {}: {err}", entry.name));
@@ -801,9 +801,9 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     );
 
     // ── (10) Discovery of raw Git branches as tip-only overlay threads ──
-    // Create a raw git branch off HEAD before bridge import; the import
-    // should surface it as a thread and `bridge git list` should advise
-    // the scoped import command for any remaining unimported tip.
+    // Create a raw git branch off HEAD before import; the import
+    // should surface it as a thread and advise the scoped import
+    // command for any remaining unimported tip.
     let cloned = open_git(&work).expect("open cloned working tree");
     let head = cloned
         .head_commit()

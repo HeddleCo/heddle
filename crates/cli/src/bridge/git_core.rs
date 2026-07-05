@@ -76,7 +76,7 @@ pub enum GitBridgeError {
     #[error("conflict during sync: {0}")]
     Conflict(String),
 
-    #[error("Git-overlay mapping conflict: {message}")]
+    #[error("Git Projection Mapping conflict: {message}")]
     MappingConflict { message: String },
 
     #[error("Git branch '{branch}' cannot be imported as a Heddle thread: {message}")]

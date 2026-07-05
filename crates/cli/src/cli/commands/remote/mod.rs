@@ -1324,30 +1324,30 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     };
 
     // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
-    // per pushable thread. The git-overlay mirror path (the #846 default)
-    // already ships EVERY ref in one transfer, so a mirror push IS an
+    // per pushable thread. The Git-backed projection path (the #846 default)
+    // already ships EVERY ref in one transfer, so a projection push IS an
     // all-threads push — routing it through the per-thread loop would rebuild
     // and re-upload the identical full pack once per thread and print a
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
-    // single mirror push below; only the non-git-overlay path loops.
+    // single projection push below; only the non-Git-backed path loops.
     if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
-    // Git-overlay repos DEFAULT to the git-backed fast path (#846): ship the
+    // Git-overlay repos DEFAULT to the Git-backed projection path (#846): ship the
     // git format (one multi-root pack + all refs) straight through weft's git
     // lane with no native conversion. Native heddle conversion stays opt-in via
     // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
     // plain native push below. `progress` drives the live push line on a TTY.
     //
     // In `--all-threads` mode `state_id` is `None` (the fan-out resolves each
-    // thread's tip); the mirror push nominates the current checkout state as
+    // thread's tip); the projection push nominates the current checkout state as
     // its advisory `local_state` — every ref ships regardless.
     let progress = progress_for(options.cli, repo);
     let state_id = match options.state_id {
         Some(state_id) => *state_id,
         None => {
-            // --all-threads git-overlay+hosted: mirror ships all refs, so the
+            // --all-threads Git-backed projection+hosted: projection ships all refs, so the
             // nominated state is advisory. Use the current checkout state.
             let user_config = UserConfig::load_default()?;
             ensure_current_state(
@@ -1382,11 +1382,11 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 style::bold(options.track_name)
             );
             if options.all_threads {
-                // Single git-overlay mirror push covers every ref/thread.
+                // Single Git Projection push covers every ref/thread.
                 println!(
                     "{}",
                     style::dim(
-                        "mirror push covers all threads (every ref shipped in one transfer)"
+                        "Git Projection push covers all threads (every ref shipped in one transfer)"
                     )
                 );
             }

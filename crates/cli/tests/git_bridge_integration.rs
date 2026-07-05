@@ -512,7 +512,7 @@ fn bind_loopback_ephemeral(context: &str) -> Option<TcpListener> {
     match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => Some(listener),
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping git bridge network test: {context}: {err}");
+            eprintln!("skipping Git interop network test: {context}: {err}");
             None
         }
         Err(err) => panic!("{context}: {err}"),
@@ -903,10 +903,10 @@ fn export_tree_keeps_legacy_gitlink_marker_blob_as_blob() {
 fn export_tree_substitutes_stub_for_redacted_blob() {
     // Critical safety property of the redaction primitive: a leaked
     // secret declared via `heddle redact` must NEVER appear in the
-    // bytes the Git bridge writes downstream. The bridge is the only
-    // path from a Heddle repo to an external Git remote (GitHub,
-    // GitLab, internal mirrors), and bytes that escape via the
-    // bridge cannot be retroactively scrubbed from those repos.
+    // bytes the Git export path writes downstream. Export is the path
+    // from a Heddle repo to an external Git remote (GitHub, GitLab,
+    // internal mirrors), and bytes that escape via Git cannot be
+    // retroactively scrubbed from those repos.
     //
     // This test pins the contract: with a redaction declared on a
     // blob, exporting the containing tree must write a stub blob
@@ -1075,7 +1075,7 @@ fn import_all_reuses_shared_gitlink_subtree_without_lossy_entries() {
 
     assert!(
         !test_support::mapping_path(&bridge).exists(),
-        "bridge import must not publish ingest-only mappings through the served mapping cache"
+        "Git import must not publish ingest-only mappings through the served mapping cache"
     );
 }
 
@@ -1092,17 +1092,17 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
         Some(git_path),
         ingest::ImportOptions { lossy: true },
     )
-    .expect("initial lossy bridge import succeeds");
+    .expect("initial lossy Git import succeeds");
     assert_eq!(first.lossy_entries.len(), 1);
 
     assert!(
         !test_support::mapping_path(&first_bridge).exists(),
-        "bridge import must not publish lossy entries through the served mapping cache"
+        "Git import must not publish lossy entries through the served mapping cache"
     );
 
     let mut rerun_bridge = GitBridge::new(&repo);
     let err = import_all(&mut rerun_bridge, Some(git_path))
-        .expect_err("default bridge import must not reuse cached lossy state silently");
+        .expect_err("default Git import must not reuse cached lossy state silently");
     assert_lossy_default_rerun_error("bridge", &err.to_string());
 }
 
@@ -1119,7 +1119,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
         Some(git_path),
         ingest::ImportOptions { lossy: true },
     )
-    .expect("initial lossy bridge import succeeds");
+    .expect("initial lossy Git import succeeds");
 
     let mut rerun_bridge = GitBridge::new(&repo);
     let second = import_all_with_options(
@@ -1198,12 +1198,12 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
                 Some(git_path),
                 ingest::ImportOptions { lossy: true },
             )
-            .expect("initial lossy bridge import succeeds");
+            .expect("initial lossy Git import succeeds");
             assert_eq!(first.lossy_entries.len(), 1);
 
             let mut rerun_bridge = GitBridge::new(&repo);
             import_all(&mut rerun_bridge, Some(git_path))
-                .expect_err("default bridge import must fail on cached lossy commit")
+                .expect_err("default Git import must fail on cached lossy commit")
                 .to_string()
         }
     };
@@ -1498,7 +1498,7 @@ fn assert_only_state_is_lossy_with_fidelity(repo: &Repository, surface: &str) {
 /// `import git --lossy` records the canonical `git_lossy` marker for
 /// genuinely unrepresentable tree entries.
 #[test]
-fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
+fn git_import_lossy_state_carries_canonical_git_lossy_marker() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let git_temp = init_invalid_utf8_name_repo();
@@ -1509,14 +1509,14 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
         Some(git_temp.path()),
         ingest::ImportOptions { lossy: true },
     )
-    .expect("lossy bridge import succeeds");
+    .expect("lossy Git import succeeds");
     assert_eq!(stats.lossy_entries.len(), 1);
 
-    assert_only_state_is_lossy_with_fidelity(&repo, "bridge import --lossy");
+    assert_only_state_is_lossy_with_fidelity(&repo, "import git --lossy");
 }
 
 /// Close-the-class regression for #567 round 2: an ingest-backed lossy state
-/// carries the SAME canonical `git_lossy` marker that `bridge import --lossy`
+/// carries the SAME canonical `git_lossy` marker that `import git --lossy`
 /// sets. Before this fix, ingest states satisfied `has_git_fidelity` but
 /// carried no lossy signal reachable from an UNMAPPED state, so the export
 /// guard reconstructed them into wrong-SHA objects. Both paths now set ONE flag
@@ -1647,7 +1647,7 @@ fn mirror_pack_file_count(mirror_git_dir: &std::path::Path) -> usize {
 
 /// `maintenance gc` must consolidate the bridge mirror (`.heddle/git`) by
 /// packing its accumulated loose objects and dropping the redundant loose
-/// copies, so bridge import/export/reconstruction paths stop paying the
+/// copies, so Git import/export/reconstruction paths stop paying the
 /// loose-object read tax.
 ///
 /// The invariant proven here (state, not timing):
@@ -3589,7 +3589,7 @@ fn round_trip_preserves_change_ids_via_notes() {
     );
 }
 
-/// Phase E: end-to-end symlink fidelity through the git bridge.
+/// Phase E: end-to-end symlink fidelity through Git import/export.
 /// Constructs a git tree containing a symlink, imports it, then re-exports
 /// the heddle tree to git and confirms the symlink survives both ways.
 ///
@@ -8137,11 +8137,11 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
 
     let git_workdir = git_repo.workdir().expect("workdir");
 
-    // ── path 1: bridge import ──
+    // ── path 1: Git import ──
     let bridge_heddle = TempDir::new().expect("bridge heddle temp");
     let bridge_repo = Repository::init(bridge_heddle.path()).expect("init bridge heddle");
     let mut bridge = GitBridge::new(&bridge_repo);
-    import_all(&mut bridge, Some(git_workdir.as_path())).expect("bridge import");
+    import_all(&mut bridge, Some(git_workdir.as_path())).expect("Git import");
     let bridge_cid = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
         .expect("bridge mapped commit");

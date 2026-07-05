@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Git adapter command implementations.
+//! Git Projection command implementations.
 
 use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 

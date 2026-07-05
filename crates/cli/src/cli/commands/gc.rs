@@ -110,7 +110,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 let removed = bridge.prune_unreachable_mapping_entries()?;
                 summary.pruned_git_mapping_entries = removed;
                 if !json && removed > 0 {
-                    println!("Pruned {removed} stale Git-overlay mapping entries");
+                    println!("Pruned {removed} stale Git Projection Mapping entries");
                 }
 
                 // Consolidate the Bridge Mirror (`.heddle/git`): pack its
@@ -125,7 +125,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 summary.consolidated_mirror_loose = consolidated;
                 if !json && consolidated > 0 {
                     println!(
-                        "Consolidated {consolidated} loose Git-overlay mirror objects into a pack"
+                        "Consolidated {consolidated} loose Bridge Mirror objects into a pack"
                     );
                 }
             }

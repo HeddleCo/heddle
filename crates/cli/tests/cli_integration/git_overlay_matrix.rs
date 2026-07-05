@@ -1244,14 +1244,14 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["recommended_action"], Value::Null);
     assert!(bridge["recovery_commands"].as_array().unwrap().is_empty());
-    let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        !bridge_text.contains("heddle bridge git init"),
-        "initialized-but-unimported bridge status should not recommend stale bridge init ceremony: {bridge_text}"
+        !status_text.contains("heddle bridge git init"),
+        "initialized-but-unimported status should not recommend retired bridge git init ceremony: {status_text}"
     );
     assert!(
-        !bridge_text.contains("heddle adopt --ref main"),
-        "bridge status text should not require import for direct-backed refs: {bridge_text}"
+        !status_text.contains("heddle adopt --ref main"),
+        "status text should not require import for direct-backed refs: {status_text}"
     );
 
     heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
@@ -2215,7 +2215,7 @@ fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
 }
 
 #[test]
-fn git_overlay_matrix_native_bridge_import_materializes_current_thread_when_clean() {
+fn git_overlay_matrix_native_git_import_materializes_current_thread_when_clean() {
     let source = TempDir::new().unwrap();
     init_git_repo_with_branch(source.path(), "main");
     std::fs::write(source.path().join("README.md"), "imported\n").unwrap();
@@ -2581,7 +2581,7 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     assert_eq!(
         logical_operations.len(),
         2,
-        "git-adapter commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
+        "Git-backed commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
     );
     assert!(
         logical_operations.iter().any(|op| op["description"]
@@ -5011,7 +5011,7 @@ fn git_overlay_matrix_no_commit_first_run_durability_commands() {
 }
 
 #[test]
-fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
+fn git_overlay_matrix_imported_branch_evolution_after_git_import() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "feature/drop-in");
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -5027,7 +5027,7 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
     let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
-        "bridge import should report branch sync activity: {import_output}"
+        "Git import should report branch sync activity: {import_output}"
     );
 
     let after_import = json(temp.path(), &["thread", "list", "--output", "json"]);
@@ -7239,7 +7239,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
             && !bridge_text.contains("heddle adopt --ref side")
             && !bridge_text.contains("Next step: heddle adopt --ref side"),
-        "bridge status should report imported history as in sync and leave optional branch adoption to thread/workspace views: {bridge_text}"
+        "status should report imported history as in sync and leave optional branch adoption to thread/workspace views: {bridge_text}"
     );
 
     std::fs::write(temp.path().join("scratch.txt"), "dirty\n").unwrap();
@@ -7280,7 +7280,7 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
-        "bridge import should report branch sync activity: {import_output}"
+        "Git import should report branch sync activity: {import_output}"
     );
 
     let threads_after_import = json(temp.path(), &["thread", "list", "--output", "json"]);
@@ -7290,7 +7290,7 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
             .unwrap()
             .iter()
             .any(|thread| thread["name"] == "support/alpha"),
-        "thread list should include imported branch after bridge import: {threads_after_import}"
+        "thread list should include imported branch after Git import: {threads_after_import}"
     );
 
     git(&["checkout", "support/alpha"], temp.path());
