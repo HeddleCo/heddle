@@ -389,10 +389,6 @@ fn emit_status_profile(output: &StatusOutput) {
             "git_overlay_status_ms",
             output.profile.git_overlay_status_ms,
         ),
-        ProfileField::millis(
-            "git_overlay_health_ms",
-            output.profile.git_overlay_health_ms,
-        ),
         ProfileField::millis("verification_ms", output.profile.verification_ms),
         ProfileField::millis("git_index_ms", output.profile.git_index_ms),
         ProfileField::millis("worktree_status_ms", output.profile.worktree_status_ms),
@@ -454,13 +450,6 @@ fn emit_profile_status_jsonl_phases(output: &StatusOutput) {
         &[ProfileField::millis(
             "git_overlay_status_ms",
             output.profile.git_overlay_status_ms,
-        )],
-    );
-    emit_profile(
-        "status git overlay health",
-        &[ProfileField::millis(
-            "git_overlay_health_ms",
-            output.profile.git_overlay_health_ms,
         )],
     );
     emit_profile(

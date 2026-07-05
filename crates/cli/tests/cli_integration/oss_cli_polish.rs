@@ -500,7 +500,7 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
     let doctor = json_value(&checkout, &["doctor", "--output", "json"]);
     assert_eq!(doctor["verification"]["verified"], true);
     assert_eq!(doctor["verification"]["status"], "clean");
-    assert_eq!(doctor["verification"]["repository_mode"], "heddle-native");
+    assert_eq!(doctor["verification"]["repository_mode"], "native-heddle");
     assert!(
         doctor.get("git_overlay_health").is_none(),
         "native doctor JSON should use verification rather than legacy Git-overlay health: {doctor}"
@@ -6577,10 +6577,9 @@ fn profile_env_writes_timings_to_stderr_without_polluting_json_stdout() {
     );
     assert!(
         stderr.contains("git_overlay_status_ms:")
-            && stderr.contains("git_overlay_health_ms:")
             && stderr.contains("verification_ms:")
             && stderr.contains("git_index_ms:"),
-        "status profile should break out git-overlay health and index costs: {stderr}"
+        "status profile should break out git-overlay status, verification, and index costs: {stderr}"
     );
     assert!(
         stderr.contains("directories_scanned:"),

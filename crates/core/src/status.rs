@@ -275,7 +275,6 @@ pub struct StatusProfile {
     pub remote_tracking_ms: u128,
     pub import_hint_ms: u128,
     pub git_overlay_status_ms: u128,
-    pub git_overlay_health_ms: u128,
     pub verification_ms: u128,
     pub git_index_ms: u128,
     pub worktree_status_ms: u128,
@@ -1789,12 +1788,9 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let git_worktree_status_result = repo.git_overlay_worktree_status();
     let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
 
-    let git_overlay_health_start = Instant::now();
+    let verification_start = Instant::now();
     let git_overlay_health =
         build_git_overlay_health_with_worktree_status(repo, &git_worktree_status_result);
-    let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
-
-    let verification_start = Instant::now();
     let trust = build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         git_overlay_health.clone(),
@@ -1873,7 +1869,6 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
                 remote_tracking_ms,
                 import_hint_ms,
                 git_overlay_status_ms,
-                git_overlay_health_ms,
                 verification_ms,
                 git_index_ms,
                 worktree_status_ms,
@@ -2099,7 +2094,6 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         remote_tracking_ms,
         import_hint_ms,
         git_overlay_status_ms,
-        git_overlay_health_ms,
         verification_ms,
         git_index_ms,
         worktree_status_ms,
