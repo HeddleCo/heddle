@@ -50,6 +50,44 @@ pub enum BridgeCommands {
 }
 
 #[derive(Subcommand, Clone)]
+pub enum ImportCommands {
+    /// Import Git commits to Heddle.
+    ///
+    /// Walks local branches and tags by default. To import remote-tracking
+    /// refs (`refs/remotes/*`), name them explicitly with `--ref`.
+    Git {
+        /// Local path or git URL to import from.
+        #[arg(short, long, value_parser = parse_git_source)]
+        path: Option<GitSource>,
+
+        /// Ref names to import (repeatable). Scopes the import to the
+        /// listed branches, tags, or remote-tracking refs; omit to
+        /// import all branches and tags.
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
+
+        /// Accept git tree entries Heddle cannot represent losslessly.
+        #[arg(long)]
+        lossy: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ExportCommands {
+    /// Export Heddle states to Git.
+    ///
+    /// Writes a complete bare Git repository at `--destination` containing
+    /// every reachable Heddle state as a Git commit, with branches and tags
+    /// mirroring Heddle's threads and markers.
+    Git {
+        /// Destination path for the exported Git repository. Must be writable;
+        /// will be initialized as a bare repo if it does not already exist.
+        #[arg(short, long)]
+        destination: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 pub enum GitCommands {
     /// Show the current state of the Git overlay bridge.
     ///

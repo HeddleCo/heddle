@@ -126,6 +126,8 @@ schema_registry! {
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
+    (&["export git"], BridgeExportSchema),
+    (&["import git"], BridgeImportSchema),
     (&["bridge git export"], BridgeExportSchema),
     (&["bridge git import"], BridgeImportSchema),
     (&["bridge git sync"], BridgeSyncSchema),

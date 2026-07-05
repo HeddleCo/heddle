@@ -28,7 +28,7 @@ use crate::cli::{
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
-use crate::cli::{BridgeCommands, GitCommands};
+use crate::cli::{BridgeCommands, ExportCommands, GitCommands, ImportCommands};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOutput {
@@ -1426,6 +1426,36 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
+    entry(&["import"], surface(GROUP, "git_adapter")),
+    entry(
+        &["import", "git"],
+        exits(
+            json_discriminators(
+                documented_schemas(IMPORTING_MUTATION, &["import git"]),
+                &[json_discriminator(
+                    Some("import git"),
+                    "output_kind",
+                    "import_git",
+                )],
+            ),
+            &[
+                (0, "ok"),
+                (65, "malformed git repo or unimportable refs"),
+                (74, "io reading git refs"),
+            ],
+        ),
+    ),
+    entry(&["export"], surface(GROUP, "git_adapter")),
+    entry(
+        &["export", "git"],
+        documented_schemas(
+            CommandContract {
+                writes_git_refs: true,
+                ..MUTATING
+            },
+            &["export git"],
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
     entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
@@ -2725,10 +2755,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
     ),
-    entry(
-        &["spool"],
-        category(feature_gated(GROUP, "client"), "repo"),
-    ),
+    entry(&["spool"], category(feature_gated(GROUP, "client"), "repo")),
     entry(
         &["spool", "attach"],
         category(feature_gated(MUTATING_TEXT, "client"), "repo"),
@@ -4813,6 +4840,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
+        #[cfg(feature = "git-overlay")]
+        Commands::Import { command } => match command {
+            ImportCommands::Git { .. } => vec!["import", "git"],
+        },
+        #[cfg(feature = "git-overlay")]
+        Commands::Export { command } => match command {
+            ExportCommands::Git { .. } => vec!["export", "git"],
+        },
         Commands::Oplog { command } => match command {
             OplogCommands::Recover => vec!["oplog", "recover"],
         },

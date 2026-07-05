@@ -40,7 +40,7 @@ pub use cli_args::{
     SpoolHistoryArgs, SupportCommands,
 };
 #[cfg(feature = "git-overlay")]
-pub use cli_args::{BridgeCommands, GitCommands};
+pub use cli_args::{BridgeCommands, ExportCommands, GitCommands, ImportCommands};
 #[cfg(feature = "semantic")]
 pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 use repo::{Config, OutputFormat};

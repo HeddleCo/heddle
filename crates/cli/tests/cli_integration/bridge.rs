@@ -508,6 +508,61 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
 }
 
 #[test]
+fn test_cli_export_git_writes_bare_repo() {
+    let source = TempDir::new().unwrap();
+    let dest_holder = TempDir::new().unwrap();
+    let dest = dest_holder.path().join("export");
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "export git").unwrap();
+    heddle(&["capture", "-m", "Export git source"], Some(source.path())).unwrap();
+
+    let export = heddle(
+        &["export", "git", "--destination", dest.to_str().unwrap()],
+        Some(source.path()),
+    );
+    assert!(export.is_ok(), "export git failed: {:?}", export.err());
+
+    let dest_repo = open_git(&dest).unwrap();
+    assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
+}
+
+#[test]
+fn test_cli_import_git_from_external_repo() {
+    let heddle_repo_dir = TempDir::new().unwrap();
+    let git_repo_dir = TempDir::new().unwrap();
+    let git_repo = SleyRepository::init(git_repo_dir.path()).unwrap();
+    let tree_oid = git_empty_tree_oid(&git_repo);
+    git_commit_with_tree(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "Imported commit",
+        &[],
+    );
+
+    heddle(&["init"], Some(heddle_repo_dir.path())).unwrap();
+    let result = heddle(
+        &[
+            "import",
+            "git",
+            "--path",
+            git_repo_dir.path().to_str().unwrap(),
+        ],
+        Some(heddle_repo_dir.path()),
+    );
+    assert!(result.is_ok(), "import git failed: {:?}", result.err());
+
+    let repo = Repository::open(heddle_repo_dir.path()).unwrap();
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn test_cli_bridge_git_import_from_external_repo() {
     let heddle_repo_dir = TempDir::new().unwrap();
     let git_repo_dir = TempDir::new().unwrap();

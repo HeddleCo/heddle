@@ -120,6 +120,13 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "git-overlay")]
+    sample(&["import", "git"], &["import", "git"]),
+    #[cfg(feature = "git-overlay")]
+    sample(
+        &["export", "git"],
+        &["export", "git", "--destination", "out.git"],
+    ),
+    #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "export"], &["bridge", "git", "export"]),
@@ -394,7 +401,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["spool", "attach", "acme/root", "acme/lib"],
     ),
     #[cfg(feature = "client")]
-    sample(&["spool", "detach"], &["spool", "detach", "acme/root", "libs"]),
+    sample(
+        &["spool", "detach"],
+        &["spool", "detach", "acme/root", "libs"],
+    ),
     #[cfg(feature = "client")]
     sample(&["spool", "children"], &["spool", "children", "acme/root"]),
     #[cfg(feature = "client")]
@@ -1384,6 +1394,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth logout",
             "auth status",
             "auth create-service-token",
+            "import git",
             "bridge git status",
             "bridge git import",
             "bridge git sync",

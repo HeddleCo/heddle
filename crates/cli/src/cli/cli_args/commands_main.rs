@@ -3,8 +3,6 @@
 
 use clap::Subcommand;
 
-#[cfg(feature = "git-overlay")]
-use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
@@ -23,6 +21,8 @@ use super::{
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SpoolCommands, SupportCommands};
+#[cfg(feature = "git-overlay")]
+use super::{BridgeCommands, ExportCommands, ImportCommands};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -34,7 +34,6 @@ pub enum Commands {
     /// Git-overlay repos normally keep Git commits in `.git` and Heddle
     /// metadata in `.heddle`. Use `adopt` only when you explicitly want a
     /// Git-backed checkout converted into native Heddle storage.
-    #[command(visible_alias = "import")]
     Adopt(AdoptArgs),
 
     /// Curated, progressive-disclosure help.
@@ -390,6 +389,20 @@ Examples:
     Oplog {
         #[command(subcommand)]
         command: OplogCommands,
+    },
+
+    /// Import from another version control system.
+    #[cfg(feature = "git-overlay")]
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
+
+    /// Export to another version control system.
+    #[cfg(feature = "git-overlay")]
+    Export {
+        #[command(subcommand)]
+        command: ExportCommands,
     },
 
     /// Download objects and refs from remote.

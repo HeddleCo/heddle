@@ -114,7 +114,7 @@ pub use agent_cmd::{
     cmd_agent_release, cmd_agent_reserve,
 };
 #[cfg(feature = "git-overlay")]
-pub use bridge::cmd_bridge_git;
+pub use bridge::{cmd_bridge_git, cmd_export_git, cmd_import_git};
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;

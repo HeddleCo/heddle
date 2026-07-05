@@ -7,10 +7,12 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
+#[cfg(feature = "client")]
+use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
-    BridgeCommands,
-    commands::{cmd_bridge_git, cmd_git_overlay_guide},
+    BridgeCommands, ExportCommands, ImportCommands,
+    commands::{cmd_bridge_git, cmd_export_git, cmd_git_overlay_guide, cmd_import_git},
 };
 use cli::{
     cli::{
@@ -46,8 +48,6 @@ use cli::{
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_spool;
 use tracing::debug;
 
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
@@ -515,6 +515,18 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
+
+        #[cfg(feature = "git-overlay")]
+        Commands::Import { command } => match command {
+            ImportCommands::Git { path, refs, lossy } => {
+                cmd_import_git(&cli, path.clone(), refs.clone(), *lossy)
+            }
+        },
+
+        #[cfg(feature = "git-overlay")]
+        Commands::Export { command } => match command {
+            ExportCommands::Git { destination } => cmd_export_git(&cli, destination.clone()),
+        },
 
         Commands::Fsck {
             full,

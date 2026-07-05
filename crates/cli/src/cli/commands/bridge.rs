@@ -454,11 +454,12 @@ fn render_bridge_git_import(
     cli: &Cli,
     repo: &Repository,
     output: &BridgeGitImportOutput,
+    command_path: &[&str],
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         write_full_command_json(
             output,
-            NextActionValidationContext::new(&["bridge", "git", "import"], repo.capability()),
+            NextActionValidationContext::new(command_path, repo.capability()),
         )?;
         return Ok(());
     }
@@ -591,6 +592,188 @@ fn git_import_required_summary(branches: &[String], total: usize) -> String {
 }
 
 /// Execute bridge subcommands.
+fn open_repo_for_cli(cli: &Cli) -> Result<Repository> {
+    match &cli.repo {
+        Some(path) => Ok(Repository::open(path)?),
+        None => Ok(Repository::open(std::env::current_dir()?)?),
+    }
+}
+
+pub fn cmd_export_git(cli: &Cli, destination: Option<PathBuf>) -> Result<()> {
+    let repo = open_repo_for_cli(cli)?;
+    let mut bridge = GitBridge::new(&repo);
+    run_git_export(
+        cli,
+        &repo,
+        &mut bridge,
+        destination,
+        "no destination specified. Use `export git --destination PATH` to write a bare Git repository, or `push <remote>` to push to a configured remote.",
+    )
+}
+
+pub fn cmd_import_git(
+    cli: &Cli,
+    path: Option<GitSource>,
+    refs: Vec<String>,
+    lossy: bool,
+) -> Result<()> {
+    let repo = open_repo_for_cli(cli)?;
+    let mut bridge = GitBridge::new(&repo);
+    run_git_import(
+        cli,
+        &repo,
+        &mut bridge,
+        path,
+        &refs,
+        lossy,
+        "import_git",
+        "import git",
+        &["import", "git"],
+    )
+}
+
+fn run_git_export(
+    cli: &Cli,
+    repo: &Repository,
+    bridge: &mut GitBridge,
+    destination: Option<PathBuf>,
+    missing_destination_message: &'static str,
+) -> Result<()> {
+    let destination = destination.ok_or_else(|| anyhow!(missing_destination_message))?;
+    let stats = bridge.export_to_path(&destination)?;
+
+    if should_output_json(cli, Some(repo.config())) {
+        let out = serde_json::json!({
+            "states_exported": stats.states_exported,
+            "commits_total": stats.commits_total,
+            "threads_synced": stats.threads_synced,
+            "markers_synced": stats.markers_synced,
+            "branches": exported_refs_json(&stats.branches),
+            "tags": exported_refs_json(&stats.tags),
+            "destination": destination.display().to_string(),
+        });
+        println!("{out}");
+    } else {
+        println!(
+            "{} exported to {}",
+            style::ok_marker(),
+            style::dim(&destination.display().to_string())
+        );
+        println!(
+            "  {}",
+            style::field(
+                "commits",
+                &export_commits_summary(stats.commits_total, stats.states_exported)
+            )
+        );
+        println!(
+            "  {}",
+            style::field("branches", &exported_refs_summary(&stats.branches))
+        );
+        println!(
+            "  {}",
+            style::field("tags", &exported_refs_summary(&stats.tags))
+        );
+    }
+    Ok(())
+}
+
+fn run_git_import(
+    cli: &Cli,
+    repo: &Repository,
+    bridge: &mut GitBridge,
+    path: Option<GitSource>,
+    refs: &[String],
+    lossy: bool,
+    output_kind: &'static str,
+    action: &'static str,
+    command_path: &[&str],
+) -> Result<()> {
+    let resolved = match path.as_ref() {
+        Some(source) => Some(resolve_source(repo, source.clone())?),
+        None => None,
+    };
+    let default_source = repo.root();
+    let source_label = resolved
+        .as_ref()
+        .map(|source| source.path().display().to_string())
+        .unwrap_or_else(|| default_source.display().to_string());
+    let scope = if refs.is_empty() {
+        "all refs".to_string()
+    } else {
+        format!("{} ref(s): {}", refs.len(), refs.join(", "))
+    };
+    let mut progress = ImportProgress::start(cli, repo, &scope, &source_label);
+    progress.begin_commit_import();
+    let import_options = ImportOptions { lossy };
+    let mut on_commit = |event| progress.commit_tick(event);
+    let source_path = resolved
+        .as_ref()
+        .map(ResolvedSource::path)
+        .unwrap_or(default_source);
+    let attached_before = match repo.head_ref()? {
+        Head::Attached { thread } => repo
+            .refs()
+            .get_thread(&thread)?
+            .map(|state| (thread, state)),
+        Head::Detached { .. } => None,
+    };
+    let stats = import_git_history(
+        bridge,
+        Some(source_path),
+        refs,
+        import_options,
+        Some(&mut on_commit),
+    )?;
+    progress.begin_ref_write();
+    progress.finish();
+    materialize_imported_attached_thread(bridge, attached_before.as_ref())?;
+
+    let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
+    let trust = build_repository_verification_state(repo);
+    let summary = if already_in_sync {
+        if trust.verified {
+            format!(
+                "Git import already in sync with {source_label}: every commit already imported; repository verification is clean"
+            )
+        } else {
+            format!(
+                "Git import already in sync with {source_label}: every commit already imported, but repository verification is blocked: {}",
+                trust.summary
+            )
+        }
+    } else if trust.verified {
+        format!("Imported Git history from {source_label}; repository verification is clean")
+    } else {
+        format!(
+            "Imported Git history from {source_label}, but repository verification is blocked: {}",
+            trust.summary
+        )
+    };
+    let output = BridgeGitImportOutput {
+        output_kind,
+        status: if trust.verified {
+            "completed".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        action,
+        summary,
+        commits_imported: stats.commits_imported,
+        states_created: stats.states_created,
+        branches_synced: stats.branches_synced,
+        tags_synced: stats.tags_synced,
+        skipped_non_commit_refs: stats.skipped_non_commit_refs,
+        lossy_entries: bridge_lossy_import_entries(&stats.lossy_entries),
+        already_in_sync,
+        recommended_action: trust.recommended_action.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        trust,
+    };
+    render_bridge_git_import(cli, repo, &output, command_path)
+}
+
 pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
     if matches!(&command, GitCommands::Status) {
         let cwd = std::env::current_dir()?;
@@ -777,7 +960,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 recovery_commands: trust.recovery_commands.clone(),
                 trust,
             };
-            render_bridge_git_import(cli, &repo, &output)?;
+            render_bridge_git_import(cli, &repo, &output, &["bridge", "git", "import"])?;
         }
 
         GitCommands::Sync { path } => {
