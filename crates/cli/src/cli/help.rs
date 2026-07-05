@@ -660,7 +660,7 @@ Everyday loop:
 Existing Git checkout:
 
     heddle status
-    heddle init                  # create the sidecar; Git commits stay in .git
+    heddle init                  # initialize Heddle metadata; Git commits stay in .git
     heddle verify
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
@@ -910,7 +910,7 @@ behind the bridge/adapter.\n\
 Start in an existing Git checkout:\n\
 \n\
     heddle status\n\
-    heddle init                               # create the sidecar; Git commits stay in .git\n\
+    heddle init                               # initialize Heddle metadata; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Save and sync ordinary work:\n\
@@ -949,7 +949,7 @@ while keeping Git remotes and commits available as interoperability surfaces.\n\
 First run:\n\
 \n\
     heddle status\n\
-    heddle init                               # create the sidecar; Git commits stay in .git\n\
+    heddle init                               # initialize Heddle metadata; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Manual setup, when you want one ref at a time:\n\

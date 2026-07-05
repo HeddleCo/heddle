@@ -490,7 +490,7 @@ Examples:
   heddle bridge git status                       # inspect advanced Git adapter mapping
   heddle bridge git import --ref main            # adopt one branch as a full Heddle lane
   heddle bridge git sync                         # bidirectional export + import
-  heddle bridge git export --destination ../mirror.git  # write a bare git mirror
+  heddle bridge git export --destination ../mirror.git  # write an explicit bare Git export
 ")]
     Bridge {
         #[command(subcommand)]

@@ -2957,7 +2957,7 @@ Export emits:
 {"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
 
-Export requires an explicit destination and does not default to the repo-local Bridge Mirror.
+Export requires an explicit destination and does not default to `.heddle/git`.
 
 ## `heddle bridge git import --output json`
 
