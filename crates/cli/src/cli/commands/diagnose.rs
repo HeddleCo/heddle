@@ -240,7 +240,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let current_state = repo.current_state()?;
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let verification_health = build_verification_health(&repo);
     let trust = build_repository_verification_state(&repo);
     let remote_tracking =

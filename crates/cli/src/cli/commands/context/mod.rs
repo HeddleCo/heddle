@@ -283,7 +283,7 @@ pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects:
         })
     };
     let policy = ResolvePolicy {
-        git_overlay_import_hints: true,
+        git_import_guidance: true,
         bootstrap_on_empty_head: Some(&bootstrap),
     };
     resolve_state_id_with_policy(repo, spec, policy)

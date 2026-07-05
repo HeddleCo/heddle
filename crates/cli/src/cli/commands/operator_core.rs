@@ -6,7 +6,7 @@ use chrono::Utc;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action};
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
+    GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, shell_quote, update_thread_state_from_state,
 };
@@ -703,7 +703,7 @@ fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) 
 pub(crate) fn recommend_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
 ) -> String {
     effective_next_action(NextActionInput::default(

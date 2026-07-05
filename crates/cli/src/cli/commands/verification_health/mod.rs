@@ -9,7 +9,7 @@ use std::{
 use heddle_core::status::next_action::{
     canonical_adopt_ref_command, canonical_bridge_import_ref_command,
     canonical_bridge_reconcile_ref_preview_command, heddle_action as core_heddle_action,
-    import_hint_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
+    import_guidance_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
 };
 pub(crate) use heddle_core::{
     ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
@@ -19,7 +19,7 @@ pub(crate) use heddle_core::{
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
-    CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
+    CommitGraphIndex, GitOverlayBranchTip, GitImportGuidance, GitOverlayOutOfBandCommits,
     GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager, ThreadState,
     describe_thread_advice, refresh_thread_freshness,
 };
@@ -1094,10 +1094,10 @@ pub(crate) fn unimported_git_history_advice(
         return Ok(None);
     }
 
-    let Some(hint) = repo.git_overlay_import_hint()? else {
+    let Some(hint) = repo.git_import_guidance()? else {
         return Ok(None);
     };
-    if !import_hint_includes_active_branch(&hint) {
+    if !import_guidance_includes_active_branch(&hint) {
         return Ok(None);
     }
     let missing = hint.missing_branches;
@@ -2198,7 +2198,7 @@ fn build_verification_health_inner(
         }
     }
 
-    let import_hint = match repo.git_overlay_import_hint() {
+    let import_hint = match repo.git_import_guidance() {
         Ok(hint) => hint,
         Err(error) => {
             checks.push(GitOverlayHealthCheck {
@@ -2217,7 +2217,7 @@ fn build_verification_health_inner(
                 && repo.current_state().ok().flatten().is_some()
                 && import_hint
                     .as_ref()
-                    .is_some_and(import_hint_includes_active_branch) =>
+                    .is_some_and(import_guidance_includes_active_branch) =>
         {
             let out_of_band = repo
                 .git_overlay_out_of_band_commits(&tip.git_commit)
@@ -2249,7 +2249,7 @@ fn build_verification_health_inner(
                 details,
             });
             if let Some(hint) = &import_hint
-                && import_hint_includes_active_branch(hint)
+                && import_guidance_includes_active_branch(hint)
             {
                 checks.push(GitOverlayHealthCheck {
                     name: "import".to_string(),
@@ -2311,7 +2311,7 @@ fn build_verification_health_inner(
     }
 
     match import_hint {
-        Some(hint) if import_hint_includes_active_branch(&hint) => {
+        Some(hint) if import_guidance_includes_active_branch(&hint) => {
             return needs_import(checks, hint);
         }
         Some(hint) => checks.push(GitOverlayHealthCheck {
@@ -2780,7 +2780,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
 
 fn needs_import(
     mut checks: Vec<GitOverlayHealthCheck>,
-    hint: GitOverlayImportHint,
+    hint: GitImportGuidance,
 ) -> GitOverlayHealth {
     checks.push(GitOverlayHealthCheck {
         name: "import".to_string(),

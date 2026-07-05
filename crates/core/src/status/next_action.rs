@@ -2,7 +2,7 @@
 //! Shared status and command next-action selection.
 
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
     shell_quote,
 };
 
@@ -18,7 +18,7 @@ pub enum NextActionScope {
 pub struct NextActionInput<'a> {
     pub operation: Option<&'a RepositoryOperationStatus>,
     pub remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-    pub import_hint: Option<&'a GitOverlayImportHint>,
+    pub import_hint: Option<&'a GitImportGuidance>,
     pub fallback: Option<&'a str>,
     pub thread_health: Option<&'a str>,
     pub trust: Option<&'a RepositoryVerificationState>,
@@ -29,7 +29,7 @@ impl<'a> NextActionInput<'a> {
     pub fn default(
         operation: Option<&'a RepositoryOperationStatus>,
         remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-        import_hint: Option<&'a GitOverlayImportHint>,
+        import_hint: Option<&'a GitImportGuidance>,
         fallback: Option<&'a str>,
     ) -> Self {
         Self {
@@ -127,7 +127,7 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return action.to_string();
     }
     if let Some(hint) = input.import_hint
-        && import_hint_includes_active_branch(hint)
+        && import_guidance_includes_active_branch(hint)
     {
         return hint.recommended_command.clone();
     }
@@ -308,7 +308,7 @@ pub fn contextual_thread_action(
     action.to_string()
 }
 
-pub fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
+pub fn import_guidance_includes_active_branch(hint: &GitImportGuidance) -> bool {
     hint.missing_branches
         .iter()
         .any(|branch| branch == &hint.current_branch)

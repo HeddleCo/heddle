@@ -14,7 +14,7 @@ pub type EmptyHeadBootstrap<'a> = dyn Fn(&Repository) -> HeddleResult<()> + 'a;
 
 /// Policy knobs derived from the six pre-consolidation call sites.
 ///
-/// * `git_overlay_import_hints` — history_target + context (via the rich
+/// * `git_import_guidance` — history_target + context (via the rich
 ///   resolver): when lookup returns `None`, check tip-only Git-overlay
 ///   branch/tag refs and surface a structured import-history failure.
 /// * `bootstrap_on_empty_head` — context only: before resolving `HEAD` /
@@ -22,7 +22,7 @@ pub type EmptyHeadBootstrap<'a> = dyn Fn(&Repository) -> HeddleResult<()> + 'a;
 ///   `ensure_current_state` in the CLI).
 #[derive(Clone, Copy, Default)]
 pub struct ResolvePolicy<'a> {
-    pub git_overlay_import_hints: bool,
+    pub git_import_guidance: bool,
     pub bootstrap_on_empty_head: Option<&'a EmptyHeadBootstrap<'a>>,
 }
 
@@ -30,7 +30,7 @@ impl<'a> ResolvePolicy<'a> {
     /// purge / redact / core::diff: plain lookup, no hints, no bootstrap.
     pub fn minimal() -> Self {
         Self {
-            git_overlay_import_hints: false,
+            git_import_guidance: false,
             bootstrap_on_empty_head: None,
         }
     }
@@ -38,7 +38,7 @@ impl<'a> ResolvePolicy<'a> {
     /// history_target and other rich CLI resolvers.
     pub fn with_git_overlay_hints() -> Self {
         Self {
-            git_overlay_import_hints: true,
+            git_import_guidance: true,
             bootstrap_on_empty_head: None,
         }
     }
@@ -132,7 +132,7 @@ fn resolve_missing_state(
     spec: &str,
     policy: ResolvePolicy<'_>,
 ) -> Result<ResolvedState, StateResolveError> {
-    if policy.git_overlay_import_hints {
+    if policy.git_import_guidance {
         if let Some(tip) = repo.git_overlay_branch_tip(spec)?
             && !tip.history_imported
         {
@@ -202,7 +202,7 @@ mod tests {
             Ok(())
         };
         let policy = ResolvePolicy {
-            git_overlay_import_hints: false,
+            git_import_guidance: false,
             bootstrap_on_empty_head: Some(&bootstrap),
         };
 
@@ -228,7 +228,7 @@ mod tests {
             repo.snapshot(Some("bootstrap".into()), None).map(|_| ())
         };
         let policy = ResolvePolicy {
-            git_overlay_import_hints: false,
+            git_import_guidance: false,
             bootstrap_on_empty_head: Some(&bootstrap),
         };
 

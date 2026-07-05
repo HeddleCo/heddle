@@ -1437,7 +1437,7 @@ fn print_thread_output(
     }
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let recommended_action = primary_next_action(
         operation.as_ref(),
         remote_tracking.as_ref(),

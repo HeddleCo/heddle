@@ -91,7 +91,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
     let stale_blockers = non_staleness_blockers(&stale_report.blockers);
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let mut output = if thread.freshness == repo::ThreadFreshness::Current {
         let recommended_action = primary_next_action(
             operation.as_ref(),

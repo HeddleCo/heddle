@@ -137,7 +137,7 @@ pub struct GitCheckpointRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitOverlayImportHint {
+pub struct GitImportGuidance {
     pub current_branch: String,
     pub missing_branch_count: usize,
     pub missing_branches: Vec<String>,
@@ -1057,7 +1057,7 @@ impl Repository {
         }))
     }
 
-    pub fn git_overlay_import_hint(&self) -> Result<Option<GitOverlayImportHint>> {
+    pub fn git_import_guidance(&self) -> Result<Option<GitImportGuidance>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }

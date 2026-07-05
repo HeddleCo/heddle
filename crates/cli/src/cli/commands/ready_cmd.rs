@@ -6,7 +6,7 @@ use chrono::Utc;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 use objects::object::Tree;
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
     ThreadFreshness, ThreadState,
 };
 use serde::{
@@ -378,7 +378,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let mut trust = build_repository_verification_state(&repo);
     let report_recommended_action = ready_report_recommended_action(&report);
     let recommended_action = ready_scoped_next_action(
@@ -450,7 +450,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
 fn ready_scoped_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     thread_action: Option<&str>,
 ) -> String {
     effective_next_action(
@@ -928,8 +928,8 @@ mod tests {
         }
     }
 
-    fn import_hint() -> GitOverlayImportHint {
-        GitOverlayImportHint {
+    fn import_hint() -> GitImportGuidance {
+        GitImportGuidance {
             current_branch: "feature".to_string(),
             missing_branch_count: 1,
             missing_branches: vec!["feature".to_string()],

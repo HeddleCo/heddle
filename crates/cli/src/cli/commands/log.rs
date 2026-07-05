@@ -330,7 +330,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         status: "completed",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        import_guidance: repo.git_overlay_import_hint()?.map(|hint| {
+        import_guidance: repo.git_import_guidance()?.map(|hint| {
             LogImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,

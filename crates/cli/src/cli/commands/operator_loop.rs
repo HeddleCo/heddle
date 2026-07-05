@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
+use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
     action_line::print_next_step,
@@ -194,7 +194,7 @@ fn emit(
 pub(crate) fn primary_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
 ) -> String {
     recommend_next_action(operation, remote_tracking, import_hint, fallback)
@@ -203,7 +203,7 @@ pub(crate) fn primary_next_action(
 pub(crate) fn primary_next_action_with_verification(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
     trust: &RepositoryVerificationState,
 ) -> String {

@@ -16,7 +16,7 @@
 //! We deliberately do not pull in a full JSON-Schema validator here:
 //! disk is tight, and the keys-only check catches every drift class
 //! the doc has historically suffered (renames, deletions, leaks of
-//! fields like `git_overlay_import_hint` into per-command outputs).
+//! fields like `git_import_guidance` into per-command outputs).
 
 use std::path::{Path, PathBuf};
 

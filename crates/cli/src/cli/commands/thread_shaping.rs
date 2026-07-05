@@ -8,7 +8,7 @@ use heddle_core::{
     CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
 };
 use objects::object::ThreadName;
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
+use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
 use super::{
@@ -370,7 +370,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let recommended_action = thread_resolve_next_action(
         &blockers,
         operation.as_ref(),
@@ -416,7 +416,7 @@ fn thread_resolve_next_action(
     blockers: &[String],
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     local_action: &str,
 ) -> Option<String> {
     let action = if blockers.is_empty() {

@@ -554,7 +554,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
     let current = repo.current_lane()?;
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status().unwrap_or(None);
-    let import_hint = repo.git_overlay_import_hint().unwrap_or(None);
+    let import_hint = repo.git_import_guidance().unwrap_or(None);
     let branch_tips = repo
         .git_overlay_branch_tips()
         .unwrap_or_default()
@@ -1279,7 +1279,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         import_guidance: if as_json {
             None
         } else {
-            repo.git_overlay_import_hint()?
+            repo.git_import_guidance()?
                 .map(|hint| ThreadListImportGuidanceOutput {
                     current_branch: hint.current_branch,
                     missing_branch_count: hint.missing_branch_count,

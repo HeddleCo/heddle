@@ -20,7 +20,7 @@ use objects::{
 };
 use refs::Head;
 use repo::{
-    AgentUsageSummary, CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint,
+    AgentUsageSummary, CommitGraphIndex, GitOverlayBranchTip, GitImportGuidance,
     GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
     RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
     ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
@@ -124,7 +124,7 @@ pub struct StatusReport {
     pub git_index: Option<GitIndexPlan>,
     #[serde(skip)]
     #[schemars(skip)]
-    pub import_guidance: Option<GitOverlayImportHintReport>,
+    pub import_guidance: Option<GitImportGuidanceReport>,
     #[serde(skip)]
     #[schemars(skip)]
     pub verification_health: GitOverlayHealth,
@@ -432,7 +432,7 @@ pub fn build_git_overlay_health_with_worktree_status(
         }
     }
 
-    let import_hint = match repo.git_overlay_import_hint() {
+    let import_hint = match repo.git_import_guidance() {
         Ok(hint) => hint,
         Err(error) => {
             checks.push(GitOverlayHealthCheck {
@@ -451,7 +451,7 @@ pub fn build_git_overlay_health_with_worktree_status(
                 && repo.current_state().ok().flatten().is_some()
                 && import_hint
                     .as_ref()
-                    .is_some_and(import_hint_includes_active_branch) =>
+                    .is_some_and(import_guidance_includes_active_branch) =>
         {
             let out_of_band = repo
                 .git_overlay_out_of_band_commits(&tip.git_commit)
@@ -483,7 +483,7 @@ pub fn build_git_overlay_health_with_worktree_status(
                 details,
             });
             if let Some(hint) = &import_hint
-                && import_hint_includes_active_branch(hint)
+                && import_guidance_includes_active_branch(hint)
             {
                 checks.push(GitOverlayHealthCheck {
                     name: "import".to_string(),
@@ -543,7 +543,7 @@ pub fn build_git_overlay_health_with_worktree_status(
     }
 
     match import_hint {
-        Some(hint) if import_hint_includes_active_branch(&hint) => {
+        Some(hint) if import_guidance_includes_active_branch(&hint) => {
             return needs_import(checks, hint);
         }
         Some(hint) => checks.push(GitOverlayHealthCheck {
@@ -777,7 +777,7 @@ pub fn build_git_overlay_health_with_worktree_status(
 
 fn needs_import(
     mut checks: Vec<GitOverlayHealthCheck>,
-    hint: GitOverlayImportHint,
+    hint: GitImportGuidance,
 ) -> GitOverlayHealth {
     checks.push(GitOverlayHealthCheck {
         name: "import".to_string(),
@@ -1251,22 +1251,22 @@ fn dirty_details(status: &WorktreeStatus) -> std::collections::BTreeMap<String, 
     details
 }
 
-fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
+fn import_guidance_includes_active_branch(hint: &GitImportGuidance) -> bool {
     hint.missing_branches
         .iter()
         .any(|branch| branch == &hint.current_branch)
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct GitOverlayImportHintReport {
+pub struct GitImportGuidanceReport {
     pub current_branch: String,
     pub missing_branch_count: usize,
     pub missing_branches: Vec<String>,
     pub recommended_command: String,
 }
 
-impl From<GitOverlayImportHint> for GitOverlayImportHintReport {
-    fn from(hint: GitOverlayImportHint) -> Self {
+impl From<GitImportGuidance> for GitImportGuidanceReport {
+    fn from(hint: GitImportGuidance) -> Self {
         Self {
             current_branch: hint.current_branch,
             missing_branch_count: hint.missing_branch_count,
@@ -1780,7 +1780,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let import_hint = if opts.detail.short_path() {
         None
     } else {
-        repo.git_overlay_import_hint().unwrap_or(None)
+        repo.git_import_guidance().unwrap_or(None)
     };
     let import_hint_ms = import_hint_start.elapsed().as_millis();
 
@@ -2115,7 +2115,7 @@ struct ShortPathInputs<'a> {
     remote_tracking: Option<GitRemoteTrackingStatus>,
     verification_health: GitOverlayHealth,
     trust: RepositoryVerificationState,
-    import_hint: Option<GitOverlayImportHint>,
+    import_hint: Option<GitImportGuidance>,
     git_index: Option<GitIndexPlan>,
     identity_notice: Option<String>,
     changes: ChangesInfo,
@@ -2225,7 +2225,7 @@ fn apply_status_advice(
     output: StatusReport,
     current_state: Option<&State>,
     thread_summary: &Option<StatusThreadSummary>,
-    import_hint: Option<GitOverlayImportHint>,
+    import_hint: Option<GitImportGuidance>,
     git_backed_mapping: bool,
 ) -> StatusReport {
     let has_changes = !output.changes.is_empty();
