@@ -39,15 +39,15 @@ use super::{
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
-    bridge::{
-        GitBridge,
+    cli::{Cli, should_output_json, style},
+    client::LocalSync,
+    git_projection_engine::{
+        GitProjection,
         git_core::{
             clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
         },
         git_ingest::import_git_history,
     },
-    cli::{Cli, should_output_json, style},
-    client::LocalSync,
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 
@@ -380,7 +380,7 @@ fn finish_git_overlay_clone(
 ) -> Result<()> {
     configure_git_overlay_origin(local_path, &remote_label)?;
     let repo = Repository::init(local_path)?;
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     let refs = options
         .thread
         .as_ref()
@@ -1812,7 +1812,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// `PartialFetchMetadata` records blake3 hashes only, but
 /// `Repository::read_object` is keyed by Git OID. The bridge
 /// already computes blake3↔git mappings *for commits* (see
-/// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
+/// `SyncMapping` in `git_projection_engine/git_core.rs`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
 /// mapping here, populated by the caller (clone-time or test-time)
 /// before [`Self::hydrate`] fires. Future work: persist a sidecar

@@ -26,22 +26,22 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     error_envelope::print_error_with_hint,
+    next_action::{NextActionValidationContext, write_command_json},
+    operator_core::complete_current_thread_manual_resolution,
+    thread::find_active_thread_entry,
+    thread_cmd::current_thread,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
-    next_action::{NextActionValidationContext, write_command_json},
-    operator_core::complete_current_thread_manual_resolution,
-    thread::find_active_thread_entry,
-    thread_cmd::current_thread,
 };
 use crate::{
     attribution::clean_attribution_value,
-    bridge::GitBridge,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
+    git_projection_engine::GitProjection,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
 
@@ -271,7 +271,7 @@ pub async fn cmd_snapshot(
     if git_overlay {
         match repo.current_state() {
             Ok(Some(state)) => {
-                let bridge = GitBridge::new(&repo);
+                let bridge = GitProjection::new(&repo);
                 if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
                     debug!("intent-to-add index update skipped: {err}");
                 }

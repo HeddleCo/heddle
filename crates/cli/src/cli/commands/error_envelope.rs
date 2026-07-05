@@ -422,7 +422,8 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 extra_json_fields: serde_json::Map::new(),
             };
         }
-        if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>()
+        if let Some(git_error) =
+            cause.downcast_ref::<crate::git_projection_engine::git_core::GitProjectionError>()
             && let Some(advice) = RecoveryAdvice::from_git_projection_error(git_error)
         {
             return ErrorClassification::from_advice(&advice);

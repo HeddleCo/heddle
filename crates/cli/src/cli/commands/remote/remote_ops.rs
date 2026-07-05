@@ -38,10 +38,10 @@ use super::super::{
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 use crate::{
-    bridge::{GitBridge, git_core::GitPullOutcome},
     cli::{Cli, RemoteCommands, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
+    git_projection_engine::{GitProjection, git_core::GitPullOutcome},
     remote::{Remote, RemoteConfig, RemoteError, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -223,7 +223,7 @@ pub async fn cmd_pull(
         let branch = repo.git_overlay_current_branch()?;
         let old_git_head = git_checkout_head_oid(repo.root());
         let old_state = repo.head()?;
-        let mut bridge = GitBridge::new(&repo);
+        let mut bridge = GitProjection::new(&repo);
         let outcome = bridge.pull(&remote_name)?;
         let new_git_head = git_checkout_head_oid(repo.root());
         let new_state = repo.head()?;

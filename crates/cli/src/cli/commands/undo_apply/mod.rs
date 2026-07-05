@@ -29,7 +29,7 @@ use sley::{
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
-use crate::bridge::git_core::{open_repo as open_git_repo, set_reference};
+use crate::git_projection_engine::git_core::{open_repo as open_git_repo, set_reference};
 
 pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     if !batches_have_git_checkpoint(batches) {

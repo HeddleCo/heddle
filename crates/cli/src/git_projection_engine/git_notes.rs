@@ -21,7 +21,7 @@ use objects::object::{ChangeId, State, Status};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectId, Repository};
 
-use super::git_core::{GitBridgeError, GitResult, git_err};
+use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
 
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
@@ -134,13 +134,14 @@ impl HeddleNote {
         self
     }
 
-    pub fn to_json_bytes(&self) -> GitResult<Vec<u8>> {
+    pub fn to_json_bytes(&self) -> GitProjectionResult<Vec<u8>> {
         serde_json::to_vec_pretty(self)
-            .map_err(|e| GitBridgeError::Git(format!("note serialize: {e}")))
+            .map_err(|e| GitProjectionError::Git(format!("note serialize: {e}")))
     }
 
-    pub fn from_json_bytes(bytes: &[u8]) -> GitResult<Self> {
-        serde_json::from_slice(bytes).map_err(|e| GitBridgeError::Git(format!("note parse: {e}")))
+    pub fn from_json_bytes(bytes: &[u8]) -> GitProjectionResult<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| GitProjectionError::Git(format!("note parse: {e}")))
     }
 }
 
@@ -152,7 +153,11 @@ fn notes_ref() -> sley::notes::NotesRef {
 ///
 /// Each call creates one new notes commit on top of any previous notes
 /// history. The notes ref is updated atomically via sley's notes plumbing.
-pub fn write_note(repo: &Repository, commit_oid: ObjectId, note: &HeddleNote) -> GitResult<()> {
+pub fn write_note(
+    repo: &Repository,
+    commit_oid: ObjectId,
+    note: &HeddleNote,
+) -> GitProjectionResult<()> {
     let json = note.to_json_bytes()?;
     let notes_ref = notes_ref();
     let refs = repo.references();
@@ -188,7 +193,7 @@ pub fn write_note(repo: &Repository, commit_oid: ObjectId, note: &HeddleNote) ->
 pub fn remove_notes(
     repo: &Repository,
     commit_oids: &std::collections::HashSet<ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     if commit_oids.is_empty() {
         return Ok(());
     }
@@ -210,7 +215,10 @@ pub fn remove_notes(
 }
 
 /// Look up the note attached to `commit_oid`, if any.
-pub fn read_note(repo: &Repository, commit_oid: ObjectId) -> GitResult<Option<HeddleNote>> {
+pub fn read_note(
+    repo: &Repository,
+    commit_oid: ObjectId,
+) -> GitProjectionResult<Option<HeddleNote>> {
     let Some(bytes) = repo
         .read_note_bytes(&notes_ref(), &commit_oid)
         .map_err(git_err)?
@@ -221,7 +229,9 @@ pub fn read_note(repo: &Repository, commit_oid: ObjectId) -> GitResult<Option<He
 }
 
 /// Read every portable Git↔Heddle identity recorded under `refs/notes/heddle`.
-pub(crate) fn read_identity_mappings(repo: &Repository) -> GitResult<Vec<(ChangeId, ObjectId)>> {
+pub(crate) fn read_identity_mappings(
+    repo: &Repository,
+) -> GitProjectionResult<Vec<(ChangeId, ObjectId)>> {
     read_all_notes(repo)?
         .into_iter()
         .map(|(oid, note)| Ok((ChangeId::parse(&note.change_id)?, oid)))
@@ -229,7 +239,9 @@ pub(crate) fn read_identity_mappings(repo: &Repository) -> GitResult<Vec<(Change
 }
 
 /// Read every (commit_oid → note) entry under `refs/notes/heddle`.
-pub(crate) fn read_all_notes(repo: &Repository) -> GitResult<HashMap<ObjectId, HeddleNote>> {
+pub(crate) fn read_all_notes(
+    repo: &Repository,
+) -> GitProjectionResult<HashMap<ObjectId, HeddleNote>> {
     let mut out = HashMap::new();
     for note_entry in repo.list_notes(&notes_ref()).map_err(git_err)? {
         let object = repo.read_object(&note_entry.blob).map_err(git_err)?;

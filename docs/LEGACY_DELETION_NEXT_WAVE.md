@@ -192,7 +192,7 @@ Removed runtime writers/readers:
 - `crates/ingest/src/importer.rs` now writes first-class Gitlink tree entries.
 - `crates/cli/src/cli/commands/git_projection.rs` now writes first-class Gitlink
   entries for Git-index gitlinks.
-- `crates/cli/src/bridge/git_export.rs` now emits Git gitlinks only from
+- `crates/cli/src/git_projection_engine/git_export.rs` now emits Git gitlinks only from
   first-class Gitlink targets and never sniffs ordinary blob content.
 
 Completed deletion direction:

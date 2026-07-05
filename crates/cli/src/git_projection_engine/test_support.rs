@@ -10,7 +10,7 @@ use objects::object::ChangeId;
 use repo::Repository as HeddleRepository;
 use sley::{ObjectId, RefPrecondition, Repository as SleyRepository};
 
-use super::git_core::{self, GitBridge, GitResult, SyncMapping};
+use super::git_core::{self, GitProjection, GitProjectionResult, SyncMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefNamespace {
@@ -117,7 +117,7 @@ impl From<git_core::DestinationReconcilePlan> for DestinationReconcilePlan {
     }
 }
 
-pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitResult<()> {
+pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitProjectionResult<()> {
     git_core::delete_reference_if_present(repo, name)
 }
 
@@ -127,36 +127,38 @@ pub fn set_reference(
     target: ObjectId,
     previous: RefPrecondition,
     message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     git_core::set_reference(repo, name, target, previous, message)
 }
 
-pub fn read_exported_refs(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
+pub fn read_exported_refs(repo: &SleyRepository) -> GitProjectionResult<HashMap<String, ObjectId>> {
     git_core::read_exported_refs(repo)
 }
 
 pub fn write_exported_refs(
     repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     git_core::write_exported_refs(repo, refs)
 }
 
-pub fn read_mirror_managed_refs(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
+pub fn read_mirror_managed_refs(
+    repo: &SleyRepository,
+) -> GitProjectionResult<HashMap<String, ObjectId>> {
     git_core::read_mirror_managed_refs(repo)
 }
 
 pub fn write_mirror_managed_refs(
     repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     git_core::write_mirror_managed_refs(repo, refs)
 }
 
 pub fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
-) -> GitResult<Vec<RefUpdate>> {
+) -> GitProjectionResult<Vec<RefUpdate>> {
     git_core::collect_managed_ref_updates(repo, record)
         .map(|updates| updates.into_iter().map(Into::into).collect())
 }
@@ -168,7 +170,7 @@ pub fn plan_destination_reconcile(
     old_at_destination: &HashMap<String, ObjectId>,
     previously_exported: &HashMap<String, ObjectId>,
     force: bool,
-) -> GitResult<DestinationReconcilePlan> {
+) -> GitProjectionResult<DestinationReconcilePlan> {
     let served_frontier = served_frontier
         .iter()
         .map(git_core::RefUpdate::from)
@@ -184,73 +186,75 @@ pub fn plan_destination_reconcile(
     .map(Into::into)
 }
 
-pub fn set_git_repo_path(bridge: &mut GitBridge<'_>, path: PathBuf) {
+pub fn set_git_repo_path(bridge: &mut GitProjection<'_>, path: PathBuf) {
     bridge.git_repo_path = Some(path);
 }
 
-pub fn mapping<'a>(bridge: &'a GitBridge<'_>) -> &'a SyncMapping {
+pub fn mapping<'a>(bridge: &'a GitProjection<'_>) -> &'a SyncMapping {
     &bridge.mapping
 }
 
-pub fn mapping_mut<'a>(bridge: &'a mut GitBridge<'_>) -> &'a mut SyncMapping {
+pub fn mapping_mut<'a>(bridge: &'a mut GitProjection<'_>) -> &'a mut SyncMapping {
     &mut bridge.mapping
 }
 
-pub fn commit_message_overrides<'a>(bridge: &'a GitBridge<'_>) -> &'a HashMap<ChangeId, String> {
+pub fn commit_message_overrides<'a>(
+    bridge: &'a GitProjection<'_>,
+) -> &'a HashMap<ChangeId, String> {
     &bridge.commit_message_overrides
 }
 
 pub fn set_commit_message_override(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     state_id: ChangeId,
     message: String,
 ) {
     bridge.set_commit_message_override(state_id, message);
 }
 
-pub fn mapping_path(bridge: &GitBridge<'_>) -> PathBuf {
+pub fn mapping_path(bridge: &GitProjection<'_>) -> PathBuf {
     bridge.mapping_path()
 }
 
-pub fn save_mapping_to_disk(bridge: &GitBridge<'_>) -> GitResult<()> {
+pub fn save_mapping_to_disk(bridge: &GitProjection<'_>) -> GitProjectionResult<()> {
     bridge.save_mapping_to_disk()
 }
 
 pub fn build_existing_mapping(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     git_repo_path: Option<&Path>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     bridge.build_existing_mapping(git_repo_path)
 }
 
 pub fn stage_ingest_source_in_mirror(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     source: &Path,
     refs: &[String],
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     bridge.stage_ingest_source_in_mirror(source, refs)
 }
 
 pub fn seed_ingest_identity_mappings_from_mirror(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     repo: &SleyRepository,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     bridge.seed_ingest_identity_mappings_from_mirror(repo)
 }
 
-pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<SleyRepository> {
+pub fn open_git_repo(bridge: &GitProjection<'_>) -> GitProjectionResult<SleyRepository> {
     bridge.open_git_repo()
 }
 
-pub fn consolidate_mirror(bridge: &GitBridge<'_>) -> GitResult<usize> {
+pub fn consolidate_mirror(bridge: &GitProjection<'_>) -> GitProjectionResult<usize> {
     bridge.consolidate_mirror()
 }
 
-pub fn heddle_repo<'a>(bridge: &'a GitBridge<'a>) -> &'a HeddleRepository {
+pub fn heddle_repo<'a>(bridge: &'a GitProjection<'a>) -> &'a HeddleRepository {
     bridge.heddle_repo
 }
 
-pub fn open_repo(path: &Path) -> GitResult<SleyRepository> {
+pub fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
     git_core::open_repo(path)
 }
 
@@ -260,13 +264,13 @@ pub fn open_repo(path: &Path) -> GitResult<SleyRepository> {
 /// commit materializes WITHOUT the mirror holding its objects (and that the OID
 /// safety gate fires on a divergence).
 pub fn materialize_checkout_closure_from_state(
-    bridge: &GitBridge<'_>,
+    bridge: &GitProjection<'_>,
     mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
     tip_state_id: &ChangeId,
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     git_core::materialize_checkout_closure_from_state(
         bridge.heddle_repo,
         &bridge.mapping,

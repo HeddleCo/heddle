@@ -8,19 +8,20 @@ use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
 
 use super::{
     git_core::{
-        GitBridge, GitBridgeError, GitResult, collect_import_source_ref_updates, open_repo,
+        GitProjection, GitProjectionError, GitProjectionResult, collect_import_source_ref_updates,
+        open_repo,
     },
     git_notes,
     git_util::ImportStats,
 };
 
 pub(crate) fn import_git_history(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     git_path: Option<&Path>,
     refs: &[String],
     options: ingest::ImportOptions,
     progress: Option<&mut dyn FnMut(ingest::ImportProgressEvent)>,
-) -> GitResult<ImportStats> {
+) -> GitProjectionResult<ImportStats> {
     let source = git_path.unwrap_or_else(|| bridge.heddle_repo.root());
     reject_shallow_source(source, refs)?;
     let scope = if refs.is_empty() {
@@ -48,28 +49,28 @@ pub(crate) fn import_git_history(
     Ok(import_stats_from_ingest(stats))
 }
 
-fn map_ingest_error(error: ingest::IngestError) -> GitBridgeError {
+fn map_ingest_error(error: ingest::IngestError) -> GitProjectionError {
     match error {
         ingest::IngestError::ThreadDiverged {
             thread,
             branch,
             existing,
             incoming,
-        } => GitBridgeError::GitHeddleThreadDiverged {
+        } => GitProjectionError::GitHeddleThreadDiverged {
             thread,
             branch,
             thread_change: existing,
             branch_change: incoming,
         },
-        other => GitBridgeError::Git(other.to_string()),
+        other => GitProjectionError::Git(other.to_string()),
     }
 }
 
-fn reject_shallow_source(source: &Path, refs: &[String]) -> GitResult<()> {
+fn reject_shallow_source(source: &Path, refs: &[String]) -> GitProjectionResult<()> {
     let repo = open_repo(source)?;
     if repo.git_dir().join("shallow").is_file() {
         let wanted = (!refs.is_empty()).then(|| refs.iter().cloned().collect::<HashSet<_>>());
-        return Err(GitBridgeError::ShallowClone {
+        return Err(GitProjectionError::ShallowClone {
             repository: repo
                 .workdir()
                 .unwrap_or_else(|| repo.git_dir().to_path_buf()),
@@ -98,10 +99,10 @@ fn import_stats_from_ingest(stats: ingest::ImportStats) -> ImportStats {
 }
 
 fn backfill_ingest_identity_notes_in_mirror(
-    bridge: &GitBridge<'_>,
+    bridge: &GitProjection<'_>,
     mirror_repo: &SleyRepository,
     refs: &[String],
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let scoped_commits = if refs.is_empty() {
         None
     } else {
@@ -113,7 +114,7 @@ fn backfill_ingest_identity_notes_in_mirror(
         let change_id = ChangeId::parse(&change_id)?;
         let git_oid = git_sha
             .parse::<ObjectId>()
-            .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
+            .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
         if scoped_commits
             .as_ref()
             .is_some_and(|commits| !commits.contains(&git_oid))
@@ -130,7 +131,7 @@ fn backfill_ingest_identity_notes_in_mirror(
             .heddle_repo
             .effective_visibility_tier(&change_id)
             .map_err(|error| {
-                GitBridgeError::Git(format!("resolve visibility for {change_id}: {error:#}"))
+                GitProjectionError::Git(format!("resolve visibility for {change_id}: {error:#}"))
             })?;
         if !repo::visible(&tier, &repo::AudienceTier::Public) {
             continue;
@@ -150,7 +151,7 @@ fn backfill_ingest_identity_notes_in_mirror(
 fn reachable_commits_from_updates(
     repo: &SleyRepository,
     updates: Vec<super::git_core::RefUpdate>,
-) -> GitResult<HashSet<ObjectId>> {
+) -> GitProjectionResult<HashSet<ObjectId>> {
     let mut stack = updates
         .into_iter()
         .map(|update| update.target)

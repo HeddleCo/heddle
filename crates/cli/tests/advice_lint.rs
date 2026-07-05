@@ -126,7 +126,7 @@ fn git_import_recovery_policy_stays_out_of_error_renderer() {
 
     assert!(
         source.contains("RecoveryAdvice::from_git_projection_error"),
-        "{ALLOWED_ENVELOPE_FILE} should delegate GitBridgeError policy to typed advice"
+        "{ALLOWED_ENVELOPE_FILE} should delegate GitProjectionError policy to typed advice"
     );
     for forbidden in [
         "NonFastForwardRef",

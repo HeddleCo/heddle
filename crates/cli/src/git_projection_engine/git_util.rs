@@ -5,9 +5,9 @@ use ingest::LossyImportEntry;
 use objects::object::{State, Status};
 use sley::ObjectId as GitObjectId;
 
-use super::git_core::GitBridge;
+use super::git_core::GitProjection;
 
-impl<'a> GitBridge<'a> {
+impl<'a> GitProjection<'a> {
     /// Build a Git commit message from a Heddle state.
     ///
     /// Phase B (post-2026-05) onward: this is just the state's intent text,
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn footer_emits_state_id_and_zero_omitted_when_no_url() {
         let state = sample_state();
-        let msg = GitBridge::build_commit_message_with_footer(&state, None, 0);
+        let msg = GitProjection::build_commit_message_with_footer(&state, None, 0);
         assert!(msg.contains(&format!(
             "Heddle-State: {}",
             state.change_id.to_string_full()
@@ -205,8 +205,11 @@ mod tests {
     #[test]
     fn footer_emits_url_when_hosted_configured() {
         let state = sample_state();
-        let msg =
-            GitBridge::build_commit_message_with_footer(&state, Some("https://heddle.test/"), 3);
+        let msg = GitProjection::build_commit_message_with_footer(
+            &state,
+            Some("https://heddle.test/"),
+            3,
+        );
         assert!(msg.contains(&format!(
             "Heddle-URL: https://heddle.test/state/{}",
             state.change_id.to_string_full()

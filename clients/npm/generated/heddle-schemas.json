@@ -15058,14 +15058,14 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "bridge_checked": {
-          "type": "boolean"
-        },
         "errors": {
           "items": {
             "$ref": "#/$defs/FsckError"
           },
           "type": "array"
+        },
+        "git_projection_checked": {
+          "type": "boolean"
         },
         "objects_checked": {
           "format": "uint",
@@ -15102,7 +15102,7 @@
         "errors",
         "warnings",
         "objects_checked",
-        "bridge_checked",
+        "git_projection_checked",
         "repaired",
         "repairs"
       ],
@@ -15160,14 +15160,14 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "bridge_checked": {
-          "type": "boolean"
-        },
         "errors": {
           "items": {
             "$ref": "#/$defs/FsckError"
           },
           "type": "array"
+        },
+        "git_projection_checked": {
+          "type": "boolean"
         },
         "objects_checked": {
           "format": "uint",
@@ -15204,7 +15204,7 @@
         "errors",
         "warnings",
         "objects_checked",
-        "bridge_checked",
+        "git_projection_checked",
         "repaired",
         "repairs"
       ],

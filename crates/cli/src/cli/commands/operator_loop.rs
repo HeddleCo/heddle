@@ -6,7 +6,6 @@ use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus
 use super::{
     action_line::print_next_step,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
@@ -14,13 +13,14 @@ use super::{
         open_operator_repo_from_path, recommend_next_action,
     },
     remote::resolve_default_remote_name,
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     workflow::cmd_sync,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    bridge::GitBridge,
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
     config::UserConfig,
+    git_projection_engine::GitProjection,
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
@@ -93,7 +93,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
         if remote_decision.status == "remote_behind" {
             ensure_worktree_clean(&repo, "sync")?;
             let remote_name = resolve_default_remote_name(&repo, None)?;
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             let outcome = bridge.pull(&remote_name)?;
             let verification = build_repository_verification_state(&repo);
             if !verification.verified {

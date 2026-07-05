@@ -27,7 +27,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
+use cli::{
+    cli::commands::GitOverlayBlobHydrator, git_projection_engine::git_core::clone_url_to_bare,
+};
 use objects::{object::Blob, store::ObjectStore};
 use repo::Repository;
 use sley::{

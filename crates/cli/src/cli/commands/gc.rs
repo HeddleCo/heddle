@@ -15,9 +15,9 @@ use anyhow::Result;
 use objects::store::ObjectStore;
 use serde::Serialize;
 
-#[cfg(feature = "git-overlay")]
-use crate::bridge::GitBridge;
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
+#[cfg(feature = "git-overlay")]
+use crate::git_projection_engine::GitProjection;
 
 #[derive(Serialize, Default)]
 struct GcOutput {
@@ -105,7 +105,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
 
         #[cfg(feature = "git-overlay")]
         {
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             if bridge.is_initialized() {
                 let removed = bridge.prune_unreachable_mapping_entries()?;
                 summary.pruned_git_mapping_entries = removed;
@@ -120,13 +120,11 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 // minted/imported commit, tree, and blob — the dominant
                 // uninstrumented read cost. Lossless + OID-preserving (packs
                 // every object on disk, content-addressed); see
-                // `GitBridge::consolidate_mirror`.
+                // `GitProjection::consolidate_mirror`.
                 let consolidated = bridge.consolidate_mirror()?;
                 summary.consolidated_mirror_loose = consolidated;
                 if !json && consolidated > 0 {
-                    println!(
-                        "Consolidated {consolidated} loose Bridge Mirror objects into a pack"
-                    );
+                    println!("Consolidated {consolidated} loose Bridge Mirror objects into a pack");
                 }
             }
         }

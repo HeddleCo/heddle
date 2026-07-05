@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bridge modules for interoperability with other version control systems.
+//! Git projection engine modules for interoperability with Git.
 //!
-//! This module provides bidirectional conversion between Heddle and other VCS,
-//! starting with Git support.
+//! This module provides bidirectional conversion between Heddle state and Git
+//! projection state.
 
 pub mod git_core;
 pub mod git_export;
@@ -17,5 +17,6 @@ pub mod git_util;
 pub mod test_support;
 
 pub use git_core::{
-    GitBridge, GitBridgeError, GitResult, SyncMapping, WriteThroughOutcome, WriteThroughSkipReason,
+    GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, WriteThroughOutcome,
+    WriteThroughSkipReason,
 };

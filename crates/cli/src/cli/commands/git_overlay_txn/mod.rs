@@ -18,6 +18,8 @@ use repo::{CommitGraphIndex, Repository, RepositoryCapability, thread_flag};
 use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionFields,
+    snapshot::resolve_principal,
+    thread_landing::land_local_command,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state,
@@ -25,12 +27,12 @@ use super::{
         git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
     },
-    snapshot::resolve_principal,
-    thread_landing::land_local_command,
 };
 use crate::{
-    bridge::git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
     config::UserConfig,
+    git_projection_engine::git_core::{
+        git_config_identity_with_global_fallback, principal_is_default_unknown,
+    },
 };
 
 pub(crate) type GitOverlayWorktreeStatus = repo::Result<Option<WorktreeStatus>>;

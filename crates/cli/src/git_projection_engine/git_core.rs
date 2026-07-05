@@ -14,9 +14,9 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{GitRefName, Repository as HeddleRepository};
-pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
 pub(crate) use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
+pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
+use repo::{GitRefName, Repository as HeddleRepository};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
     IndexEntry, IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
@@ -37,7 +37,7 @@ use super::{
 
 /// Errors specific to Git Projection and Bridge Mirror operations.
 #[derive(Debug, thiserror::Error)]
-pub enum GitBridgeError {
+pub enum GitProjectionError {
     #[error("git error: {0}")]
     Git(String),
 
@@ -116,7 +116,7 @@ pub enum GitBridgeError {
 }
 
 /// Type alias for Git Projection and Bridge Mirror results.
-pub type GitResult<T> = std::result::Result<T, GitBridgeError>;
+pub type GitProjectionResult<T> = std::result::Result<T, GitProjectionError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefUpdate {
@@ -131,9 +131,9 @@ pub(crate) struct RefUpdate {
 /// `refs/remotes/{name}/...` write site, so a remote named `git` can never be
 /// treated as a normal remote-tracking namespace — keeping the writers
 /// consistent with [`parse_git_ref`], which already rejects such refs.
-fn reject_reserved_git_remote_name(remote: &str) -> GitResult<()> {
+fn reject_reserved_git_remote_name(remote: &str) -> GitProjectionResult<()> {
     if is_reserved_git_remote_name(remote) {
-        return Err(GitBridgeError::Git(format!(
+        return Err(GitProjectionError::Git(format!(
             "a Git remote named '{remote}' collides with heddle's reserved namespace \
              (local refs are recorded under the '{REMOTE_NAME_FOR_LOCAL_GIT_REPO}' sentinel); \
              rename the remote (e.g. `git remote rename {remote} origin`) and retry"
@@ -146,7 +146,7 @@ fn remote_name_from_remote_ref(ref_name: &str) -> Option<&str> {
     GitRefName::new(ref_name).remote_name()
 }
 
-fn validate_refspec_ref(ref_name: &str) -> GitResult<()> {
+fn validate_refspec_ref(ref_name: &str) -> GitProjectionResult<()> {
     if let Some(remote) = remote_name_from_remote_ref(ref_name) {
         reject_reserved_git_remote_name(remote)?;
     }
@@ -168,7 +168,7 @@ pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
 /// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
 /// marker. Ported from jj's `RefSpec` (`lib/src/git.rs`).
 mod refspec {
-    use super::{GitResult, validate_refspec_ref};
+    use super::{GitProjectionResult, validate_refspec_ref};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RefSpec {
@@ -184,10 +184,10 @@ mod refspec {
             source: Option<String>,
             destination: impl Into<String>,
             forced: bool,
-        ) -> GitResult<Self> {
+        ) -> GitProjectionResult<Self> {
             let destination = destination.into();
             if source.is_none() && destination.is_empty() {
-                return Err(super::GitBridgeError::InvalidMapping(
+                return Err(super::GitProjectionError::InvalidMapping(
                     "refspec source and destination cannot both be empty".to_string(),
                 ));
             }
@@ -206,13 +206,13 @@ mod refspec {
         pub fn forced(
             source: impl Into<String>,
             destination: impl Into<String>,
-        ) -> GitResult<Self> {
+        ) -> GitProjectionResult<Self> {
             Self::new(Some(source.into()), destination, true)
         }
 
         /// A delete refspec (`:destination`). Not forced: deleting a destination
         /// that has no source cannot lose work.
-        pub fn delete(destination: impl Into<String>) -> GitResult<Self> {
+        pub fn delete(destination: impl Into<String>) -> GitProjectionResult<Self> {
             Self::new(None, destination, false)
         }
 
@@ -241,7 +241,7 @@ pub use refspec::RefSpec;
 /// A negative refspec (`^source`) excluding refs from a fetch or push. Ported
 /// from jj's `NegativeRefSpec` (`lib/src/git.rs`).
 mod negative_refspec {
-    use super::{GitBridgeError, GitResult, validate_refspec_ref};
+    use super::{GitProjectionError, GitProjectionResult, validate_refspec_ref};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct NegativeRefSpec {
@@ -251,11 +251,11 @@ mod negative_refspec {
     impl NegativeRefSpec {
         /// Construct a negative refspec after validating the rendered `^source`
         /// form Git will receive.
-        pub fn new(source: impl Into<String>) -> GitResult<Self> {
+        pub fn new(source: impl Into<String>) -> GitProjectionResult<Self> {
             let source = source.into();
             validate_refspec_ref(&source)?;
             if source.contains('*') {
-                return Err(GitBridgeError::InvalidMapping(format!(
+                return Err(GitProjectionError::InvalidMapping(format!(
                     "invalid negative refspec source '{source}': Negative glob patterns are not supported"
                 )));
             }
@@ -277,7 +277,7 @@ pub use negative_refspec::NegativeRefSpec;
 /// The fetch refspecs heddle uses to mirror a remote: every branch and every
 /// heddle note, forced. Built through [`RefSpec`] so the wire format has a
 /// single typed source of truth.
-fn heddle_mirror_fetch_refspecs() -> GitResult<[String; 2]> {
+fn heddle_mirror_fetch_refspecs() -> GitProjectionResult<[String; 2]> {
     Ok([
         RefSpec::forced("refs/heads/*", "refs/heads/*")?.to_git_format(),
         RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format(),
@@ -455,11 +455,11 @@ impl SyncMapping {
         &mut self,
         change_id: ChangeId,
         git_oid: ObjectId,
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         if let Some(existing) = self.heddle_to_git.get(&change_id)
             && *existing != git_oid
         {
-            return Err(GitBridgeError::MappingConflict {
+            return Err(GitProjectionError::MappingConflict {
                 message: format!(
                     "change id {} mapped to {} (new {})",
                     change_id, existing, git_oid
@@ -470,7 +470,7 @@ impl SyncMapping {
         if let Some(existing) = self.git_to_heddle.get(&git_oid)
             && *existing != change_id
         {
-            return Err(GitBridgeError::MappingConflict {
+            return Err(GitProjectionError::MappingConflict {
                 message: format!(
                     "git oid {} mapped to {} (new {})",
                     git_oid, existing, change_id
@@ -568,7 +568,7 @@ impl SyncMapping {
 }
 
 /// Legacy-named implementation for explicit Git Projection and Bridge Mirror operations.
-pub struct GitBridge<'a> {
+pub struct GitProjection<'a> {
     pub(crate) heddle_repo: &'a HeddleRepository,
     pub(crate) git_repo_path: Option<PathBuf>,
     pub(crate) mapping: SyncMapping,
@@ -582,7 +582,7 @@ struct MappingFileSnapshot {
 }
 
 impl MappingFileSnapshot {
-    fn read(path: PathBuf) -> GitResult<Self> {
+    fn read(path: PathBuf) -> GitProjectionResult<Self> {
         let contents = match fs::read(&path) {
             Ok(contents) => Some(contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -591,7 +591,7 @@ impl MappingFileSnapshot {
         Ok(Self { path, contents })
     }
 
-    fn restore(self) -> GitResult<()> {
+    fn restore(self) -> GitProjectionResult<()> {
         match self.contents {
             Some(contents) => {
                 if let Some(parent) = self.path.parent() {
@@ -609,7 +609,7 @@ impl MappingFileSnapshot {
     }
 }
 
-impl<'a> GitBridge<'a> {
+impl<'a> GitProjection<'a> {
     /// Create a Git Projection helper for a Heddle repository.
     pub fn new(heddle_repo: &'a HeddleRepository) -> Self {
         Self {
@@ -622,7 +622,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Initialize the Bridge Mirror in the .heddle/git directory.
-    pub fn init_mirror(&mut self) -> GitResult<()> {
+    pub fn init_mirror(&mut self) -> GitProjectionResult<()> {
         let _guard = self.init_mirror_with_guard()?;
         _guard.commit();
         Ok(())
@@ -632,7 +632,7 @@ impl<'a> GitBridge<'a> {
     /// callers performing a multi-step bring-up (init + first export)
     /// can roll back the partially-created mirror if a later step
     /// fails. Call `guard.commit()` once the mirror is known-good.
-    pub(crate) fn init_mirror_with_guard(&mut self) -> GitResult<MirrorInitGuard> {
+    pub(crate) fn init_mirror_with_guard(&mut self) -> GitProjectionResult<MirrorInitGuard> {
         let git_dir = self.heddle_repo.heddle_dir().join("git");
 
         let did_create = if git_dir.exists() {
@@ -661,7 +661,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Open the Git repository (mirror or regular).
-    pub(crate) fn open_git_repo(&self) -> GitResult<SleyRepository> {
+    pub(crate) fn open_git_repo(&self) -> GitProjectionResult<SleyRepository> {
         if let Some(ref path) = self.git_repo_path {
             open_repo(path)
         } else {
@@ -678,7 +678,7 @@ impl<'a> GitBridge<'a> {
     pub(crate) fn sort_states_topologically(
         &self,
         states: &[ChangeId],
-    ) -> GitResult<Vec<ChangeId>> {
+    ) -> GitProjectionResult<Vec<ChangeId>> {
         let mut sorted = Vec::new();
         let mut visited: std::collections::HashSet<ChangeId> = std::collections::HashSet::new();
 
@@ -687,7 +687,7 @@ impl<'a> GitBridge<'a> {
             store: &S,
             visited: &mut std::collections::HashSet<ChangeId>,
             sorted: &mut Vec<ChangeId>,
-        ) -> GitResult<()> {
+        ) -> GitProjectionResult<()> {
             if visited.contains(state_id) {
                 return Ok(());
             }
@@ -717,7 +717,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Export all Heddle states to Git commits.
-    pub fn export(&mut self) -> GitResult<super::git_util::ExportStats> {
+    pub fn export(&mut self) -> GitProjectionResult<super::git_util::ExportStats> {
         export_all(self)
     }
 
@@ -735,8 +735,8 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn with_mapping_rollback<T>(
         &mut self,
-        operation: impl FnOnce(&mut Self) -> GitResult<T>,
-    ) -> GitResult<T> {
+        operation: impl FnOnce(&mut Self) -> GitProjectionResult<T>,
+    ) -> GitProjectionResult<T> {
         let mapping = self.mapping.clone();
         let commit_message_overrides = self.commit_message_overrides.clone();
         let commit_parent_overrides = self.commit_parent_overrides.clone();
@@ -753,7 +753,7 @@ impl<'a> GitBridge<'a> {
                     .restore()
                     .and_then(|()| mapping_tmp_file.restore())
                 {
-                    return Err(GitBridgeError::Git(format!(
+                    return Err(GitProjectionError::Git(format!(
                         "operation failed ({error}); additionally failed to roll back Git Projection Mapping state ({rollback_error})"
                     )));
                 }
@@ -764,7 +764,7 @@ impl<'a> GitBridge<'a> {
 
     /// Push to a Git remote. Returns the full names of the refs written
     /// at the destination this invocation (see [`Self::push_with_scope_force`]).
-    pub fn push(&mut self, remote_name: &str) -> GitResult<Vec<String>> {
+    pub fn push(&mut self, remote_name: &str) -> GitProjectionResult<Vec<String>> {
         self.push_with_scope(remote_name, GitPushScope::AllThreads)
     }
 
@@ -774,7 +774,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         remote_name: &str,
         scope: GitPushScope,
-    ) -> GitResult<Vec<String>> {
+    ) -> GitProjectionResult<Vec<String>> {
         self.push_with_scope_force(remote_name, scope, false)
     }
 
@@ -791,7 +791,7 @@ impl<'a> GitBridge<'a> {
         remote_name: &str,
         scope: GitPushScope,
         force: bool,
-    ) -> GitResult<Vec<String>> {
+    ) -> GitProjectionResult<Vec<String>> {
         self.init_mirror()?;
         let current_branch = match scope {
             GitPushScope::CurrentThread => Some(self.current_attached_thread_for_push()?),
@@ -839,14 +839,14 @@ impl<'a> GitBridge<'a> {
         }
     }
 
-    fn current_attached_thread_for_push(&self) -> GitResult<String> {
+    fn current_attached_thread_for_push(&self) -> GitProjectionResult<String> {
         let Head::Attached { thread } = self.heddle_repo.head_ref()? else {
-            return Err(GitBridgeError::Git(
+            return Err(GitProjectionError::Git(
                 "cannot push the current Git-overlay branch from a detached Heddle HEAD; use --all-threads to push all exported refs".to_string(),
             ));
         };
         if self.heddle_repo.refs().get_thread(&thread)?.is_none() {
-            return Err(GitBridgeError::Git(format!(
+            return Err(GitProjectionError::Git(format!(
                 "attached thread '{thread}' has no state to push"
             )));
         }
@@ -859,7 +859,7 @@ impl<'a> GitBridge<'a> {
     pub fn export_to_path(
         &mut self,
         target_path: &Path,
-    ) -> GitResult<super::git_util::ExportStats> {
+    ) -> GitProjectionResult<super::git_util::ExportStats> {
         self.init_mirror()?;
         let stats = self.export()?;
         self.copy_mirror_to_path(
@@ -889,7 +889,7 @@ impl<'a> GitBridge<'a> {
         scope: GitPushScope,
         current_branch: Option<&str>,
         force: bool,
-    ) -> GitResult<Vec<String>> {
+    ) -> GitProjectionResult<Vec<String>> {
         let mirror_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
             open_repo(target_path)?
@@ -898,7 +898,7 @@ impl<'a> GitBridge<'a> {
             SleyRepository::init_bare(target_path).map_err(git_err)?;
             open_repo(target_path)?
         } else {
-            return Err(GitBridgeError::Git(format!(
+            return Err(GitProjectionError::Git(format!(
                 "destination '{}' does not exist",
                 target_path.display()
             )));
@@ -965,7 +965,7 @@ impl<'a> GitBridge<'a> {
 
     /// Fetch Git refs and objects into the internal mirror without moving
     /// Heddle thread refs or the current worktree.
-    pub fn fetch(&mut self, remote_name: &str) -> GitResult<()> {
+    pub fn fetch(&mut self, remote_name: &str) -> GitProjectionResult<()> {
         self.fetch_with_scope(
             remote_name,
             GitFetchScope::BranchesAndNotes,
@@ -978,7 +978,7 @@ impl<'a> GitBridge<'a> {
         remote_name: &str,
         scope: GitFetchScope,
         refresh_checkout: RefreshCheckoutAfterFetch,
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         reject_reserved_git_remote_name(remote_name)?;
         self.init_mirror()?;
         let current_branch = self.heddle_repo.git_overlay_current_branch()?;
@@ -1106,7 +1106,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Pull from a Git remote.
-    pub fn pull(&mut self, remote_name: &str) -> GitResult<GitPullOutcome> {
+    pub fn pull(&mut self, remote_name: &str) -> GitProjectionResult<GitPullOutcome> {
         let head_before = self.heddle_repo.refs().read_head()?;
         let attached_before = match &head_before {
             Head::Attached { thread } => self
@@ -1174,7 +1174,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         remote_name: &str,
         attached_before: Option<&(String, ChangeId)>,
-    ) -> GitResult<PullPreflight> {
+    ) -> GitProjectionResult<PullPreflight> {
         let Some((thread, state_id)) = attached_before else {
             return Ok(PullPreflight::ImportRequired);
         };
@@ -1196,7 +1196,7 @@ impl<'a> GitBridge<'a> {
         if commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)? {
             return Ok(PullPreflight::ImportRequired);
         }
-        Err(GitBridgeError::RemoteDiverged {
+        Err(GitProjectionError::RemoteDiverged {
             branch: thread.clone(),
             upstream: format!("{remote_name}/{thread}"),
             local: local_git_oid,
@@ -1204,7 +1204,7 @@ impl<'a> GitBridge<'a> {
         })
     }
 
-    fn mirror_checkout_tags_for_push(&self) -> GitResult<()> {
+    fn mirror_checkout_tags_for_push(&self) -> GitProjectionResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
@@ -1251,7 +1251,7 @@ impl<'a> GitBridge<'a> {
     pub(crate) fn seed_git_checkpoint_mappings_from_checkout(
         &mut self,
         mirror_repo: &SleyRepository,
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
@@ -1270,14 +1270,14 @@ impl<'a> GitBridge<'a> {
             let git_oid = record
                 .git_commit
                 .parse::<ObjectId>()
-                .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
+                .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
 
             if mirror_repo.read_object(&git_oid).is_err() {
                 copy_reachable_objects(&object_repo, mirror_repo, [git_oid])?;
             }
             mirror_repo
                 .read_object(&git_oid)
-                .map_err(|_| GitBridgeError::CommitNotFound(record.git_commit.clone()))?;
+                .map_err(|_| GitProjectionError::CommitNotFound(record.git_commit.clone()))?;
 
             self.mapping.insert(change_id, git_oid);
             // Only publish a note for a state served to the public mirror.
@@ -1292,7 +1292,7 @@ impl<'a> GitBridge<'a> {
                 .heddle_repo
                 .effective_visibility_tier(&change_id)
                 .map_err(|e| {
-                    GitBridgeError::Git(format!("resolve visibility for {change_id}: {e:#}"))
+                    GitProjectionError::Git(format!("resolve visibility for {change_id}: {e:#}"))
                 })?;
             if repo::visible(&tier, &repo::AudienceTier::Public)
                 && super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
@@ -1310,7 +1310,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         source: &Path,
         refs: &[String],
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         let source_repo = open_repo(source)?;
         let updates = collect_import_source_ref_updates(&source_repo, refs)?;
         if updates.is_empty() {
@@ -1342,7 +1342,7 @@ impl<'a> GitBridge<'a> {
     /// thread: copy exported objects from the internal mirror, advance the
     /// matching Git branch, attach HEAD, and rebuild the Git index from the
     /// exported commit tree.
-    pub fn write_through_current_checkout(&mut self) -> GitResult<WriteThroughOutcome> {
+    pub fn write_through_current_checkout(&mut self) -> GitProjectionResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MissingDotGit,
@@ -1382,7 +1382,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         state_id: ChangeId,
         message: String,
-    ) -> GitResult<WriteThroughOutcome> {
+    ) -> GitProjectionResult<WriteThroughOutcome> {
         self.set_commit_message_override(state_id, message);
         self.write_through_current_checkout()
     }
@@ -1409,7 +1409,7 @@ impl<'a> GitBridge<'a> {
     /// [`Self::write_through_current_checkout`], replacing these
     /// placeholder entries with real ones — so the index is never
     /// churned by read-only invocations.
-    pub fn update_intent_to_add(&self, state_id: &ChangeId) -> GitResult<()> {
+    pub fn update_intent_to_add(&self, state_id: &ChangeId) -> GitProjectionResult<()> {
         let root = self.heddle_repo.root();
         if !root.join(".git").exists() {
             return Ok(());
@@ -1546,7 +1546,7 @@ impl<'a> GitBridge<'a> {
     pub fn write_through_thread_checkout(
         &mut self,
         thread: &str,
-    ) -> GitResult<WriteThroughOutcome> {
+    ) -> GitProjectionResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MissingDotGit,
@@ -1561,7 +1561,7 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn write_current_checkout_from_existing_mirror(
         &mut self,
-    ) -> GitResult<WriteThroughOutcome> {
+    ) -> GitProjectionResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MissingDotGit,
@@ -1589,7 +1589,7 @@ impl<'a> GitBridge<'a> {
     fn write_thread_checkout_from_existing_mirror(
         &mut self,
         thread: &str,
-    ) -> GitResult<WriteThroughOutcome> {
+    ) -> GitProjectionResult<WriteThroughOutcome> {
         let Some(state_id) = self
             .heddle_repo
             .refs()
@@ -1606,7 +1606,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         thread: &str,
         state_id: &ChangeId,
-    ) -> GitResult<WriteThroughOutcome> {
+    ) -> GitProjectionResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
         // Reconstructing a faithful commit from state (#568 P1) resolves each
         // parent's git OID through the bridge mapping. A checkpoint/push runs
@@ -1625,10 +1625,10 @@ impl<'a> GitBridge<'a> {
         } else if let Some(git_commit) = self
             .heddle_repo
             .git_overlay_mapped_git_commit_for_change(state_id)
-            .map_err(|error| GitBridgeError::Git(error.to_string()))?
+            .map_err(|error| GitProjectionError::Git(error.to_string()))?
         {
             ObjectId::from_hex(mirror_repo.object_format(), &git_commit)
-                .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?
+                .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?
         } else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoMappedCommit,
@@ -1664,7 +1664,7 @@ impl<'a> GitBridge<'a> {
 
         let heddle_repo = self.heddle_repo;
         let mapping = &self.mapping;
-        let write_result = (|| -> GitResult<()> {
+        let write_result = (|| -> GitProjectionResult<()> {
             // Incremental object materialization (perf): bringing the new commit's
             // full reachable closure into the checkout re-walks the ENTIRE tree
             // every checkpoint — ~115s of the ~140s on the ~6k-object ghostty tree,
@@ -1685,7 +1685,7 @@ impl<'a> GitBridge<'a> {
                     object_repo.object_format(),
                     [parent],
                 )
-                .map_err(|error| GitBridgeError::Git(error.to_string()))?,
+                .map_err(|error| GitProjectionError::Git(error.to_string()))?,
                 None => HashSet::new(),
             };
             // #568 P1: materialize the checkout from heddle state, NOT by copying
@@ -1778,7 +1778,7 @@ impl<'a> GitBridge<'a> {
         &self,
         remote_name: &str,
         branch: &str,
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
@@ -1814,7 +1814,7 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    fn refresh_checkout_remote_tracking_refs(&self, remote_name: &str) -> GitResult<()> {
+    fn refresh_checkout_remote_tracking_refs(&self, remote_name: &str) -> GitProjectionResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
@@ -1858,7 +1858,7 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    fn refresh_checkout_note_refs_from_mirror(&self) -> GitResult<()> {
+    fn refresh_checkout_note_refs_from_mirror(&self) -> GitProjectionResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
@@ -1894,7 +1894,7 @@ impl<'a> GitBridge<'a> {
         &self,
         remote_name: &str,
         direction: RemoteDirection,
-    ) -> GitResult<ResolvedRemote> {
+    ) -> GitProjectionResult<ResolvedRemote> {
         let repo = self.open_git_repo()?;
         let url = match remote_url_from_repo(&repo, remote_name, direction)? {
             Some(url) => Some(url),
@@ -1918,7 +1918,7 @@ impl<'a> GitBridge<'a> {
         &self,
         remote_name: &str,
         direction: RemoteDirection,
-    ) -> GitResult<Option<String>> {
+    ) -> GitProjectionResult<Option<String>> {
         if direction == RemoteDirection::Fetch
             && let Some(url) =
                 remote_fetch_url_from_checkout_config(self.heddle_repo.root(), remote_name)?
@@ -1936,7 +1936,7 @@ fn remote_url_from_repo(
     repo: &SleyRepository,
     remote_name: &str,
     direction: RemoteDirection,
-) -> GitResult<Option<String>> {
+) -> GitProjectionResult<Option<String>> {
     let config = repo.config_snapshot().map_err(git_err)?;
     let push = direction == RemoteDirection::Push;
     let value = if push {
@@ -1954,7 +1954,10 @@ fn remote_url_from_repo(
     parse_configured_remote_url(&rewritten, &repo_relative_base(repo)).map(Some)
 }
 
-fn checkout_tracking_remote_name(root: &Path, requested: &str) -> GitResult<Option<String>> {
+fn checkout_tracking_remote_name(
+    root: &Path,
+    requested: &str,
+) -> GitProjectionResult<Option<String>> {
     let remotes = checkout_remote_url_items(root)?;
     if remotes.is_empty() {
         return Ok(None);
@@ -1977,7 +1980,7 @@ fn checkout_tracking_remote_name(root: &Path, requested: &str) -> GitResult<Opti
     Ok(None)
 }
 
-fn checkout_remote_url_items(root: &Path) -> GitResult<Vec<(String, String)>> {
+fn checkout_remote_url_items(root: &Path) -> GitProjectionResult<Vec<(String, String)>> {
     let mut remotes = Vec::new();
     for config_path in checkout_git_config_paths(root) {
         parse_remote_url_items_from_config(&config_path, &mut remotes)?;
@@ -1985,7 +1988,7 @@ fn checkout_remote_url_items(root: &Path) -> GitResult<Vec<(String, String)>> {
     Ok(remotes)
 }
 
-fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
+fn checkout_note_ref_exists(root: &Path) -> GitProjectionResult<bool> {
     if !root.join(".git").exists() {
         return Ok(false);
     }
@@ -1997,7 +2000,10 @@ fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
         .is_some())
 }
 
-fn seed_checkout_note_refs_into_mirror(root: &Path, mirror_repo: &SleyRepository) -> GitResult<()> {
+fn seed_checkout_note_refs_into_mirror(
+    root: &Path,
+    mirror_repo: &SleyRepository,
+) -> GitProjectionResult<()> {
     if !root.join(".git").exists() {
         return Ok(());
     }
@@ -2033,12 +2039,13 @@ fn seed_checkout_note_refs_into_mirror(root: &Path, mirror_repo: &SleyRepository
 fn hydrate_checkout_notes_from_remote_without_mirror(
     root: &Path,
     remote_name: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     reject_reserved_git_remote_name(remote_name)?;
     let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
     let object_repo = common_repo_for_worktree(&checkout_repo)?;
-    let url = remote_fetch_url_from_checkout_config(root, remote_name)?
-        .ok_or_else(|| GitBridgeError::Git(format!("remote '{remote_name}' has no fetch URL")))?;
+    let url = remote_fetch_url_from_checkout_config(root, remote_name)?.ok_or_else(|| {
+        GitProjectionError::Git(format!("remote '{remote_name}' has no fetch URL"))
+    })?;
 
     if let Some(path) = local_path_from_url(&url)? {
         let remote_repo = open_repo(&path)?;
@@ -2069,7 +2076,7 @@ fn fetch_heddle_notes_into_repo(
     repo: &SleyRepository,
     remote_name: &str,
     url: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
     let refspec = RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format();
@@ -2108,13 +2115,15 @@ fn fetch_heddle_notes_into_repo(
         &mut progress,
     )
     .map(|_| ())
-    .map_err(|err| GitBridgeError::Git(format!("failed to fetch notes from {remote_name}: {err}")))
+    .map_err(|err| {
+        GitProjectionError::Git(format!("failed to fetch notes from {remote_name}: {err}"))
+    })
 }
 
 fn parse_remote_url_items_from_config(
     path: &Path,
     remotes: &mut Vec<(String, String)>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Ok(());
     };
@@ -2168,7 +2177,7 @@ fn looks_like_remote_location(value: &str) -> bool {
 fn remote_fetch_url_from_checkout_config(
     root: &Path,
     remote_name: &str,
-) -> GitResult<Option<String>> {
+) -> GitProjectionResult<Option<String>> {
     for config_path in checkout_git_config_paths(root) {
         let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? else {
             continue;
@@ -2178,7 +2187,7 @@ fn remote_fetch_url_from_checkout_config(
     Ok(None)
 }
 
-fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<String> {
+fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitProjectionResult<String> {
     if configured_remote_is_local_path(value) {
         let path = configured_remote_local_path(value, relative_base);
         return Ok(format!("file://{}", path.display()));
@@ -2259,7 +2268,10 @@ fn common_git_dir_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
     })
 }
 
-fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResult<Option<String>> {
+fn parse_remote_fetch_url_from_config(
+    path: &Path,
+    remote_name: &str,
+) -> GitProjectionResult<Option<String>> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Ok(None);
     };
@@ -2289,7 +2301,7 @@ fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResu
     Ok(None)
 }
 
-fn common_repo_for_worktree(repo: &SleyRepository) -> GitResult<SleyRepository> {
+fn common_repo_for_worktree(repo: &SleyRepository) -> GitProjectionResult<SleyRepository> {
     let common_dir_file = repo.git_dir().join("commondir");
     let Ok(contents) = fs::read_to_string(&common_dir_file) else {
         return Ok(repo.clone());
@@ -2309,11 +2321,11 @@ fn common_repo_for_worktree(repo: &SleyRepository) -> GitResult<SleyRepository> 
     open_repo(&common_dir)
 }
 
-pub(crate) fn git_err(err: impl std::fmt::Display) -> GitBridgeError {
-    GitBridgeError::Git(err.to_string())
+pub(crate) fn git_err(err: impl std::fmt::Display) -> GitProjectionError {
+    GitProjectionError::Git(err.to_string())
 }
 
-fn restore_file(path: PathBuf, previous: Option<&[u8]>) -> GitResult<()> {
+fn restore_file(path: PathBuf, previous: Option<&[u8]>) -> GitProjectionResult<()> {
     if let Some(previous) = previous {
         fs::write(path, previous)?;
     } else if path.exists() {
@@ -2325,14 +2337,14 @@ fn restore_file(path: PathBuf, previous: Option<&[u8]>) -> GitResult<()> {
 /// `fsync` a single file by opening it read-only and calling
 /// `sync_all`. Best-effort: missing files are not an error (a Drop
 /// guard might have removed them between write and fsync).
-fn fsync_path(path: &Path) -> GitResult<()> {
+fn fsync_path(path: &Path) -> GitProjectionResult<()> {
     match std::fs::File::open(path) {
         Ok(file) => {
             file.sync_all()?;
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(GitBridgeError::Io(err)),
+        Err(err) => Err(GitProjectionError::Io(err)),
     }
 }
 
@@ -2391,7 +2403,7 @@ impl Drop for MirrorInitGuard {
 pub(crate) fn thread_is_unclaimed_bootstrap(
     heddle_repo: &HeddleRepository,
     change_id: &ChangeId,
-) -> GitResult<bool> {
+) -> GitProjectionResult<bool> {
     let Some(state) = heddle_repo.store().get_state(change_id)? else {
         return Ok(false);
     };
@@ -2404,7 +2416,7 @@ pub(crate) fn thread_is_unclaimed_bootstrap(
     Ok(tree == Tree::new())
 }
 
-pub(crate) fn open_repo(path: &Path) -> GitResult<SleyRepository> {
+pub(crate) fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
     match SleyRepository::discover(path) {
         Ok(repo) => Ok(repo),
         Err(_) => SleyRepository::open(path).map_err(git_err),
@@ -2418,7 +2430,10 @@ pub(crate) fn open_repo(path: &Path) -> GitResult<SleyRepository> {
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
-pub(crate) fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitResult<()> {
+pub(crate) fn delete_reference_if_present(
+    repo: &SleyRepository,
+    name: &str,
+) -> GitProjectionResult<()> {
     delete_reference(repo, name, None, true)
 }
 
@@ -2426,7 +2441,7 @@ fn delete_reference_matching(
     repo: &SleyRepository,
     name: &str,
     expected_old: ObjectId,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     delete_reference(repo, name, Some(expected_old), false)
 }
 
@@ -2435,11 +2450,11 @@ fn delete_reference(
     name: &str,
     expected_old: Option<ObjectId>,
     missing_ok: bool,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let refs = repo.references();
     match refs.read_ref(name).map_err(git_err)? {
         None if missing_ok => Ok(()),
-        None => Err(GitBridgeError::Git(format!(
+        None => Err(GitProjectionError::Git(format!(
             "failed to delete Git reference '{name}': ref is missing"
         ))),
         Some(ReferenceTarget::Direct(oid)) => repo
@@ -2458,7 +2473,7 @@ fn delete_reference(
                     .map_err(git_err)?
                     .and_then(|reference| reference.peeled_oid(repo).ok().flatten());
                 if current != Some(expected_old) {
-                    return Err(GitBridgeError::Git(format!(
+                    return Err(GitProjectionError::Git(format!(
                         "failed to delete Git reference '{name}': expected {expected_old}, found {}",
                         current
                             .map(|oid| oid.to_string())
@@ -2477,7 +2492,7 @@ pub(crate) fn set_reference(
     target: ObjectId,
     constraint: RefPrecondition,
     log_message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let refs = repo.references();
     let old_oid = match refs.read_ref(name).map_err(git_err)? {
         Some(ReferenceTarget::Direct(oid)) => oid,
@@ -2523,7 +2538,7 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
     tree: &Tree,
     prefix: &str,
     out: &mut Vec<(String, FileMode)>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     for entry in tree.iter() {
         let path = if prefix.is_empty() {
             entry.name().to_string()
@@ -2548,7 +2563,7 @@ fn update_checkout_head_ref(
     target: ObjectId,
     previous_branch: Option<ObjectId>,
     log_message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
     });
@@ -2573,7 +2588,7 @@ fn update_checkout_head_ref(
     Ok(())
 }
 
-fn checkout_git_head_is_detached(root: &Path) -> GitResult<bool> {
+fn checkout_git_head_is_detached(root: &Path) -> GitProjectionResult<bool> {
     let repo = SleyRepository::discover(root).map_err(git_err)?;
     Ok(repo.head().map(|head| head.is_detached()).unwrap_or(false))
 }
@@ -2581,7 +2596,7 @@ fn checkout_git_head_is_detached(root: &Path) -> GitResult<bool> {
 pub(crate) fn resolve_git_commit_identity(
     repo_root: &Path,
     fallback: &Principal,
-) -> GitResult<LocalGitIdentity> {
+) -> GitProjectionResult<LocalGitIdentity> {
     if !principal_is_default_unknown(fallback) {
         return Ok(LocalGitIdentity::from_principal(fallback));
     }
@@ -2589,14 +2604,14 @@ pub(crate) fn resolve_git_commit_identity(
         return Ok(identity);
     }
 
-    Err(GitBridgeError::Git(
+    Err(GitProjectionError::Git(
         "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
     ))
 }
 
 pub(crate) fn git_config_identity_with_global_fallback(
     repo_root: &Path,
-) -> GitResult<Option<LocalGitIdentity>> {
+) -> GitProjectionResult<Option<LocalGitIdentity>> {
     let name = git_config_value_with_global_fallback(repo_root, "user.name")?;
     let email = git_config_value_with_global_fallback(repo_root, "user.email")?;
     if let (Some(name), Some(email)) = (name, email)
@@ -2614,7 +2629,10 @@ pub(crate) fn principal_is_default_unknown(principal: &Principal) -> bool {
         || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
 }
 
-fn git_config_value_with_global_fallback(repo_root: &Path, key: &str) -> GitResult<Option<String>> {
+fn git_config_value_with_global_fallback(
+    repo_root: &Path,
+    key: &str,
+) -> GitProjectionResult<Option<String>> {
     let Ok(repo) = SleyRepository::discover(repo_root) else {
         return Ok(None);
     };
@@ -2628,7 +2646,7 @@ fn git_config_value_with_global_fallback(repo_root: &Path, key: &str) -> GitResu
         .map(str::to_string))
 }
 
-fn git_config_value(value: &str) -> GitResult<String> {
+fn git_config_value(value: &str) -> GitProjectionResult<String> {
     let Some(quoted) = value
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
@@ -2643,7 +2661,7 @@ fn git_config_value(value: &str) -> GitResult<String> {
             continue;
         }
         let Some(escaped) = chars.next() else {
-            return Err(GitBridgeError::Git(
+            return Err(GitProjectionError::Git(
                 "unterminated escape in repo-local Git config".to_string(),
             ));
         };
@@ -2683,7 +2701,7 @@ fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
     })
 }
 
-fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
+fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
     // Defense in depth (push-routing no-op): the git-overlay exporter speaks
     // only the local/git network transports. A `heddle://` hosted URL must
     // NEVER reach this classifier — the hosted-sync path
@@ -2694,7 +2712,7 @@ fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
     // URL, "reconcile" locally, and report success without contacting the
     // server).
     if url.starts_with("heddle://") {
-        return Err(GitBridgeError::Git(format!(
+        return Err(GitProjectionError::Git(format!(
             "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
         )));
     }
@@ -2703,7 +2721,7 @@ fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
     };
     let path = PathBuf::from(raw_path);
     if path.as_os_str().is_empty() {
-        return Err(GitBridgeError::Git(format!(
+        return Err(GitProjectionError::Git(format!(
             "remote '{}' has no filesystem path",
             url
         )));
@@ -2711,7 +2729,7 @@ fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-fn collect_ref_updates(repo: &SleyRepository) -> GitResult<Vec<RefUpdate>> {
+fn collect_ref_updates(repo: &SleyRepository) -> GitProjectionResult<Vec<RefUpdate>> {
     let mut updates = Vec::new();
 
     for reference in repo.references().list_refs().map_err(git_err)? {
@@ -2763,7 +2781,7 @@ pub(crate) struct ExportedCommitCounts {
 pub(crate) fn count_exported_commits(
     repo: &SleyRepository,
     newly_minted: &HashSet<ObjectId>,
-) -> GitResult<ExportedCommitCounts> {
+) -> GitProjectionResult<ExportedCommitCounts> {
     let tips: Vec<ObjectId> = collect_ref_updates(repo)?
         .into_iter()
         .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Tag))
@@ -2805,7 +2823,7 @@ pub(crate) fn count_exported_commits(
 fn collect_ref_updates_for_fetch(
     repo: &SleyRepository,
     scope: GitFetchScope,
-) -> GitResult<Vec<RefUpdate>> {
+) -> GitProjectionResult<Vec<RefUpdate>> {
     let updates = collect_ref_updates(repo)?;
     match scope {
         GitFetchScope::AllRefs => Ok(updates),
@@ -2819,7 +2837,7 @@ fn collect_ref_updates_for_fetch(
 pub(crate) fn collect_import_source_ref_updates(
     repo: &SleyRepository,
     refs: &[String],
-) -> GitResult<Vec<RefUpdate>> {
+) -> GitProjectionResult<Vec<RefUpdate>> {
     let updates = collect_ref_updates(repo)?;
     if refs.is_empty() {
         return Ok(updates);
@@ -2847,18 +2865,18 @@ pub(crate) fn ensure_commit_update_fast_forward(
     name: &str,
     old: ObjectId,
     new: ObjectId,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     if old == new || old == ObjectId::null(repo.object_format()) {
         return Ok(());
     }
     match commit_is_descendant_of(repo, new, old) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(GitBridgeError::NonFastForwardRef {
+        Ok(false) => Err(GitProjectionError::NonFastForwardRef {
             name: name.to_string(),
             old,
             new,
         }),
-        Err(err) => Err(GitBridgeError::Git(format!(
+        Err(err) => Err(GitProjectionError::Git(format!(
             "ref update would move {name}: {old} -> {new}, but Heddle could not verify it as a fast-forward ({err}); fetch/import first or inspect the refs explicitly"
         ))),
     }
@@ -2868,7 +2886,7 @@ fn commit_is_descendant_of(
     repo: &SleyRepository,
     descendant: ObjectId,
     ancestor: ObjectId,
-) -> GitResult<bool> {
+) -> GitProjectionResult<bool> {
     let mut stack = vec![descendant];
     let mut seen = HashSet::new();
     while let Some(oid) = stack.pop() {
@@ -2927,7 +2945,7 @@ fn network_exported_refs_path(heddle_dir: &Path, url: &str) -> PathBuf {
 /// assuming the destination's current heddle-namespace refs were heddle's) is the
 /// conservative choice: it can never delete a foreign ref — nor force-overwrite a
 /// destination tip — on the first export after this code lands.
-fn read_exported_refs_at(path: &Path) -> GitResult<HashMap<String, ObjectId>> {
+fn read_exported_refs_at(path: &Path) -> GitProjectionResult<HashMap<String, ObjectId>> {
     match fs::read_to_string(path) {
         Ok(text) => {
             let mut map = HashMap::new();
@@ -2956,14 +2974,17 @@ fn read_exported_refs_at(path: &Path) -> GitResult<HashMap<String, ObjectId>> {
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
-        Err(e) => Err(GitBridgeError::Io(e)),
+        Err(e) => Err(GitProjectionError::Io(e)),
     }
 }
 
 /// Persist `refs` (full ref name → published tip OID) as heddle's exported-refs
 /// record at `path`. Atomic temp+rename so a torn write can't surface a
 /// half-record.
-fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitResult<()> {
+fn write_exported_refs_at(
+    path: &Path,
+    refs: &HashMap<String, ObjectId>,
+) -> GitProjectionResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2985,14 +3006,14 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
 
 /// Write `HEAD` as a symbolic ref pointing at `branch_ref` (e.g.
 /// `refs/heads/main`) via sley's ref backend.
-pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitResult<()> {
+pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitProjectionResult<()> {
     let repo = repo_for_git_dir(git_dir)?;
     repo.set_head_symref(branch_ref, HeadUpdateOptions::new())
         .map_err(git_err)?;
     Ok(())
 }
 
-fn repo_for_git_dir(git_dir: &Path) -> GitResult<SleyRepository> {
+fn repo_for_git_dir(git_dir: &Path) -> GitProjectionResult<SleyRepository> {
     if let Ok(repo) = open_repo(git_dir) {
         return Ok(repo);
     }
@@ -3008,7 +3029,7 @@ fn repo_for_git_dir(git_dir: &Path) -> GitResult<SleyRepository> {
 /// tip OID), the local-path destination record. See [`read_exported_refs_at`].
 pub(crate) fn read_exported_refs(
     target_repo: &SleyRepository,
-) -> GitResult<HashMap<String, ObjectId>> {
+) -> GitProjectionResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&exported_refs_manifest_path(target_repo))
 }
 
@@ -3017,7 +3038,7 @@ pub(crate) fn read_exported_refs(
 pub(crate) fn write_exported_refs(
     target_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
 }
 
@@ -3053,7 +3074,7 @@ pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &SleyRepository) -> bool
 /// the current mirror ref set; see [`mirror_managed_refs_recorded`].
 pub(crate) fn read_mirror_managed_refs(
     mirror_repo: &SleyRepository,
-) -> GitResult<HashMap<String, ObjectId>> {
+) -> GitProjectionResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
 }
 
@@ -3062,7 +3083,7 @@ pub(crate) fn read_mirror_managed_refs(
 pub(crate) fn write_mirror_managed_refs(
     mirror_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     write_exported_refs_at(&mirror_managed_refs_path(mirror_repo), refs)
 }
 
@@ -3080,7 +3101,7 @@ pub(crate) fn write_mirror_managed_refs(
 /// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
 pub(crate) fn read_or_seed_mirror_managed_refs(
     mirror_repo: &SleyRepository,
-) -> GitResult<HashMap<String, ObjectId>> {
+) -> GitProjectionResult<HashMap<String, ObjectId>> {
     if mirror_managed_refs_recorded(mirror_repo) {
         read_mirror_managed_refs(mirror_repo)
     } else {
@@ -3103,7 +3124,7 @@ pub(crate) fn read_or_seed_mirror_managed_refs(
 pub(crate) fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
-) -> GitResult<Vec<RefUpdate>> {
+) -> GitProjectionResult<Vec<RefUpdate>> {
     Ok(collect_ref_updates(repo)?
         .into_iter()
         .filter(|update| {
@@ -3160,7 +3181,7 @@ fn classify_ref_move(
     old: Option<ObjectId>,
     new: ObjectId,
     recorded_tip: Option<ObjectId>,
-) -> GitResult<RefMove> {
+) -> GitProjectionResult<RefMove> {
     let Some(old) = old else {
         return Ok(RefMove::Create);
     };
@@ -3389,7 +3410,7 @@ pub(crate) fn plan_destination_reconcile(
     old_at_destination: &HashMap<String, ObjectId>,
     previously_exported: &HashMap<String, ObjectId>,
     force: bool,
-) -> GitResult<DestinationReconcilePlan> {
+) -> GitProjectionResult<DestinationReconcilePlan> {
     // The DESIRED ref-set indexed by full name → its `RefUpdate` (served target +
     // namespace). A name is in `desired` iff the WHOLE-MIRROR served frontier
     // wants it published now — there is no scope-filtered subset (heddle#316 r16),
@@ -3464,7 +3485,7 @@ pub(crate) fn plan_destination_reconcile(
                     if force {
                         true
                     } else {
-                        return Err(GitBridgeError::NonFastForwardRef {
+                        return Err(GitProjectionError::NonFastForwardRef {
                             name: full.clone(),
                             old: old.unwrap_or_else(|| ObjectId::null(mirror_repo.object_format())),
                             new: update.target,
@@ -3532,7 +3553,9 @@ pub(crate) fn plan_destination_reconcile(
 /// The destination's current ref tips (full name → oid) across the namespaces
 /// heddle manages (heads, tags, notes) — the `old_at_destination` input to
 /// [`plan_destination_reconcile`] for a local-path destination.
-fn read_destination_ref_map(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
+fn read_destination_ref_map(
+    repo: &SleyRepository,
+) -> GitProjectionResult<HashMap<String, ObjectId>> {
     Ok(collect_ref_updates(repo)?
         .iter()
         .map(|update| (full_ref_name(update), update.target))
@@ -3543,7 +3566,7 @@ pub(crate) fn apply_ref_updates(
     repo: &SleyRepository,
     updates: &[RefUpdate],
     log_message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     for update in updates {
         let full_name = full_ref_name(update);
         set_reference(
@@ -3562,7 +3585,7 @@ fn apply_remote_tracking_ref_updates(
     remote_name: &str,
     updates: &[RefUpdate],
     log_message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     reject_reserved_git_remote_name(remote_name)?;
     for update in updates
         .iter()
@@ -3582,7 +3605,7 @@ fn apply_remote_tracking_ref_updates(
 /// Copy a local Git repository into a bare repository without invoking Git
 /// transport helpers. This is the local-path clone fast path used by the OSS
 /// Git-overlay workflow when the user does not have `git` installed.
-pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()> {
+pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitProjectionResult<()> {
     fs::create_dir_all(dest)?;
     let source = open_repo(source_path)?;
     let target = match SleyRepository::open(dest) {
@@ -3650,18 +3673,18 @@ pub fn clone_url_to_bare(
     dest: &Path,
     depth: Option<u32>,
     filter: Option<&str>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     // Public Git-overlay workflows must run on machines with no Git executable
     // installed. Keep depth-only clones native and reject filtered clones until
     // the importer can tolerate missing objects.
     if let Some(spec) = filter {
-        return Err(GitBridgeError::Git(format!(
+        return Err(GitProjectionError::Git(format!(
             "partial Git clone filter `{spec}` is not supported in Heddle's native no-git runtime yet; retry without --filter/--lazy so Heddle can import a complete object graph"
         )));
     }
     if let Some(source_path) = local_path_from_url(url)? {
         if depth.is_some() {
-            return Err(GitBridgeError::Git(
+            return Err(GitProjectionError::Git(
                 "shallow file:// Git clones are not supported in Heddle's native no-git runtime yet; retry without --depth so Heddle can copy the local Git object graph without spawning Git transport helpers"
                     .to_string(),
             ));
@@ -3695,7 +3718,7 @@ fn default_branch_from_file_url(url: &str) -> Option<String> {
     (!branch.is_empty()).then(|| branch.to_string())
 }
 
-fn bare_branch_exists(repo_path: &Path, branch: &str) -> GitResult<bool> {
+fn bare_branch_exists(repo_path: &Path, branch: &str) -> GitProjectionResult<bool> {
     let repo = open_repo(repo_path)?;
     Ok(repo
         .find_reference(&format!("refs/heads/{branch}"))
@@ -3707,7 +3730,7 @@ fn clone_url_to_bare_via_sley(
     url: &str,
     dest: &Path,
     depth: Option<u32>,
-) -> GitResult<Option<String>> {
+) -> GitProjectionResult<Option<String>> {
     fs::create_dir_all(dest)?;
     let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
     let mut credentials = NoCredentials;
@@ -3747,7 +3770,7 @@ fn clone_url_to_bare_via_sley(
             &mut credentials,
             &mut progress,
         )
-        .map_err(|err| GitBridgeError::Git(format!("clone failed for {url}: {err}")))?;
+        .map_err(|err| GitProjectionError::Git(format!("clone failed for {url}: {err}")))?;
     Ok(outcome
         .head_symref
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
@@ -3788,7 +3811,7 @@ pub(crate) fn materialize_checkout_closure_from_state(
     tip_state_id: &ChangeId,
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     // Lossy commits whose closure is copied verbatim from the mirror. Their roots
     // are batched and copied once at the end (a single excluding pack install,
     // matching the prior single-copy perf shape) rather than per-commit.
@@ -3820,7 +3843,7 @@ pub(crate) fn materialize_checkout_closure_from_state(
         let state = heddle_repo
             .store()
             .get_state(&state_id)?
-            .ok_or(GitBridgeError::StateNotFound(state_id))?;
+            .ok_or(GitProjectionError::StateNotFound(state_id))?;
 
         if commit_is_byte_faithful(&state) {
             let content = reconstruct_commit_bytes(heddle_repo, object_repo, mapping, &state)?;
@@ -3829,7 +3852,7 @@ pub(crate) fn materialize_checkout_closure_from_state(
             // object into the worktree.
             let reconstructed = commit_object_id(&content);
             if reconstructed != git_oid {
-                return Err(GitBridgeError::Git(format!(
+                return Err(GitProjectionError::Git(format!(
                     "checkout reconstruction OID mismatch for state {state_id}: reconstructed {reconstructed}, expected mapped {git_oid}; \
                      refusing to materialize a wrong-OID checkout (unmodeled fidelity gap)"
                 )));
@@ -3870,16 +3893,16 @@ fn resolve_mapped_git_oid(
     mapping: &SyncMapping,
     state_id: &ChangeId,
     object_repo: &SleyRepository,
-) -> GitResult<Option<ObjectId>> {
+) -> GitProjectionResult<Option<ObjectId>> {
     if let Some(git_oid) = mapping.get_git(state_id) {
         return Ok(Some(git_oid));
     }
     if let Some(git_commit) = heddle_repo
         .git_overlay_mapped_git_commit_for_change(state_id)
-        .map_err(|error| GitBridgeError::Git(error.to_string()))?
+        .map_err(|error| GitProjectionError::Git(error.to_string()))?
     {
         let oid = ObjectId::from_hex(object_repo.object_format(), &git_commit)
-            .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?;
+            .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
         return Ok(Some(oid));
     }
     Ok(None)
@@ -3889,7 +3912,7 @@ pub(crate) fn copy_reachable_objects(
     source: &SleyRepository,
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     // TODO: Keep local Git-lane reachable transfer behind Sley primitives. If
     // this needs pack identity/stream planning, route it through the Sley
     // reachable-pack facade gate instead of adding a Heddle-local planner.
@@ -3916,7 +3939,7 @@ pub(crate) fn copy_reachable_objects_excluding(
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
     excluded: &HashSet<ObjectId>,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     if excluded.is_empty() {
         return copy_reachable_objects(source, target, roots);
     }
@@ -3935,7 +3958,7 @@ pub(crate) fn copy_reachable_objects_excluding(
         roots,
         excluded,
     )
-    .map_err(|error| GitBridgeError::Git(error.to_string()))?;
+    .map_err(|error| GitProjectionError::Git(error.to_string()))?;
     // Make the freshly-installed pack visible to subsequent reads on `target`,
     // mirroring what `copy_reachable_from` does internally.
     target.refresh_objects();
@@ -3947,7 +3970,7 @@ fn fetch_network_remote(
     remote_name: &str,
     url: &str,
     scope: GitFetchScope,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
     mirror_repo
@@ -3985,7 +4008,7 @@ fn fetch_network_remote(
             &mut credentials,
             &mut progress,
         )
-        .map_err(|err| GitBridgeError::Git(format!("failed to fetch from {url}: {err}")))?;
+        .map_err(|err| GitProjectionError::Git(format!("failed to fetch from {url}: {err}")))?;
     let _ = remote_name;
     Ok(())
 }
@@ -3999,7 +4022,7 @@ fn push_network_remote(
     scope: GitPushScope,
     current_branch: Option<&str>,
     force: bool,
-) -> GitResult<Vec<String>> {
+) -> GitProjectionResult<Vec<String>> {
     // The network destination's exported-refs record lives in heddle's own dir,
     // keyed by the remote URL (the remote has no local git dir to host the
     // sidecar). Read it BEFORE the empty-frontier fast-path: a retraction lands
@@ -4034,7 +4057,7 @@ fn push_network_remote(
             &|_| true,
             &mut credentials,
         )
-        .map_err(|err| GitBridgeError::Git(format!("failed to list refs from {url}: {err}")))?;
+        .map_err(|err| GitProjectionError::Git(format!("failed to list refs from {url}: {err}")))?;
     let remote_refs = records
         .into_iter()
         .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
@@ -4100,7 +4123,7 @@ fn push_network_remote(
             &mut credentials,
             &mut progress,
         )
-        .map_err(|err| GitBridgeError::Git(format!("push failed for {url}: {err}")))?;
+        .map_err(|err| GitProjectionError::Git(format!("push failed for {url}: {err}")))?;
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
@@ -4469,12 +4492,17 @@ mod tests {
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let repo = open_repo(root).expect("open");
         assert_eq!(repo.head_state().unwrap().branch_name(), Some("main"));
-        assert_eq!(legacy_branch_parse(&git_dir.join("HEAD")), Some("main".into()));
+        assert_eq!(
+            legacy_branch_parse(&git_dir.join("HEAD")),
+            Some("main".into())
+        );
 
         // Detached HEAD.
-        let oid =
-            ObjectId::from_hex(ObjectFormat::Sha1, "0000000000000000000000000000000000000001")
-                .unwrap();
+        let oid = ObjectId::from_hex(
+            ObjectFormat::Sha1,
+            "0000000000000000000000000000000000000001",
+        )
+        .unwrap();
         std::fs::write(git_dir.join("HEAD"), format!("{oid}\n")).unwrap();
         let repo = open_repo(root).expect("open");
         let state = repo.head_state().unwrap();
@@ -4485,10 +4513,7 @@ mod tests {
         // Unborn branch symref (no refs/heads/feature yet).
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
         let repo = open_repo(root).expect("open");
-        assert_eq!(
-            repo.head_state().unwrap().branch_name(),
-            Some("feature")
-        );
+        assert_eq!(repo.head_state().unwrap().branch_name(), Some("feature"));
         assert_eq!(
             legacy_branch_parse(&git_dir.join("HEAD")),
             Some("feature".into())

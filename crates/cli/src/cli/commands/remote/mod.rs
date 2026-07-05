@@ -22,8 +22,8 @@ use super::{
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::cli::progress_render::{clear_line, progress_for};
@@ -34,13 +34,13 @@ use crate::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
 use crate::{
-    bridge::{
-        GitBridge,
-        git_core::{GitPushScope, set_reference},
-    },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
+    git_projection_engine::{
+        GitProjection,
+        git_core::{GitPushScope, set_reference},
+    },
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -77,7 +77,7 @@ pub(crate) fn push_git_overlay_refs(
     } else {
         None
     };
-    let mut bridge = GitBridge::new(repo);
+    let mut bridge = GitProjection::new(repo);
     let refs_written = bridge.push_with_scope_force(&remote_name, scope, force)?;
     let tracking_refresh = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
     let trust = build_repository_verification_state(repo);
@@ -246,7 +246,7 @@ pub async fn cmd_push(
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
             if let Some(mirror_remote) = mirror.as_deref() {
-                let mut bridge = GitBridge::new(&repo);
+                let mut bridge = GitProjection::new(&repo);
                 let outcome = bridge.push(mirror_remote);
                 render_mirror_outcome(cli, &repo, mirror_remote, outcome);
             }
@@ -344,7 +344,7 @@ pub async fn cmd_push(
         // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
         // `--mirror` fires here too, best-effort, after the primary push.
         if let Some(mirror_remote) = mirror.as_deref() {
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             let outcome = bridge.push(mirror_remote);
             render_mirror_outcome(cli, &repo, mirror_remote, outcome);
         }
@@ -442,7 +442,7 @@ pub async fn cmd_push(
     // the named Git remote mirror. Best-effort — mirror failure does not
     // abort the primary push.
     if let Some(mirror_remote) = mirror.as_deref() {
-        let mut bridge = GitBridge::new(&repo);
+        let mut bridge = GitProjection::new(&repo);
         let outcome = bridge.push(mirror_remote);
         render_mirror_outcome(cli, &repo, mirror_remote, outcome);
     }
@@ -481,7 +481,7 @@ fn render_mirror_outcome(
     cli: &Cli,
     repo: &Repository,
     mirror_remote: &str,
-    outcome: crate::bridge::GitResult<Vec<String>>,
+    outcome: crate::git_projection_engine::GitProjectionResult<Vec<String>>,
 ) {
     let json = should_output_json(cli, Some(repo.config()));
     match outcome {
@@ -1201,11 +1201,14 @@ struct PushableThread {
 /// name for deterministic output. Threads whose ref cannot be resolved to a
 /// state are skipped (they carry no pushable state).
 fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
-    let remote_names = crate::bridge::git_export::git_remote_names(repo);
+    let remote_names = crate::git_projection_engine::git_export::git_remote_names(repo);
     let mut threads: Vec<PushableThread> = Vec::new();
     for thread in repo.refs().list_threads()? {
         let name = thread.to_string();
-        if crate::bridge::git_export::is_remote_tracking_thread_name(&name, &remote_names) {
+        if crate::git_projection_engine::git_export::is_remote_tracking_thread_name(
+            &name,
+            &remote_names,
+        ) {
             continue;
         }
         if let Some(state) = repo.refs().get_thread(&thread)? {

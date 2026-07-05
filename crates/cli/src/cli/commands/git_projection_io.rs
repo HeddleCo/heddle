@@ -16,19 +16,19 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         serialize_empty_action_as_null,
     },
-    import_progress::ImportProgress,
-    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::{
-    bridge::{
-        GitBridge, git_core::clone_url_to_bare, git_export::export_all,
+    cli::{Cli, cli_args::GitSource, should_output_json, style},
+    git_projection_engine::{
+        GitProjection, git_core::clone_url_to_bare, git_export::export_all,
         git_ingest::import_git_history, git_util::ExportedRef,
     },
-    cli::{Cli, cli_args::GitSource, should_output_json, style},
 };
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
@@ -287,7 +287,9 @@ fn render_import_git(
     Ok(())
 }
 
-fn git_projection_lossy_import_entries(entries: &[LossyImportEntry]) -> Vec<GitProjectionLossyImportEntryOutput> {
+fn git_projection_lossy_import_entries(
+    entries: &[LossyImportEntry],
+) -> Vec<GitProjectionLossyImportEntryOutput> {
     entries
         .iter()
         .map(|entry| GitProjectionLossyImportEntryOutput {
@@ -309,7 +311,7 @@ fn open_repo_for_cli(cli: &Cli) -> Result<Repository> {
 
 pub fn cmd_export_git(cli: &Cli, destination: Option<PathBuf>) -> Result<()> {
     let repo = open_repo_for_cli(cli)?;
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     run_git_export(
         cli,
         &repo,
@@ -326,7 +328,7 @@ pub fn cmd_import_git(
     lossy: bool,
 ) -> Result<()> {
     let repo = open_repo_for_cli(cli)?;
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     run_git_import(
         cli,
         &repo,
@@ -342,7 +344,7 @@ pub fn cmd_import_git(
 
 pub fn cmd_sync_git(cli: &Cli, path: Option<GitSource>) -> Result<()> {
     let repo = open_repo_for_cli(cli)?;
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     run_git_sync(
         cli,
         &repo,
@@ -357,7 +359,7 @@ pub fn cmd_sync_git(cli: &Cli, path: Option<GitSource>) -> Result<()> {
 fn run_git_export(
     cli: &Cli,
     repo: &Repository,
-    bridge: &mut GitBridge,
+    bridge: &mut GitProjection,
     destination: Option<PathBuf>,
     missing_destination_message: &'static str,
 ) -> Result<()> {
@@ -404,7 +406,7 @@ fn run_git_export(
 fn run_git_import(
     cli: &Cli,
     repo: &Repository,
-    bridge: &mut GitBridge,
+    bridge: &mut GitProjection,
     path: Option<GitSource>,
     refs: &[String],
     lossy: bool,
@@ -500,7 +502,7 @@ fn run_git_import(
 fn run_git_sync(
     cli: &Cli,
     repo: &Repository,
-    bridge: &mut GitBridge,
+    bridge: &mut GitProjection,
     path: Option<GitSource>,
     output_kind: &'static str,
     action: &'static str,
@@ -651,7 +653,7 @@ pub fn cmd_context_reason_git(
 }
 
 fn materialize_imported_attached_thread(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     attached_before: Option<&(ThreadName, ChangeId)>,
 ) -> Result<()> {
     let Some((thread, old_state)) = attached_before else {

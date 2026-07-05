@@ -1080,8 +1080,8 @@ export interface FsckRepair {
 }
 
 export interface FsckRepairGitSchema {
-  bridge_checked: boolean;
   errors: FsckError[];
+  git_projection_checked: boolean;
   objects_checked: number;
   repair_target?: string | null;
   repaired: boolean;
@@ -1091,8 +1091,8 @@ export interface FsckRepairGitSchema {
 }
 
 export interface FsckSchema {
-  bridge_checked: boolean;
   errors: FsckError[];
+  git_projection_checked: boolean;
   objects_checked: number;
   repair_target?: string | null;
   repaired: boolean;

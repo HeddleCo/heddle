@@ -106,8 +106,7 @@ impl RecoveryAdvice {
         let current_oid = current_oid.into();
         let expected_oid = expected_oid.into();
         let branch = branch.into();
-        let primary_command =
-            canonical_git_repair_ref_preview_command(Some("heddle"), &branch);
+        let primary_command = canonical_git_repair_ref_preview_command(Some("heddle"), &branch);
         let dirty_summary = if dirty_paths.is_empty() {
             "dirty paths: none".to_string()
         } else {
@@ -854,26 +853,28 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn from_git_projection_error(
-        error: &crate::bridge::git_core::GitBridgeError,
+        error: &crate::git_projection_engine::git_core::GitProjectionError,
     ) -> Option<Self> {
-        use crate::bridge::git_core::GitBridgeError;
+        use crate::git_projection_engine::git_core::GitProjectionError;
         match error {
-            GitBridgeError::NonFastForwardRef { name, .. }
-                if name == crate::bridge::git_notes::NOTES_REF =>
+            GitProjectionError::NonFastForwardRef { name, .. }
+                if name == crate::git_projection_engine::git_notes::NOTES_REF =>
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
-            GitBridgeError::NonFastForwardRef { name, .. } => name
+            GitProjectionError::NonFastForwardRef { name, .. } => name
                 .strip_prefix("refs/heads/")
                 .map(Self::git_overlay_remote_push_rejected),
-            GitBridgeError::MappingConflict { .. } => Some(Self::git_overlay_mapping_conflict()),
-            GitBridgeError::GitHeddleThreadDiverged { thread, branch, .. } => {
+            GitProjectionError::MappingConflict { .. } => {
+                Some(Self::git_overlay_mapping_conflict())
+            }
+            GitProjectionError::GitHeddleThreadDiverged { thread, branch, .. } => {
                 Some(Self::git_heddle_thread_diverged(thread, branch))
             }
-            GitBridgeError::RemoteDiverged {
+            GitProjectionError::RemoteDiverged {
                 branch, upstream, ..
             } => Some(Self::git_overlay_remote_diverged(branch, upstream)),
-            GitBridgeError::ShallowClone {
+            GitProjectionError::ShallowClone {
                 repository,
                 retry_command,
             } => Some(Self::git_overlay_shallow_clone(repository, retry_command)),
@@ -1405,11 +1406,11 @@ impl Error for RecoveryAdvice {}
 #[cfg(test)]
 mod tests {
     use super::RecoveryAdvice;
-    use crate::bridge::git_core::GitBridgeError;
+    use crate::git_projection_engine::git_core::GitProjectionError;
 
     #[test]
     fn git_projection_mapping_conflict_returns_typed_advice() {
-        let error = GitBridgeError::MappingConflict {
+        let error = GitProjectionError::MappingConflict {
             message: "git oid abc mapped to old-change (new new-change)".to_string(),
         };
 
@@ -1427,7 +1428,7 @@ mod tests {
 
     #[test]
     fn git_projection_plain_conflict_message_does_not_classify_as_mapping_conflict() {
-        let error = GitBridgeError::Conflict(
+        let error = GitProjectionError::Conflict(
             "git oid abc mapped to old-change (new new-change)".to_string(),
         );
 
@@ -1437,7 +1438,7 @@ mod tests {
     #[test]
     fn git_projection_shallow_clone_returns_typed_advice() {
         let retry_command = "heddle import git --ref main";
-        let error = GitBridgeError::ShallowClone {
+        let error = GitProjectionError::ShallowClone {
             repository: std::path::PathBuf::from("/tmp/shallow"),
             retry_command: retry_command.to_string(),
         };

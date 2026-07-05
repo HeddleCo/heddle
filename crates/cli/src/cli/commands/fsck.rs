@@ -68,9 +68,9 @@ fn repair_git(
 
 #[cfg(feature = "git-overlay")]
 fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
-    use crate::bridge::GitBridge;
+    use crate::git_projection_engine::GitProjection;
 
-    let mut bridge = GitBridge::new(repo);
+    let mut bridge = GitProjection::new(repo);
     if !bridge.mirror_path().exists() && sley::Repository::discover(repo.root()).is_err() {
         return Ok(vec![FsckRepair {
             name: "git_projection_metadata".to_string(),
@@ -143,7 +143,7 @@ fn repair_git_ref(
     use objects::object::ThreadName;
     use refs::Head;
 
-    use crate::bridge::git_ingest::import_git_history;
+    use crate::git_projection_engine::git_ingest::import_git_history;
 
     let heddle_preview = canonical_git_repair_ref_preview_command(Some("heddle"), ref_name);
     let git_preview = canonical_git_repair_ref_preview_command(Some("git"), ref_name);
@@ -173,7 +173,7 @@ fn repair_git_ref(
         .ok_or_else(|| git_repair_direction_required_advice(ref_name))?;
     match prefer {
         "git" => {
-            let mut bridge = crate::bridge::GitBridge::new(repo);
+            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
             let stats = import_git_history(
                 &mut bridge,
                 Some(repo.root()),
@@ -204,18 +204,20 @@ fn repair_git_ref(
                 .ok_or_else(|| git_repair_missing_heddle_thread_advice(ref_name))?;
             repo.goto_without_record(&state)?;
             repo.refs().write_head(&Head::Attached { thread: tn })?;
-            let mut bridge = crate::bridge::GitBridge::new(repo);
+            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
             match bridge.write_through_current_checkout()? {
-                crate::bridge::WriteThroughOutcome::Wrote(git_oid) => Ok(vec![FsckRepair {
-                    name: "git_projection_ref_prefer_heddle".to_string(),
-                    repaired: true,
-                    detail: format!(
-                        "wrote Heddle state {} for '{ref_name}' through to Git commit {git_oid}",
-                        state.short()
-                    ),
-                    count: 1,
-                }]),
-                crate::bridge::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
+                crate::git_projection_engine::WriteThroughOutcome::Wrote(git_oid) => {
+                    Ok(vec![FsckRepair {
+                        name: "git_projection_ref_prefer_heddle".to_string(),
+                        repaired: true,
+                        detail: format!(
+                            "wrote Heddle state {} for '{ref_name}' through to Git commit {git_oid}",
+                            state.short()
+                        ),
+                        count: 1,
+                    }])
+                }
+                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => Err(anyhow!(
                     git_repair_write_through_skipped_advice(ref_name, reason.to_string(),)
                 )),
             }

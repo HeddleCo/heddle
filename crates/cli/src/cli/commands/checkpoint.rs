@@ -20,14 +20,14 @@ use serde::Serialize;
 use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
-    action_line::print_next, command_catalog::ActionTemplate,
-    verification_health::RepositoryVerificationState, git_overlay_txn,
-    snapshot::ensure_current_state, worktree_safety::dirty_worktree_advice,
+    action_line::print_next, command_catalog::ActionTemplate, git_overlay_txn,
+    snapshot::ensure_current_state, verification_health::RepositoryVerificationState,
+    worktree_safety::dirty_worktree_advice,
 };
 use crate::{
-    bridge::{GitBridge, WriteThroughOutcome},
     cli::{CheckpointArgs, Cli, should_output_json, style, worktree_status_options},
     config::UserConfig,
+    git_projection_engine::{GitProjection, WriteThroughOutcome},
 };
 
 #[derive(Serialize)]
@@ -225,7 +225,7 @@ fn create_git_checkpoint_inner(
         .git_overlay_current_branch()?
         .unwrap_or_else(|| "HEAD".to_string());
     let previous_git_oid = git_rev_parse_head(repo.root());
-    let mut bridge = GitBridge::new(repo);
+    let mut bridge = GitProjection::new(repo);
     if let Some(parents) = git_parent_override {
         bridge.set_commit_parent_override(state.change_id, parents);
     }

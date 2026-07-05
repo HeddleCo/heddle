@@ -23,7 +23,7 @@
 //!   * C9 signed merge carrying a `mergetag` header (mergetag + gpgsig ordering)
 //!
 //! For every commit reachable in the source, the harness imports it through the
-//! real `GitBridge`, calls `reconstruct_commit_bytes`, then asserts BOTH:
+//! real `GitProjection`, calls `reconstruct_commit_bytes`, then asserts BOTH:
 //!   1. byte-identity with the original object (`git cat-file commit`), the
 //!      debuggable check that pinpoints a diverging header/byte; and
 //!   2. the framed SHA-1 equals the original commit SHA (the authoritative
@@ -39,12 +39,14 @@ use std::{
 
 use cli::{
     Repository,
-    bridge::{git_core::GitBridge, git_reconstruct::commit_object_id, test_support},
+    git_projection_engine::{
+        git_core::GitProjection, git_reconstruct::commit_object_id, test_support,
+    },
 };
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
 
-fn ingest_into_bridge(bridge: &mut GitBridge<'_>, source: &Path) -> Result<(), String> {
+fn ingest_into_bridge(bridge: &mut GitProjection<'_>, source: &Path) -> Result<(), String> {
     let target = test_support::heddle_repo(bridge).root();
     ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy: false })
         .map_err(|error| error.to_string())?;
@@ -273,7 +275,7 @@ fn extract_commit_bundle(dir: &Path) -> PathBuf {
     repo
 }
 
-/// Import every commit reachable in `source` through the real `GitBridge`, then
+/// Import every commit reachable in `source` through the real `GitProjection`, then
 /// assert each reconstructs byte-identically AND its framed SHA-1 reproduces the
 /// original commit SHA.
 fn assert_all_commits_reconstruct(case: &str, source: &Path) {
@@ -284,7 +286,7 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     ingest_into_bridge(&mut bridge, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
@@ -327,7 +329,7 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
 /// verbatim imported bytes, landing at its ORIGINAL git SHA with byte-identical
 /// content. Where [`assert_all_commits_reconstruct`] checks the serializer in
 /// isolation (#566), this drives the export's actual reconstruct-and-WRITE step
-/// ([`GitBridge::reconstruct_and_write_commit_for_git_sha`]) and proves the
+/// ([`GitProjection::reconstruct_and_write_commit_for_git_sha`]) and proves the
 /// minted object no longer depends on the git mirror's verbatim copy — the
 /// dependency #568 removes. The fresh repo is asserted empty of each commit
 /// BEFORE reconstruction, so a regenerated object appearing there can only have
@@ -339,7 +341,7 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     ingest_into_bridge(&mut bridge, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 

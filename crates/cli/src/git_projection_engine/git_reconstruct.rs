@@ -27,8 +27,8 @@ use sley::{
     plumbing::sley_object::EncodedObject,
 };
 
-use crate::bridge::{
-    git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err},
+use crate::git_projection_engine::{
+    git_core::{GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, git_err},
     git_export::export_tree,
 };
 
@@ -69,7 +69,7 @@ pub fn reconstruct_commit_bytes(
     repo: &SleyRepository,
     mapping: &SyncMapping,
     state: &State,
-) -> GitResult<Vec<u8>> {
+) -> GitProjectionResult<Vec<u8>> {
     let tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
     let parent_oids = state
         .parents
@@ -77,9 +77,9 @@ pub fn reconstruct_commit_bytes(
         .map(|parent| {
             mapping
                 .get_git(parent)
-                .ok_or(GitBridgeError::StateNotFound(*parent))
+                .ok_or(GitProjectionError::StateNotFound(*parent))
         })
-        .collect::<GitResult<Vec<_>>>()?;
+        .collect::<GitProjectionResult<Vec<_>>>()?;
     build_commit_content(state, &tree_oid, &parent_oids)
 }
 
@@ -94,7 +94,7 @@ pub fn reconstruct_commit_bytes(
 /// removes. Idempotent: sley's object writer hashes first and no-ops when the
 /// object already exists, so re-writing a commit the mirror already carries (the
 /// common case today) costs nothing.
-pub fn write_commit_object(repo: &SleyRepository, content: &[u8]) -> GitResult<ObjectId> {
+pub fn write_commit_object(repo: &SleyRepository, content: &[u8]) -> GitProjectionResult<ObjectId> {
     repo.write_object(EncodedObject::new(GitObjectType::Commit, content.to_vec()))
         .map_err(git_err)
 }
@@ -106,7 +106,7 @@ fn build_commit_content(
     state: &State,
     tree_oid: &ObjectId,
     parent_oids: &[ObjectId],
-) -> GitResult<Vec<u8>> {
+) -> GitProjectionResult<Vec<u8>> {
     let mut out = Vec::new();
 
     // `tree` is always first, exactly once (§1.1).
@@ -178,7 +178,7 @@ fn write_actor_line(
     who: &Principal,
     seconds: i64,
     tz_offset_secs: i32,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let seconds = checked_actor_timestamp(label, seconds, tz_offset_secs)?;
     out.extend_from_slice(label);
     out.push(b' ');
@@ -193,7 +193,11 @@ fn write_actor_line(
     Ok(())
 }
 
-fn checked_actor_timestamp(label: &[u8], seconds: i64, tz_offset_secs: i32) -> GitResult<i64> {
+fn checked_actor_timestamp(
+    label: &[u8],
+    seconds: i64,
+    tz_offset_secs: i32,
+) -> GitProjectionResult<i64> {
     // Git serializes UTC seconds plus a timezone offset. Validate the local
     // seconds implied by that pair so malformed fidelity data cannot overflow
     // reconstruct-time timestamp arithmetic.
@@ -202,7 +206,7 @@ fn checked_actor_timestamp(label: &[u8], seconds: i64, tz_offset_secs: i32) -> G
         .map(|_| seconds)
         .ok_or_else(|| {
             let label = String::from_utf8_lossy(label);
-            GitBridgeError::Store(StoreError::InvalidObject(format!(
+            GitProjectionError::Store(StoreError::InvalidObject(format!(
                 "{label} timestamp {seconds} with timezone offset {tz_offset_secs} overflows i64"
             )))
         })
@@ -236,11 +240,11 @@ fn append_folded(out: &mut Vec<u8>, value: &[u8]) {
     }
 }
 
-impl GitBridge<'_> {
+impl GitProjection<'_> {
     /// Open (initializing if necessary) a writable sley repo suitable for
     /// reconstruction's tree-OID resolution. Any writable odb works — git trees
     /// are content-addressed — so the bridge's own mirror is reused.
-    pub fn reconstruction_repo(&mut self) -> GitResult<SleyRepository> {
+    pub fn reconstruction_repo(&mut self) -> GitProjectionResult<SleyRepository> {
         self.init_mirror()?;
         self.open_git_repo()
     }
@@ -252,7 +256,7 @@ impl GitBridge<'_> {
         &self,
         repo: &SleyRepository,
         state: &State,
-    ) -> GitResult<Vec<u8>> {
+    ) -> GitProjectionResult<Vec<u8>> {
         reconstruct_commit_bytes(self.heddle_repo, repo, &self.mapping, state)
     }
 
@@ -265,7 +269,7 @@ impl GitBridge<'_> {
         &self,
         repo: &SleyRepository,
         state: &State,
-    ) -> GitResult<ObjectId> {
+    ) -> GitProjectionResult<ObjectId> {
         let content = self.reconstruct_commit_bytes(repo, state)?;
         write_commit_object(repo, &content)
     }
@@ -278,7 +282,7 @@ impl GitBridge<'_> {
         &self,
         repo: &SleyRepository,
         sha: &str,
-    ) -> GitResult<Option<Vec<u8>>> {
+    ) -> GitProjectionResult<Option<Vec<u8>>> {
         let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
         let Some(change_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
@@ -305,7 +309,7 @@ impl GitBridge<'_> {
         &self,
         repo: &SleyRepository,
         sha: &str,
-    ) -> GitResult<Option<ObjectId>> {
+    ) -> GitProjectionResult<Option<ObjectId>> {
         let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
         let Some(change_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
@@ -384,7 +388,7 @@ mod tests {
             .expect_err("timestamp plus timezone offset must not overflow");
 
         assert!(
-            matches!(&error, GitBridgeError::Store(StoreError::InvalidObject(message)) if message.contains("overflows i64")),
+            matches!(&error, GitProjectionError::Store(StoreError::InvalidObject(message)) if message.contains("overflows i64")),
             "expected InvalidObject overflow error, got: {error:?}",
         );
         assert!(

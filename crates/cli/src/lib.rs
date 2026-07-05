@@ -19,11 +19,11 @@ pub mod bench;
 // `Commands::GitOverlay` is gated behind
 // `git-overlay`, so a native-only `heddle` binary exposes no
 // overlay-specific subcommands. Deeper code-elimination can come later.
-pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod exit;
 pub mod extensions;
+pub mod git_projection_engine;
 pub mod harness;
 pub mod operation_id;
 pub mod perf;

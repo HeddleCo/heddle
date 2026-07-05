@@ -37,17 +37,17 @@ use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
-    verification_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
-        override_trust_recommended_action, serialize_empty_action_as_null,
-    },
     mount_lifecycle,
     next_action::{NextActionValidationContext, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
+    verification_health::{
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        override_trust_recommended_action, serialize_empty_action_as_null,
+    },
     worktree_cmd::{
         helpers::{plan_worktree_target, write_isolated_checkout},
         shared_target,
@@ -2761,10 +2761,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::bridge::GitBridge::new(repo);
+            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::bridge::WriteThroughOutcome::Wrote(_) => {}
-                crate::bridge::WriteThroughOutcome::Skipped(reason) => {
+                crate::git_projection_engine::WriteThroughOutcome::Wrote(_) => {}
+                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()
