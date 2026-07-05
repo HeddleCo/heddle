@@ -161,7 +161,7 @@ pub fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<S
             if upstream.is_empty() {
                 Some("heddle fetch".to_string())
             } else {
-                Some(canonical_bridge_import_ref_command(upstream))
+                Some(canonical_git_import_ref_command(upstream))
             }
         }
         _ => None,
@@ -180,11 +180,11 @@ pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
     heddle_action(["adopt", "--ref", ref_name])
 }
 
-pub fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
+pub fn canonical_git_import_ref_command(ref_name: &str) -> String {
     heddle_action(["import", "git", "--ref", ref_name])
 }
 
-pub fn canonical_bridge_reconcile_ref_preview_command(
+pub fn canonical_git_repair_ref_preview_command(
     prefer: Option<&str>,
     ref_name: &str,
 ) -> String {
@@ -203,7 +203,7 @@ pub fn canonical_bridge_reconcile_ref_preview_command(
     }
 }
 
-pub fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
+pub fn canonical_git_repair_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
         "fsck", "--repair", "git", "--prefer", prefer, "--ref", ref_name,
     ])

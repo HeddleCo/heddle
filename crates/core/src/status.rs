@@ -35,8 +35,8 @@ use sley::{
 };
 
 use self::next_action::{
-    NextActionInput, canonical_adopt_ref_command, canonical_bridge_import_ref_command,
-    canonical_bridge_reconcile_ref_preview_command, contextual_thread_action,
+    NextActionInput, canonical_adopt_ref_command, canonical_git_import_ref_command,
+    canonical_git_repair_ref_preview_command, contextual_thread_action,
     effective_next_action, heddle_action, non_empty_action, remote_tracking_next_action,
     remote_tracking_status,
 };
@@ -624,7 +624,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     let recovery = if status == "needs_checkpoint" {
                         "heddle checkpoint -m \"...\"".to_string()
                     } else {
-                        canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
+                        canonical_git_repair_ref_preview_command(None, &ref_name)
                     };
                     checks.push(check);
                     return RepositoryVerificationHealth {
@@ -1169,8 +1169,8 @@ fn remote_drift_recovery_commands(
             if upstream.is_empty() {
                 return vec!["heddle fetch".to_string()];
             }
-            let import = canonical_bridge_import_ref_command(upstream);
-            let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
+            let import = canonical_git_import_ref_command(upstream);
+            let reconcile = canonical_git_repair_ref_preview_command(None, upstream);
             if upstream_thread_matches_current_git_tip(repo, upstream) {
                 vec![reconcile]
             } else {

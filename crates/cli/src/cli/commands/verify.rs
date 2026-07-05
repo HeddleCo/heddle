@@ -469,7 +469,7 @@ struct VerifySetupGuidance {
 enum RepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -489,7 +489,7 @@ fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<Veri
         RepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         RepositorySetupActionKind::Other => {
@@ -513,7 +513,7 @@ fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<Veri
         RepositorySetupActionKind::Adopt => {
             format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
         }
         RepositorySetupActionKind::Other => {
@@ -529,7 +529,7 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
     } else if action.starts_with("heddle import git") {
-        RepositorySetupActionKind::BridgeImport
+        RepositorySetupActionKind::GitImport
     } else {
         RepositorySetupActionKind::Other
     }

@@ -705,7 +705,7 @@ fn run_reason(
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
     if !map_path.exists() {
-        anyhow::bail!(RecoveryAdvice::bridge_ingest_required(
+        anyhow::bail!(RecoveryAdvice::git_import_metadata_required(
             &map_path.display().to_string(),
             &git_path.display().to_string(),
         ));

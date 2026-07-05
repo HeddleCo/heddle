@@ -125,7 +125,7 @@ fn git_import_recovery_policy_stays_out_of_error_renderer() {
         .unwrap_or_else(|err| panic!("read {}: {err}", envelope.display()));
 
     assert!(
-        source.contains("RecoveryAdvice::from_git_bridge_error"),
+        source.contains("RecoveryAdvice::from_git_projection_error"),
         "{ALLOWED_ENVELOPE_FILE} should delegate GitBridgeError policy to typed advice"
     );
     for forbidden in [

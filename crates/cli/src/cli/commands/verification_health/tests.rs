@@ -6,7 +6,7 @@
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
 use heddle_core::status::next_action::{
-    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     remote_tracking_next_action,
 };
 use objects::object::ThreadName;
@@ -86,7 +86,7 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
 
 #[test]
 fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
-    let import = canonical_bridge_import_ref_command("feature with spaces");
+    let import = canonical_git_import_ref_command("feature with spaces");
     assert_eq!(
         action_template(&import)
             .expect("import command should expose a template")
@@ -95,7 +95,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
     );
 
     let reconcile =
-        canonical_bridge_reconcile_ref_preview_command(Some("heddle"), "feature 'quoted'");
+        canonical_git_repair_ref_preview_command(Some("heddle"), "feature 'quoted'");
     assert_eq!(
         action_template(&reconcile)
             .expect("reconcile command should expose a template")

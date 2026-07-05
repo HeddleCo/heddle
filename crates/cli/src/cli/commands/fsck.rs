@@ -136,8 +136,8 @@ fn repair_git_ref(
     preview: bool,
 ) -> Result<Vec<FsckRepair>> {
     use heddle_core::status::next_action::{
-        canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
-        canonical_bridge_reconcile_ref_preview_command,
+        canonical_git_import_ref_command, canonical_git_repair_ref_command,
+        canonical_git_repair_ref_preview_command,
     };
     use ingest::ImportOptions;
     use objects::object::ThreadName;
@@ -145,12 +145,12 @@ fn repair_git_ref(
 
     use crate::bridge::git_ingest::import_git_history;
 
-    let heddle_preview = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), ref_name);
-    let git_preview = canonical_bridge_reconcile_ref_preview_command(Some("git"), ref_name);
+    let heddle_preview = canonical_git_repair_ref_preview_command(Some("heddle"), ref_name);
+    let git_preview = canonical_git_repair_ref_preview_command(Some("git"), ref_name);
 
     let recovery_commands = match prefer.as_deref() {
-        Some("git") => vec![canonical_bridge_import_ref_command(ref_name)],
-        Some("heddle") => vec![canonical_bridge_reconcile_ref_command("heddle", ref_name)],
+        Some("git") => vec![canonical_git_import_ref_command(ref_name)],
+        Some("heddle") => vec![canonical_git_repair_ref_command("heddle", ref_name)],
         None if preview => vec![heddle_preview.clone(), git_preview.clone()],
         None => return Err(anyhow!(git_repair_direction_required_advice(ref_name))),
         _ => unreachable!("clap restricts --prefer values"),
@@ -238,9 +238,9 @@ fn git_repair_ref_required_advice() -> RecoveryAdvice {
 }
 
 fn git_repair_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
-    use heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command;
+    use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
 
-    let preview_command = canonical_bridge_reconcile_ref_preview_command(None, ref_name);
+    let preview_command = canonical_git_repair_ref_preview_command(None, ref_name);
     RecoveryAdvice::safety_refusal(
         "git_repair_direction_required",
         format!("Refusing to repair '{ref_name}': choose a local side before applying"),
@@ -253,19 +253,19 @@ fn git_repair_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
         preview_command.clone(),
         vec![
             preview_command,
-            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), ref_name),
-            canonical_bridge_reconcile_ref_preview_command(Some("git"), ref_name),
+            canonical_git_repair_ref_preview_command(Some("heddle"), ref_name),
+            canonical_git_repair_ref_preview_command(Some("git"), ref_name),
         ],
     )
 }
 
 fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
     use heddle_core::status::next_action::{
-        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_command,
+        canonical_adopt_ref_command, canonical_git_repair_ref_command,
     };
 
     let import_command = canonical_adopt_ref_command(ref_name);
-    let reconcile_git_command = canonical_bridge_reconcile_ref_command("git", ref_name);
+    let reconcile_git_command = canonical_git_repair_ref_command("git", ref_name);
     RecoveryAdvice::safety_refusal(
         "git_repair_missing_heddle_thread",
         format!("Cannot prefer Heddle for '{ref_name}': no matching Heddle thread exists"),
@@ -285,9 +285,9 @@ fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
 }
 
 fn git_repair_write_through_skipped_advice(ref_name: &str, reason: String) -> RecoveryAdvice {
-    use heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command;
+    use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
 
-    let preview_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), ref_name);
+    let preview_command = canonical_git_repair_ref_preview_command(Some("heddle"), ref_name);
     RecoveryAdvice::safety_refusal(
         "git_repair_write_through_skipped",
         format!("Could not repair '{ref_name}' by preferring Heddle: {reason}"),

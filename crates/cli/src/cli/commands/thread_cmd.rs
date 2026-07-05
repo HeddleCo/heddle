@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command;
+use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
@@ -910,7 +910,7 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
 }
 
 fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
-    let reconcile_preview = canonical_bridge_reconcile_ref_preview_command(None, thread_id);
+    let reconcile_preview = canonical_git_repair_ref_preview_command(None, thread_id);
     RecoveryAdvice::safety_refusal(
         "imported_git_ref_not_managed_thread",
         format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),

@@ -14,7 +14,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
-use heddle_core::status::next_action::canonical_bridge_import_ref_command;
+use heddle_core::status::next_action::canonical_git_import_ref_command;
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -496,7 +496,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
             "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?;
     let Some(reference) = reference else {
@@ -504,7 +504,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is missing"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
             "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         )));
     };
     let target = reference.peeled_oid(&git_repo).map_err(|err| {
@@ -514,7 +514,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             ),
             format!("Git ref '{branch_ref}' could not be peeled to a commit"),
             "Git status would report upstream tracking for an unreadable branch",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?
     .ok_or_else(|| {
@@ -522,7 +522,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is unborn"),
             format!("Git ref '{branch_ref}' could not be peeled to a commit"),
             "Git status would report upstream tracking for an unreadable branch",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?;
     set_reference(
@@ -590,7 +590,7 @@ fn verify_git_overlay_clone(
             "clone verification failed: .git/HEAD is not attached to a branch",
             "Git HEAD is detached after clone verification",
             "Heddle cannot prove which Git branch should map to the imported thread",
-            canonical_bridge_import_ref_command(track_name),
+            canonical_git_import_ref_command(track_name),
         ))
     })?;
     if git_head != track_name {
@@ -600,7 +600,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git HEAD branch '{git_head}' does not match Heddle thread '{track_name}'"),
             "continuing would leave Git and Heddle attached to different active names",
-            canonical_bridge_import_ref_command(&git_head),
+            canonical_git_import_ref_command(&git_head),
         )));
     }
 
@@ -636,7 +636,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git branch '{track_name}' does not map to imported Heddle state {state_id}"),
             "continuing would leave the Git/Heddle mapping unproven for this clone",
-            canonical_bridge_import_ref_command(track_name),
+            canonical_git_import_ref_command(track_name),
         )));
     }
 

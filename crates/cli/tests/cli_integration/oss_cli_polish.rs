@@ -12275,7 +12275,7 @@ fn import_git_schema_declares_already_in_sync() {
         .expect("schema has properties");
     assert!(
         props.contains_key("already_in_sync"),
-        "BridgeImportSchema must declare `already_in_sync`: {schema}"
+        "GitProjectionImportSchema must declare `already_in_sync`: {schema}"
     );
     assert_eq!(
         props["already_in_sync"]["type"], "boolean",

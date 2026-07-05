@@ -564,7 +564,7 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
         }
         ThreadShapingError::ImportedGitRefNotManaged { thread_id } => {
             let reconcile_preview =
-                heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command(
+                heddle_core::status::next_action::canonical_git_repair_ref_preview_command(
                     None, &thread_id,
                 );
             anyhow!(RecoveryAdvice::safety_refusal(

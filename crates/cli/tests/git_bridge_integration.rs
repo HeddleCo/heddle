@@ -46,11 +46,11 @@ use tempfile::TempDir;
 
 type TestImportResult<T> = Result<T, String>;
 
-trait TestGitBridgeImport {
+trait TestGitImport {
     fn import(&mut self, git_path: Option<&std::path::Path>) -> TestImportResult<ImportStats>;
 }
 
-impl TestGitBridgeImport for GitBridge<'_> {
+impl TestGitImport for GitBridge<'_> {
     fn import(&mut self, git_path: Option<&std::path::Path>) -> TestImportResult<ImportStats> {
         import_all(self, git_path)
     }

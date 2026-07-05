@@ -1365,7 +1365,7 @@ fn status_repository_setup_guidance(
         StatusRepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        StatusRepositorySetupActionKind::BridgeImport => {
+        StatusRepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         StatusRepositorySetupActionKind::Other => {
@@ -1379,7 +1379,7 @@ fn status_repository_setup_guidance(
 enum StatusRepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -1389,7 +1389,7 @@ fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupAct
     } else if action.starts_with("heddle adopt") {
         StatusRepositorySetupActionKind::Adopt
     } else if action.starts_with("heddle import git") {
-        StatusRepositorySetupActionKind::BridgeImport
+        StatusRepositorySetupActionKind::GitImport
     } else {
         StatusRepositorySetupActionKind::Other
     }

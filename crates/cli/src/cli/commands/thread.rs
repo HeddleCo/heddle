@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use heddle_core::status::next_action::{
-    NextActionInput, canonical_bridge_reconcile_ref_preview_command, effective_next_action,
+    NextActionInput, canonical_git_repair_ref_preview_command, effective_next_action,
     thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
 };
 use objects::{
@@ -683,7 +683,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.coordination_status = CoordinationStatus::Clean;
             summary.blockers.clear();
             summary.recommended_action =
-                canonical_bridge_reconcile_ref_preview_command(None, &summary.name);
+                canonical_git_repair_ref_preview_command(None, &summary.name);
         }
         if summary.is_current {
             enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
@@ -2841,7 +2841,7 @@ fn thread_switch_would_overwrite_worktree_advice(thread: &str) -> RecoveryAdvice
 }
 
 fn thread_switch_git_checkout_skipped_advice(thread: &str, reason: String) -> RecoveryAdvice {
-    let primary_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), thread);
+    let primary_command = canonical_git_repair_ref_preview_command(Some("heddle"), thread);
     RecoveryAdvice::safety_refusal(
         "thread_switch_git_checkout_skipped",
         format!("switched Heddle to '{thread}', but could not update Git checkout: {reason}"),

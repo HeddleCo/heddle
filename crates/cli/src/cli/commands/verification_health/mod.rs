@@ -7,8 +7,8 @@ use std::{
 };
 
 use heddle_core::status::next_action::{
-    canonical_adopt_ref_command, canonical_bridge_import_ref_command,
-    canonical_bridge_reconcile_ref_preview_command, heddle_action as core_heddle_action,
+    canonical_adopt_ref_command, canonical_git_import_ref_command,
+    canonical_git_repair_ref_preview_command, heddle_action as core_heddle_action,
     import_guidance_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
 };
 pub(crate) use heddle_core::{
@@ -40,7 +40,7 @@ pub(crate) type PlainGitVerificationProbe = PlainGitVerifyProbe;
 pub(crate) enum RepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -1458,7 +1458,7 @@ pub(crate) fn repository_setup_guidance(
         RepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         RepositorySetupActionKind::Other => {
@@ -1482,7 +1482,7 @@ pub(crate) fn repository_setup_guidance(
         RepositorySetupActionKind::Adopt => {
             format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
         }
         RepositorySetupActionKind::Other => {
@@ -1498,7 +1498,7 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
     } else if action.starts_with("heddle import git") {
-        RepositorySetupActionKind::BridgeImport
+        RepositorySetupActionKind::GitImport
     } else {
         RepositorySetupActionKind::Other
     }
@@ -2000,8 +2000,8 @@ pub(crate) fn remote_drift_decision(
                     requires_clean_worktree: false,
                 };
             }
-            let import = canonical_bridge_import_ref_command(upstream);
-            let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
+            let import = canonical_git_import_ref_command(upstream);
+            let reconcile = canonical_git_repair_ref_preview_command(None, upstream);
             let imported = upstream_thread_matches_current_git_tip(repo, upstream);
             RemoteDriftDecision {
                 status,
@@ -2417,7 +2417,7 @@ fn build_verification_health_inner(
             let recovery = if status == "needs_checkpoint" {
                 "heddle checkpoint -m \"...\"".to_string()
             } else {
-                canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
+                canonical_git_repair_ref_preview_command(None, &ref_name)
             };
             checks.push(check);
             return RepositoryVerificationHealth {

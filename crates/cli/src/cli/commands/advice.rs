@@ -4,7 +4,7 @@
 use std::{error::Error, fmt};
 
 use heddle_core::status::next_action::{
-    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
 };
 use serde_json::{Map, Value};
 
@@ -107,7 +107,7 @@ impl RecoveryAdvice {
         let expected_oid = expected_oid.into();
         let branch = branch.into();
         let primary_command =
-            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), &branch);
+            canonical_git_repair_ref_preview_command(Some("heddle"), &branch);
         let dirty_summary = if dirty_paths.is_empty() {
             "dirty paths: none".to_string()
         } else {
@@ -372,13 +372,13 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn bridge_ingest_required(map_path: &str, git_path: &str) -> Self {
+    pub(crate) fn git_import_metadata_required(map_path: &str, git_path: &str) -> Self {
         let command = format!("heddle import git --path {git_path}");
         Self::safety_refusal(
-            "bridge_ingest_required",
+            "git_import_metadata_required",
             format!("No Git SHA map exists at {map_path}"),
             format!("Build the SHA map with `{command}`, then retry."),
-            format!("bridge import metadata is missing at {map_path}"),
+            format!("git import metadata is missing at {map_path}"),
             "reasoning import cannot map transcript references to Git commits without the SHA map",
             "repository state, refs, metadata, and worktree files were left unchanged",
             command.clone(),
@@ -853,7 +853,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn from_git_bridge_error(
+    pub(crate) fn from_git_projection_error(
         error: &crate::bridge::git_core::GitBridgeError,
     ) -> Option<Self> {
         use crate::bridge::git_core::GitBridgeError;
@@ -934,7 +934,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
-        let primary_command = canonical_bridge_reconcile_ref_preview_command(None, branch);
+        let primary_command = canonical_git_repair_ref_preview_command(None, branch);
         Self::safety_refusal(
             "git_heddle_thread_diverged",
             "Git branch and Heddle thread have diverged",
@@ -968,7 +968,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
-        let import_command = canonical_bridge_import_ref_command(upstream);
+        let import_command = canonical_git_import_ref_command(upstream);
         let merge_preview = super::thread_landing::merge_preview_command(upstream);
         Self::safety_refusal(
             "git_overlay_remote_diverged",
@@ -1408,12 +1408,12 @@ mod tests {
     use crate::bridge::git_core::GitBridgeError;
 
     #[test]
-    fn git_bridge_mapping_conflict_returns_typed_advice() {
+    fn git_projection_mapping_conflict_returns_typed_advice() {
         let error = GitBridgeError::MappingConflict {
             message: "git oid abc mapped to old-change (new new-change)".to_string(),
         };
 
-        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+        let advice = RecoveryAdvice::from_git_projection_error(&error)
             .expect("mapping conflict should be classified");
 
         assert_eq!(advice.kind, "git_overlay_mapping_conflict");
@@ -1426,23 +1426,23 @@ mod tests {
     }
 
     #[test]
-    fn git_bridge_plain_conflict_message_does_not_classify_as_mapping_conflict() {
+    fn git_projection_plain_conflict_message_does_not_classify_as_mapping_conflict() {
         let error = GitBridgeError::Conflict(
             "git oid abc mapped to old-change (new new-change)".to_string(),
         );
 
-        assert!(RecoveryAdvice::from_git_bridge_error(&error).is_none());
+        assert!(RecoveryAdvice::from_git_projection_error(&error).is_none());
     }
 
     #[test]
-    fn git_bridge_shallow_clone_returns_typed_advice() {
+    fn git_projection_shallow_clone_returns_typed_advice() {
         let retry_command = "heddle import git --ref main";
         let error = GitBridgeError::ShallowClone {
             repository: std::path::PathBuf::from("/tmp/shallow"),
             retry_command: retry_command.to_string(),
         };
 
-        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+        let advice = RecoveryAdvice::from_git_projection_error(&error)
             .expect("shallow clone should be classified");
 
         assert_eq!(advice.kind, "git_overlay_shallow_clone");

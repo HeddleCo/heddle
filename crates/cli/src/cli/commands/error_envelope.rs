@@ -423,7 +423,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>()
-            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error)
+            && let Some(advice) = RecoveryAdvice::from_git_projection_error(git_error)
         {
             return ErrorClassification::from_advice(&advice);
         }
