@@ -124,10 +124,10 @@ pub struct StatusReport {
     pub git_index: Option<GitIndexPlan>,
     #[serde(skip)]
     #[schemars(skip)]
-    pub git_overlay_import_hint: Option<GitOverlayImportHintReport>,
+    pub import_guidance: Option<GitOverlayImportHintReport>,
     #[serde(skip)]
     #[schemars(skip)]
-    pub git_overlay_health: GitOverlayHealth,
+    pub verification_health: GitOverlayHealth,
     pub thread: Option<String>,
     pub base_state: Option<String>,
     pub base_root: Option<String>,
@@ -1789,11 +1789,11 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
 
     let verification_start = Instant::now();
-    let git_overlay_health =
+    let verification_health =
         build_git_overlay_health_with_worktree_status(repo, &git_worktree_status_result);
     let trust = build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
-        git_overlay_health.clone(),
+        verification_health.clone(),
         &git_worktree_status_result,
         &opts.machine_contract_input,
     );
@@ -1856,7 +1856,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             current_state: current_state.as_ref(),
             operation,
             remote_tracking,
-            git_overlay_health,
+            verification_health,
             trust,
             import_hint,
             git_index,
@@ -1959,8 +1959,8 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
         validation_capability: repo.capability(),
-        git_overlay_import_hint: import_hint.clone().map(Into::into),
-        git_overlay_health: git_overlay_health.clone(),
+        import_guidance: import_hint.clone().map(Into::into),
+        verification_health: verification_health.clone(),
         trust: trust.clone(),
         operation,
         remote_tracking,
@@ -2113,7 +2113,7 @@ struct ShortPathInputs<'a> {
     current_state: Option<&'a State>,
     operation: Option<RepositoryOperationStatus>,
     remote_tracking: Option<GitRemoteTrackingStatus>,
-    git_overlay_health: GitOverlayHealth,
+    verification_health: GitOverlayHealth,
     trust: RepositoryVerificationState,
     import_hint: Option<GitOverlayImportHint>,
     git_index: Option<GitIndexPlan>,
@@ -2146,8 +2146,8 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         storage_model: input.repo.storage_model_label().to_string(),
         hosted_enabled: input.repo.hosted_enabled(),
         validation_capability: input.repo.capability(),
-        git_overlay_import_hint: input.import_hint.map(Into::into),
-        git_overlay_health: input.git_overlay_health,
+        import_guidance: input.import_hint.map(Into::into),
+        verification_health: input.verification_health,
         trust: input.trust.clone(),
         operation: input.operation,
         remote_tracking: input.remote_tracking,
@@ -3013,7 +3013,7 @@ mod tests {
 
         assert_eq!(report.output_kind, "status");
         assert!(!report.repository_label.is_empty());
-        assert!(!report.git_overlay_health.status.is_empty());
+        assert!(!report.verification_health.status.is_empty());
         assert!(!report.trust.status.is_empty());
         assert_eq!(report.trust.machine_contract, "not_checked");
         assert_eq!(report.trust.machine_contract_coverage.status, "not_checked");

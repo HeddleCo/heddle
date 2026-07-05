@@ -823,7 +823,7 @@ fn render_status_operation(output: &StatusOutput) {
             println!("Remote drift: {}", style::warn(&remote_tracking.message));
         }
     }
-    if let Some(hint) = &output.git_overlay_import_hint
+    if let Some(hint) = &output.import_guidance
         && !hint
             .missing_branches
             .iter()
@@ -837,9 +837,9 @@ fn render_status_operation(output: &StatusOutput) {
             )
         );
     }
-    if !output.git_overlay_health.clean {
+    if !output.verification_health.clean {
         let label = if matches!(
-            output.git_overlay_health.status.as_str(),
+            output.verification_health.status.as_str(),
             "needs_init" | "needs_import"
         ) {
             "Setup needed"
@@ -851,10 +851,10 @@ fn render_status_operation(output: &StatusOutput) {
         } else {
             println!(
                 "{label}: {}",
-                style::warn(&output.git_overlay_health.summary)
+                style::warn(&output.verification_health.summary)
             );
         }
-        if output.git_overlay_health.status == "needs_import"
+        if output.verification_health.status == "needs_import"
             && output.changed_path_count == 0
             && !has_status_changes(output)
         {
@@ -1248,7 +1248,7 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
         return "an operation is in progress; finish or abort it before starting another workflow";
     }
     if output.recommended_action.contains("adopt --ref")
-        || output.git_overlay_import_hint.as_ref().is_some_and(|hint| {
+        || output.import_guidance.as_ref().is_some_and(|hint| {
             hint.missing_branches
                 .iter()
                 .any(|branch| branch == &hint.current_branch)
