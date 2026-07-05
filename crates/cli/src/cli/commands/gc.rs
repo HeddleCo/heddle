@@ -113,9 +113,9 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                     println!("Pruned {removed} stale Git-overlay mapping entries");
                 }
 
-                // Consolidate the git-overlay mirror (`.heddle/git`): pack its
+                // Consolidate the Bridge Mirror (`.heddle/git`): pack its
                 // loose objects and drop the redundant loose copies. The mirror
-                // is a separate object store (sley's git ODB) from heddle's
+                // is a separate object store (Sley's Git ODB) from Heddle's
                 // native store packed above, and accumulates a loose object per
                 // minted/imported commit, tree, and blob — the dominant
                 // uninstrumented read cost. Lossless + OID-preserving (packs

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Core Git bridge types and operations.
+//! Core Git Projection and Bridge Mirror operations.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -35,7 +35,7 @@ use super::{
     git_util::ImportStats,
 };
 
-/// Errors specific to Git bridge operations.
+/// Errors specific to Git Projection and Bridge Mirror operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitBridgeError {
     #[error("git error: {0}")]
@@ -115,7 +115,7 @@ pub enum GitBridgeError {
     ChangeIdParse(#[from] ChangeIdParseError),
 }
 
-/// Type alias for Git bridge results.
+/// Type alias for Git Projection and Bridge Mirror results.
 pub type GitResult<T> = std::result::Result<T, GitBridgeError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,7 +524,7 @@ impl SyncMapping {
 
     /// Whether the in-memory mapping holds no `ChangeId → git OID` entries. The
     /// checkout-materialization path (#568 P1) uses this to decide whether it must
-    /// hydrate the mapping from disk (a standalone `bridge git checkout`) or trust
+    /// hydrate the mapping from disk (a standalone projection checkout) or trust
     /// the mapping export just built in memory (a checkpoint/push).
     pub(crate) fn is_empty(&self) -> bool {
         self.heddle_to_git.is_empty()
@@ -567,7 +567,7 @@ impl SyncMapping {
     }
 }
 
-/// Git bridge for Heddle repository.
+/// Legacy-named implementation for explicit Git Projection and Bridge Mirror operations.
 pub struct GitBridge<'a> {
     pub(crate) heddle_repo: &'a HeddleRepository,
     pub(crate) git_repo_path: Option<PathBuf>,
@@ -610,7 +610,7 @@ impl MappingFileSnapshot {
 }
 
 impl<'a> GitBridge<'a> {
-    /// Create a new Git bridge for a Heddle repository.
+    /// Create a Git Projection helper for a Heddle repository.
     pub fn new(heddle_repo: &'a HeddleRepository) -> Self {
         Self {
             heddle_repo,
@@ -621,7 +621,7 @@ impl<'a> GitBridge<'a> {
         }
     }
 
-    /// Initialize a Git mirror in the .heddle/git directory.
+    /// Initialize the Bridge Mirror in the .heddle/git directory.
     pub fn init_mirror(&mut self) -> GitResult<()> {
         let _guard = self.init_mirror_with_guard()?;
         _guard.commit();
@@ -754,7 +754,7 @@ impl<'a> GitBridge<'a> {
                     .and_then(|()| mapping_tmp_file.restore())
                 {
                     return Err(GitBridgeError::Git(format!(
-                        "operation failed ({error}); additionally failed to roll back git bridge mapping state ({rollback_error})"
+                        "operation failed ({error}); additionally failed to roll back Git Projection Mapping state ({rollback_error})"
                     )));
                 }
                 Err(error)
@@ -1287,7 +1287,7 @@ impl<'a> GitBridge<'a> {
             // purge+retract closes this for the all-states export, but a scoped
             // export never examines an out-of-thread checkpoint — so gate the
             // note at its source, symmetric with `export_state`'s minting gate
-            // (heddle#316). The Git bridge always publishes the Public mirror.
+            // (heddle#316). Git projection export always publishes the public Git projection.
             let tier = self
                 .heddle_repo
                 .effective_visibility_tier(&change_id)
@@ -1615,7 +1615,7 @@ impl<'a> GitBridge<'a> {
         // can legitimately disagree mid-operation, e.g. a `--git-commit` merge
         // checkpoint that has not yet flushed; clobbering the freshly-built
         // mapping with a disk read trips the conflict guard). Only a STANDALONE
-        // checkout (`bridge git checkout`, no preceding export) starts with an
+        // checkout (projection checkout, no preceding export) starts with an
         // empty mapping; hydrate it from disk in that case alone.
         if self.mapping.is_empty() {
             self.build_existing_mapping(None)?;

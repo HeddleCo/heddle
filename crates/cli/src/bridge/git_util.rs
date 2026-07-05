@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Shared utilities and helpers for Git bridge operations.
+//! Shared utilities and helpers for Git Projection operations.
 
 use ingest::LossyImportEntry;
 use objects::object::{State, Status};
@@ -150,7 +150,7 @@ pub struct ExportedRef {
 #[derive(Debug, Default)]
 pub struct ImportStats {
     /// Total commits walked from the source refs, including ones whose
-    /// heddle state was already present. Mirrors what `bridge git
+    /// heddle state was already present. Mirrors what explicit Git projection
     /// ingest` reports so the two verbs read the same way.
     pub commits_imported: usize,
     /// New state objects written to the heddle store during this

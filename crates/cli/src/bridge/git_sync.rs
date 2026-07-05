@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Sync threads/markers functionality for Git bridge.
+//! Sync threads/markers for Git Projection Mapping.
 
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use refs::RefExpectation;

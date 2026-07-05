@@ -326,7 +326,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.build_existing_mapping(None)?;
     let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
-    // The Git bridge publishes the PUBLIC mirror — the export audience is
+    // Git projection export publishes the public projection — the export audience is
     // always `Public`. Per-commit visibility is enforced here, in the OSS
     // bridge, by emitting absence (the authoritative wire serve gate is weft's
     // job, spike §10 #4).

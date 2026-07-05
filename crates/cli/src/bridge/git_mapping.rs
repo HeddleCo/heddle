@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Persistence and discovery for Git bridge mappings.
+//! Persistence and discovery for Git Projection Mapping.
 
 use std::{
     collections::HashSet,
@@ -220,7 +220,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Consolidate the bridge mirror (`.heddle/git`) — the bare Sley repo used
-    /// by explicit Git bridge import/export/sync paths — by packing every
+    /// by explicit Git projection import/export/sync paths — by packing every
     /// on-disk object into a single pack and dropping the now-redundant loose
     /// copies.
     ///
