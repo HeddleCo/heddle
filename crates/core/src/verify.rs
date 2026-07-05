@@ -87,7 +87,7 @@ impl MachineContractInput {
 impl Default for MachineContractInput {
     fn default() -> Self {
         Self {
-            coverage: machine_contract_coverage(),
+            coverage: MachineContractCoverage::not_checked(),
         }
     }
 }
@@ -268,6 +268,56 @@ pub struct MachineContractCoverage {
     pub accepted_opaque_schema_examples: Vec<String>,
     pub unaccepted_opaque_schema_examples: Vec<String>,
     pub undocumented_schema_examples: Vec<String>,
+}
+
+impl MachineContractCoverage {
+    pub fn not_checked() -> Self {
+        Self {
+            status: "not_checked".to_string(),
+            verified_scope: "not_checked".to_string(),
+            advanced_scope: "not_checked".to_string(),
+            summary: "Machine-contract proof was not supplied by this embedder".to_string(),
+            catalog_commands_total: 0,
+            catalog_mutating_commands_total: 0,
+            json_commands_total: 0,
+            json_mutating_commands_total: 0,
+            json_commands_with_schema: 0,
+            json_commands_with_accepted_opaque_schema: 0,
+            json_commands_without_schema: 0,
+            verified_scope_json_commands_total: 0,
+            verified_scope_json_commands_with_schema: 0,
+            verified_scope_json_commands_with_accepted_opaque_schema: 0,
+            verified_scope_json_commands_without_schema: 0,
+            advanced_scope_json_commands_total: 0,
+            advanced_scope_json_commands_with_accepted_opaque_schema: 0,
+            mutating_commands_total: 0,
+            mutating_commands_with_schema: 0,
+            mutating_commands_with_accepted_opaque_schema: 0,
+            mutating_commands_without_schema: 0,
+            verified_scope_mutating_commands_total: 0,
+            verified_scope_mutating_commands_with_schema: 0,
+            verified_scope_mutating_commands_with_accepted_opaque_schema: 0,
+            verified_scope_mutating_commands_without_schema: 0,
+            advanced_scope_mutating_commands_total: 0,
+            advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
+            schema_verbs_total: 0,
+            documented_schema_verbs_total: 0,
+            undocumented_schema_verbs_total: 0,
+            opaque_schema_verbs_total: 0,
+            accepted_opaque_schema_verbs_total: 0,
+            unaccepted_opaque_schema_verbs_total: 0,
+            supports_op_id_total: 0,
+            jsonl_commands_total: 0,
+            missing_schema_examples: Vec::new(),
+            missing_mutating_schema_examples: Vec::new(),
+            verified_scope_missing_schema_examples: Vec::new(),
+            verified_scope_accepted_opaque_schema_examples: Vec::new(),
+            advanced_scope_accepted_opaque_schema_examples: Vec::new(),
+            accepted_opaque_schema_examples: Vec::new(),
+            unaccepted_opaque_schema_examples: Vec::new(),
+            undocumented_schema_examples: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -1374,65 +1424,10 @@ fn split_action(action: &str) -> std::result::Result<Vec<String>, String> {
     Ok(args)
 }
 
-pub fn machine_contract_coverage() -> MachineContractCoverage {
-    let schema_verbs = BTreeSet::from([
-        "status",
-        "verify",
-        "diff",
-        "fsck",
-        "query",
-        "error",
-    ]);
-    MachineContractCoverage {
-        status: "available".to_string(),
-        verified_scope: "everyday_and_agent".to_string(),
-        advanced_scope: "advanced_internal_admin".to_string(),
-        summary: "core status/verify reports have concrete schemas".to_string(),
-        catalog_commands_total: 3,
-        catalog_mutating_commands_total: 0,
-        json_commands_total: 3,
-        json_mutating_commands_total: 0,
-        json_commands_with_schema: 2,
-        json_commands_with_accepted_opaque_schema: 1,
-        json_commands_without_schema: 0,
-        verified_scope_json_commands_total: 2,
-        verified_scope_json_commands_with_schema: 2,
-        verified_scope_json_commands_with_accepted_opaque_schema: 0,
-        verified_scope_json_commands_without_schema: 0,
-        advanced_scope_json_commands_total: 1,
-        advanced_scope_json_commands_with_accepted_opaque_schema: 1,
-        mutating_commands_total: 0,
-        mutating_commands_with_schema: 0,
-        mutating_commands_with_accepted_opaque_schema: 0,
-        mutating_commands_without_schema: 0,
-        verified_scope_mutating_commands_total: 0,
-        verified_scope_mutating_commands_with_schema: 0,
-        verified_scope_mutating_commands_with_accepted_opaque_schema: 0,
-        verified_scope_mutating_commands_without_schema: 0,
-        advanced_scope_mutating_commands_total: 0,
-        advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
-        schema_verbs_total: schema_verbs.len(),
-        documented_schema_verbs_total: schema_verbs.len(),
-        undocumented_schema_verbs_total: 0,
-        opaque_schema_verbs_total: 1,
-        accepted_opaque_schema_verbs_total: 1,
-        unaccepted_opaque_schema_verbs_total: 0,
-        supports_op_id_total: 1,
-        jsonl_commands_total: 0,
-        missing_schema_examples: Vec::new(),
-        missing_mutating_schema_examples: Vec::new(),
-        verified_scope_missing_schema_examples: Vec::new(),
-        verified_scope_accepted_opaque_schema_examples: Vec::new(),
-        advanced_scope_accepted_opaque_schema_examples: vec![
-            "advanced/internal/admin".to_string()
-        ],
-        accepted_opaque_schema_examples: vec!["advanced/internal/admin".to_string()],
-        unaccepted_opaque_schema_examples: Vec::new(),
-        undocumented_schema_examples: Vec::new(),
-    }
-}
-
 fn machine_contract_is_clean(coverage: &MachineContractCoverage) -> bool {
+    if matches!(coverage.status.as_str(), "not_checked" | "not_applicable") {
+        return true;
+    }
     coverage.verified_scope_json_commands_without_schema == 0
         && coverage.verified_scope_mutating_commands_without_schema == 0
         && coverage.undocumented_schema_verbs_total == 0
@@ -1440,10 +1435,11 @@ fn machine_contract_is_clean(coverage: &MachineContractCoverage) -> bool {
 }
 
 pub fn machine_contract_status(coverage: &MachineContractCoverage) -> &'static str {
-    if machine_contract_is_clean(coverage) {
-        "available"
-    } else {
-        "available_with_schema_gaps"
+    match coverage.status.as_str() {
+        "not_checked" => "not_checked",
+        "not_applicable" => "not_applicable",
+        _ if machine_contract_is_clean(coverage) => "available",
+        _ => "available_with_schema_gaps",
     }
 }
 

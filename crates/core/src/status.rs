@@ -2987,13 +2987,14 @@ mod tests {
         assert!(!report.repository_label.is_empty());
         assert!(!report.git_overlay_health.status.is_empty());
         assert!(!report.trust.status.is_empty());
-        assert!(!report.trust.machine_contract.is_empty());
+        assert_eq!(report.trust.machine_contract, "not_checked");
+        assert_eq!(report.trust.machine_contract_coverage.status, "not_checked");
         assert!(
             report
                 .trust
                 .checks
                 .iter()
-                .any(|check| check.name == "Machine contract")
+                .any(|check| check.name == "Machine contract" && check.status == "not_checked")
         );
     }
 
@@ -3015,13 +3016,14 @@ mod tests {
         assert!(!report.repository_label.is_empty());
         assert!(report.trust.heddle_initialized);
         assert!(!report.trust.status.is_empty());
-        assert!(!report.trust.machine_contract.is_empty());
+        assert_eq!(report.trust.machine_contract, "not_checked");
+        assert_eq!(report.trust.machine_contract_coverage.status, "not_checked");
         assert!(
             report
                 .trust
                 .checks
                 .iter()
-                .any(|check| check.name == "Machine contract")
+                .any(|check| check.name == "Machine contract" && check.status == "not_checked")
         );
     }
 }
