@@ -178,7 +178,7 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
             .join("git-bridge")
             .join("bridge-mapping.json")
             .exists(),
-        "adopt/import must not publish the served bridge mapping cache"
+        "adopt/import must not publish the Git projection mapping cache"
     );
 }
 

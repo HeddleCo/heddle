@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository integrity checks.
 
-mod bridge;
+mod git_projection;
 mod objects;
 mod refs;
 mod state;
@@ -85,7 +85,7 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
     refs::check_refs(repo, &mut errors, &mut warnings)?;
     refs::check_merge_state(repo, &mut warnings)?;
     if opts.git_projection {
-        bridge::check_bridge(repo, &mut errors, &mut warnings, &mut objects_checked)?;
+        git_projection::check_git_projection(repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
 
     let valid = errors.is_empty();

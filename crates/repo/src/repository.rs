@@ -247,14 +247,14 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitBridgeMappingEntry {
+struct GitProjectionMappingEntry {
     change_id: String,
     git_oid: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct GitBridgeMappingFile {
-    entries: Vec<GitBridgeMappingEntry>,
+struct GitProjectionMappingFile {
+    entries: Vec<GitProjectionMappingEntry>,
 }
 
 /// Lazy-clone read-time hydration hook.
@@ -1079,7 +1079,7 @@ impl Repository {
 
         let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
@@ -1106,7 +1106,7 @@ impl Repository {
             let git_commit = target.to_string();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
@@ -1158,7 +1158,7 @@ impl Repository {
 
         let imported_markers: std::collections::HashSet<MarkerName> =
             self.refs().list_markers()?.into_iter().collect();
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
@@ -1184,7 +1184,7 @@ impl Repository {
             let git_commit = target.to_string();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
@@ -1240,7 +1240,7 @@ impl Repository {
             return Ok(None);
         };
         let full_name = GitRefName::remote_tracking_full_name(name);
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         for reference in git_repo.references().list_refs().map_err(|error| {
@@ -1260,7 +1260,7 @@ impl Repository {
             };
             return self.git_overlay_mapped_change_for_commit(
                 &target.to_string(),
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             );
@@ -1358,7 +1358,7 @@ impl Repository {
         }))
     }
 
-    fn git_overlay_bridge_mapping(&self) -> Result<HashMap<String, String>> {
+    fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
         let path = self
             .heddle_dir
             .join("git-bridge")
@@ -1372,7 +1372,7 @@ impl Repository {
             return Ok(HashMap::new());
         }
 
-        let file: GitBridgeMappingFile = serde_json::from_str(&contents)?;
+        let file: GitProjectionMappingFile = serde_json::from_str(&contents)?;
         Ok(file
             .entries
             .into_iter()
@@ -1443,11 +1443,11 @@ impl Repository {
     fn git_overlay_mapped_change_for_commit(
         &self,
         git_commit: &str,
-        bridge_mapping: &HashMap<String, String>,
+        projection_mapping: &HashMap<String, String>,
         ingest_mapping: &HashMap<String, String>,
         checkpoint_mapping: &HashMap<String, String>,
     ) -> Result<Option<ChangeId>> {
-        let Some(change) = bridge_mapping
+        let Some(change) = projection_mapping
             .get(git_commit)
             .or_else(|| ingest_mapping.get(git_commit))
             .or_else(|| checkpoint_mapping.get(git_commit))
@@ -1488,9 +1488,9 @@ impl Repository {
         &self,
         change_id: &ChangeId,
     ) -> Result<Option<String>> {
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         if let Some(git_commit) =
-            self.git_overlay_mapped_git_commit_for_change_in(change_id, &bridge_mapping)?
+            self.git_overlay_mapped_git_commit_for_change_in(change_id, &projection_mapping)?
         {
             return Ok(Some(git_commit));
         }
@@ -1510,12 +1510,12 @@ impl Repository {
         &self,
         git_commit: &str,
     ) -> Result<Option<ChangeId>> {
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         self.git_overlay_mapped_change_for_commit(
             git_commit,
-            &bridge_mapping,
+            &projection_mapping,
             &ingest_mapping,
             &checkpoint_mapping,
         )
@@ -1529,7 +1529,7 @@ impl Repository {
     }
 
     /// Count the Git commits reachable from `tip_git_commit` that are not
-    /// represented in Heddle state (no served bridge mapping, ingest identity
+    /// represented in Heddle state (no Git Projection Mapping, ingest identity
     /// mapping, or checkpoint mapping). The walk prunes at the first mapped
     /// commit on each lineage, so the cost is proportional to the out-of-band
     /// suffix, capped at `GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT`.
@@ -1551,7 +1551,7 @@ impl Repository {
             return Ok(None);
         };
 
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
 
@@ -1566,7 +1566,7 @@ impl Repository {
             if self
                 .git_overlay_mapped_change_for_commit(
                     &git_commit,
-                    &bridge_mapping,
+                    &projection_mapping,
                     &ingest_mapping,
                     &checkpoint_mapping,
                 )?

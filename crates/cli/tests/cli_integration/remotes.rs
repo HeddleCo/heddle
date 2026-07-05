@@ -2199,7 +2199,7 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
         "fetch must not move the local checkout HEAD"
     );
 
-    let mirror = open_git(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
+    let mirror = open_git(work.join(".heddle").join("git")).expect("open legacy Bridge Mirror");
     assert!(
         find_reference(&mirror, cli::bridge::git_notes::NOTES_REF).is_ok(),
         "fetch should carry refs/notes/heddle for Heddle identity metadata"

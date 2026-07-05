@@ -4039,11 +4039,11 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
         .expect("mapping cache should be readable after export");
     assert!(
         !mapping_cache.contains(&state_b.to_string_full()),
-        "the served bridge mapping cache must not persist embargoed ChangeIds: {mapping_cache}"
+        "the Git projection mapping cache must not persist embargoed ChangeIds: {mapping_cache}"
     );
     assert!(
         !mapping_cache.contains(&oid_b.to_string()),
-        "the served bridge mapping cache must not persist embargoed Git OIDs: {mapping_cache}"
+        "the Git projection mapping cache must not persist embargoed Git OIDs: {mapping_cache}"
     );
 
     // The mirror ref itself no longer serves B.
