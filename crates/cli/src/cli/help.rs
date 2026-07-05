@@ -152,7 +152,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                  `heddle help advanced` for power surfaces, automation, and Git interop, \
                  or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
                  `git-overlay`, \
-                 `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
+                 `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
                  `remotes`, `output-formats`, `git-dependencies`)."
             );
         }
@@ -500,7 +500,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
-        "bridge" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
+        "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
         _ => return None,
     })
@@ -1052,7 +1052,8 @@ mod tests {
             "review",
             "discuss",
             "discussions",
-            "bridge",
+            "git-projection",
+            "git-projections",
             "footer",
             "notes",
             "signals",
@@ -1118,7 +1119,7 @@ mod tests {
                  the everyday surface"
             );
         }
-        for verb in ["review", "discuss", "context", "thread", "bridge"] {
+        for verb in ["review", "discuss", "context", "thread", "git-projection"] {
             assert!(
                 !everyday.contains(verb),
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"

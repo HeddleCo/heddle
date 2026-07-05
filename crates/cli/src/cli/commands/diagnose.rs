@@ -570,12 +570,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         );
     }
     if !output.verification_health.clean {
-        let label = if output.repository_capability == "git-overlay" {
-            "Git overlay health"
-        } else {
-            "Verification"
-        };
-        println!("{label}: {}", output.verification_health.summary);
+        println!("Verification: {}", output.verification_health.summary);
     }
     if let Some(thread) = &output.thread {
         println!(

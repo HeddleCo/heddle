@@ -70,11 +70,11 @@ fn model_help_topic_gives_short_first_time_mental_model() {
 }
 
 #[test]
-fn bridge_help_topic_teaches_adoption_before_export_notes() {
-    let help = heddle_help(&["help", "bridge"]);
+fn git_projection_help_topic_teaches_adoption_before_export_notes() {
+    let help = heddle_help(&["help", "git-projection"]);
     assert!(
         help.starts_with("Git Projection"),
-        "bridge topic should open with the workflow, not advanced notes metadata: {help}"
+        "git projection topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
         "heddle status",
@@ -89,16 +89,16 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
     ] {
         assert!(
             help.contains(needle),
-            "bridge topic should include `{needle}`: {help}"
+            "git projection topic should include `{needle}`: {help}"
         );
     }
     assert!(
         help.find("First run:") < help.find("Export metadata for Git readers"),
-        "bridge topic should put adoption before notes/export details: {help}"
+        "git projection topic should put adoption before notes/export details: {help}"
     );
     assert!(
         !help.contains("\n    heddle land --push\n"),
-        "bridge topic should not teach a threadless land from the main checkout: {help}"
+        "git projection topic should not teach a threadless land from the main checkout: {help}"
     );
 }
 
@@ -7843,7 +7843,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         &["main"],
     );
     // The `Repository:` mode preamble is dropped from the default read
-    // view (heddle#275); the everyday surface leads with bridge state.
+    // view (heddle#275); the everyday surface leads with verification state.
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
@@ -7852,7 +7852,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "fsck", "--git"],
-        &["repository is valid", "Bridge:"],
+        &["repository is valid", "Git projection:"],
     );
 
     let ready = heddle_output_with_env(
@@ -8036,7 +8036,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     for verb in [
-        "review", "discuss", "context", "switch", "thread", "bridge", "push", "pull", "doctor",
+        "review", "discuss", "context", "switch", "thread", "git-projection", "push", "pull", "doctor",
         "verify", "init", "adopt", "clone", "log", "show",
     ] {
         assert!(
@@ -10700,7 +10700,7 @@ fn text_surfaces_tolerate_closed_downstream_pipes() {
     for command in [
         "--output text status",
         "--output text verify",
-        "help bridge",
+        "help git-projection",
     ] {
         let output = std::process::Command::new("bash")
             .arg("-c")
