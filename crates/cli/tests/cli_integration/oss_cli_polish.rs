@@ -1383,7 +1383,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             "start",
             "ready",
             "--preview",
-            "blame",
+            "query --attribution",
             "assert_final_verify",
             "assert_transcript_claims",
             "HEDDLE_RUNTIME_PATH",
@@ -1420,6 +1420,11 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
         }
+        assert!(
+            !source.contains("heddle ship"),
+            "{} should use `heddle land`, not the removed `heddle ship` verb",
+            script.display()
+        );
         if script.file_name().and_then(|name| name.to_str()) == Some("verify-cold-flow-agent.sh") {
             assert!(
                 source.contains("reconcile"),
@@ -1443,7 +1448,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("assert_merge_preview_points_to_ship_json"),
+                source.contains("assert_merge_preview_points_to_land_json"),
                 "{} should prove merge preview points to the land landing loop",
                 script.display()
             );
@@ -7664,7 +7669,7 @@ fn legacy_global_json_flag_is_not_supported() {
 #[test]
 fn legacy_phase_2_root_aliases_are_not_rewritten() {
     const CASES: &[(&str, &[&str])] = &[
-        ("blame", &["blame", "file.txt"]),
+        ("query --attribution", &["query --attribution", "file.txt"]),
         ("purge", &["purge", "apply"]),
     ];
 
