@@ -2140,9 +2140,9 @@ name `heddle import git ...` for imported Heddle repositories; native
 first-run flows should use the `heddle adopt --ref <branch>` recommendation
 from `status`, `init`, and `verification`.
 
-This is the machine-readable home for `git_overlay_import_hint` and
-`git_overlay_health`; normal Git-overlay operations read and write the
-checkout's real `.git`.
+`verification` is the public proof block. Legacy `git_overlay_import_hint`
+and `git_overlay_health` sidecars are not emitted by `status`; use `doctor`
+for explicit diagnostic detail.
 
 ### Sample
 
@@ -2151,24 +2151,15 @@ checkout's real `.git`.
   "output_kind": "status",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "git_overlay_import_hint": {
-    "current_branch": "main",
-    "missing_branch_count": 1,
-    "missing_branches": ["support/import-me"],
-    "recommended_command": "heddle import git --ref support/import-me"
-  },
-  "git_overlay_health": {
+  "verification": {
+    "verified": false,
     "status": "needs_import",
-    "clean": false,
+    "import_state": "needs_import",
+    "mapping_state": "needs_import",
     "summary": "1 Git branch tip(s) still need Heddle import",
-    "recovery_commands": ["heddle import git --ref support/import-me"],
-    "checks": [
-      {
-        "name": "import",
-        "status": "needs_import",
-        "summary": "1 Git branch tip(s) still need Heddle import"
-      }
-    ]
+    "checks": [],
+    "recommended_action": "heddle import git --ref support/import-me",
+    "recovery_commands": ["heddle import git --ref support/import-me"]
   },
   "recommended_action": "heddle import git --ref support/import-me",
   "recovery_commands": ["heddle import git --ref support/import-me"]
@@ -2181,14 +2172,6 @@ checkout's real `.git`.
 |-------|------|-------------|-----------|
 | `repository_capability` | string | required | Same vocabulary as `heddle status`. |
 | `storage_model` | string | required | Same. |
-| `mirror_path` | string \| null | required | Path to the explicit bridge/export mirror, when known; not the active Git-overlay `.git`. |
-| `mirror_initialized` | bool | required | `true` when the bridge mirror exists. |
-| `git_overlay_import_hint` | object \| null | required | `null` when bridge is in sync. |
-| `git_overlay_import_hint.current_branch` | string | required when hint is present | Active branch on the Git side. |
-| `git_overlay_import_hint.missing_branch_count` | int | required when hint is present | Length of `missing_branches`. |
-| `git_overlay_import_hint.missing_branches` | array<string> | required when hint is present | Branch names visible only on the Git side. |
-| `git_overlay_import_hint.recommended_command` | string | required when hint is present | Suggested `heddle import git …` invocation. |
-| `git_overlay_health` | object | required | Health summary derived from the shared verification engine. |
 | `recommended_action` | string | required | Top-level mirror of the verification engine's primary next command. |
 | `recommended_action_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for the primary action; `null` when none. |
 | `recovery_commands` | array<string> | required | Verification recovery commands. Empty when clean. |
@@ -2971,9 +2954,9 @@ List every runtime schema verb and the subset enforced by
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
-verification report and the primary recovery command. This is the one
-place outside `status` where `git_overlay_import_hint` is part
-of the JSON contract — doctor is the catch-all health surface and its job
+verification report and the primary recovery command. This diagnostic
+surface keeps `git_overlay_import_hint` in its JSON contract because doctor is
+the catch-all health surface and its job
 is to surface every relevant signal for the operator.
 
 ```json

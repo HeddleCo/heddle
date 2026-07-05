@@ -122,7 +122,11 @@ pub struct StatusReport {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     pub git_index: Option<GitIndexPlan>,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub git_overlay_import_hint: Option<GitOverlayImportHintReport>,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub git_overlay_health: GitOverlayHealth,
     pub thread: Option<String>,
     pub base_state: Option<String>,

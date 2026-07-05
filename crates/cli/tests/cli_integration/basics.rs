@@ -877,7 +877,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
+    assert_eq!(parsed["verification"]["status"], "needs_init");
     assert!(
         !temp.path().join(".heddle").exists(),
         "diagnose in a plain Git repo must be observe-only"
@@ -1702,7 +1702,7 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
+    assert_eq!(parsed["verification"]["status"], "needs_init");
     assert!(parsed["git_overlay_import_hint"].is_null());
     assert!(
         !temp.path().join(".heddle").exists(),

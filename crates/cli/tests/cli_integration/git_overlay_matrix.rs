@@ -4324,7 +4324,6 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     );
 
     let bridge = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(bridge["git_overlay_health"]["status"], "clean");
     assert_eq!(bridge["verification"]["status"], "clean");
     assert_eq!(bridge["recommended_action"], Value::Null);
     let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();

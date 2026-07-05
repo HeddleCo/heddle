@@ -23032,92 +23032,6 @@
           ],
           "type": "object"
         },
-        "GitOverlayHealth": {
-          "properties": {
-            "checks": {
-              "items": {
-                "$ref": "#/$defs/GitOverlayHealthCheck"
-              },
-              "type": "array"
-            },
-            "clean": {
-              "type": "boolean"
-            },
-            "recovery_commands": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "status": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "clean",
-            "summary",
-            "recovery_commands",
-            "checks"
-          ],
-          "type": "object"
-        },
-        "GitOverlayHealthCheck": {
-          "properties": {
-            "details": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": "object"
-            },
-            "name": {
-              "type": "string"
-            },
-            "status": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "name",
-            "status",
-            "summary"
-          ],
-          "type": "object"
-        },
-        "GitOverlayImportHintReport": {
-          "properties": {
-            "current_branch": {
-              "type": "string"
-            },
-            "missing_branch_count": {
-              "format": "uint",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "missing_branches": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "recommended_command": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "current_branch",
-            "missing_branch_count",
-            "missing_branches",
-            "recommended_command"
-          ],
-          "type": "object"
-        },
         "MachineContractCoverage": {
           "properties": {
             "accepted_opaque_schema_examples": {
@@ -23763,19 +23677,6 @@
             }
           ]
         },
-        "git_overlay_health": {
-          "$ref": "#/$defs/GitOverlayHealth"
-        },
-        "git_overlay_import_hint": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/GitOverlayImportHintReport"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "harness": {
           "type": [
             "string",
@@ -23993,7 +23894,6 @@
         "storage_model",
         "hosted_enabled",
         "verification",
-        "git_overlay_health",
         "child_threads",
         "promotion_suggested",
         "impact_categories",

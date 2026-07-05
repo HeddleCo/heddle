@@ -1174,21 +1174,6 @@ export interface GitOverlayGuideSchema {
   topic: string;
 }
 
-export interface GitOverlayHealth {
-  checks: GitOverlayHealthCheck[];
-  clean: boolean;
-  recovery_commands: string[];
-  status: string;
-  summary: string;
-}
-
-export interface GitOverlayHealthCheck {
-  details?: Record<string, string>;
-  name: string;
-  status: string;
-  summary: string;
-}
-
 export interface GitOverlayHealthCheckSchema {
   name: string;
   status: string;
@@ -1201,13 +1186,6 @@ export interface GitOverlayHealthSchema {
   recovery_commands: string[];
   status: string;
   summary: string;
-}
-
-export interface GitOverlayImportHintReport {
-  current_branch: string;
-  missing_branch_count: number;
-  missing_branches: string[];
-  recommended_command: string;
 }
 
 export interface GitOverlayImportHintSchema {
@@ -2307,8 +2285,6 @@ export interface StatusSchema {
   freshness?: string | null;
   git_checkpoint?: GitCheckpointInfo | null;
   git_index?: GitIndexPlan | null;
-  git_overlay_health: GitOverlayHealth;
-  git_overlay_import_hint?: GitOverlayImportHintReport | null;
   harness?: string | null;
   heavy_impact_paths: string[];
   heddle_session_id?: string | null;

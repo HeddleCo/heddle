@@ -3380,10 +3380,10 @@ mod tests {
                 "status schema missing property '{required}'"
             );
         }
-        for promoted in &["git_overlay_import_hint", "git_overlay_health"] {
+        for legacy in &["git_overlay_import_hint", "git_overlay_health"] {
             assert!(
-                properties.contains_key(*promoted),
-                "status schema missing promoted Git overlay diagnostic property '{promoted}'"
+                !properties.contains_key(*legacy),
+                "status schema must expose verification, not legacy Git overlay sidecar '{legacy}'"
             );
         }
     }
