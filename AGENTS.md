@@ -50,7 +50,7 @@ Heddle is an AI-native version control system written in Rust. It combines conte
 - All core VCS commands implemented
 - 600+ tests passing (including formal spec and hosted integration coverage)
 - Wire protocol for remote sync complete
-- Git bridge implemented (bidirectional sync)
+- Git Projection import/export/sync implemented
 - Packed refs, packfiles, shallow clone, hooks, and crypto signing implemented
 - Multi-agent parallel materialized threads implemented (`start --path`, `thread list/show/drop`, `actor spawn/list/done`)
 - Hosted namespaces, repositories, grants, and content inspection APIs implemented in foundation form
@@ -121,7 +121,7 @@ Note: `HEDDLE_SESSION_ID` and `HEDDLE_SESSION_SEGMENT` are **not implemented**. 
 ## Known Limitations (v0.1)
 
 - Reftable format not implemented (packed-refs works but degrades above ~10k refs)
-- Git bridge may have edge cases with complex histories
+- Git Projection may have edge cases with complex histories
 - Semantic diff is available but may be conservative
 - Partial clone (lazy object fetch) not yet supported
 - Provenance-backed local blame and hosted provenance inspection are implemented; richer compare/review UX on top of provenance is still planned

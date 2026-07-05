@@ -3467,7 +3467,7 @@ mod tests {
 
     /// Streaming the Git pack must drive the generic progress substrate with a
     /// live "uploading N/M bytes" phase, ending at the full pack size. This is
-    /// the DoD "live progress line" for the default git-overlay mirror push.
+    /// the DoD "live progress line" for the default Git Projection pack push.
     #[test]
     fn git_pack_stream_reports_upload_progress() {
         let dir = TempDir::new().expect("tempdir");

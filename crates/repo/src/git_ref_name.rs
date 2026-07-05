@@ -123,7 +123,7 @@ impl<'a> GitRefName<'a> {
         !self.is_local_only()
     }
 
-    /// Return the named content namespace Heddle surfaces in local Git bridge
+    /// Return the named content namespace Heddle surfaces in local Git projection
     /// operations.
     pub fn content_namespace(&self) -> Option<GitRefContentNamespace> {
         match self.namespace() {

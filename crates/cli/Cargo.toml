@@ -144,7 +144,7 @@ local = []
 # Repository mode features. At least one must be enabled. Released as
 # three OSS CLI flavors: `git-overlay` only (works on top of existing
 # Git repos; no native content-addressed init), `native` only (pure
-# content-addressed VCS; no Git bridge), or both. The closed `heddle-hosted`
+# content-addressed VCS; no Git Projection import/export surface), or both. The closed `heddle-hosted`
 # build adds `client` on top of either / both.
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]

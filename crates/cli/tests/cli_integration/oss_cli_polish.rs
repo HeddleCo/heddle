@@ -461,7 +461,7 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
     assert!(
         mapping["summary"]
             .as_str()
-            .is_some_and(|summary| summary.contains("do not require Git-overlay mapping")),
+            .is_some_and(|summary| summary.contains("do not require Git Projection Mapping")),
         "native mapping row should not sound blocked: {verify}"
     );
     let clone = checks
@@ -12046,8 +12046,8 @@ fn status_recommendation_runs_cleanly_after_clone() {
     let json = heddle(&["--output", "json", "status"], Some(&work)).expect("status JSON");
     let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
     assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "status should report no missing branches after clone: {json}"
+        parsed.get("git_overlay_import_hint").is_none(),
+        "status should not expose retired git_overlay_import_hint after clone: {json}"
     );
 }
 

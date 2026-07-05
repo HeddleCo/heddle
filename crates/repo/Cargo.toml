@@ -49,7 +49,7 @@ windows-sys = { workspace = true, features = [
 default = ["git-overlay", "native", "zstd"]
 # Repository mode features. At least one must be enabled. The OSS CLI
 # can be built as git-overlay-only (works on top of existing Git repos),
-# native-only (content-addressed VCS, no Git bridge), or both.
+# native-only (content-addressed VCS, no Git Projection import/export surface), or both.
 # Currently these features are declared as a foundation; the
 # overlay-specific methods on `Repository` are not yet gated behind
 # `git-overlay` — that's a follow-up refactor once the CLI surface

@@ -3618,9 +3618,9 @@ Each of these:
 - Uses `created_at` (not `timestamp` or `recorded_at`) for state-creation timestamps.
 - Serializes `Option<...>` semantic fields as explicit `null`.
 - Serializes empty collections as `[]` / `{}`.
-- Does not carry `git_overlay_import_hint` or `missing_branches`
-  payloads; those live only in `heddle status` and
-  `heddle doctor`.
+- Does not carry retired `git_overlay_import_hint` sidecars or raw
+  `missing_branches` payloads; import guidance, when present, is exposed
+  through current command-specific fields.
 
 ---
 
