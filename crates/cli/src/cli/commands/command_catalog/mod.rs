@@ -1448,12 +1448,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["export"], surface(GROUP, "git_adapter")),
     entry(
         &["export", "git"],
-        documented_schemas(
-            CommandContract {
-                writes_git_refs: true,
-                ..MUTATING
-            },
-            &["export git"],
+        json_discriminators(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    ..MUTATING
+                },
+                &["export git"],
+            ),
+            &[json_discriminator(Some("export git"), "output_kind", "export_git")],
         ),
     ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
@@ -1475,12 +1478,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "export"],
         git_adapter_alias(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    ..MUTATING
-                },
-                &["bridge git export"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        ..MUTATING
+                    },
+                    &["bridge git export"],
+                ),
+                &[json_discriminator(
+                    Some("bridge git export"),
+                    "output_kind",
+                    "bridge_git_export",
+                )],
             ),
             "push",
         ),
@@ -1551,49 +1561,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (0, "ok"),
                 (65, "unmergeable divergence; manual resolution required"),
             ],
-        ),
-    ),
-    entry(
-        &["bridge", "git", "push"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_heddle_refs: false,
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..MUTATING
-                    },
-                    &["bridge git push"],
-                ),
-                &[json_discriminator(
-                    Some("bridge git push"),
-                    "output_kind",
-                    "bridge_git_push",
-                )],
-            ),
-            "push",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "pull"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..WORKTREE_MUTATION
-                    },
-                    &["bridge git pull"],
-                ),
-                &[json_discriminator(
-                    Some("bridge git pull"),
-                    "output_kind",
-                    "bridge_git_pull",
-                )],
-            ),
-            "pull",
         ),
     ),
     entry(
@@ -4929,8 +4896,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 GitCommands::Import { .. } => vec!["bridge", "git", "import"],
                 GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
                 GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
-                GitCommands::Push { .. } => vec!["bridge", "git", "push"],
-                GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
                 #[cfg(feature = "ingest")]
                 GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
             },

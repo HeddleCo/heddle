@@ -3459,58 +3459,6 @@ fn git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle() 
 }
 
 #[test]
-fn git_overlay_matrix_bridge_push_pull_report_verification_state() {
-    let temp = TempDir::new().unwrap();
-    let origin = TempDir::new().unwrap();
-    init_git_repo_with_branch(temp.path(), "main");
-    git(&["init", "--bare", "--initial-branch=main"], origin.path());
-    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
-    git_commit_all(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
-
-    std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-
-    let push = json(
-        temp.path(),
-        &["--output", "json", "bridge", "git", "push", origin_arg],
-    );
-    assert_eq!(push["output_kind"], "bridge_git_push");
-    assert_eq!(push["action"], "bridge git push");
-    assert_eq!(push["status"], "pushed");
-    assert_eq!(push["success"], true);
-    assert_eq!(push["pushed"], true);
-    assert_eq!(push["changed"], true);
-    assert_eq!(push["transport"], "git");
-    assert_eq!(push["remote"], origin_arg);
-    assert_eq!(push["verification"]["verified"], true);
-    assert_eq!(push["verification"]["status"], "clean");
-    assert_verify_check_rows(&push["verification"]);
-
-    let pull = json(
-        temp.path(),
-        &["--output", "json", "bridge", "git", "pull", origin_arg],
-    );
-    assert_eq!(pull["output_kind"], "bridge_git_pull");
-    assert_eq!(pull["action"], "bridge git pull");
-    assert_eq!(pull["status"], "up_to_date");
-    assert_eq!(pull["success"], true);
-    assert_eq!(pull["pulled"], false);
-    assert_eq!(pull["changed"], false);
-    assert_eq!(pull["transport"], "git");
-    assert_eq!(pull["remote"], origin_arg);
-    assert_eq!(pull["verification"]["verified"], true);
-    assert_eq!(pull["verification"]["status"], "clean");
-    assert_verify_check_rows(&pull["verification"]);
-}
-
-#[test]
 fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     let temp = TempDir::new().unwrap();
     let origin = TempDir::new().unwrap();

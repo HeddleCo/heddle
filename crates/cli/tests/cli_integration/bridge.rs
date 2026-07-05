@@ -599,22 +599,17 @@ fn test_cli_bridge_git_import_from_external_repo() {
 }
 
 #[test]
-fn test_cli_bridge_git_push_to_local_bare_remote() {
+fn test_cli_bridge_git_push_pull_leaves_removed() {
     let source = TempDir::new().unwrap();
-    let remote = TempDir::new().unwrap();
-    let remote_repo = SleyRepository::init_bare(remote.path()).unwrap();
-
     heddle(&["init"], Some(source.path())).unwrap();
-    std::fs::write(source.path().join("push.txt"), "bridge push").unwrap();
-    heddle(&["capture", "-m", "Bridge push"], Some(source.path())).unwrap();
 
-    let result = heddle(
-        &["bridge", "git", "push", remote.path().to_str().unwrap()],
-        Some(source.path()),
-    );
-    assert!(result.is_ok(), "Bridge push failed: {:?}", result.err());
-
-    assert!(find_reference(&remote_repo, "refs/heads/main").is_ok());
+    for leaf in ["push", "pull"] {
+        let result = heddle(&["bridge", "git", leaf], Some(source.path()));
+        assert!(
+            result.is_err(),
+            "bridge git {leaf} should be removed in favor of top-level {leaf}"
+        );
+    }
 }
 
 /// `heddle push --mirror=<git-remote>` performs the primary push to the

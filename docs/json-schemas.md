@@ -191,30 +191,37 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "catalog_commands_total": 223,
-      "json_commands_total": 177,
-      "json_commands_with_schema": 130,
+      "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 221,
+      "catalog_mutating_commands_total": 112,
+      "json_commands_total": 175,
+      "json_mutating_commands_total": 107,
+      "json_commands_with_schema": 128,
       "json_commands_with_accepted_opaque_schema": 47,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 43,
       "verified_scope_json_commands_with_schema": 43,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 134,
+      "advanced_scope_json_commands_total": 132,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
+      "mutating_commands_total": 107,
+      "mutating_commands_with_schema": 80,
       "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 26,
       "verified_scope_mutating_commands_with_schema": 26,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
+      "advanced_scope_mutating_commands_total": 81,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 183,
-      "documented_schema_verbs_total": 183,
+      "schema_verbs_total": 181,
+      "documented_schema_verbs_total": 181,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 47,
       "accepted_opaque_schema_verbs_total": 47,
       "unaccepted_opaque_schema_verbs_total": 0,
+      "supports_op_id_total": 97,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -2941,7 +2948,7 @@ human-readable dump text in `dump` instead of writing a second stdout payload.
 Export emits:
 
 ```json
-{"states_exported": 3, "commits_total": 3, "threads_synced": 1, "markers_synced": 2, "branches": [{"name": "main", "tip": "0123456789abcdef0123456789abcdef01234567"}], "tags": [{"name": "v1.0.0", "tip": "89abcdef0123456789abcdef0123456789abcdef"}], "destination": "/work/project.git"}
+{"output_kind": "export_git", "states_exported": 3, "commits_total": 3, "threads_synced": 1, "markers_synced": 2, "branches": [{"name": "main", "tip": "0123456789abcdef0123456789abcdef01234567"}], "tags": [{"name": "v1.0.0", "tip": "89abcdef0123456789abcdef0123456789abcdef"}], "destination": "/work/project.git"}
 ```
 
 Export requires an explicit destination and does not default to `.heddle/git`.
@@ -2969,18 +2976,16 @@ key naming:
 
 | Verb | Shape |
 |------|-------|
-| `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
+| `export` | `{"output_kind": "bridge_git_export", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
 | `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
-| `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
-| `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
 ## `heddle bridge git export --output json`
 
 Export emits:
 
 ```json
-{"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
+{"output_kind": "bridge_git_export", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
 
 Export requires an explicit destination and does not default to `.heddle/git`.
@@ -2999,22 +3004,6 @@ Sync emits:
 
 ```json
 {"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
-```
-
-## `heddle bridge git push --output json`
-
-Push emits:
-
-```json
-{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}
-```
-
-## `heddle bridge git pull --output json`
-
-Pull emits:
-
-```json
-{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}
 ```
 
 ### Bridge Git Import Fields
@@ -3142,26 +3131,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 134,
+    "advanced_scope_json_commands_total": 132,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 83,
+    "advanced_scope_mutating_commands_total": 81,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 223,
-    "catalog_mutating_commands_total": 114,
-    "json_commands_total": 177,
+    "catalog_commands_total": 221,
+    "catalog_mutating_commands_total": 112,
+    "json_commands_total": 175,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 130,
+    "json_commands_with_schema": 128,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 109,
+    "json_mutating_commands_total": 107,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 109,
+    "mutating_commands_total": 107,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 82,
+    "mutating_commands_with_schema": 80,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "223 command(s), 177 JSON command(s), 114 mutating command(s), 109 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3199,7 +3188,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "223 command(s), 177 JSON command(s), 114 mutating command(s), 109 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "221 command(s), 175 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

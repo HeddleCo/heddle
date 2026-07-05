@@ -132,8 +132,6 @@ schema_registry! {
     (&["bridge git import"], BridgeImportSchema),
     (&["bridge git sync"], BridgeSyncSchema),
     (&["bridge git reconcile"], BridgeGitReconcileSchema),
-    (&["bridge git push"], BridgePushSchema),
-    (&["bridge git pull"], BridgePullSchema),
     (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
@@ -2834,6 +2832,7 @@ pub struct ExportedRefSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BridgeExportSchema {
+    pub output_kind: Option<String>,
     pub states_exported: u64,
     pub commits_total: u64,
     pub threads_synced: u64,
@@ -2897,30 +2896,6 @@ pub struct BridgeGitReconcileSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgePushSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub pushed: bool,
-    pub changed: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgePullSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub pulled: bool,
-    pub changed: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: String,
 }
 
 // ---- stash / revert -------------------------------------------------------
@@ -3383,8 +3358,6 @@ mod tests {
             "bridge git export",
             "bridge git sync",
             "bridge git reconcile",
-            "bridge git push",
-            "bridge git pull",
             "bridge git reason",
             "git-overlay",
         ] {

@@ -148,9 +148,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "push"], &["bridge", "git", "push"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "pull"], &["bridge", "git", "pull"]),
     #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     sample(
         &["bridge", "git", "reason"],
@@ -1234,8 +1232,6 @@ fn native_only_catalog_excludes_git_overlay_commands() {
         "bridge git export",
         "bridge git sync",
         "bridge git reconcile",
-        "bridge git push",
-        "bridge git pull",
         "bridge git reason",
         "git-overlay",
     ] {
@@ -1349,7 +1345,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // revert, purge, redact, stash, clean, discuss, context, review,
     // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
-    // session verbs, bridge git push/pull, continue, daemon stop,
+    // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
     // maintenance gc/index, merge --preview, pull, push, query, ready,
     // the remote family, start, switch, sync, and the thread lifecycle
@@ -1395,13 +1391,13 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth status",
             "auth create-service-token",
             "import git",
+            "export git",
             "bridge git status",
+            "bridge git export",
             "bridge git import",
             "bridge git sync",
             "bridge git reconcile",
-            "bridge git push",
-            "bridge git pull",
-            "capture",
+                    "capture",
             "checkpoint",
             "cherry-pick",
             "clean",

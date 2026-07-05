@@ -28,7 +28,6 @@ use super::{
     },
     import_progress::ImportProgress,
     next_action::{NextActionValidationContext, write_full_command_json},
-    remote::resolve_default_remote_name,
 };
 use crate::{
     bridge::{
@@ -52,72 +51,6 @@ impl ResolvedSource {
     }
 }
 
-#[derive(Serialize)]
-struct BridgeGitPushOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    pushed: bool,
-    changed: bool,
-    transport: &'static str,
-    remote: String,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct BridgeGitPullOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    pulled: bool,
-    changed: bool,
-    transport: &'static str,
-    remote: String,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-fn bridge_git_push_output(
-    remote: String,
-    trust: RepositoryVerificationState,
-) -> BridgeGitPushOutput {
-    BridgeGitPushOutput {
-        output_kind: "bridge_git_push",
-        action: "bridge git push",
-        status: "pushed",
-        success: true,
-        pushed: true,
-        changed: true,
-        transport: "git",
-        remote,
-        trust,
-    }
-}
-
-fn bridge_git_pull_output(
-    remote: String,
-    changed: bool,
-    trust: RepositoryVerificationState,
-) -> BridgeGitPullOutput {
-    BridgeGitPullOutput {
-        output_kind: "bridge_git_pull",
-        action: "bridge git pull",
-        status: if changed { "updated" } else { "up_to_date" },
-        success: true,
-        pulled: changed,
-        changed,
-        transport: "git",
-        remote,
-        trust,
-    }
-}
 
 /// Owned scratch directory that removes itself on drop. Hand-rolled rather
 /// than pulling `tempfile` into the cli's runtime deps just for this.
@@ -644,6 +577,7 @@ fn run_git_export(
 
     if should_output_json(cli, Some(repo.config())) {
         let out = serde_json::json!({
+            "output_kind": "export_git",
             "states_exported": stats.states_exported,
             "commits_total": stats.commits_total,
             "threads_synced": stats.threads_synced,
@@ -842,6 +776,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
 
             if should_output_json(cli, Some(repo.config())) {
                 let out = serde_json::json!({
+                    "output_kind": "bridge_git_export",
                     "states_exported": stats.states_exported,
                     "commits_total": stats.commits_total,
                     "threads_synced": stats.threads_synced,
@@ -1221,64 +1156,6 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 trust,
             };
             render_bridge_git_reconcile(cli, &repo, &output)?;
-        }
-
-        GitCommands::Push { remote } => {
-            let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
-            bridge.push(&remote_name)?;
-            let trust = build_repository_verification_state(&repo);
-
-            if should_output_json(cli, Some(repo.config())) {
-                let output = bridge_git_push_output(remote_name, trust);
-                crate::cli::render::write_json_stdout(&output)?;
-            } else {
-                println!(
-                    "{} pushed to remote {}",
-                    style::ok_marker(),
-                    style::bold(&remote_name)
-                );
-                println!(
-                    "Verification: {}",
-                    if trust.verified {
-                        style::accent(&trust.summary)
-                    } else {
-                        style::warn(&trust.summary)
-                    }
-                );
-            }
-        }
-
-        GitCommands::Pull { remote } => {
-            let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
-            let outcome = bridge.pull(&remote_name)?;
-            let trust = build_repository_verification_state(&repo);
-
-            if should_output_json(cli, Some(repo.config())) {
-                let output = bridge_git_pull_output(remote_name, outcome.changed, trust);
-                crate::cli::render::write_json_stdout(&output)?;
-            } else {
-                if outcome.changed {
-                    println!(
-                        "{} pulled from remote {}",
-                        style::ok_marker(),
-                        style::bold(&remote_name)
-                    );
-                } else {
-                    println!(
-                        "{} remote {} made no pull changes",
-                        style::ok_marker(),
-                        style::bold(&remote_name)
-                    );
-                }
-                println!(
-                    "Verification: {}",
-                    if trust.verified {
-                        style::accent(&trust.summary)
-                    } else {
-                        style::warn(&trust.summary)
-                    }
-                );
-            }
         }
 
         #[cfg(feature = "ingest")]

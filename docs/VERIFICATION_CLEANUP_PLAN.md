@@ -74,7 +74,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 - `bridge git init` should be removed; it exists to initialize the persistent mirror that the target model deletes.
 - `bridge git status` should be removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
 - `bridge git import` becomes `import git`; `bridge git export` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
-- `bridge git push` / `pull` / `sync` fold into top-level `push` / `pull` / `sync`.
+- `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` remains until top-level sync fully covers the explicit bidirectional bridge workflow.
 - `export git` must require an explicit destination or named remote target. It must not create hidden repo-local Git state.
 - `import git` and `export git` should both support dry-run JSON.
 - Lossy import must stay explicit with strong naming, such as `--allow-lossy`. If byte-identical Git export is expected, import captures residuals rather than silently degrading fidelity.
@@ -171,7 +171,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Export/write-through can use residuals instead of the mirror for lossy objects.
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
 5. Retire public bridge/mirror workflow
-   - Public `bridge git init/status/push/pull/sync` are removed or hidden.
+   - Public `bridge git init/push/pull` are removed; `status` and `sync` remain until replacement diagnostics and bidirectional sync routing are complete.
    - Top-level `push`/`pull`/`sync` route Git remotes.
    - Normal flows no longer create persistent `.heddle/git`.
    - Maintenance cleanup can remove migrated mirrors.

@@ -166,18 +166,6 @@ pub enum GitCommands {
         preview: bool,
     },
 
-    /// Push to Git remote.
-    Push {
-        /// Remote name (default: origin).
-        remote: Option<String>,
-    },
-
-    /// Pull from Git remote.
-    Pull {
-        /// Remote name (default: origin).
-        remote: Option<String>,
-    },
-
     /// Mine local AI-coding-agent sessions (Claude / Codex / OpenCode)
     /// for reasoning notecards and attach them as `context` annotations
     /// to the matching imported states. Requires `bridge git import` to

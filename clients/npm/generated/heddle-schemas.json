@@ -10900,6 +10900,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "bridge_git_export"
+          ],
+          "type": "string"
+        },
         "replayed": {
           "type": [
             "boolean",
@@ -10930,7 +10936,8 @@
         "markers_synced",
         "branches",
         "tags",
-        "destination"
+        "destination",
+        "output_kind"
       ],
       "title": "BridgeExportSchema",
       "type": "object"
@@ -11132,275 +11139,6 @@
         "output_kind"
       ],
       "title": "BridgeImportSchema",
-      "type": "object"
-    },
-    "bridge git init": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "initialized": {
-          "type": "boolean"
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "path": {
-          "type": "string"
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "initialized",
-        "path"
-      ],
-      "title": "BridgeInitSchema",
-      "type": "object"
-    },
-    "bridge git pull": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "action": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "changed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "output_kind": {
-          "enum": [
-            "bridge_git_pull"
-          ],
-          "type": "string"
-        },
-        "pulled": {
-          "type": "boolean"
-        },
-        "remote": {
-          "type": "string"
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "success": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "transport": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "pulled",
-        "remote",
-        "output_kind"
-      ],
-      "title": "BridgePullSchema",
-      "type": "object"
-    },
-    "bridge git push": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "action": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "changed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "output_kind": {
-          "enum": [
-            "bridge_git_push"
-          ],
-          "type": "string"
-        },
-        "pushed": {
-          "type": "boolean"
-        },
-        "remote": {
-          "type": "string"
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "success": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "transport": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "pushed",
-        "remote",
-        "output_kind"
-      ],
-      "title": "BridgePushSchema",
       "type": "object"
     },
     "bridge git reason": {
@@ -16420,6 +16158,129 @@
       "title": "ExpandSchema",
       "type": "object"
     },
+    "export git": {
+      "$defs": {
+        "ExportedRefSchema": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "tip": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "tip"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/ExportedRefSchema"
+          },
+          "type": "array"
+        },
+        "commits_total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "markers_synced": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "export_git"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "states_exported": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tags": {
+          "items": {
+            "$ref": "#/$defs/ExportedRefSchema"
+          },
+          "type": "array"
+        },
+        "threads_synced": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "states_exported",
+        "commits_total",
+        "threads_synced",
+        "markers_synced",
+        "branches",
+        "tags",
+        "destination",
+        "output_kind"
+      ],
+      "title": "BridgeExportSchema",
+      "type": "object"
+    },
     "fetch": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -16534,6 +16395,31 @@
             "message"
           ],
           "type": "object"
+        },
+        "FsckRepair": {
+          "properties": {
+            "count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "repaired": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "repaired",
+            "detail",
+            "count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16552,6 +16438,21 @@
           "minimum": 0,
           "type": "integer"
         },
+        "repair_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repaired": {
+          "type": "boolean"
+        },
+        "repairs": {
+          "items": {
+            "$ref": "#/$defs/FsckRepair"
+          },
+          "type": "array"
+        },
         "valid": {
           "type": "boolean"
         },
@@ -16567,7 +16468,9 @@
         "errors",
         "warnings",
         "objects_checked",
-        "bridge_checked"
+        "bridge_checked",
+        "repaired",
+        "repairs"
       ],
       "title": "FsckReport",
       "type": "object"
@@ -16735,6 +16638,205 @@
         }
       },
       "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "import git": {
+      "$defs": {
+        "ActionTemplateSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
+              "type": "boolean"
+            },
+            "argv_template": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "required_inputs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "action",
+            "argv_template",
+            "required_inputs",
+            "agent_may_fill"
+          ],
+          "type": "object"
+        },
+        "LossyImportEntrySchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "git_object": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "action",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "already_in_sync": {
+          "type": "boolean"
+        },
+        "branches_synced": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "commits_imported": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lossy_entries": {
+          "items": {
+            "$ref": "#/$defs/LossyImportEntrySchema"
+          },
+          "type": "array"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "import_git"
+          ],
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommended_action_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery_commands": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "skipped_non_commit_refs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "states_created": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tags_synced": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "summary",
+        "commits_imported",
+        "states_created",
+        "branches_synced",
+        "tags_synced",
+        "skipped_non_commit_refs",
+        "lossy_entries",
+        "already_in_sync",
+        "recovery_commands",
+        "output_kind"
+      ],
+      "title": "BridgeImportSchema",
       "type": "object"
     },
     "init": {
@@ -24100,64 +24202,6 @@
           ],
           "type": "object"
         },
-        "GitOverlayHealth": {
-          "properties": {
-            "checks": {
-              "items": {
-                "$ref": "#/$defs/GitOverlayHealthCheck"
-              },
-              "type": "array"
-            },
-            "clean": {
-              "type": "boolean"
-            },
-            "recovery_commands": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "status": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "clean",
-            "summary",
-            "recovery_commands",
-            "checks"
-          ],
-          "type": "object"
-        },
-        "GitOverlayHealthCheck": {
-          "properties": {
-            "details": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": "object"
-            },
-            "name": {
-              "type": "string"
-            },
-            "status": {
-              "type": "string"
-            },
-            "summary": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "name",
-            "status",
-            "summary"
-          ],
-          "type": "object"
-        },
         "MachineContractCoverage": {
           "properties": {
             "accepted_opaque_schema_examples": {
@@ -24803,9 +24847,6 @@
             }
           ]
         },
-        "git_overlay_health": {
-          "$ref": "#/$defs/GitOverlayHealth"
-        },
         "harness": {
           "type": [
             "string",
@@ -25023,7 +25064,6 @@
         "storage_model",
         "hosted_enabled",
         "verification",
-        "git_overlay_health",
         "child_threads",
         "promotion_suggested",
         "impact_categories",
@@ -35025,6 +35065,134 @@
           ],
           "type": "object"
         },
+        "RepositoryVerificationState": {
+          "properties": {
+            "active_operation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "checks": {
+              "items": {
+                "$ref": "#/$defs/VerificationCheck"
+              },
+              "type": "array"
+            },
+            "clone_verification": {
+              "type": "string"
+            },
+            "default_remote": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "git_branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "heddle_initialized": {
+              "type": "boolean"
+            },
+            "heddle_thread": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "import_state": {
+              "type": "string"
+            },
+            "machine_contract": {
+              "type": "string"
+            },
+            "machine_contract_coverage": {
+              "$ref": "#/$defs/MachineContractCoverage"
+            },
+            "mapping_state": {
+              "type": "string"
+            },
+            "recommended_action": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "recommended_action_template": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ActionTemplate"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recovery_action_templates": {
+              "items": {
+                "$ref": "#/$defs/ActionTemplate"
+              },
+              "type": "array"
+            },
+            "recovery_commands": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "remote_drift": {
+              "type": "string"
+            },
+            "repository_mode": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "verified": {
+              "type": "boolean"
+            },
+            "workflow_status": {
+              "type": "string"
+            },
+            "workflow_summary": {
+              "type": "string"
+            },
+            "worktree_dirty": {
+              "type": "boolean"
+            },
+            "worktree_state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verified",
+            "status",
+            "repository_mode",
+            "heddle_initialized",
+            "worktree_dirty",
+            "worktree_state",
+            "import_state",
+            "mapping_state",
+            "remote_drift",
+            "clone_verification",
+            "machine_contract",
+            "machine_contract_coverage",
+            "workflow_status",
+            "workflow_summary",
+            "summary",
+            "recovery_commands",
+            "recovery_action_templates",
+            "checks"
+          ],
+          "type": "object"
+        },
         "VerificationCheck": {
           "properties": {
             "clean": {
@@ -35088,92 +35256,13 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "active_operation": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "checks": {
-          "items": {
-            "$ref": "#/$defs/VerificationCheck"
-          },
-          "type": "array"
-        },
         "clean": {
           "type": "boolean"
-        },
-        "clone_verification": {
-          "type": "string"
-        },
-        "default_remote": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "git_branch": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "heddle_initialized": {
-          "type": "boolean"
-        },
-        "heddle_thread": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "import_state": {
-          "type": "string"
-        },
-        "machine_contract": {
-          "type": "string"
-        },
-        "machine_contract_coverage": {
-          "$ref": "#/$defs/MachineContractCoverage"
-        },
-        "mapping_state": {
-          "type": "string"
         },
         "output_kind": {
           "enum": [
             "verify"
           ],
-          "type": "string"
-        },
-        "recommended_action": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "recommended_action_template": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ActionTemplate"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "recovery_action_templates": {
-          "items": {
-            "$ref": "#/$defs/ActionTemplate"
-          },
-          "type": "array"
-        },
-        "recovery_commands": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "remote_drift": {
           "type": "string"
         },
         "repository_context": {
@@ -35189,53 +35278,15 @@
         "repository_label": {
           "type": "string"
         },
-        "repository_mode": {
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "verified": {
-          "type": "boolean"
-        },
-        "workflow_status": {
-          "type": "string"
-        },
-        "workflow_summary": {
-          "type": "string"
-        },
-        "worktree_dirty": {
-          "type": "boolean"
-        },
-        "worktree_state": {
-          "type": "string"
+        "verification": {
+          "$ref": "#/$defs/RepositoryVerificationState"
         }
       },
       "required": [
         "output_kind",
         "clean",
         "repository_label",
-        "verified",
-        "status",
-        "repository_mode",
-        "heddle_initialized",
-        "worktree_dirty",
-        "worktree_state",
-        "import_state",
-        "mapping_state",
-        "remote_drift",
-        "clone_verification",
-        "machine_contract",
-        "machine_contract_coverage",
-        "workflow_status",
-        "workflow_summary",
-        "summary",
-        "recovery_commands",
-        "recovery_action_templates",
-        "checks"
+        "verification"
       ],
       "title": "VerifyReport",
       "type": "object"
