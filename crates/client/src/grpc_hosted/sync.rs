@@ -1765,7 +1765,7 @@ fn build_git_mirror_push_plan(
 ) -> Result<GitLanePushPlan, ProtocolError> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Err(ProtocolError::InvalidState(
-            "Git mirror pushes require a git-overlay repository".to_string(),
+            "Git remote mirror pushes require a git-overlay repository".to_string(),
         ));
     }
     let git_repo = repo

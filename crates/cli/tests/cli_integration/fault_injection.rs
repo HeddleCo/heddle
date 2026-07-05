@@ -19,9 +19,9 @@ use oplog::{OpLogBackend, OpRecord};
 
 use super::*;
 
-/// R9: bridge mapping persistence.
+/// R9: Git Projection Mapping persistence.
 ///
-/// `bridge export` writes the served heddle↔git mapping to disk via a
+/// `export git` writes the served heddle↔git mapping to disk via a
 /// tmp-rename-rename pattern (`bridge-mapping.json.tmp` →
 /// `bridge-mapping.json`). The fault checkpoint
 /// `mapping_after_tmp_before_commit` panics in the gap between those
@@ -65,7 +65,7 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // ── Phase 1: spawn the export with fault injection armed ──
     //
     // The process should panic with our intentional message rather
-    // than completing the bridge export. We explicitly assert the
+    // than completing the Git projection export. We explicitly assert the
     // panic message so a regression that silently no-ops the
     // checkpoint surfaces here, not three commits downstream.
     let crashed = Command::new(env!("CARGO_BIN_EXE_heddle"))

@@ -345,7 +345,7 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
     ingest_into_bridge(&mut bridge, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
-    // A FRESH bare repo, separate from the bridge mirror: it has never held any
+    // A FRESH bare repo, separate from the legacy Bridge Mirror: it has never held any
     // commit object, so a regenerated commit landing here is provably rebuilt
     // from state rather than copied from the mirror's verbatim import.
     let fresh_home = TempDir::new().expect("fresh temp");

@@ -6,7 +6,7 @@
 //! actually crash the process between the load-bearing writes, the
 //! rollback paths only have unit-test coverage of the *helpers*, not
 //! of the *recovery contract itself*. The integration story
-//! ("crashing here doesn't corrupt the bridge mapping") was unverified.
+//! ("crashing here doesn't corrupt the Git Projection Mapping") was unverified.
 //!
 //! This module exposes a single `maybe_panic_at(name)` checkpoint
 //! that production code threads at the points where a crash would

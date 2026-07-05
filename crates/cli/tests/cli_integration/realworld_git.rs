@@ -610,7 +610,7 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
 
 /// R10: `heddle gc` must prune mapping entries whose Git object is no
 /// longer reachable while leaving live-thread mappings intact. We
-/// poison the bridge mapping with a synthetic entry pointing at an
+/// poison the Git Projection Mapping with a synthetic entry pointing at an
 /// unreachable oid and verify gc removes it without disturbing the
 /// real mapping rows.
 #[test]

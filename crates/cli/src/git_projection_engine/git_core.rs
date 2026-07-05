@@ -162,7 +162,7 @@ fn validate_refspec_ref(ref_name: &str) -> GitProjectionResult<()> {
 /// `refs/remotes/<remote>/HEAD` entries are not treated as refs.
 pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
     RefSpec::new(None, ref_name, false).ok()?;
-    GitRefName::new(ref_name).bridge_ref()
+    GitRefName::new(ref_name).git_projection_ref()
 }
 
 /// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
@@ -1369,7 +1369,7 @@ impl<'a> GitProjection<'a> {
         // attached thread. Moving every Git branch during an everyday save
         // surprised Git users and made stale isolated threads fail while
         // checkpointing unrelated work. Full export remains explicit via
-        // bridge export or push-all.
+        // export git or push --all-threads.
         export_current_thread(self, &thread)?;
         // Mirror is committed to disk (objects + refs) in a known-good
         // shape; remaining failures only affect the user's checkout
@@ -1609,7 +1609,7 @@ impl<'a> GitProjection<'a> {
     ) -> GitProjectionResult<WriteThroughOutcome> {
         let mirror_repo = self.open_git_repo()?;
         // Reconstructing a faithful commit from state (#568 P1) resolves each
-        // parent's git OID through the bridge mapping. A checkpoint/push runs
+        // parent's git OID through the Git Projection Mapping. A checkpoint/push runs
         // export first, which leaves the in-memory mapping populated for the
         // served set — trust it, and do NOT re-read from disk (notes vs sidecar
         // can legitimately disagree mid-operation, e.g. a `--git-commit` merge

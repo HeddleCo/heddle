@@ -450,7 +450,7 @@ fn test_cli_bridge_git_init_leaf_removed() {
     );
     assert!(
         !temp.path().join(".heddle/git").exists(),
-        "removed public command must not initialize the Git mirror"
+        "removed public command must not initialize the legacy Bridge Mirror"
     );
 }
 

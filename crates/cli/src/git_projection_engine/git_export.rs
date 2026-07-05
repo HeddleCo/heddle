@@ -64,7 +64,7 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 ///
 /// (2) is read off ONE canonical signal — [`State::git_lossy`] — that lossy
 /// import population paths set, rather than enumerating import surfaces or
-/// relying on bridge mapping sidecar state. The state flag closes the whole
+/// relying on Git Projection Mapping sidecar state. The state flag closes the whole
 /// class, including any future lossy entry point.
 ///
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
@@ -136,8 +136,8 @@ pub(crate) fn export_state(
     // export no longer depends on the mirror holding the verbatim imported bytes.
     //
     // Routing (#567 round 3): export keys off (is byte-faithful?) AND (does a
-    // bridge mapping exist?). The verbatim / mapped-OID fallback for a lossy
-    // commit applies ONLY when a bridge mapping holds a TRACKED original OID to
+    // Git Projection Mapping exist?). The verbatim / mapped-OID fallback for a lossy
+    // commit applies ONLY when a Git Projection Mapping holds a TRACKED original OID to
     // preserve — and that branch lives in `export_scoped`'s already-mapped path.
     // `export_state` is only ever reached for an UNMAPPED state (the caller's
     // `has_heddle` guard), so there is NO original OID to match and NO verbatim

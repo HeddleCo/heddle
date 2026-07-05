@@ -1259,7 +1259,7 @@ fn checkout_materialization_reconstructs_faithful_commit_from_empty_mirror() {
     let mut bridge = GitProjection::new(&repo);
 
     // Learn the expected git OID the SAME way export does — reconstruct the
-    // commit's bytes from state and hash them — and seed the bridge mapping so
+    // commit's bytes from state and hash them — and seed the Git Projection Mapping so
     // the walk's OID-equality gate has an expected target.
     let scratch_temp = TempDir::new().expect("scratch temp");
     let scratch = SleyRepository::init_bare(scratch_temp.path()).expect("scratch repo");
@@ -1645,7 +1645,7 @@ fn mirror_pack_file_count(mirror_git_dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// `maintenance gc` must consolidate the bridge mirror (`.heddle/git`) by
+/// `maintenance gc` must consolidate the legacy Bridge Mirror (`.heddle/git`) by
 /// packing its accumulated loose objects and dropping the redundant loose
 /// copies, so Git import/export/reconstruction paths stop paying the
 /// loose-object read tax.
@@ -2961,7 +2961,7 @@ fn clone_url_to_bare_filter_rejection_precedes_remote_probe() {
     );
 }
 
-/// Phase A: `bridge export --destination DEST` must populate DEST with
+/// Phase A: `export git --destination DEST` must populate DEST with
 /// reachable git objects + refs. Auto-creates DEST as a bare repo when it
 /// doesn't exist (so users don't have to pre-init the destination).
 #[test]

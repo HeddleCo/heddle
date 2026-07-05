@@ -750,7 +750,7 @@ fn strip_trailing_heddle(p: &Path) -> &Path {
 /// Convenience: open a git repo at `git_path` and a Heddle repo at
 /// `heddle_path` (initializing it if missing), then run one import pass.
 /// Returns both the stats and the final sha map. The map is persisted
-/// under `.heddle/ingest/sha_map.sqlite`; bridge export owns its served
+/// under `.heddle/ingest/sha_map.sqlite`; Git projection export owns its served
 /// `git-bridge/bridge-mapping.json` cache separately.
 ///
 /// `heddle_path` is the worktree root — `Repository::init` appends `.heddle`
@@ -1520,11 +1520,11 @@ mod tests {
             .join("bridge-mapping.json");
         assert!(
             !bridge_mapping_path.exists(),
-            "ingest import must not publish the served bridge mapping cache"
+            "ingest import must not publish the served Git Projection Mapping cache"
         );
         assert!(
             !gitdir.path().join(".heddle").join("git").exists(),
-            "ingest-backed import must not create the legacy internal Git mirror"
+            "ingest-backed import must not create the legacy Bridge Mirror"
         );
     }
 
