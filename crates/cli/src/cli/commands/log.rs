@@ -66,11 +66,11 @@ struct LogOutput {
     /// JSON contract: import-hint information is exposed via
     /// `heddle status --output json` instead.
     #[serde(skip)]
-    git_overlay_import_hint: Option<LogGitOverlayImportHintOutput>,
+    import_guidance: Option<LogImportGuidanceOutput>,
 }
 
 #[derive(Serialize)]
-struct LogGitOverlayImportHintOutput {
+struct LogImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -330,8 +330,8 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         status: "completed",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        git_overlay_import_hint: repo.git_overlay_import_hint()?.map(|hint| {
-            LogGitOverlayImportHintOutput {
+        import_guidance: repo.git_overlay_import_hint()?.map(|hint| {
+            LogImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
@@ -999,7 +999,7 @@ fn write_full<W: std::io::Write>(
         )?;
         wrote_header = true;
     }
-    if let Some(hint) = &output.git_overlay_import_hint {
+    if let Some(hint) = &output.import_guidance {
         writeln!(
             out,
             "{}",
@@ -1248,7 +1248,7 @@ mod tests {
             status: "completed",
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
-            git_overlay_import_hint: None,
+            import_guidance: None,
             states: vec![sample_entry()],
         };
 
@@ -1285,7 +1285,7 @@ mod tests {
             status: "completed",
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
-            git_overlay_import_hint: None,
+            import_guidance: None,
             states: vec![sample_entry()],
         };
         let mut buf = Vec::new();
@@ -1327,7 +1327,7 @@ mod tests {
             status: "completed",
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
-            git_overlay_import_hint: None,
+            import_guidance: None,
             states: vec![sample_entry()],
         };
 

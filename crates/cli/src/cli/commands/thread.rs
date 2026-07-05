@@ -315,11 +315,11 @@ struct ThreadListOutput {
     /// JSON contract: import-hint information is exposed via
     /// `heddle status --output json` instead.
     #[serde(skip)]
-    git_overlay_import_hint: Option<ThreadListGitOverlayImportHintOutput>,
+    import_guidance: Option<ThreadListImportGuidanceOutput>,
 }
 
 #[derive(Serialize)]
-struct ThreadListGitOverlayImportHintOutput {
+struct ThreadListImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -1276,11 +1276,11 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         recovery_commands: trust.recovery_commands.clone(),
         recovery_action_templates: trust.recovery_action_templates.clone(),
         trust,
-        git_overlay_import_hint: if as_json {
+        import_guidance: if as_json {
             None
         } else {
             repo.git_overlay_import_hint()?
-                .map(|hint| ThreadListGitOverlayImportHintOutput {
+                .map(|hint| ThreadListImportGuidanceOutput {
                     current_branch: hint.current_branch,
                     missing_branch_count: hint.missing_branch_count,
                     missing_branches: hint.missing_branches,
@@ -1321,7 +1321,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
             print_next_step(&output.recommended_action);
         }
         if output.trust.verified
-            && let Some(hint) = &output.git_overlay_import_hint
+            && let Some(hint) = &output.import_guidance
         {
             println!(
                 "{}",

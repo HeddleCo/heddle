@@ -38,9 +38,9 @@ pub(crate) struct DiagnoseOutput {
     storage_model: String,
     hosted_enabled: bool,
     #[serde(skip)]
-    git_overlay_import_hint: Option<DiagnoseGitOverlayImportHintOutput>,
+    import_guidance: Option<DiagnoseImportGuidanceOutput>,
     #[serde(skip)]
-    git_overlay_health: GitOverlayHealth,
+    verification_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     operation: Option<RepositoryOperationStatus>,
@@ -125,7 +125,7 @@ struct DiagnoseHealthOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DiagnoseGitOverlayImportHintOutput {
+struct DiagnoseImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -197,8 +197,8 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         repository_capability: "plain-git".to_string(),
         storage_model: "git-only".to_string(),
         hosted_enabled: false,
-        git_overlay_import_hint: None,
-        git_overlay_health,
+        import_guidance: None,
+        verification_health: git_overlay_health,
         trust: trust.clone(),
         operation: None,
         remote_tracking: None,
@@ -368,15 +368,15 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
-        git_overlay_import_hint: import_hint.clone().map(|hint| {
-            DiagnoseGitOverlayImportHintOutput {
+        import_guidance: import_hint.clone().map(|hint| {
+            DiagnoseImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
                 recommended_command: hint.recommended_command,
             }
         }),
-        git_overlay_health,
+        verification_health: git_overlay_health,
         trust: trust.clone(),
         operation: operation.clone(),
         remote_tracking: remote_tracking.clone(),
@@ -560,7 +560,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
     if let Some(remote_tracking) = &output.remote_tracking {
         println!("Sync: {}", remote_tracking.message);
     }
-    if let Some(hint) = &output.git_overlay_import_hint {
+    if let Some(hint) = &output.import_guidance {
         println!(
             "{}",
             crate::cli::render::git_only_branch_summary(
@@ -569,13 +569,13 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             )
         );
     }
-    if !output.git_overlay_health.clean {
+    if !output.verification_health.clean {
         let label = if output.repository_capability == "git-overlay" {
             "Git overlay health"
         } else {
             "Verification"
         };
-        println!("{label}: {}", output.git_overlay_health.summary);
+        println!("{label}: {}", output.verification_health.summary);
     }
     if let Some(thread) = &output.thread {
         println!(

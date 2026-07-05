@@ -38,7 +38,7 @@ struct ShowOutput {
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract.
     #[serde(skip)]
-    git_overlay_import_hint: Option<ShowGitOverlayImportHintOutput>,
+    import_guidance: Option<ShowImportGuidanceOutput>,
 }
 
 #[derive(Serialize)]
@@ -67,7 +67,7 @@ struct VerificationInfo {
 }
 
 #[derive(Serialize)]
-struct ShowGitOverlayImportHintOutput {
+struct ShowImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -106,8 +106,8 @@ fn cmd_show_with_output_kind(
         output_kind,
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        git_overlay_import_hint: repo.git_overlay_import_hint()?.map(|hint| {
-            ShowGitOverlayImportHintOutput {
+        import_guidance: repo.git_overlay_import_hint()?.map(|hint| {
+            ShowImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
@@ -213,7 +213,7 @@ fn render_state(output: &ShowOutput, verbose: bool) {
         );
         wrote_header = true;
     }
-    if let Some(hint) = &output.git_overlay_import_hint {
+    if let Some(hint) = &output.import_guidance {
         println!(
             "{}",
             crate::cli::render::git_only_branch_summary(
