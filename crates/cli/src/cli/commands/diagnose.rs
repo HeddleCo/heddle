@@ -172,15 +172,6 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
             .collect(),
         total: probe.changes.change_count(),
     };
-    let import_hint = probe
-        .import_hint
-        .clone()
-        .map(|hint| DiagnoseGitOverlayImportHintOutput {
-            current_branch: hint.current_branch,
-            missing_branch_count: hint.missing_branch_count,
-            missing_branches: hint.missing_branches,
-            recommended_command: hint.recommended_command,
-        });
     let trust = probe.trust.clone();
     let git_overlay_health = GitOverlayHealth {
         status: trust.status.clone(),
@@ -204,7 +195,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         repository_capability: "plain-git".to_string(),
         storage_model: "git-only".to_string(),
         hosted_enabled: false,
-        git_overlay_import_hint: import_hint,
+        git_overlay_import_hint: None,
         git_overlay_health,
         trust: trust.clone(),
         operation: None,

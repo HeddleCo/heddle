@@ -596,22 +596,13 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         let cwd = std::env::current_dir()?;
         let start = cli.repo.as_ref().unwrap_or(&cwd);
         if let Some(probe) = build_plain_git_verification_probe(start)? {
-            let import_hint = probe
-                .import_hint
-                .clone()
-                .map(|hint| BridgeGitImportHintOutput {
-                    current_branch: hint.current_branch,
-                    missing_branch_count: hint.missing_branch_count,
-                    missing_branches: hint.missing_branches,
-                    recommended_command: hint.recommended_command,
-                });
             let output = BridgeGitStatusOutput {
                 output_kind: "bridge_git_status",
                 repository_capability: "plain-git".to_string(),
                 storage_model: "git-only".to_string(),
                 mirror_path: None,
                 mirror_initialized: false,
-                git_overlay_import_hint: import_hint,
+                git_overlay_import_hint: None,
                 git_overlay_health: GitOverlayHealth {
                     status: probe.trust.status.clone(),
                     clean: probe.trust.verified,

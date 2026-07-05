@@ -37,7 +37,7 @@ Then read `CONTEXT.md` if it exists, and read any ADRs in `docs/adr/` that touch
 
 ## Use the Glossary's Vocabulary
 
-When output names a domain concept in an issue title, refactor proposal, hypothesis, or test name, use the term as defined in `CONTEXT.md`. Do not drift to synonyms the glossary explicitly avoids.
+When output names a domain concept in an issue title, refactor proposal, hypothesis, or test name, use the term as defined in `CONTEXT.md`. Do not drift to synonyms the glossary explicitly avoids. For Git and verification work, use the exact `Git Overlay`, `Bridge Mirror`, `Git Checkpoint`, `Repository Verification State`, and `Machine-Contract Proof` terms from the glossary.
 
 If a needed domain concept is missing, create or update `CONTEXT.md` only when the term has been resolved with enough confidence to record.
 

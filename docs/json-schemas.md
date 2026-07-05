@@ -2203,6 +2203,11 @@ the `heddle adopt --ref <branch>` recommendation from `status`,
 `init`, and `verification`. This is the only command whose JSON output
 carries `git_overlay_import_hint`.
 
+The bridge mirror is an explicit import/export/sync artifact. It is not the
+active Git-overlay store: normal `status`, `commit`, `checkpoint`, branch
+movement, index, and worktree operations read and write the checkout's real
+`.git`.
+
 ### Sample
 
 ```json
@@ -2242,8 +2247,8 @@ carries `git_overlay_import_hint`.
 |-------|------|-------------|-----------|
 | `repository_capability` | string | required | Same vocabulary as `heddle status`. |
 | `storage_model` | string | required | Same. |
-| `mirror_path` | string \| null | required | Path to the bridge mirror, when known. |
-| `mirror_initialized` | bool | required | `true` when `.heddle/git` exists. |
+| `mirror_path` | string \| null | required | Path to the explicit bridge/export mirror, when known; not the active Git-overlay `.git`. |
+| `mirror_initialized` | bool | required | `true` when the bridge mirror exists. |
 | `git_overlay_import_hint` | object \| null | required | `null` when bridge is in sync. |
 | `git_overlay_import_hint.current_branch` | string | required when hint is present | Active branch on the Git side. |
 | `git_overlay_import_hint.missing_branch_count` | int | required when hint is present | Length of `missing_branches`. |
@@ -2950,7 +2955,8 @@ key naming:
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
-`heddle bridge git init --output json` emits:
+`heddle bridge git init --output json` emits a bridge mirror path, not the
+active Git-overlay `.git`:
 
 ```json
 {"initialized": true, "path": "/work/project/.heddle/git"}

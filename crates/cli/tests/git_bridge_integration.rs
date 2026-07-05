@@ -1645,10 +1645,10 @@ fn mirror_pack_file_count(mirror_git_dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// `maintenance gc` must consolidate the git-overlay MIRROR (`.heddle/git`) —
-/// the bare sley repo that is heddle's canonical git object store — by packing
-/// its accumulated loose objects and dropping the redundant loose copies, so
-/// every read+write command stops paying the loose-object read tax.
+/// `maintenance gc` must consolidate the bridge mirror (`.heddle/git`) by
+/// packing its accumulated loose objects and dropping the redundant loose
+/// copies, so bridge import/export/reconstruction paths stop paying the
+/// loose-object read tax.
 ///
 /// The invariant proven here (state, not timing):
 /// 1. The loose-object count drops to zero (everything moves into a pack).

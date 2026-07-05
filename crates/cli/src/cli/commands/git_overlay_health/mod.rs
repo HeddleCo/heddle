@@ -37,17 +37,8 @@ use crate::{cli::worktree_status_options, remote::RemoteConfig};
 pub(crate) struct PlainGitVerificationProbe {
     pub root: PathBuf,
     pub git_branch: Option<String>,
-    pub import_hint: Option<PlainGitImportHint>,
     pub changes: WorktreeStatus,
     pub trust: RepositoryVerificationState,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlainGitImportHint {
-    pub current_branch: String,
-    pub missing_branch_count: usize,
-    pub missing_branches: Vec<String>,
-    pub recommended_command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1689,7 +1680,6 @@ pub(crate) fn build_plain_git_verification_probe(
     let init = "heddle init".to_string();
     let setup_action = init.clone();
     let setup_recovery_commands = vec![init.clone()];
-    let import_hint = None;
     let machine_contract_coverage = machine_contract_coverage();
     let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
     let action_plan = VerificationActionPlan {
@@ -1831,7 +1821,6 @@ pub(crate) fn build_plain_git_verification_probe(
     Ok(Some(PlainGitVerificationProbe {
         root,
         git_branch,
-        import_hint,
         changes,
         trust,
     }))

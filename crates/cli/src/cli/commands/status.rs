@@ -13,8 +13,9 @@ use futures::{SinkExt, StreamExt};
 use heddle_core::{
     ChangesInfo, CoordinationStatus, FastShortStatusReport,
     GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
-    MaterializedThreadInfo, StatusDetail, StatusOptions, StatusReport as StatusOutput,
-    changes_from_worktree_status, changes_paths, fast_short_status_report, status as core_status,
+    MachineContractInput, MaterializedThreadInfo, StatusDetail, StatusOptions,
+    StatusReport as StatusOutput, changes_from_worktree_status, changes_paths,
+    fast_short_status_report, status as core_status,
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
@@ -352,7 +353,11 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         .build();
     let output = core_status(
         &ctx,
-        StatusOptions::new(detail, status_options).with_start_path(start),
+        StatusOptions::new(detail, status_options)
+            .with_start_path(start)
+            .with_machine_contract_input(MachineContractInput::from_coverage(
+                super::git_overlay_health::machine_contract_coverage(),
+            )),
     )?;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,

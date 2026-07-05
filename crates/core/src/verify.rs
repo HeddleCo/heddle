@@ -27,15 +27,31 @@ use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode
 #[derive(Clone)]
 pub struct VerifyOptions {
     pub start_path: Option<PathBuf>,
+    pub machine_contract_input: MachineContractInput,
+    pub action_audience: ActionAudience,
 }
 
 impl VerifyOptions {
     pub fn new() -> Self {
-        Self { start_path: None }
+        Self {
+            start_path: None,
+            machine_contract_input: MachineContractInput::default(),
+            action_audience: ActionAudience::Human,
+        }
     }
 
     pub fn with_start_path(mut self, start_path: impl Into<PathBuf>) -> Self {
         self.start_path = Some(start_path.into());
+        self
+    }
+
+    pub fn with_machine_contract_input(mut self, input: MachineContractInput) -> Self {
+        self.machine_contract_input = input;
+        self
+    }
+
+    pub fn with_action_audience(mut self, audience: ActionAudience) -> Self {
+        self.action_audience = audience;
         self
     }
 }
@@ -43,6 +59,33 @@ impl VerifyOptions {
 impl Default for VerifyOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionAudience {
+    Human,
+    Agent,
+    Script,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct MachineContractInput {
+    pub coverage: MachineContractCoverage,
+}
+
+impl MachineContractInput {
+    pub fn from_coverage(coverage: MachineContractCoverage) -> Self {
+        Self { coverage }
+    }
+}
+
+impl Default for MachineContractInput {
+    fn default() -> Self {
+        Self {
+            coverage: machine_contract_coverage(),
+        }
     }
 }
 
@@ -233,6 +276,16 @@ pub struct VerificationCheck {
 }
 
 pub fn build_plain_git_verification_probe(start: &Path) -> Result<Option<PlainGitVerifyProbe>> {
+    build_plain_git_verification_probe_with_machine_contract(
+        start,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_plain_git_verification_probe_with_machine_contract(
+    start: &Path,
+    machine_contract_input: &MachineContractInput,
+) -> Result<Option<PlainGitVerifyProbe>> {
     let git_repo = match SleyRepository::discover(start) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
@@ -252,7 +305,7 @@ pub fn build_plain_git_verification_probe(start: &Path) -> Result<Option<PlainGi
         .and_then(|head| head.branch_name().map(ToString::to_string));
     let default_remote = git_default_remote_name_from_repo(&git_repo);
     let changes_dirty = plain_git_has_changes(&git_repo)?;
-    let machine_contract_coverage = machine_contract_coverage();
+    let machine_contract_coverage = machine_contract_input.coverage.clone();
     let setup_action = "heddle init".to_string();
     let recovery_commands = vec![setup_action.clone()];
     let trust = RepositoryVerificationState {
@@ -370,17 +423,30 @@ fn plain_git_has_changes(git_repo: &SleyRepository) -> Result<bool> {
     Ok(dirty)
 }
 
-pub fn build_repository_verification_state(repo: &Repository) -> Result<RepositoryVerificationState> {
+pub fn build_repository_verification_state(
+    repo: &Repository,
+) -> Result<RepositoryVerificationState> {
+    build_repository_verification_state_with_machine_contract(
+        repo,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_repository_verification_state_with_machine_contract(
+    repo: &Repository,
+    machine_contract_input: &MachineContractInput,
+) -> Result<RepositoryVerificationState> {
     let worktree_status = if repo.capability() == repo::RepositoryCapability::GitOverlay {
         repo.git_overlay_worktree_status()
     } else {
         native_worktree_status(repo)
     };
     let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
-    Ok(build_repository_verification_state_with_worktree_status(
+    Ok(build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         health,
         &worktree_status,
+        machine_contract_input,
     ))
 }
 
@@ -396,6 +462,20 @@ pub fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
     health: GitOverlayHealth,
     worktree_status: &Result<Option<WorktreeStatus>>,
+) -> RepositoryVerificationState {
+    build_repository_verification_state_with_worktree_status_and_machine_contract(
+        repo,
+        health,
+        worktree_status,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_repository_verification_state_with_worktree_status_and_machine_contract(
+    repo: &Repository,
+    health: GitOverlayHealth,
+    worktree_status: &Result<Option<WorktreeStatus>>,
+    machine_contract_input: &MachineContractInput,
 ) -> RepositoryVerificationState {
     let git_branch = repo.git_overlay_current_branch().ok().flatten();
     let heddle_thread = repo.current_lane().ok().flatten();
@@ -455,7 +535,7 @@ pub fn build_repository_verification_state_with_worktree_status(
                 matches!(check.name.as_str(), "worktree" | "heddle_worktree")
                     && check.status != "clean"
             });
-    let machine_contract_coverage = machine_contract_coverage();
+    let machine_contract_coverage = machine_contract_input.coverage.clone();
     let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
     let mut recovery_commands = health.recovery_commands.clone();
     let remote_action = remote_sync_action(&health);
@@ -1163,7 +1243,10 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
     };
 
     let probe_start = Instant::now();
-    let plain_git_probe = build_plain_git_verification_probe(start)?;
+    let plain_git_probe = build_plain_git_verification_probe_with_machine_contract(
+        start,
+        &opts.machine_contract_input,
+    )?;
     let plain_git_probe_ms = probe_start.elapsed().as_millis();
     let mut profile = VerifyProfile {
         plain_git_probe_ms,
@@ -1191,7 +1274,10 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
         &opened
     };
     let verification_start = Instant::now();
-    let trust = build_repository_verification_state(repo)?;
+    let trust = build_repository_verification_state_with_machine_contract(
+        repo,
+        &opts.machine_contract_input,
+    )?;
     profile.verification_ms = verification_start.elapsed().as_millis();
     let presentation = repository_presentation(repo, None, None);
     Ok(VerifyReport {

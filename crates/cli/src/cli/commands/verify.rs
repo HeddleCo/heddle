@@ -5,8 +5,8 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    RepositoryVerificationState, VerificationCheck, VerifyOptions, VerifyReport,
-    verify as core_verify,
+    MachineContractInput, RepositoryVerificationState, VerificationCheck, VerifyOptions,
+    VerifyReport, verify as core_verify,
 };
 use repo::Repository;
 
@@ -25,7 +25,14 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let ctx = verify_execution_context_from_cli(cli, &start)?;
-    let output = core_verify(&ctx, VerifyOptions::new().with_start_path(start.clone()))?;
+    let output = core_verify(
+        &ctx,
+        VerifyOptions::new()
+            .with_start_path(start.clone())
+            .with_machine_contract_input(MachineContractInput::from_coverage(
+                super::git_overlay_health::machine_contract_coverage(),
+            )),
+    )?;
     if profile_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),

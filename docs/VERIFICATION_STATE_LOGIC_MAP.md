@@ -20,7 +20,11 @@ Target rows describe the next model and must not be cited as shipped behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
-  machines.
+  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Bridge Mirror,
+  Git Checkpoint, Repository Verification State, and Machine-Contract Proof.
+- In Git-overlay mode, active Git reads and writes use the checkout's real
+  `.git`; `.heddle/git` is the Bridge Mirror for explicit bridge import/export,
+  sync, reconstruction, and maintenance paths.
 - `verified: true` means repository safety checks are clean. It does not mean
   there is no useful workflow action. Ready threads and local commits waiting to
   push can keep repository verification clean while setting a next action.

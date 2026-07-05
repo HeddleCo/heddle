@@ -363,7 +363,7 @@ impl std::fmt::Display for WriteThroughSkipReason {
                 write!(f, "the current Heddle state has not been exported to Git")
             }
             WriteThroughSkipReason::MirrorIsWorktree => {
-                write!(f, "the Git mirror is already the active checkout")
+                write!(f, "the bridge mirror target is the checkout itself")
             }
             WriteThroughSkipReason::IndexAlreadyDirty => {
                 write!(f, "the Git index is already locked by another operation")

@@ -219,16 +219,17 @@ impl<'a> GitBridge<'a> {
         Ok(removed)
     }
 
-    /// Consolidate the git-overlay MIRROR (`.heddle/git`) — heddle's canonical
-    /// git object store, a bare sley repo — by packing every on-disk object into
-    /// a single pack and dropping the now-redundant loose copies.
+    /// Consolidate the bridge mirror (`.heddle/git`) — the bare Sley repo used
+    /// by explicit Git bridge import/export/sync paths — by packing every
+    /// on-disk object into a single pack and dropping the now-redundant loose
+    /// copies.
     ///
     /// The mirror accumulates one loose object per minted/imported commit, tree,
-    /// and blob (thousands on a real clone). Loose-object reads dominate the
-    /// uninstrumented cost of `git_overlay_worktree_status`, which every read
-    /// command (status/diff/verify) and write command (capture/commit) pays.
-    /// `heddle maintenance gc` already consolidates heddle's NATIVE store; this
-    /// brings the mirror to parity.
+    /// and blob (thousands on a real clone). Loose-object reads dominate bridge
+    /// mirror import/export and reconstruction paths. Active Git-overlay status
+    /// and checkpoint paths use the checkout's real `.git` repository, not this
+    /// mirror. `heddle maintenance gc` already consolidates Heddle's native
+    /// store; this brings the bridge mirror to parity.
     ///
     /// Correctness: this uses [`repack_all_objects`], which gathers EVERY object
     /// on disk (every loose object and every pack), not the reachability closure

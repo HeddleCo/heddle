@@ -4,6 +4,11 @@ This note tracks cleanup that should come after the current deletion wave. The
 project is pre-1.0 and should prefer the current model over compatibility shims,
 but durable signed data still needs a deletion path that preserves verification.
 
+Active cleanup plan: `docs/VERIFICATION_CLEANUP_PLAN.md` tracks the staged
+removal of duplicate CLI/core verification ownership and stale bridge-mirror
+language. The null-only plain-Git import hint sidecar has been deleted; public
+`git_overlay_import_hint` JSON cleanup remains tracked in the verification plan.
+
 ## Deleted In The Current Wave
 
 - `objects::delta` and `objects::store::compression` re-export modules were

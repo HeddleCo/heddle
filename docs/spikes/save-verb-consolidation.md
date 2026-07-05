@@ -2,6 +2,12 @@
 
 Status: decision spike
 
+Current shipped behavior still exposes `capture` as a granular savepoint and
+`checkpoint` as the Git-facing primitive for closing a Git-overlay checkpoint
+gap. This spike records the intended consolidation; do not treat its proposed
+breadcrumbs as shipped until the CLI and tests have moved to the canonical
+`commit -> ready -> land -> push|cleanup` chain.
+
 ## Decision
 
 Consolidate the user-facing save/land path to one canonical save verb and one

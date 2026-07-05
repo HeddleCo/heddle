@@ -40,8 +40,8 @@ pub use thread_shaping::{
     ThreadShapingError, capture_split, thread_move,
 };
 pub use verify::{
-    ActionTemplate, MachineContractCoverage, PlainGitVerifyProbe, RepositoryContextInfo,
-    RepositoryPresentation, RepositoryVerificationState, VerificationCheck, VerifyOptions,
-    VerifyProfile, VerifyReport, dirty_path_count, repository_mode_label, repository_presentation,
-    verify,
+    ActionAudience, ActionTemplate, MachineContractCoverage, MachineContractInput,
+    PlainGitVerifyProbe, RepositoryContextInfo, RepositoryPresentation,
+    RepositoryVerificationState, VerificationCheck, VerifyOptions, VerifyProfile, VerifyReport,
+    dirty_path_count, repository_mode_label, repository_presentation, verify,
 };

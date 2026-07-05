@@ -36,7 +36,8 @@ use crate::{
     ReportContract, RepositoryContextInfo, RepositoryVerificationState, VerificationCheck,
     schema_for_report,
     verify::{
-        action_template, action_templates, build_repository_verification_state_with_worktree_status,
+        MachineContractInput, action_template, action_templates,
+        build_repository_verification_state_with_worktree_status_and_machine_contract,
         serialize_empty_action_as_null,
     },
 };
@@ -53,6 +54,7 @@ pub struct StatusOptions {
     pub start_path: Option<PathBuf>,
     pub detail: StatusDetail,
     pub worktree_status_options: repo::WorktreeStatusOptions,
+    pub machine_contract_input: MachineContractInput,
 }
 
 impl StatusOptions {
@@ -61,11 +63,17 @@ impl StatusOptions {
             start_path: None,
             detail,
             worktree_status_options,
+            machine_contract_input: MachineContractInput::default(),
         }
     }
 
     pub fn with_start_path(mut self, start_path: impl Into<PathBuf>) -> Self {
         self.start_path = Some(start_path.into());
+        self
+    }
+
+    pub fn with_machine_contract_input(mut self, input: MachineContractInput) -> Self {
+        self.machine_contract_input = input;
         self
     }
 }
@@ -1759,10 +1767,11 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
 
     let verification_start = Instant::now();
-    let trust = build_repository_verification_state_with_worktree_status(
+    let trust = build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         git_overlay_health.clone(),
         &git_worktree_status_result,
+        &opts.machine_contract_input,
     );
     let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
