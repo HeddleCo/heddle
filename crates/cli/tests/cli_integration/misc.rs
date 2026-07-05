@@ -114,8 +114,8 @@ fn status_reports_clean_for_freshly_initialized_git_overlay_repo() {
         "freshly-initialized Git-overlay worktree should read clean Git history directly: {parsed}"
     );
     assert_eq!(
-        parsed["git_overlay_health"]["status"], "clean",
-        "thread health and Git-overlay health should agree: {parsed}"
+        parsed["verification"]["status"], "clean",
+        "thread health and verification status should agree: {parsed}"
     );
     assert_eq!(
         parsed["recommended_action"],

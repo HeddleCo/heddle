@@ -3372,13 +3372,13 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     assert_eq!(status["changed_path_count"], 0);
     assert_eq!(status["changes"]["modified"], serde_json::json!([]));
     assert!(
-        status["git_overlay_health"]["checks"]
+        status["verification"]["checks"]
             .as_array()
             .unwrap()
             .iter()
             .any(|check| check["status"] == "needs_checkpoint"
                 && check["details"]["dirty_paths"] == "tracked.txt"),
-        "git overlay health should name the Git-dirty path already captured by Heddle: {status}"
+        "verification should name the Git-dirty path already captured by Heddle: {status}"
     );
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
