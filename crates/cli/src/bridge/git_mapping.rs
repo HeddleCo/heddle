@@ -219,17 +219,17 @@ impl<'a> GitBridge<'a> {
         Ok(removed)
     }
 
-    /// Consolidate the bridge mirror (`.heddle/git`) — the bare Sley repo used
+    /// Consolidate the legacy Bridge Mirror (`.heddle/git`) — the bare Sley repo used
     /// by explicit Git projection import/export/sync paths — by packing every
     /// on-disk object into a single pack and dropping the now-redundant loose
     /// copies.
     ///
     /// The mirror accumulates one loose object per minted/imported commit, tree,
-    /// and blob (thousands on a real clone). Loose-object reads dominate bridge
-    /// mirror import/export and reconstruction paths. Active Git-overlay status
+    /// and blob (thousands on a real clone). Loose-object reads dominate legacy Bridge Mirror import/export
+    /// and reconstruction paths. Active Git-overlay status
     /// and checkpoint paths use the checkout's real `.git` repository, not this
     /// mirror. `heddle maintenance gc` already consolidates Heddle's native
-    /// store; this brings the bridge mirror to parity.
+    /// store; this brings the legacy Bridge Mirror to parity.
     ///
     /// Correctness: this uses [`repack_all_objects`], which gathers EVERY object
     /// on disk (every loose object and every pack), not the reachability closure

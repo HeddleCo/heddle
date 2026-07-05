@@ -2615,7 +2615,7 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     assert_eq!(
         mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]),
         base,
-        "undo should rewind the internal Git mirror branch as well as the visible Git checkout"
+        "undo should rewind the legacy Bridge Mirror branch as well as the visible Git checkout"
     );
     assert_eq!(git_stdout(temp.path(), &["status", "--short"]), "");
     let verify = json(temp.path(), &["--output", "json", "verify"]);
@@ -2976,7 +2976,7 @@ fn git_overlay_matrix_push_preserves_merge_git_checkpoint_tip() {
     assert_eq!(
         mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]),
         merge_sha,
-        "the bridge mirror should push the checkpoint commit, not a synthesized export"
+        "the legacy Bridge Mirror should push the checkpoint commit, not a synthesized export"
     );
     assert_eq!(
         git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
@@ -4445,7 +4445,7 @@ fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
     );
     assert!(
         !temp.path().join(".heddle/git").exists(),
-        "ingest-backed import should not recreate the legacy internal Git mirror"
+        "ingest-backed import should not recreate the legacy legacy Bridge Mirror"
     );
     let verify = json(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["verified"], true);

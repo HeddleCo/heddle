@@ -47,7 +47,7 @@ and assume the discipline holds.
    key. The exception is genuinely conditional fields whose presence
    itself carries meaning (e.g. `git_commit_preview`, only present in
    `--preview` mode); those are documented as conditional.
-3. **No leakage of unrelated context.** Bridge import-hint information
+3. **No leakage of unrelated context.** Git import guidance
    lives only in `heddle status --output json` (and the
    comprehensive `heddle doctor --output json`). Per-command outputs do not
    carry it. Transports do not silently piggy-back state.
@@ -258,7 +258,7 @@ in-progress operation.
 | `git_checkpoint` | object \| null | required | Latest git checkpoint, when configured. |
 | `changes` | object | required | Worktree status: `{modified: [], added: [], deleted: []}`. |
 
-**Note:** Bridge import-hint information is not part of this output.
+**Note:** Git import guidance is not part of this output.
 Use `heddle status --output json`.
 
 ---
@@ -3490,7 +3490,7 @@ itself):
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
 report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
-counts loose Git-overlay mirror objects packed into the mirror's own pack):
+counts loose legacy Bridge Mirror objects packed into the mirror's own pack):
 
 ```json
 {"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}

@@ -768,7 +768,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
     assert!(
         export["states_exported"].as_u64().unwrap_or(0) >= 1
             || export["threads_synced"].as_u64().unwrap_or(0) >= 1,
-        "explicit bridge export should write Git-format refs natively: {export}"
+        "explicit Git projection export should write Git-format refs natively: {export}"
     );
     let exported = open_git(&export_path).expect("open exported git repo");
     find_reference(&exported, "refs/heads/main").expect("export should write main branch");
@@ -856,7 +856,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         "undo should rewind the visible Git checkout without invoking git"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
@@ -864,7 +864,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         .to_string();
     assert_eq!(
         mirror_tip, base,
-        "undo should rewind the internal Git mirror branch without invoking git"
+        "undo should rewind the legacy Bridge Mirror branch without invoking git"
     );
 
     let status = assert_clean_json_without_git(&["--output", "json", "status"], &work);
@@ -877,7 +877,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
     );
 }
 
-/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the Git mirror
+/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the legacy Bridge Mirror
 /// to the parent — no revert commit recorded as Git history — while preserving
 /// the pre-undo state in heddle's thread history via the internal
 /// `undo-recovery` handle (heddle#305 r2: a heddle-internal ref, not a user
@@ -921,7 +921,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
     assert_eq!(undo["action"], "undo");
 
-    // Git mirror is hard-reset to the parent — not a revert commit on top.
+    // legacy Bridge Mirror is hard-reset to the parent — not a revert commit on top.
     assert_eq!(
         git_head_oid(&work),
         base,
@@ -1551,14 +1551,14 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
         "pull text should explain remote movement without requiring git on PATH: {pull}"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
         .expect("peel mirror main");
     assert_eq!(
         mirror_tip, advanced_tip,
-        "heddle pull should advance the native Git mirror without using git on PATH"
+        "heddle pull should advance the native legacy Bridge Mirror without using git on PATH"
     );
 }
 
@@ -1705,7 +1705,7 @@ fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path(
         .expect("peel checkout remote-tracking branch");
     assert_eq!(checkout_topic, topic_tip);
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_topic = find_reference(&mirror, "refs/remotes/origin/topic-remote")
         .expect("fetch should mirror remote-tracking branch")
         .peel_to_id()

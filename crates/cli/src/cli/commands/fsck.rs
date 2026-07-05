@@ -75,7 +75,7 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
         return Ok(vec![FsckRepair {
             name: "git_projection_metadata".to_string(),
             repaired: false,
-            detail: "no Git repository or legacy bridge mirror was found".to_string(),
+            detail: "no Git repository or legacy Bridge Mirror was found".to_string(),
             count: 0,
         }]);
     }

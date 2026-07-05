@@ -20,11 +20,13 @@ Target rows describe the next model and must not be cited as shipped behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
-  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Bridge Mirror,
-  Git Checkpoint, Repository Verification State, and Machine-Contract Proof.
+  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Git Projection Mapping,
+  Git Checkpoint, Repository Verification State, and Machine-Contract Proof. Use
+  Bridge Mirror only when describing legacy mirror migration or repair.
 - In Git-overlay mode, active Git reads and writes use the checkout's real
-  `.git`; `.heddle/git` is the Bridge Mirror for explicit bridge import/export,
-  sync, reconstruction, and maintenance paths.
+  `.git`. Heddle stores Git Projection Mapping metadata under
+  `.heddle/git-bridge/` and uses legacy Bridge Mirror data only as
+  migration or repair input when present.
 - `verified: true` means repository safety checks are clean. It does not mean
   there is no useful workflow action. Ready threads and local commits waiting to
   push can keep repository verification clean while setting a next action.
@@ -51,7 +53,7 @@ A clean verification report means all applicable dimensions agree:
 | Side-branch and tag import | Missing non-active Git branch tips are reported as `available` import work and do not block the active checkout. Tags visible to the checkout map to Heddle markers. | `tags_need_import`, `tag_marker_mismatch`; `available` is informational. |
 | Worktree | Git index/worktree and Heddle worktree compare cleanly. Native Heddle worktrees compare cleanly against the current state. | `dirty_worktree`, `needs_checkpoint`, native `uncaptured`, or worktree inspection `degraded`. |
 | Remote tracking | No upstream work must be integrated before local mutation. `remote_ahead` and `remote_untracked` are verified-clean publish guidance. | `remote_behind`, `remote_diverged`, `remote_contains_undone_checkpoint`, or remote check `degraded`. |
-| Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or bridge operation needs continue, abort, resolve, or raw-Git handoff. |
+| Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or Git projection operation needs continue, abort, resolve, or raw-Git handoff. |
 | Workflow | Ready work is reported as workflow guidance after repository safety is known, and merged-thread metadata agrees with target history. | `workflow_status: blocked` when ready work exists but a repository blocker prevents landing; `stale_integration_metadata` when merged-thread records no longer match target history. |
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. `available_with_doc_gaps` is currently non-blocking. | `machine_contract_gaps` / `schema_gaps`, command contract drift, schema validation failures. |
 | Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |

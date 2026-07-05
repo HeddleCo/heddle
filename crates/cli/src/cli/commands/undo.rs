@@ -198,7 +198,7 @@ pub fn cmd_undo(
 
     // heddle#305: capture the pre-undo state into thread history BEFORE the
     // reset, so the worktree content the undone batch(es) absorbed is never
-    // silently discarded. The reset below hard-resets the Git mirror and
+    // silently discarded. The reset below hard-resets the Git projection ref and
     // rewinds the heddle thread; recording the current tip in the internal
     // recovery ref keeps it a first-class, addressable recovery point —
     // durable even if a later divergent capture/commit strands the redo path.

@@ -640,7 +640,7 @@ impl Repository {
         // blob's bytes off-limits, materialize the human-readable
         // stub instead. The stub names who redacted it, when, why,
         // and whether the bytes have already been purged. Safe to
-        // include in worktrees, semantic diffs, and bridge-git
+        // include in worktrees, semantic diffs, and Git projection
         // exports (which themselves call through `materialize_tree`).
         // Errors loading the redactions store are propagated rather
         // than swallowed — a partial redaction read shouldn't

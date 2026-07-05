@@ -3,7 +3,7 @@
 //!
 //! This module centralizes the safety checks and recovery advice that surround
 //! Git-overlay checkpoint writes. It deliberately does not execute checkout,
-//! index, ref, or object mutations: those stay in the existing bridge,
+//! index, ref, or object mutations: those stay in the Git projection engine,
 //! checkpoint, repo::atomic, and refs::commit_and_publish paths.
 
 use std::path::Path;

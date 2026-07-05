@@ -163,8 +163,9 @@ pub struct GitOverlayTagTip {
 }
 
 /// How many Git commits reachable from a branch tip have no Heddle mapping
-/// (neither bridge-imported nor checkpointed). Used to report how far a Git
-/// branch moved out-of-band before `heddle adopt --ref` reconciles it.
+/// (neither imported/projection-mapped nor checkpointed). Used to report
+/// how far a Git branch moved out-of-band before `heddle adopt --ref`
+/// reconciles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitOverlayOutOfBandCommits {
     pub count: usize,

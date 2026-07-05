@@ -32,7 +32,7 @@ let git = SleyRepository::open_with(
 )?;
 ```
 
-Heddle would use this in bridge clone/import/export scratch paths instead of
+Heddle would use this in Git projection clone/import/export scratch paths instead of
 choosing between `open` and `discover` locally.
 
 ### Explicit Missing-Reference APIs

@@ -45,12 +45,12 @@ Heddle is an agent-native version control system built around three core ideas:
 ```text
 CLI / Web UI
   -> repository operations and hosted APIs
-  -> refs, oplog, worktree, semantic, bridge, authz
+  -> refs, oplog, worktree, semantic, Git projection, authz
   -> object store and metadata backends
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and bridge functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
+Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and Git interoperability/projection functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
@@ -237,7 +237,7 @@ This model supports Heddle's larger review and repository-intelligence story: co
 
 The semantic layer provides code-aware diff and structural inspection. It is intentionally helpful rather than magical: semantic output exists today, but can still be conservative.
 
-## Git Bridge And Remote Sync
+## Git Projection And Remote Sync
 
 Heddle supports:
 

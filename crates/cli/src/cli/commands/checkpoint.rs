@@ -3,7 +3,7 @@
 //!
 //! Our git-overlay model treats captures as granular sub-commit
 //! provenance and checkpoints as the Git commit equivalent that
-//! syncs the current Heddle state to the Git ref via the bridge.
+//! syncs the current Heddle state to the Git ref through Git projection.
 //!
 //! Resolved against main's "A11 cheap save" variant: the lightweight
 //! save semantic is already covered by `heddle capture`, so we keep

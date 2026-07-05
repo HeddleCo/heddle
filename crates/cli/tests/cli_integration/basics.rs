@@ -1965,7 +1965,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     assert!(!git_commit.is_empty());
 
     // Heddle records change_id provenance on `refs/notes/heddle`
-    // inside the bridge mirror at `.heddle/git/` rather than rewriting
+    // inside the legacy Bridge Mirror at `.heddle/git/` rather than rewriting
     // commit messages with a `Heddle-Change:` trailer — that keeps Git
     // commit SHAs stable across heddle imports/exports and keeps normal
     // `git log --all` in the user's repo free of Heddle metadata roots.
@@ -1980,7 +1980,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
         .expect("git notes show should run");
     assert!(
         notes.status.success(),
-        "expected refs/notes/heddle in the bridge mirror to record the checkpoint commit; stderr: {}",
+        "expected refs/notes/heddle in the legacy Bridge Mirror to record the checkpoint commit; stderr: {}",
         String::from_utf8_lossy(&notes.stderr)
     );
     let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -2392,7 +2392,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     );
 
     // Each landed thread should record a Heddle change id on the
-    // bridge mirror's `refs/notes/heddle` ref without publishing the
+    // legacy Bridge Mirror's `refs/notes/heddle` ref without publishing the
     // metadata notes ref into the user's ordinary `.git/refs`.
     for git_commit in [
         auth_ship["git_commit"].as_str().unwrap(),
@@ -2409,7 +2409,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
             .expect("git notes show should run");
         assert!(
             notes.status.success(),
-            "landed commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
+            "landed commit {git_commit} should have a heddle note in the legacy Bridge Mirror; stderr: {}",
             String::from_utf8_lossy(&notes.stderr)
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();

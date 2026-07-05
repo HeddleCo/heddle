@@ -363,7 +363,7 @@ impl std::fmt::Display for WriteThroughSkipReason {
                 write!(f, "the current Heddle state has not been exported to Git")
             }
             WriteThroughSkipReason::MirrorIsWorktree => {
-                write!(f, "the bridge mirror target is the checkout itself")
+                write!(f, "the legacy Bridge Mirror target is the checkout itself")
             }
             WriteThroughSkipReason::IndexAlreadyDirty => {
                 write!(f, "the Git index is already locked by another operation")
@@ -650,12 +650,12 @@ impl<'a> GitBridge<'a> {
         Ok(MirrorInitGuard::new_from_init(git_dir, did_create))
     }
 
-    /// Get the path to the Git mirror directory.
+    /// Get the path to the legacy Bridge Mirror directory.
     pub fn mirror_path(&self) -> PathBuf {
         self.heddle_repo.heddle_dir().join("git")
     }
 
-    /// Check if a Git mirror is initialized.
+    /// Check if a legacy Bridge Mirror is initialized.
     pub fn is_initialized(&self) -> bool {
         self.mirror_path().exists()
     }
@@ -2372,22 +2372,22 @@ impl Drop for MirrorInitGuard {
             tracing::warn!(
                 path = %self.path.display(),
                 error = %err,
-                "failed to roll back partial bridge mirror; manual cleanup may be required"
+                "failed to roll back partial legacy Bridge Mirror; manual cleanup may be required"
             );
         }
     }
 }
 
-/// Bridge policy: a thread is considered an "unclaimed bootstrap" when it
-/// points at an empty-tree state with no parents. That is the exact shape of
+/// Git projection policy: a thread is considered an "unclaimed bootstrap"
+/// when it /// points at an empty-tree state with no parents. That is the exact shape of
 /// the state produced by `Repository::seed_default_thread`, and it cannot
 /// occur through normal user work — any snapshot advances the tip to a state
 /// with either a non-empty tree or a non-empty parents list.
 ///
-/// When a user runs `heddle init` followed by `heddle bridge pull` (or
-/// `import`), the bootstrap `main` is unclaimed and the incoming git ref
-/// should win. This helper lets the bridge recognize that case without
-/// silently overwriting real work.
+/// When a user runs `heddle init` followed by `heddle pull` (or
+/// `import git`), the bootstrap `main` is unclaimed and the incoming git ref
+/// should win. This helper lets the Git projection engine recognize that
+/// case without silently overwriting real work.
 pub(crate) fn thread_is_unclaimed_bootstrap(
     heddle_repo: &HeddleRepository,
     change_id: &ChangeId,
@@ -3075,7 +3075,7 @@ pub(crate) fn write_mirror_managed_refs(
 /// would silently stop embargo retraction (a now-embargoed thread tip would never
 /// be rewound/deleted because its branch would be treated as a foreign ref to
 /// spare). Every ref currently in the mirror was put there by heddle (the mint
-/// reconcile, `import`, or `fetch`), so claiming them all as managed on the first
+/// reconcile, `import git`, or `fetch`), so claiming them all as managed on the first
 /// run is correct. A record that EXISTS but is empty (everything was legitimately
 /// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
 pub(crate) fn read_or_seed_mirror_managed_refs(
@@ -3632,7 +3632,7 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 /// `fetch_network_remote` but starts from an empty `init_bare` rather than an
 /// existing repo.
 ///
-/// Used by `bridge import --path <URL>` (Phase F): we clone into a
+/// Used by `import git --path <URL>` (Phase F): we clone into a
 /// scratch directory under the heddle repo's `.heddle/tmp/` and feed the
 /// resulting bare repo into the normal import path. Also used by `clone`
 /// for Git-overlay URLs, where `depth` carries through to a shallow clone.

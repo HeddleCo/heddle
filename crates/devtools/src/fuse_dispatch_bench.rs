@@ -592,8 +592,8 @@ fn prepare_sources(args: &Args) -> Result<Sources> {
             )?;
             // Populate from git_source by copying contents and capturing.
             // (We use the simpler `init+copy+capture` shape rather than
-            // bridge-git-import because the bridge expects a git remote
-            // wiring we don't need for a single-state workload.)
+            // import git because the Git projection import path expects a
+            // Git remote wiring we don't need for a single-state workload.)
             copy_tree_contents(&git_source, &hs)?;
             let _ = fs::remove_dir_all(hs.join(".git"));
             // Capture the initial state so threads have something to start from.

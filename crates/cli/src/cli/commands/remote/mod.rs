@@ -439,7 +439,7 @@ pub async fn cmd_push(
     }
 
     // Ad-hoc dual-push (heddle#25): after the primary push, also push to
-    // the named git-bridge mirror. Best-effort — mirror failure does not
+    // the named Git remote mirror. Best-effort — mirror failure does not
     // abort the primary push.
     if let Some(mirror_remote) = mirror.as_deref() {
         let mut bridge = GitBridge::new(&repo);

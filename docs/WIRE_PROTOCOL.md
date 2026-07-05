@@ -139,5 +139,5 @@ All core VCS commands are implemented:
 | Branching | `merge`, `rebase`, `resolve`, `cherry-pick`, `revert` |
 | Stashing | `stash` |
 | Remote | `remote`, `fetch`, `push`, `pull`, `clone`, `serve` |
-| Git Bridge | `bridge` |
+| Git Projection | `import git`, `export git`, `sync git` |
 | Utilities | `compare`, `collapse`, `completion` |

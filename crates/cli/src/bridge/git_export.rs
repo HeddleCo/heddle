@@ -235,7 +235,7 @@ pub fn export_tree(
             // record, export the stub instead of the bytes. This is the
             // single chokepoint between Heddle-side redactions and any
             // downstream Git remote (GitHub, internal mirrors, ...).
-            // Bytes that escape via the bridge are bytes that escape,
+            // Bytes that escape via Git projection are bytes that escape,
             // full stop — we cannot retroactively scrub them from
             // outside repos. The check sits *here*, not in
             // `materialize_blob`, because export reads `blob.content()`

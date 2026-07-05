@@ -495,16 +495,16 @@ fn realworld_git_annotated_tag_rename_round_trips() {
     .unwrap();
     heddle_without_git(&["import", "git"], &work).unwrap();
 
-    // The bridge mirror should expose the retargeted tag at the new
+    // The legacy Bridge Mirror should expose the retargeted tag at the new
     // tag oid; both A and B remain reachable.
     let mirror = work.join(".heddle").join("git");
-    let mirror_repo = open_git(&mirror).expect("open bridge mirror");
+    let mirror_repo = open_git(&mirror).expect("open legacy Bridge Mirror");
     let tag_ref = find_reference(&mirror_repo, "refs/tags/v0.1").expect("v0.1 ref present");
     let tag_oid = tag_ref.target().try_id().expect("tag oid").to_owned();
     assert_eq!(
         tag_oid,
         tag_b.id(),
-        "bridge mirror should track the retargeted tag oid"
+        "legacy Bridge Mirror should track the retargeted tag oid"
     );
     assert!(
         mirror_repo.find_object(a).is_ok(),

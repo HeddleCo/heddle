@@ -4,7 +4,8 @@
 /// Sentinel remote name for refs owned by the local repository.
 ///
 /// Local branches, tags, and notes use this owner when represented in the
-/// bridge parser. A user remote named `git` would collide with that sentinel.
+/// Git projection parser. A user remote named `git` would collide with
+/// that sentinel.
 pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
 
 /// The content namespaces Heddle intentionally mirrors as named Git refs.
@@ -161,7 +162,7 @@ impl<'a> GitRefName<'a> {
             .or_else(|| self.note_name())
     }
 
-    /// Parse a bridge-visible ref. Notes are content refs in Heddle and are
+    /// Parse a Git-projection-visible ref. Notes are content refs in Heddle and are
     /// accepted here to match hosted mirror behavior.
     pub fn bridge_ref(&self) -> Option<ParsedGitRef<'a>> {
         match self.namespace() {

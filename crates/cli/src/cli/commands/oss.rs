@@ -14,7 +14,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "topic": "git-overlay",
-                "summary": "Use Heddle as the daily loop with Git compatibility through the bridge: status, diff, commit, start --path, ready, land, push, undo, verify.",
+                "summary": "Use Heddle as the daily loop with explicit Git projection compatibility: status, diff, commit, start --path, ready, land, push, undo, verify.",
                 "steps": [
                     "heddle status",
                     "heddle init",
