@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
 };
 use crate::{

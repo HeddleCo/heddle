@@ -27,7 +27,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
         VerifyOptions::new()
             .with_start_path(start.clone())
             .with_machine_contract_input(MachineContractInput::from_coverage(
-                super::git_overlay_health::machine_contract_coverage(),
+                super::verification_health::machine_contract_coverage(),
             )),
     )?;
     if profile_enabled() {

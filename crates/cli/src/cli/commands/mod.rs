@@ -34,7 +34,7 @@ mod ff_record;
 mod fsck;
 mod gc;
 mod git_projection;
-mod git_overlay_health;
+mod verification_health;
 mod git_overlay_txn;
 mod goto;
 pub(crate) mod heddleignore_defaults;

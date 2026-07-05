@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},
-    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::{require_resolved_state, resolve_state_id},
     snapshot::ensure_current_state,
 };

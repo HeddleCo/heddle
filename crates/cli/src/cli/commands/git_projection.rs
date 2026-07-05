@@ -26,7 +26,7 @@ use super::{
         create_git_checkpoint_with_worktree_status,
     },
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::RepositoryVerificationState,
+    verification_health::RepositoryVerificationState,
     git_overlay_txn,
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{

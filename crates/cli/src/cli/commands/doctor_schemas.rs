@@ -28,7 +28,7 @@ use sley::Repository as SleyRepository;
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
-    git_overlay_health::{MachineContractCoverage, machine_contract_coverage},
+    verification_health::{MachineContractCoverage, machine_contract_coverage},
     schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
 };
 use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};

@@ -14,7 +14,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::merge_thread_into_current,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
@@ -631,7 +631,7 @@ fn emit_thread_resolve(cli: &Cli, repo: &Repository, output: &ThreadResolveOutpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::commands::git_overlay_health::VerificationCheck;
+    use crate::cli::commands::verification_health::VerificationCheck;
 
     fn trust_state(verified: bool) -> RepositoryVerificationState {
         let check = VerificationCheck {
@@ -655,7 +655,7 @@ mod tests {
             details: std::collections::BTreeMap::new(),
         };
         let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+            crate::cli::commands::verification_health::machine_contract_coverage();
         RepositoryVerificationState {
             verified,
             status: if verified { "clean" } else { "needs_import" }.to_string(),
@@ -671,7 +671,7 @@ mod tests {
             active_operation: None,
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
                 &machine_contract_coverage,
             )
             .to_string(),

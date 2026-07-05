@@ -29,7 +29,7 @@ use sley::{
 use super::super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
     },

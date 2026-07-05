@@ -34,7 +34,7 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     git_projection::{GitIndexPlan, git_index_plan_for_root},
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
@@ -336,7 +336,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         StatusOptions::new(detail, status_options)
             .with_start_path(start)
             .with_machine_contract_input(MachineContractInput::from_coverage(
-                super::git_overlay_health::machine_contract_coverage(),
+                super::verification_health::machine_contract_coverage(),
             )),
     )?;
     debug!(
@@ -2321,7 +2321,7 @@ mod tests {
     #[test]
     fn plain_git_status_serializes_empty_recommended_action_as_null() {
         let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+            crate::cli::commands::verification_health::machine_contract_coverage();
         let trust = RepositoryVerificationState {
             verified: true,
             status: "verified".to_string(),
@@ -2337,7 +2337,7 @@ mod tests {
             active_operation: None,
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
                 &machine_contract_coverage,
             )
             .to_string(),

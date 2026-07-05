@@ -26,7 +26,7 @@ use tokio::time::{Duration, sleep};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     marker::cmd_thread_marker,
     mount_lifecycle,
     next_action::normalized_action,

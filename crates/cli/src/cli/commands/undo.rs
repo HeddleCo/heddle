@@ -15,7 +15,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,

@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::cli::{
     cli_args::{AgentCommands, AgentServeArgs, Cli},

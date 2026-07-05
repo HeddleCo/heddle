@@ -26,7 +26,7 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     error_envelope::print_error_with_hint,
-    git_overlay_health::{
+    verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         git_overlay_mutation_preflight_advice_with_worktree_status,

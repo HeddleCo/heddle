@@ -130,7 +130,7 @@ fn repository_verification_state_from_health_inner(
         .iter()
         .find(|check| {
             matches!(check.name.as_str(), "head_mapping" | "tag_mapping")
-                && git_overlay_mapping_status_blocks(&check.status)
+                && projection_mapping_status_blocks(&check.status)
         })
         .or_else(|| {
             health
@@ -794,7 +794,7 @@ fn mapping_verification_check(
         );
     }
     if let Some(mapping) = find_health_check(health, "head_mapping")
-        && git_overlay_mapping_status_blocks(&mapping.status)
+        && projection_mapping_status_blocks(&mapping.status)
     {
         return verification_check_from_health("Mapping", mapping, recommended_action, health);
     }
@@ -837,7 +837,7 @@ fn mapping_verification_check(
     )
 }
 
-fn git_overlay_mapping_status_blocks(status: &str) -> bool {
+fn projection_mapping_status_blocks(status: &str) -> bool {
     !matches!(status, "clean" | "git_backed")
 }
 
@@ -1022,7 +1022,7 @@ pub(crate) fn build_repository_verification_state(
     } else {
         Ok(None)
     };
-    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, &worktree_status);
     repository_verification_state_from_health_with_worktree_status(repo, health, &worktree_status)
 }
 
@@ -1051,7 +1051,7 @@ pub(crate) fn build_repository_verification_state_profiled(
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
     let health_start = std::time::Instant::now();
-    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, &worktree_status);
     let health_ms = health_start.elapsed().as_millis();
 
     let from_health_start = std::time::Instant::now();
@@ -1082,7 +1082,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
-    let health = build_git_overlay_health_with_worktree_status(repo, worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, worktree_status);
     repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
 }
 
@@ -2093,8 +2093,8 @@ fn git_default_remote_name_from_repo(repo: &SleyRepository) -> Option<String> {
         .find(|name| name == "origin")
 }
 
-pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
-    build_git_overlay_health_inner(repo, None)
+pub(crate) fn build_verification_health(repo: &Repository) -> GitOverlayHealth {
+    build_verification_health_inner(repo, None)
 }
 
 /// `status` hot-path variant: reuse the caller's already-computed git-overlay
@@ -2103,14 +2103,14 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
 /// `status` command otherwise pays it twice (here and in `build_status_output`).
 /// `worktree_status` is the exact `Result` from `git_overlay_worktree_status()`,
 /// so the clean/dirty/degraded classification stays byte-identical.
-pub(crate) fn build_git_overlay_health_with_worktree_status(
+pub(crate) fn build_verification_health_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> GitOverlayHealth {
-    build_git_overlay_health_inner(repo, Some(worktree_status))
+    build_verification_health_inner(repo, Some(worktree_status))
 }
 
-fn build_git_overlay_health_inner(
+fn build_verification_health_inner(
     repo: &Repository,
     precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
 ) -> GitOverlayHealth {

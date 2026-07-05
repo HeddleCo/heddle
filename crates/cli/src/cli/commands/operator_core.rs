@@ -14,7 +14,7 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::{IndexStage, Repository as SleyRepository};
 
 use super::{
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, action_template, repository_verification_blockers,
         repository_verification_primary_command,
     },
@@ -738,7 +738,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
+    use crate::cli::commands::verification_health::{VerificationCheck, machine_contract_coverage};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED

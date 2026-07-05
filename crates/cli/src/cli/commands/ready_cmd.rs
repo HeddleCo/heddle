@@ -17,7 +17,7 @@ use serde::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
@@ -114,10 +114,10 @@ impl Serialize for ReadyOutput {
             normalized_action(self.operator.recommended_action.clone().unwrap_or_default());
         let next_action_template = next_action
             .as_deref()
-            .and_then(super::git_overlay_health::action_template);
+            .and_then(super::verification_health::action_template);
         let recommended_action_template = recommended_action
             .as_deref()
-            .and_then(super::git_overlay_health::action_template);
+            .and_then(super::verification_health::action_template);
         let verification = serde_json::to_value(&self.trust).map_err(S::Error::custom)?;
         let readiness = self.readiness_summary();
 
@@ -704,7 +704,7 @@ fn missing_ready_capture_intent_report_for(
             "commit the work with -m/--message/--intent before readiness checks".to_string(),
         ],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::git_overlay_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
 }
@@ -869,7 +869,7 @@ fn trust_blocked_report_for(
         conflict_count: 0,
         blockers: vec!["repository verification is blocked".to_string()],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::git_overlay_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
 }
@@ -880,7 +880,7 @@ mod tests {
     use repo::{OperationKind, OperationScope};
 
     use super::*;
-    use crate::cli::commands::git_overlay_health;
+    use crate::cli::commands::verification_health;
 
     fn report(merge_relation: &str, recommended_action: &str) -> ThreadPreviewReport {
         ThreadPreviewReport {
@@ -898,7 +898,7 @@ mod tests {
             conflict_count: 0,
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
-            recommended_action_template: git_overlay_health::action_template(recommended_action),
+            recommended_action_template: verification_health::action_template(recommended_action),
             thread_health: "ready".to_string(),
         }
     }

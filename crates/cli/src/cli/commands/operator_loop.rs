@@ -6,7 +6,7 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationSta
 use super::{
     action_line::print_next_step,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
@@ -66,7 +66,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Sync)?;
 
     if let Some(remote) = repo.git_remote_tracking_status()? {
-        let remote_decision = super::git_overlay_health::remote_drift_decision(&repo, &remote);
+        let remote_decision = super::verification_health::remote_drift_decision(&repo, &remote);
         if remote_decision.status == "remote_diverged" {
             let recommended_action = remote_decision
                 .primary_action

@@ -15,7 +15,7 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
     collapse::{CollapsePublishedRef, collapse_resolved_states},
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
     },
     git_overlay_txn,

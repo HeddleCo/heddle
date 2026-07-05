@@ -22,7 +22,7 @@ use super::{
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
@@ -61,7 +61,7 @@ pub(crate) fn push_git_overlay_refs(
     Option<String>,
     Option<GitOverlayTrackingRefresh>,
     Vec<String>,
-    super::git_overlay_health::RepositoryVerificationState,
+    super::verification_health::RepositoryVerificationState,
 )> {
     let remote_name = resolve_default_remote_name(repo, remote)?;
     let scope = if all_threads {

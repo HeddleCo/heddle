@@ -14,7 +14,7 @@ use super::{
     advice::RecoveryAdvice,
     command_runtime_contract,
     ff_record::record_ff_advance,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         repository_verification_primary_command,
     },

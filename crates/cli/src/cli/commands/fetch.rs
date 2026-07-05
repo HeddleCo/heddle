@@ -16,7 +16,7 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, git_overlay_health::build_repository_verification_state,
+    advice::RecoveryAdvice, verification_health::build_repository_verification_state,
     remote::resolved_default_remote_name,
 };
 #[cfg(feature = "client")]
@@ -43,7 +43,7 @@ struct FetchOutput {
     #[allow(dead_code)]
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
-    trust: super::git_overlay_health::RepositoryVerificationState,
+    trust: super::verification_health::RepositoryVerificationState,
 }
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {

@@ -23,7 +23,7 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         override_trust_recommended_action, repository_verification_blocked_advice,
         serialize_empty_action_as_null,

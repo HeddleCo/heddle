@@ -12,7 +12,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         build_repository_verification_state_profiled,
     },

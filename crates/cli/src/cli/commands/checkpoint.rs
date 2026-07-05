@@ -21,7 +21,7 @@ use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
     action_line::print_next, command_catalog::ActionTemplate,
-    git_overlay_health::RepositoryVerificationState, git_overlay_txn,
+    verification_health::RepositoryVerificationState, git_overlay_txn,
     snapshot::ensure_current_state, worktree_safety::dirty_worktree_advice,
 };
 use crate::{

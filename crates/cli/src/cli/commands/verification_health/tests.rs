@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tests for the shared repository verification contract.
 //!
-//! Extracted verbatim from `git_overlay_health.rs` (heddle#609 phase 2):
+//! Extracted verbatim from `verification_health.rs` (heddle#609 phase 2):
 //! the `mod tests` body moved into this sibling file unchanged (de-indented
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
@@ -101,9 +101,9 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
             .expect("reconcile command should expose a template")
             .argv_template[1..],
         [
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--prefer",
             "heddle",
             "--ref",

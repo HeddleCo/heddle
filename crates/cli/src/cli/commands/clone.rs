@@ -34,7 +34,7 @@ use sley::{
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;

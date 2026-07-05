@@ -15,9 +15,9 @@ use serde::Serialize;
 
 use super::{
     action_line::print_next_step,
-    git_overlay_health::{
+    verification_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
-        build_git_overlay_health, build_plain_git_verification_probe,
+        build_verification_health, build_plain_git_verification_probe,
         build_repository_verification_state, primary_recovery_command,
         remote_tracking_with_verification_action, serialize_empty_action_as_null,
         trust_visible_worktree_status,
@@ -175,7 +175,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         total: probe.changes.change_count(),
     };
     let trust = probe.trust.clone();
-    let git_overlay_health = GitOverlayHealth {
+    let verification_health = GitOverlayHealth {
         status: trust.status.clone(),
         clean: trust.verified,
         summary: trust.summary.clone(),
@@ -198,7 +198,7 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         storage_model: "git-only".to_string(),
         hosted_enabled: false,
         import_guidance: None,
-        verification_health: git_overlay_health,
+        verification_health,
         trust: trust.clone(),
         operation: None,
         remote_tracking: None,
@@ -241,7 +241,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
-    let git_overlay_health = build_git_overlay_health(&repo);
+    let verification_health = build_verification_health(&repo);
     let trust = build_repository_verification_state(&repo);
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
@@ -300,13 +300,13 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         .map(is_synthetic_root)
         .unwrap_or(true);
     let mut health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
-    if !git_overlay_health.clean && operation.is_none() {
-        health.status = git_overlay_health.status.clone();
-        health.recommended_action = primary_recovery_command(&git_overlay_health)
+    if !verification_health.clean && operation.is_none() {
+        health.status = verification_health.status.clone();
+        health.recommended_action = primary_recovery_command(&verification_health)
             .unwrap_or("heddle doctor")
             .to_string();
         if health.blockers.is_empty() {
-            health.blockers.push(git_overlay_health.summary.clone());
+            health.blockers.push(verification_health.summary.clone());
         }
     }
     let workspace = diagnose_workspace(&summaries);
@@ -376,7 +376,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
                 recommended_command: hint.recommended_command,
             }
         }),
-        verification_health: git_overlay_health,
+        verification_health,
         trust: trust.clone(),
         operation: operation.clone(),
         remote_tracking: remote_tracking.clone(),

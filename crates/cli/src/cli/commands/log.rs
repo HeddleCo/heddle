@@ -25,7 +25,7 @@ use super::{
     action_line::{format_next_step_dim, print_next_step},
     advice::RecoveryAdvice,
     expand::{CollapseAnnotation, collapse_annotations_for_states},
-    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
     snapshot::ensure_current_state,
 };

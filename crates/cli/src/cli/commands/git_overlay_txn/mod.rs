@@ -18,7 +18,7 @@ use repo::{CommitGraphIndex, Repository, RepositoryCapability, thread_flag};
 use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionFields,
-    git_overlay_health::{
+    verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
@@ -193,7 +193,7 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
             .git_remote_tracking_status()
             .ok()
             .flatten()
-            .map(|remote| super::git_overlay_health::remote_drift_decision(repo, &remote));
+            .map(|remote| super::verification_health::remote_drift_decision(repo, &remote));
         let primary_command = remote_decision
             .as_ref()
             .and_then(|decision| decision.primary_action.clone())
@@ -374,7 +374,7 @@ fn checkpoint_preflight_advice(
     trust: &RepositoryVerificationState,
     action: &str,
 ) -> RecoveryAdvice {
-    let primary_command = super::git_overlay_health::remote_drift_primary_action(repo)
+    let primary_command = super::verification_health::remote_drift_primary_action(repo)
         .unwrap_or_else(|| {
             if trust.recommended_action.trim().is_empty() {
                 "heddle verify".to_string()
@@ -417,7 +417,7 @@ fn missing_git_checkpoint_identity_advice(action: &str, retry_command: &str) -> 
 
 fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerificationState {
     if is_commit_action(&trust.recommended_action) {
-        super::git_overlay_health::override_trust_recommended_action(&mut trust, "heddle status");
+        super::verification_health::override_trust_recommended_action(&mut trust, "heddle status");
     }
     let status_action = "heddle status".to_string();
     let status_template = ActionFields::from_action(&status_action).template;
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn commit_blocked_by_trust_advice_uses_trust_recovery() {
         let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+            crate::cli::commands::verification_health::machine_contract_coverage();
         let trust = RepositoryVerificationState {
             verified: false,
             status: "operation_in_progress".to_string(),
@@ -532,7 +532,7 @@ mod tests {
             active_operation: Some("Git merge (in-progress)".to_string()),
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
                 &machine_contract_coverage,
             )
             .to_string(),

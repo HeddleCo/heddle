@@ -37,7 +37,7 @@ use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
-    git_overlay_health::{
+    verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         override_trust_recommended_action, serialize_empty_action_as_null,

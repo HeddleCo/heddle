@@ -16,7 +16,7 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         serialize_empty_action_as_null,
     },
