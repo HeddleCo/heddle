@@ -2578,8 +2578,8 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].display` | string | required | Joined command path. |
 | `commands[].aliases` | array<string> | required | Alternate command spellings advertised by the command contract table. |
 | `commands[].tier` | string | required | Derived discovery tier for broad filtering (`everyday`, `advanced`, or `hidden`). |
-| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_adapter`, `automation`, `admin`, or `internal`). |
-| `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_adapter`, or `hidden`). |
+| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_projection`, `automation`, `admin`, or `internal`). |
+| `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_projection`, or `hidden`). |
 | `commands[].help_rank` | int | required | Stable ordering key for human command discovery. Lower ranks appear earlier. |
 | `commands[].canonical_command` | string \| null | required | Canonical Heddle command for Git-shaped aliases; `null` for native commands. |
 | `commands[].canonical_action` | object \| null | required | Structured canonical mapping for Git-shaped aliases. Contains `command`, `kind`, `executable`, `note`, `argv`, and `template`; `null` for native commands. `kind` is `direct_command`, `command_family`, `workflow`, or `conceptual_home`. |

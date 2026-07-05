@@ -1015,7 +1015,7 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.surface,
-                "native" | "git_adapter" | "automation" | "admin" | "internal"
+                "native" | "git_projection" | "automation" | "admin" | "internal"
             ),
             "`{display}` has unknown product surface `{}`",
             contract.surface
@@ -1023,27 +1023,27 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.help_visibility,
-                "everyday" | "advanced" | "git_adapter" | "hidden"
+                "everyday" | "advanced" | "git_projection" | "hidden"
             ),
             "`{display}` has unknown help visibility `{}`",
             contract.help_visibility
         );
-        if contract.help_visibility == "git_adapter" {
+        if contract.help_visibility == "git_projection" {
             assert_eq!(
-                contract.surface, "git_adapter",
-                "`{display}` Git adapter commands must live on the Git adapter surface"
+                contract.surface, "git_projection",
+                "`{display}` Git projection commands must live on the Git projection surface"
             );
             assert!(
                 contract.canonical_command.is_some(),
-                "`{display}` Git-shaped aliases must name a canonical Heddle command"
+                "`{display}` Git projection commands must name a canonical Heddle command"
             );
             assert!(
                 contract.canonical_kind.is_some(),
-                "`{display}` Git-shaped aliases must classify the canonical action"
+                "`{display}` Git projection commands must classify the canonical action"
             );
             assert!(
                 contract.canonical_note.is_some(),
-                "`{display}` Git-shaped aliases must explain the canonical action"
+                "`{display}` Git projection commands must explain the canonical action"
             );
         }
         if contract.help_visibility == "everyday" {
@@ -1865,8 +1865,8 @@ fn command_contract_table_drives_help_tiers() {
         (
             "switch",
             "advanced",
-            "git_adapter",
-            "git_adapter",
+            "git_projection",
+            "git_projection",
             Some("thread switch"),
             Some("direct_command"),
             false,

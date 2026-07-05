@@ -295,7 +295,7 @@ struct CommandContract {
     /// Area grouping for the `heddle help advanced` listing (heddle#652).
     /// Only meaningful on native-surface root commands with an advanced
     /// help visibility; commands on the `automation` / `admin` /
-    /// `git_adapter` surfaces derive their group from the surface itself
+    /// `git_projection` surfaces derive their group from the surface itself
     /// (see [`advanced_help_groups`]). The
     /// `advanced_help_groups_cover_every_advanced_verb` test forces
     /// every advanced native root command to pick one, so the grouped
@@ -1047,11 +1047,11 @@ const fn exits(
     }
 }
 
-const fn git_adapter_alias(
+const fn git_projection_alias(
     contract: CommandContract,
     canonical_command: &'static str,
 ) -> CommandContract {
-    git_adapter_action(
+    git_projection_action(
         contract,
         canonical_command,
         "direct_command",
@@ -1059,15 +1059,15 @@ const fn git_adapter_alias(
     )
 }
 
-const fn git_adapter_action(
+const fn git_projection_action(
     contract: CommandContract,
     canonical_command: &'static str,
     canonical_kind: &'static str,
     canonical_note: &'static str,
 ) -> CommandContract {
     CommandContract {
-        surface: "git_adapter",
-        help_visibility: "git_adapter",
+        surface: "git_projection",
+        help_visibility: "git_projection",
         canonical_command: Some(canonical_command),
         canonical_kind: Some(canonical_kind),
         canonical_note: Some(canonical_note),
@@ -1420,7 +1420,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
-    entry(&["import"], surface(GROUP, "git_adapter")),
+    entry(&["import"], surface(GROUP, "git_projection")),
     entry(
         &["import", "git"],
         exits(
@@ -1439,7 +1439,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["export"], surface(GROUP, "git_adapter")),
+    entry(&["export"], surface(GROUP, "git_projection")),
     entry(
         &["export", "git"],
         json_discriminators(
@@ -1460,7 +1460,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["sync", "git"],
         exits(
-            git_adapter_action(
+            git_projection_action(
                 json_discriminators(
                     documented_schemas(IMPORTING_MUTATION, &["sync git"]),
                     &[json_discriminator(
@@ -1763,7 +1763,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["context", "reason", "git"],
         surface(
             opaque_schemas(DATA_MUTATION, &["context reason git"]),
-            "git_adapter",
+            "git_projection",
         ),
     ),
     entry(&["daemon"], surface(GROUP, "admin")),
@@ -1890,7 +1890,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fetch"],
-        git_adapter_action(
+        git_projection_action(
             json_discriminators(
                 documented_schemas(
                     CommandContract {
@@ -2554,7 +2554,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash"],
-        git_adapter_action(
+        git_projection_action(
             READ_TEXT,
             "capture",
             "conceptual_home",
@@ -2563,7 +2563,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "push"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(WORKTREE_ONLY_MUTATION, &["stash push"]),
             "capture",
             "workflow",
@@ -2572,7 +2572,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "list"],
-        git_adapter_action(
+        git_projection_action(
             json_discriminators(
                 documented_schemas(READ_JSON, &["stash list"]),
                 &[json_discriminator(
@@ -2588,7 +2588,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "pop"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(
                 CommandContract {
                     destructive_data: true,
@@ -2603,7 +2603,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "apply"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(WORKTREE_ONLY_MUTATION, &["stash apply"]),
             "undo",
             "conceptual_home",
@@ -2612,7 +2612,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "drop"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash drop"]),
             "thread captures",
             "conceptual_home",
@@ -2621,7 +2621,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "clear"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash clear"]),
             "thread captures",
             "conceptual_home",
@@ -2630,7 +2630,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "show"],
-        git_adapter_alias(
+        git_projection_alias(
             json_discriminators(
                 documented_schemas(READ_JSON, &["stash show"]),
                 &[json_discriminator(
@@ -2724,7 +2724,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["switch"],
-        git_adapter_alias(
+        git_projection_alias(
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["switch"]),
                 &[json_discriminator(
@@ -4159,7 +4159,7 @@ fn advanced_help_root_entries() -> Vec<&'static CommandContractEntry> {
 /// as `(display title, verbs)` pairs (heddle#652). The grouping is
 /// contract-table data, not a hand-maintained help string: native
 /// advanced commands carry an explicit `help_category` on their
-/// registration, while `automation` / `admin` / `git_adapter` commands
+/// registration, while `automation` / `admin` / `git_projection` commands
 /// derive their group from the surface they already declare. Verbs keep
 /// contract order (help_rank, then name) within each group — the same
 /// ordering the flat list used. Feature-gated verbs absent from the
@@ -4202,7 +4202,7 @@ fn advanced_help_group_id(contract: &CommandContract) -> &'static str {
     match contract.surface {
         "automation" => "automation",
         "admin" => "admin",
-        "git_adapter" => "git-interop",
+        "git_projection" => "git-interop",
         _ => contract.help_category.unwrap_or(""),
     }
 }
