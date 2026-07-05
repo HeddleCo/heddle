@@ -2962,11 +2962,13 @@ active Git-overlay `.git`:
 {"initialized": true, "path": "/work/project/.heddle/git"}
 ```
 
-`heddle bridge git export --output json` emits:
+`heddle bridge git export --destination /work/project.git --output json` emits:
 
 ```json
-{"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project/.heddle/git"}
+{"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
+
+Export requires an explicit destination and does not default to the repo-local Bridge Mirror.
 
 `heddle bridge git import --output json` emits:
 

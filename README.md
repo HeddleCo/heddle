@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to adopt the repo
 
-Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and bridge metadata in `.heddle`. Lower-level `heddle bridge git ...` commands remain available for explicit Git-adapter import/export/sync work.
+Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and bridge metadata in `.heddle`. Lower-level `heddle bridge git ...` commands remain available for explicit Git-adapter import/export/sync work; they are not the active Git Overlay store.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 

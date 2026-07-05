@@ -135,13 +135,13 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 ## Git Repair Surface
 
-- The replacement for `bridge git reconcile` is `heddle fsck --repair git`.
+- The replacement for `bridge git reconcile` is a Git repair mode on `fsck`; target spelling is `fsck --repair git` once the flag is implemented.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
-- `heddle fsck --repair git` may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
-- `heddle fsck --repair git` does not import missing Git commits by default; history expansion belongs to `adopt`, `import git`, or `pull`.
-- `heddle fsck --repair git` may migrate needed residual bytes from an old `.heddle/git` Bridge Mirror into Raw Git Object Residual storage.
-- `heddle fsck --repair git` reports when an old mirror is removable but does not delete it; deletion belongs to maintenance cleanup or an explicit cleanup flag.
+- The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
+- The Git repair mode does not import missing Git commits by default; history expansion belongs to `adopt`, `import git`, or `pull`.
+- The Git repair mode may migrate needed residual bytes from an old `.heddle/git` Bridge Mirror into Raw Git Object Residual storage.
+- The Git repair mode reports when an old mirror is removable but does not delete it; deletion belongs to maintenance cleanup or an explicit cleanup flag.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
 - Normal user output should not expose Git Projection Mapping internals. Verbose, fsck, import/export dry-run, and diagnostics can.
 - `log` / `show --verbose` should keep showing the Git Checkpoint commit ID as the user-facing Git handle.
