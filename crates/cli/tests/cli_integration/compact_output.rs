@@ -156,12 +156,12 @@ fn status_compact_emits_only_decision_surface() {
     );
     assert_only_compact_keys(&compact, "status");
 
-    // Contrast: the full contract still carries the noisy metadata the
+    // Contrast: the full contract still carries verification metadata the
     // compact projection drops.
     let full = full_json(&["status"], &temp);
     assert!(
-        full.get("git_overlay_health").is_some() && full.get("verification").is_some(),
-        "full status must keep the metadata compact drops: {full}"
+        full.get("git_overlay_health").is_none() && full.get("verification").is_some(),
+        "full status must expose verification without the legacy git_overlay_health alias: {full}"
     );
     assert!(
         compact.get("git_overlay_health").is_none() && compact.get("verification").is_none(),

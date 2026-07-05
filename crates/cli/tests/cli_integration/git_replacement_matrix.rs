@@ -853,7 +853,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
     );
 
     let status = assert_clean_json_without_git(&["--output", "json", "status"], &work);
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
+    assert_eq!(status["verification"]["status"], "clean");
     assert!(
         status["changes"]["modified"].as_array().unwrap().is_empty()
             && status["changes"]["added"].as_array().unwrap().is_empty()

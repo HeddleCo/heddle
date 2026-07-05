@@ -123,6 +123,8 @@ pub struct StatusReport {
     #[serde(skip)]
     #[schemars(skip)]
     pub git_overlay_import_hint: Option<GitOverlayImportHintReport>,
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub git_overlay_health: GitOverlayHealth,
     pub thread: Option<String>,
     pub base_state: Option<String>,

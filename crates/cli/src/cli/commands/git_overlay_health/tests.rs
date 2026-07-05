@@ -11,7 +11,6 @@ use heddle_core::status::next_action::{
     remote_tracking_next_action,
 };
 use repo::{GitRemoteTrackingStatus, Repository};
-use sley::Repository as SleyRepository;
 use tempfile::TempDir;
 
 use super::{
@@ -382,8 +381,10 @@ fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
         }
     }
 
-    let git_repo = SleyRepository::discover(root).expect("open git repo");
-    let status = super::plain_git_worktree_status(root, &git_repo).expect("status");
+    let status = super::build_plain_git_verification_probe(root)
+        .expect("probe result")
+        .expect("plain git probe")
+        .changes;
 
     let target = PathBuf::from("file.txt");
     assert!(

@@ -172,13 +172,6 @@ in-progress operation.
   "hosted_enabled": false,
   "operation": null,
   "remote_tracking": null,
-  "git_overlay_health": {
-    "status": "clean",
-    "clean": true,
-    "summary": "Git overlay and Heddle agree",
-    "recovery_commands": [],
-    "checks": []
-  },
   "verification": {
     "verified": true,
     "status": "clean",
@@ -295,7 +288,6 @@ in-progress operation.
 | `hosted_enabled` | bool | required | Whether the repo is connected to a hosted server. |
 | `operation` | object \| null | required | In-progress operation (`merge`, `rebase`, …) or `null`. |
 | `remote_tracking` | object \| null | required | Remote drift summary or `null`. |
-| `git_overlay_health` | object | required | Compatibility health view derived from the shared verification checks. |
 | `verification` | object | required | Full `RepositoryVerificationState`; status next actions defer to this when verification is blocked. |
 | `thread` | string \| null | required | Current thread name; `null` for detached HEAD. |
 | `base_state`, `base_root` | string \| null | required | Thread base anchor change-ids. |

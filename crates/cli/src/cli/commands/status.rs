@@ -11,8 +11,7 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
-    ChangesInfo, CoordinationStatus, FastShortStatusReport,
-    GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
+    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
     MachineContractInput, MaterializedThreadInfo, StatusDetail, StatusOptions,
     StatusReport as StatusOutput, changes_from_worktree_status, changes_paths,
     fast_short_status_report, status as core_status,
@@ -57,7 +56,6 @@ struct PlainGitStatusOutput {
     heddle_initialized: bool,
     git_branch: Option<String>,
     path: String,
-    git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
@@ -235,23 +233,6 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
     };
     let changes = changes_from_worktree_status(&probe.changes);
     let changed_path_count = probe.changes.change_count();
-    let git_overlay_health = GitOverlayHealth {
-        status: probe.trust.status.clone(),
-        clean: probe.trust.verified,
-        summary: probe.trust.summary.clone(),
-        recovery_commands: probe.trust.recovery_commands.clone(),
-        checks: probe
-            .trust
-            .checks
-            .iter()
-            .map(|check| GitOverlayHealthCheck {
-                name: check.name.clone(),
-                status: check.status.clone(),
-                summary: check.summary.clone(),
-                details: check.details.clone(),
-            })
-            .collect(),
-    };
     let trust = probe.trust;
     let git_index = git_index_plan_for_root(&probe.root)?.map(core_git_index_plan);
     Ok(Some(PlainGitStatusOutput {
@@ -270,7 +251,6 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
         changed_path_count,
         changes,
         git_index,
-        git_overlay_health,
         trust,
     }))
 }
@@ -1866,10 +1846,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        build_status_output, combined_verdict_axes, coordination_axis_clean,
-        coordination_label, render_status_materialized, resolve_coordination_with_trust,
+        ChangesInfo, CoordinationStatus, MaterializedThreadInfo, PlainGitStatusOutput,
+        RepositoryVerificationState, assess_materialized_threads, build_status_output,
+        combined_verdict_axes, coordination_axis_clean, coordination_label,
+        render_status_materialized, resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -2390,13 +2370,6 @@ mod tests {
             heddle_initialized: false,
             git_branch: Some("main".to_string()),
             path: "/tmp/repo".to_string(),
-            git_overlay_health: GitOverlayHealth {
-                status: "healthy".to_string(),
-                clean: true,
-                summary: "plain Git repository".to_string(),
-                recovery_commands: Vec::new(),
-                checks: Vec::new(),
-            },
             recommended_action: trust.recommended_action.clone(),
             recommended_action_template: trust.recommended_action_template.clone(),
             recovery_commands: trust.recovery_commands.clone(),

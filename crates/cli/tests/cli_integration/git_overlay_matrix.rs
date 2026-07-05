@@ -978,7 +978,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     assert_eq!(status["repository_capability"], "plain-git");
     assert_eq!(status["heddle_initialized"], false);
     assert_eq!(status["git_branch"], "trunk");
-    assert_eq!(status["git_overlay_health"]["status"], "needs_init");
+    assert_eq!(status["verification"]["status"], "needs_init");
     assert_eq!(status["recommended_action"], "heddle init");
     assert_eq!(status["verification"]["recommended_action"], "heddle init");
     assert!(
@@ -2340,7 +2340,7 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
+    assert_eq!(status["verification"]["status"], "clean");
     assert_eq!(status["recommended_action"], Value::Null);
 
     let reconcile = json(
@@ -2358,7 +2358,7 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
     assert_eq!(reconcile["status"], "completed");
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
+    assert_eq!(status["verification"]["status"], "clean");
     assert_eq!(status["thread"], "main");
 }
 
@@ -2653,7 +2653,7 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
         "undo JSON recommended action should match an immediate verify probe: undo={undo}, verify={verify}"
     );
     let status = json(temp.path(), &["--output", "json", "status"]);
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
+    assert_eq!(status["verification"]["status"], "clean");
 
     std::fs::write(temp.path().join("tracked.txt"), "three\n").unwrap();
     let second = json(
@@ -4416,7 +4416,6 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["thread"], "feature/drop-in");
     assert_eq!(status["verification"]["status"], "clean");
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
     assert_eq!(status["verification"]["mapping_state"], "git_backed");
     assert_eq!(status["verification"]["import_state"], "clean");
     assert_eq!(
@@ -4588,8 +4587,7 @@ fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
     assert_eq!(verify["status"], "clean");
     let status_after = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status_after["verification"]["status"], "clean");
-    assert_eq!(status_after["git_overlay_health"]["status"], "clean");
-    assert_eq!(status_after["git_overlay_health"]["clean"], true);
+    assert_eq!(status_after["verification"]["verified"], true);
     assert_eq!(
         status_after["changed_path_count"], 0,
         "a reconciled checkout should have nothing left to save: {status_after}"
@@ -4620,7 +4618,6 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
 
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["status"], "needs_reconcile");
-    assert_eq!(status["git_overlay_health"]["status"], "needs_reconcile");
     assert_eq!(status["verification"]["mapping_state"], "needs_reconcile");
     assert_eq!(status["changed_path_count"], 0);
     assert!(status["changes"]["modified"].as_array().unwrap().is_empty());
@@ -4963,7 +4960,6 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
         status["thread"].is_null(),
         "detached Git HEAD should not be reported as the last attached branch: {status}"
     );
-    assert_eq!(status["git_overlay_health"]["status"], "detached_head");
     assert_eq!(status["verification"]["status"], "detached_head");
     assert!(status["verification"]["git_branch"].is_null());
     assert!(status["verification"]["heddle_thread"].is_null());
@@ -5087,7 +5083,6 @@ fn git_overlay_matrix_detached_at_tag_status_commands() {
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_git_overlay_basics(&status);
     assert!(status["thread"].is_null());
-    assert_eq!(status["git_overlay_health"]["status"], "detached_head");
     assert_eq!(status["verification"]["status"], "detached_head");
     assert!(
         status["changes"]["added"]

@@ -91,7 +91,7 @@ fn git_overlay_interop_native_git_commit_stays_direct_backed_until_import() {
         Value::Null,
         "native git commit should remain directly readable without forcing import: {before_import}"
     );
-    assert_eq!(before_import["git_overlay_health"]["status"], "clean");
+    assert_eq!(before_import["verification"]["status"], "clean");
 
     heddle(
         &["bridge", "git", "import", "--ref", "main"],

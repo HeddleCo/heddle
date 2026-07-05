@@ -3438,6 +3438,7 @@ mod tests {
             "repository_capability",
             "storage_model",
             "hosted_enabled",
+            "verification",
             "thread",
             "current_state",
             "actor",
@@ -3449,6 +3450,10 @@ mod tests {
                 "status schema missing property '{required}'"
             );
         }
+        assert!(
+            !properties.contains_key("git_overlay_health"),
+            "status schema must not expose legacy git_overlay_health alias"
+        );
     }
 
     #[test]
