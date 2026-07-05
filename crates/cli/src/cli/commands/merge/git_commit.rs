@@ -99,7 +99,7 @@ pub(super) fn validate_git_state(
 
     let expected: std::collections::HashSet<&str> =
         expected_paths.iter().map(|p| p.as_str()).collect();
-    let git_intent = match super::super::git_adapter::git_index_intent_for_root(repo_root) {
+    let git_intent = match super::super::git_projection::git_index_intent_for_root(repo_root) {
         Ok(intent) => intent,
         Err(err) => {
             blockers.push(format!("failed to inspect git worktree status: {err}"));
@@ -148,7 +148,7 @@ pub(super) fn validate_git_state(
 }
 
 fn unrelated_git_index_intent_paths(
-    intent: &super::super::git_adapter::GitIndexIntent,
+    intent: &super::super::git_projection::GitIndexIntent,
     expected: &std::collections::HashSet<&str>,
 ) -> Vec<String> {
     let mut unrelated = Vec::new();

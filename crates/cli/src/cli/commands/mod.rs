@@ -33,7 +33,7 @@ mod fetch;
 mod ff_record;
 mod fsck;
 mod gc;
-mod git_adapter;
+mod git_projection;
 mod git_overlay_health;
 mod git_overlay_txn;
 mod goto;
@@ -153,7 +153,7 @@ pub use expand::cmd_expand;
 pub use fetch::cmd_fetch;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
-pub use git_adapter::{cmd_commit_git_adapter, cmd_switch_git_adapter};
+pub use git_projection::{cmd_commit_git_projection, cmd_switch_git_projection};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 #[cfg(feature = "client")]

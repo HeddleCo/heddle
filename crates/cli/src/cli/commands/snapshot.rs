@@ -473,10 +473,11 @@ fn current_thread_name(repo: &Repository) -> String {
 /// Large-capture safety preflight for `commit`'s dirty path, reusing an
 /// already-computed Git-overlay worktree status instead of re-walking the
 /// worktree. The Git Projection commit path has already computed the same
-/// pre-mutation status for its own preflights and the clean classification, so threading it here
+/// pre-mutation status for its own preflights and the clean classification, so
+/// threading it here
 /// removes a redundant full walk. The large-capture gating decision is
 /// byte-identical because it reads the same `WorktreeStatus`.
-pub(crate) fn preflight_large_capture_for_git_adapter_commit_with_worktree_status(
+pub(crate) fn preflight_large_capture_for_git_projection_commit_with_worktree_status(
     force: bool,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> Result<()> {

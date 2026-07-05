@@ -33,7 +33,7 @@ use tracing::debug;
 
 use super::{
     action_line::print_command,
-    git_adapter::{GitIndexPlan, git_index_plan_for_root},
+    git_projection::{GitIndexPlan, git_index_plan_for_root},
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
         serialize_empty_action_as_null,

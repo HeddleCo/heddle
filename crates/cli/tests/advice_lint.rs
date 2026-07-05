@@ -307,7 +307,7 @@ fn git_overlay_mutation_preflight_stays_shared() {
     let mut violations = Vec::new();
     for (file, forbidden) in [
         (
-            "cli/commands/git_adapter.rs",
+            "cli/commands/git_projection.rs",
             &[
                 "plain_git_mutation_advice(",
                 "detached_git_head_mutation_advice(",
@@ -359,7 +359,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
             ][..],
         ),
         (
-            "cli/commands/git_adapter.rs",
+            "cli/commands/git_projection.rs",
             &[
                 "git_overlay_txn::preflight_plain_git_mutation(",
                 "git_overlay_txn::preflight_commit(",
@@ -383,7 +383,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
 
     for file in [
         "cli/commands/checkpoint.rs",
-        "cli/commands/git_adapter.rs",
+        "cli/commands/git_projection.rs",
         "cli/commands/workflow.rs",
     ] {
         let path = src_dir.join(file);
