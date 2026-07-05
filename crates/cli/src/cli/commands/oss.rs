@@ -42,7 +42,6 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
         "   {}",
         style::dim("create the Heddle sidecar; Git commits stay in .git")
     );
-    println!("   {}", style::bold("heddle workspace"));
     println!("2. Inspect changes");
     println!("   {}", style::bold("heddle diff"));
     println!("3. Save work");
