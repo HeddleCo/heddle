@@ -532,7 +532,8 @@ async fn async_main() -> Result<()> {
             full,
             thorough,
             bridge,
-        } => cmd_fsck(&cli, *full, *thorough, *bridge),
+            repair,
+        } => cmd_fsck(&cli, *full, *thorough, *bridge, *repair),
 
         Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 

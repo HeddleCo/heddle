@@ -118,10 +118,10 @@ Use the glossary terms in `CONTEXT.md` exactly.
 ### Track B: Bridge Mirror Retirement
 
 1. Add Raw Git Object Residual durable objects and fsck checks without deleting `.heddle/git` yet.
-2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity.
+2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers while legacy `bridge git import/export` remain available for transition.
 3. Route top-level Git remote `push` / `pull` / `sync` by remote capability.
 4. Teach checkout write-through, export, push, sync, clone, and reconstruction paths to compose reconstructed Heddle state plus residuals without requiring a persistent bare mirror.
-5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation.
+5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck --repair git` performs explicit metadata-only Git Projection Mapping repair and reruns bridge checks; residual validation remains follow-on work.
 6. Retire public `bridge git` commands after replacements and fsck diagnostics exist.
 7. Lazy-migrate old `.heddle/git` mirrors into residual storage and leave deletion to explicit maintenance cleanup.
 
@@ -135,7 +135,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 ## Git Repair Surface
 
-- The replacement for `bridge git reconcile` is a Git repair mode on `fsck`; target spelling is `fsck --repair git` once the flag is implemented.
+- The replacement for `bridge git reconcile` is a Git repair mode on `fsck`; target spelling is `fsck --repair git`. The current implementation is metadata-only and does not import history, reconcile refs, or write the worktree.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.

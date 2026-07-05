@@ -71,7 +71,8 @@ pub use commands_integration::{
 #[cfg(feature = "client")]
 pub use commands_main::PresenceCommands;
 pub use commands_main::{
-    ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands,
+    ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands,
+    SessionCommands,
 };
 pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;

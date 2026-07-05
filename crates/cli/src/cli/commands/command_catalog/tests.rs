@@ -1830,6 +1830,15 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
         vec!["constraint", "invariant", "rationale"]
     );
 
+    let fsck_options = catalog
+        .options_for_display("fsck")
+        .expect("fsck should be cataloged");
+    let repair = fsck_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("repair"))
+        .expect("fsck --repair should be cataloged");
+    assert_eq!(repair.possible_values, vec!["git"]);
+
     let integration_install_options = catalog
         .options_for_display("integration install")
         .expect("integration install should be cataloged");

@@ -2023,7 +2023,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
-            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+            documented_core_report_schema(
+                CommandContract {
+                    mutates: true,
+                    observe_only: false,
+                    supports_op_id: false,
+                    may_move_ref: false,
+                    writes_heddle_refs: false,
+                    ..READ_JSON
+                },
+                FsckReport::CONTRACT,
+            ),
             "recovery",
         ),
     ),

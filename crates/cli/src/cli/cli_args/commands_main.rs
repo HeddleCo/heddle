@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Top-level CLI commands.
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
@@ -23,6 +23,12 @@ use super::{
 use super::{AuthCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use super::{BridgeCommands, ExportCommands, ImportCommands};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FsckRepairTarget {
+    /// Repair Git projection metadata only.
+    Git,
+}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -379,6 +385,10 @@ Examples:
         /// Include Git-overlay mirror, mapping, notes, and checkout checks.
         #[arg(long)]
         bridge: bool,
+
+        /// Repair a focused integrity surface before checking it.
+        #[arg(long, value_enum, value_name = "TARGET")]
+        repair: Option<FsckRepairTarget>,
     },
 
     /// Inspect and repair the operation log.

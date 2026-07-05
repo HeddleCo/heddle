@@ -3144,24 +3144,24 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     ],
     "advanced_scope_json_commands_total": 134,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 82,
+    "advanced_scope_mutating_commands_total": 83,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
     "catalog_commands_total": 223,
-    "catalog_mutating_commands_total": 113,
+    "catalog_mutating_commands_total": 114,
     "json_commands_total": 177,
     "json_commands_with_accepted_opaque_schema": 47,
     "json_commands_with_schema": 130,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 108,
+    "json_mutating_commands_total": 109,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 108,
+    "mutating_commands_total": 109,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 81,
+    "mutating_commands_with_schema": 82,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "223 command(s), 177 JSON command(s), 113 mutating command(s), 108 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "223 command(s), 177 JSON command(s), 114 mutating command(s), 109 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3199,7 +3199,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "223 command(s), 177 JSON command(s), 113 mutating command(s), 108 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "223 command(s), 177 JSON command(s), 114 mutating command(s), 109 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3523,7 +3523,7 @@ nothing to stop — both exit 0):
 `heddle fsck --output json` emits:
 
 ```json
-{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "bridge_checked": false}
+{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "bridge_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
 `heddle oplog recover --output json` emits an operator recovery report

@@ -28,6 +28,9 @@ pub struct FsckReport {
     pub warnings: Vec<String>,
     pub objects_checked: usize,
     pub bridge_checked: bool,
+    pub repair_target: Option<String>,
+    pub repaired: bool,
+    pub repairs: Vec<FsckRepair>,
 }
 
 impl FsckReport {
@@ -41,6 +44,14 @@ impl FsckReport {
 
 impl HeddleReport for FsckReport {
     const CONTRACT: ReportContract = FsckReport::CONTRACT;
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct FsckRepair {
+    pub name: String,
+    pub repaired: bool,
+    pub detail: String,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -85,6 +96,9 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
         warnings,
         objects_checked,
         bridge_checked: opts.bridge,
+        repair_target: None,
+        repaired: false,
+        repairs: Vec::new(),
     })
 }
 

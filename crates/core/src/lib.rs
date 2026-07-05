@@ -21,7 +21,7 @@ pub use diff::{
     plain_git_head_diff, render_diff_patch, render_diff_patch_bytes, should_render_modified_pair,
     trim_added_decorations_for_display, write_diff_patch,
 };
-pub use fsck::{FsckError, FsckOptions, FsckReport, fsck};
+pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
 pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
     TaskId, Warning, WarningSink,
