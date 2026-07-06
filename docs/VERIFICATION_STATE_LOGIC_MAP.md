@@ -25,7 +25,7 @@ Target rows describe the next model and must not be cited as shipped behavior.
   Bridge Mirror only when describing legacy mirror migration or repair.
 - In Git-overlay mode, active Git reads and writes use the checkout's real
   `.git`. Heddle stores Git Projection Mapping metadata under
-  `.heddle/git-bridge/` and uses legacy Bridge Mirror data only as
+  `.heddle/git-projection/` and uses legacy Bridge Mirror data only as
   migration or repair input when present.
 - `verified: true` means repository safety checks are clean. It does not mean
   there is no useful workflow action. Ready threads and local commits waiting to

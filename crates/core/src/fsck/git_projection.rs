@@ -137,8 +137,8 @@ fn mirror_path(repo: &Repository) -> PathBuf {
 
 fn mapping_path(repo: &Repository) -> PathBuf {
     repo.heddle_dir()
-        .join("git-bridge")
-        .join("bridge-mapping.json")
+        .join("git-projection")
+        .join("git-projection-mapping.json")
 }
 
 fn mapping_tmp_path(repo: &Repository) -> PathBuf {
@@ -370,8 +370,8 @@ mod tests {
     fn write_projection_mapping(repo: &Repository, change_id: &str, git_oid: &sley::ObjectId) {
         let mapping_path = repo
             .heddle_dir()
-            .join("git-bridge")
-            .join("bridge-mapping.json");
+            .join("git-projection")
+            .join("git-projection-mapping.json");
         let mapping_parent = mapping_path.parent().expect("mapping path has parent");
         fs::create_dir_all(mapping_parent).expect("create Git projection mapping directory");
         let contents =

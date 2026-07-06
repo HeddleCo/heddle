@@ -1362,8 +1362,8 @@ impl Repository {
     fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
         let path = self
             .heddle_dir
-            .join("git-bridge")
-            .join("bridge-mapping.json");
+            .join("git-projection")
+            .join("git-projection-mapping.json");
         if !path.exists() {
             return Ok(HashMap::new());
         }

@@ -4071,11 +4071,11 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
 ///   2. `purge_unserved_mappings` — drops every mapping whose state (or a reachable
 ///      ancestor) is not served at the Public tier;
 ///   3. `save_mapping_to_disk` — writes the surviving mapping to the SERVED cache
-///      `.heddle/git-bridge/bridge-mapping.json`.
+///      `.heddle/git-projection/git-projection-mapping.json`.
 ///
 /// An earlier intermediate `save_mapping_to_disk_preserving` helper snapshotted the
 /// mapping BEFORE the purge, so a seeded-but-embargoed entry resurrected into the
-/// served `bridge-mapping.json` — a visibility leak. That helper is gone; the fix
+/// served `git-projection-mapping.json` — a visibility leak. That helper is gone; the fix
 /// relies on seed-before-purge-before-save. PR #737 added the IMPORT-path test
 /// `adopt_all_uses_ingest_mapping_without_internal_mirror`; this is its EXPORT-path
 /// analogue: an embargoed SHA that the SEED re-introduces from the ingest map must
@@ -4168,7 +4168,7 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
 
     // Export on a FRESH git_projection: build_existing_mapping starts empty, the seed
     // re-hydrates B from the durable ingest map, then the purge must drop B before
-    // save writes the served bridge-mapping.json.
+    // save writes the served git-projection-mapping.json.
     let mut export_git_projection = GitProjection::new(&repo);
     export_all(&mut export_git_projection).expect("export with seeded embargoed tip");
 
@@ -4185,11 +4185,11 @@ fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
         "the still-public base A must remain served"
     );
 
-    // The CRITICAL leak surface: the served bridge-mapping.json on disk. A
+    // The CRITICAL leak surface: the served git-projection-mapping.json on disk. A
     // pre-purge save (the resurrected `save_mapping_to_disk_preserving` bug) would
     // leak B's ChangeId and OID here even though the in-memory purge ran.
     let served = std::fs::read_to_string(test_support::mapping_path(&export_git_projection))
-        .expect("served bridge-mapping.json must exist after export");
+        .expect("served git-projection-mapping.json must exist after export");
     assert!(
         !served.contains(&change_b.to_string_full()),
         "served mapping must NOT contain the embargoed ChangeId B (seed→purge→save leak): {served}"

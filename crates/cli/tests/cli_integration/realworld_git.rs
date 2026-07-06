@@ -646,8 +646,8 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
 
     let mapping_path = work
         .join(".heddle")
-        .join("git-bridge")
-        .join("bridge-mapping.json");
+        .join("git-projection")
+        .join("git-projection-mapping.json");
     let mapping_text = std::fs::read_to_string(&mapping_path).expect("mapping json");
     let original_entries = mapping_text.matches("\"change_id\"").count();
 

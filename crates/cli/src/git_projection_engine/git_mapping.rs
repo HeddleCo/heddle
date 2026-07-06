@@ -62,8 +62,8 @@ impl<'a> GitProjection<'a> {
     pub(crate) fn mapping_path(&self) -> PathBuf {
         self.heddle_repo
             .heddle_dir()
-            .join("git-bridge")
-            .join("bridge-mapping.json")
+            .join("git-projection")
+            .join("git-projection-mapping.json")
     }
 
     pub(crate) fn mapping_tmp_path(&self) -> PathBuf {
@@ -162,8 +162,8 @@ impl<'a> GitProjection<'a> {
     pub(crate) fn save_mapping_to_disk(&self) -> GitProjectionResult<()> {
         self.write_mapping_tmp_to_disk()?;
         // Fault-injection checkpoint: a crash here leaves the
-        // sidecar in tmp form (`bridge-mapping.json.tmp`) without a
-        // committed `bridge-mapping.json`. The next mapping-cache read
+        // sidecar in tmp form (`git-projection-mapping.json.tmp`) without a
+        // committed `git-projection-mapping.json`. The next mapping-cache read
         // atomically renames the tmp into place. Tested by
         // `bridge_recovers_from_crash_after_tmp_before_commit`.
         objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
@@ -172,7 +172,7 @@ impl<'a> GitProjection<'a> {
 
     /// Build the export identity mapping from portable metadata and the served
     /// bridge cache. `refs/notes/heddle` is authoritative because it travels
-    /// with Git history; `bridge-mapping.json` is the local served/export cache
+    /// with Git history; `git-projection-mapping.json` is the local served/export cache
     /// after visibility filtering. Ingest identity lives separately at
     /// `.heddle/ingest/sha_map.sqlite` and is intentionally not folded in here.
     pub(crate) fn build_existing_mapping(

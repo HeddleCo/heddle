@@ -2351,7 +2351,7 @@ fn fsync_path(path: &Path) -> GitProjectionResult<()> {
 /// RAII guard for `init_mirror`. When the mirror directory did not
 /// exist at acquisition time, an early Drop (panic, error return)
 /// removes the partially-initialized `.heddle/git/` so a future
-/// `heddle bridge ...` doesn't see a half-built bare repo. Call
+/// `heddle export git ...` doesn't see a half-built bare repo. Call
 /// `commit()` once the mirror is known-good (e.g. after a successful
 /// first export) to disarm the guard.
 pub(crate) struct MirrorInitGuard {

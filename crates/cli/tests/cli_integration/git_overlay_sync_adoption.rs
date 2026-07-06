@@ -175,8 +175,8 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     assert!(
         !work
             .join(".heddle")
-            .join("git-bridge")
-            .join("bridge-mapping.json")
+            .join("git-projection")
+            .join("git-projection-mapping.json")
             .exists(),
         "adopt/import must not publish the Git projection mapping cache"
     );

@@ -751,7 +751,7 @@ fn strip_trailing_heddle(p: &Path) -> &Path {
 /// `heddle_path` (initializing it if missing), then run one import pass.
 /// Returns both the stats and the final sha map. The map is persisted
 /// under `.heddle/ingest/sha_map.sqlite`; Git projection export owns its served
-/// `git-bridge/bridge-mapping.json` cache separately.
+/// `git-projection/git-projection-mapping.json` cache separately.
 ///
 /// `heddle_path` is the worktree root — `Repository::init` appends `.heddle`
 /// itself. For tolerance with callers who pass the `.heddle`-suffixed form
@@ -1513,15 +1513,11 @@ mod tests {
             assert_eq!(reloaded.get_commit(&git_oid), map.get_commit(&git_oid));
         }
 
-        // TODO(git-projection vocab): on-disk filename still "bridge-mapping.json"
-        // (and the ".heddle/git-bridge/" directory). It is a PERSISTED cache read
-        // back on later runs across cli/core/repo/ingest; renaming it would orphan
-        // existing repos. Left as-is pending a coordinated hard-rename or read-fallback.
         let git_projection_mapping_path = gitdir
             .path()
             .join(".heddle")
-            .join("git-bridge")
-            .join("bridge-mapping.json");
+            .join("git-projection")
+            .join("git-projection-mapping.json");
         assert!(
             !git_projection_mapping_path.exists(),
             "ingest import must not publish the served Git Projection Mapping cache"

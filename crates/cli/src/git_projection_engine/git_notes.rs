@@ -6,7 +6,7 @@
 //! message — and so without changing the commit SHA.
 //!
 //! This is the history-carrying half of the export identity model. The
-//! `bridge-mapping.json` sidecar is a local served/export cache; notes are
+//! `git-projection-mapping.json` sidecar is a local served/export cache; notes are
 //! the portable source that survives plain Git clones and exports.
 //!
 //! Sley provides the tree-backed notes plumbing; this module owns Heddle's
