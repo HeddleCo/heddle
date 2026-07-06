@@ -15,9 +15,6 @@ use super::{
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
     collapse::{CollapsePublishedRef, collapse_resolved_states},
-    git_overlay_health::{
-        RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
-    },
     git_overlay_txn,
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json},
@@ -33,16 +30,19 @@ use super::{
         thread_not_found_advice,
     },
     thread_landing::{land_local_command, switch_thread_command},
+    verification_health::{
+        RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
+    },
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    bridge::GitBridge,
     cli::{
         Cli,
         cli_args::{LandArgs, SyncArgs},
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
+    git_projection_engine::GitProjection,
 };
 
 #[derive(Serialize)]
@@ -91,7 +91,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
     let stale_blockers = non_staleness_blockers(&stale_report.blockers);
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let mut output = if thread.freshness == repo::ThreadFreshness::Current {
         let recommended_action = primary_next_action(
             operation.as_ref(),
@@ -899,7 +899,7 @@ fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Resu
 
     ensure_worktree_clean(repo, "land")?;
     let remote_name = super::remote::resolve_default_remote_name(repo, None)?;
-    let mut bridge = GitBridge::new(repo);
+    let mut bridge = GitProjection::new(repo);
     bridge.pull(&remote_name)?;
 
     let trust = git_overlay_txn::post_verify(repo);

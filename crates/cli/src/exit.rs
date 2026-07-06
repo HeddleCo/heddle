@@ -73,6 +73,7 @@ impl HeddleExitCode {
             //   command rejects the requested projection)
             "nothing_to_commit"
             | "reconcile_direction_required"
+            | "git_repair_direction_required"
             | "dirty_worktree"
             | "state_corrupted"
             | "state_not_found"
@@ -263,7 +264,7 @@ mod tests {
 
     #[test]
     fn reconcile_direction_required_advice_is_data_err() {
-        // `heddle bridge git reconcile` without a `--prefer` side requires
+        // `heddle fsck --repair git` without a `--prefer` side requires
         // manual resolution — the reconcile contract's documented DataErr.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
             "reconcile_direction_required",
@@ -371,6 +372,7 @@ mod tests {
             ("repository_not_found", HeddleExitCode::Config),
             ("nothing_to_commit", HeddleExitCode::DataErr),
             ("reconcile_direction_required", HeddleExitCode::DataErr),
+            ("git_repair_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
             ("state_not_found", HeddleExitCode::DataErr),

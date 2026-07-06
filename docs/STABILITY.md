@@ -212,8 +212,8 @@ Tradeoffs:
 - **What gets gated, what gets observed.** Not every CLI verb needs
   a budget. Proposed: budget the verbs in the AGENTS.md "core thread
   workflow" (`status`, `capture`, `commit`, `log`, `show`, `start`,
-  `merge --preview`) plus explicit Git-adapter import/export/sync
-  entry points; track the rest as observed timings without a
+  `merge --preview`) plus the Git Projection import/export/sync entry
+  points; track the rest as observed timings without a
   fail-the-build gate.
 
 ### 1.3 Maximum known-bug count by severity
@@ -262,8 +262,9 @@ Tradeoffs:
   runner as `rust-tests.yml`. Cheaper than a dedicated runner; the
   runner cost dominates over the rare cancellation.
 - **What's exercised.** Proposed: commit/undo/redo loop plus a
-  `bridge git sync` loop against a fixture upstream. The bridge is the
-  most state-rich adapter code path and benefits most from a long run.
+  Git Projection sync loop against a fixture upstream. Projection
+  reconciliation is the most state-rich Git interop path and benefits
+  most from a long run.
 
 ## 2. API stability commitment
 

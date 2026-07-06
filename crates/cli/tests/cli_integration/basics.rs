@@ -103,6 +103,15 @@ fn json_stdout(output: &Output, context: &str) -> Value {
     })
 }
 
+fn assert_no_legacy_verification_sidecars(value: &Value) {
+    for legacy in ["git_overlay_import_hint", "git_overlay_health"] {
+        assert!(
+            value.get(legacy).is_none(),
+            "JSON output must not expose legacy verification sidecar `{legacy}`: {value}"
+        );
+    }
+}
+
 /// Mutation `--output json` replies no longer embed `verification`
 /// (the verification-claim gate still consults it in-memory, but it
 /// is omitted from the wire to keep mutation replies focused).
@@ -135,6 +144,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -351,11 +362,11 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle bridge git reconcile --ref feature/drop-in --preview"
+        "heddle fsck --repair git --ref feature/drop-in --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle bridge git reconcile --ref feature/drop-in --preview"])
+        serde_json::json!(["heddle fsck --repair git --ref feature/drop-in --preview"])
     );
 }
 
@@ -545,7 +556,7 @@ fn test_cli_status_after_git_overlay_init_uses_git_backed_refs() {
     assert_eq!(parsed["verification"]["status"], "clean");
     assert_eq!(parsed["verification"]["mapping_state"], "git_backed");
     assert!(parsed["recommended_action"].is_null(), "{parsed}");
-    assert!(parsed["git_overlay_import_hint"].is_null(), "{parsed}");
+    assert_no_legacy_verification_sidecars(&parsed);
     assert_eq!(parsed["changed_path_count"], 0);
     assert_eq!(parsed["thread_health"], "clean");
     assert!(
@@ -586,12 +597,13 @@ fn test_cli_status_after_manual_git_commit_keeps_direct_git_backed_ref_clean() {
 
     let verify = heddle(&["verify", "--output", "json"], Some(temp.path())).unwrap();
     let parsed_verify: Value = serde_json::from_str(&verify).unwrap();
-    assert_eq!(parsed_verify["status"], "clean", "{parsed_verify}");
+    let verification = &parsed_verify["verification"];
+    assert_eq!(verification["status"], "clean", "{parsed_verify}");
     assert_eq!(
-        parsed_verify["mapping_state"], "git_backed",
+        verification["mapping_state"], "git_backed",
         "{parsed_verify}"
     );
-    assert_eq!(parsed_verify["worktree_state"], "clean", "{parsed_verify}");
+    assert_eq!(verification["worktree_state"], "clean", "{parsed_verify}");
 }
 
 #[test]
@@ -687,10 +699,7 @@ fn test_cli_status_surfaces_git_import_hint_for_other_branches() {
     let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["recommended_action"], "heddle init");
-    assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "plain Git status should not surface an import hint under Git-backed overlay setup: {parsed}"
-    );
+    assert_no_legacy_verification_sidecars(&parsed);
     assert!(
         parsed["changes"]["added"]
             .as_array()
@@ -774,10 +783,7 @@ fn test_cli_status_in_plain_git_repo_handles_detached_head() {
         parsed["thread"].is_null(),
         "detached HEAD should not fake a thread: {parsed}"
     );
-    assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "detached HEAD should not emit branch import hint: {parsed}"
-    );
+    assert_no_legacy_verification_sidecars(&parsed);
     assert!(
         parsed["changes"]["added"]
             .as_array()
@@ -803,20 +809,13 @@ fn test_cli_status_surfaces_git_import_hint_for_many_branches() {
     }
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(
         parsed["verification"]["import_state"], "git_backed",
         "Git refs should be directly readable without import hints: {parsed}"
     );
-    assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "direct Git-backed refs should not produce missing-branch hints: {parsed}"
-    );
+    assert_no_legacy_verification_sidecars(&parsed);
 }
 
 #[test]
@@ -878,7 +877,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
+    assert_eq!(parsed["verification"]["status"], "needs_init");
     assert!(
         !temp.path().join(".heddle").exists(),
         "diagnose in a plain Git repo must be observe-only"
@@ -1256,16 +1255,9 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert!(
-        bridge["git_overlay_import_hint"].is_null(),
-        "direct Git-backed refs should not produce missing-branch hints: {bridge}"
-    );
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
@@ -1290,16 +1282,9 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
     );
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert!(
-        bridge["git_overlay_import_hint"].is_null(),
-        "direct Git-backed refs should not produce missing-branch hints: {bridge}"
-    );
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
@@ -1332,16 +1317,9 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(
-        &["bridge", "git", "status", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert!(
-        bridge["git_overlay_import_hint"].is_null(),
-        "after switching branches, Git refs stay directly readable: {bridge}"
-    );
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
@@ -1392,58 +1370,35 @@ fn test_cli_status_handles_detached_head_after_bootstrap() {
         parsed["thread"].is_null(),
         "detached HEAD should clear current thread: {parsed}"
     );
-    assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "detached HEAD should clear import hint after bootstrap too: {parsed}"
-    );
+    assert_no_legacy_verification_sidecars(&parsed);
 }
 
 #[test]
-fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
+fn test_cli_import_git_clears_import_hint_for_existing_branches() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/import-me"], temp.path());
 
-    let before: Value = serde_json::from_str(
-        &heddle(
-            &["bridge", "git", "status", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        before["git_overlay_import_hint"].is_null(),
-        "direct Git-backed refs should not require import before bridge sync: {before}"
-    );
+    let before: Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
+    assert_no_legacy_verification_sidecars(&before);
 
-    let import_output = heddle(
-        &["bridge", "git", "import", "--path", "."],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
     let parsed_import: serde_json::Value =
         serde_json::from_str(&import_output).unwrap_or(serde_json::Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
     assert!(
         synced >= 1 || import_output.contains("Synced") || import_output.contains("branches"),
-        "bridge import should sync local branches: {import_output}"
+        "Git import should sync local branches: {import_output}"
     );
 
-    let after: Value = serde_json::from_str(
-        &heddle(
-            &["bridge", "git", "status", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        after["git_overlay_import_hint"].is_null(),
-        "importing Git branches should clear the import hint: {after}"
-    );
+    let after: Value =
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
+    assert_no_legacy_verification_sidecars(&after);
 
     let threads: Value = serde_json::from_str(
         &heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap(),
@@ -1460,7 +1415,7 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
 }
 
 #[test]
-fn test_cli_bridge_git_import_ref_imports_only_selected_branch() {
+fn test_cli_import_git_ref_imports_only_selected_branch() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -1472,9 +1427,8 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_branch() {
         &[
             "--output",
             "json",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             ".",
             "--ref",
@@ -1644,7 +1598,7 @@ fn test_cli_thread_list_marks_tip_only_branch_with_ref_scoped_import_action() {
 }
 
 #[test]
-fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
+fn test_cli_import_git_ref_imports_only_selected_tag() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -1656,7 +1610,7 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
 
     let import_output = heddle(
         &[
-            "--output", "json", "bridge", "git", "import", "--path", ".", "--ref", "v1.0.0",
+            "--output", "json", "import", "git", "--path", ".", "--ref", "v1.0.0",
         ],
         Some(temp.path()),
     )
@@ -1682,21 +1636,17 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
 }
 
 #[test]
-fn test_cli_bridge_git_import_defaults_to_current_repo_even_after_mirror_exists() {
+fn test_cli_import_git_defaults_to_current_repo_even_after_mirror_exists() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    heddle(
-        &["bridge", "git", "import", "--path", "."],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
 
     git(&["branch", "support/import-latest"], temp.path());
 
-    let import_output = heddle(&["bridge", "git", "import"], Some(temp.path())).unwrap();
+    let import_output = heddle(&["import", "git"], Some(temp.path())).unwrap();
     let parsed_import: Value = serde_json::from_str(&import_output).unwrap_or(Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
     assert!(
@@ -1734,8 +1684,8 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
-    assert!(parsed["git_overlay_import_hint"].is_null());
+    assert_eq!(parsed["verification"]["status"], "needs_init");
+    assert_no_legacy_verification_sidecars(&parsed);
     assert!(
         !temp.path().join(".heddle").exists(),
         "diagnose should not bootstrap plain Git before explicit init"
@@ -2015,7 +1965,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     assert!(!git_commit.is_empty());
 
     // Heddle records change_id provenance on `refs/notes/heddle`
-    // inside the bridge mirror at `.heddle/git/` rather than rewriting
+    // inside the legacy Bridge Mirror at `.heddle/git/` rather than rewriting
     // commit messages with a `Heddle-Change:` trailer — that keeps Git
     // commit SHAs stable across heddle imports/exports and keeps normal
     // `git log --all` in the user's repo free of Heddle metadata roots.
@@ -2030,7 +1980,7 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
         .expect("git notes show should run");
     assert!(
         notes.status.success(),
-        "expected refs/notes/heddle in the bridge mirror to record the checkpoint commit; stderr: {}",
+        "expected refs/notes/heddle in the legacy Bridge Mirror to record the checkpoint commit; stderr: {}",
         String::from_utf8_lossy(&notes.stderr)
     );
     let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -2442,7 +2392,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     );
 
     // Each landed thread should record a Heddle change id on the
-    // bridge mirror's `refs/notes/heddle` ref without publishing the
+    // legacy Bridge Mirror's `refs/notes/heddle` ref without publishing the
     // metadata notes ref into the user's ordinary `.git/refs`.
     for git_commit in [
         auth_ship["git_commit"].as_str().unwrap(),
@@ -2459,7 +2409,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
             .expect("git notes show should run");
         assert!(
             notes.status.success(),
-            "landed commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
+            "landed commit {git_commit} should have a heddle note in the legacy Bridge Mirror; stderr: {}",
             String::from_utf8_lossy(&notes.stderr)
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -3164,7 +3114,7 @@ fn test_cli_undo_redo() {
 /// We bypass the `cmd_snapshot` path on purpose: that path layers in
 /// the user-config / repo-defaults fallback (0.8), so a `None`
 /// confidence can only originate from a non-snapshot writer such as
-/// the git bridge import. Putting the state directly via the object
+/// Git import. Putting the state directly via the object
 /// store is the smallest reliable way to reproduce that scenario in
 /// a CLI integration test.
 #[test]

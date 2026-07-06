@@ -118,15 +118,15 @@ fn known_recovery_phrases_stay_in_typed_advice() {
 }
 
 #[test]
-fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
+fn git_import_recovery_policy_stays_out_of_error_renderer() {
     let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let envelope = src_dir.join(ALLOWED_ENVELOPE_FILE);
     let source = fs::read_to_string(&envelope)
         .unwrap_or_else(|err| panic!("read {}: {err}", envelope.display()));
 
     assert!(
-        source.contains("RecoveryAdvice::from_git_bridge_error"),
-        "{ALLOWED_ENVELOPE_FILE} should delegate GitBridgeError policy to typed advice"
+        source.contains("RecoveryAdvice::from_git_projection_error"),
+        "{ALLOWED_ENVELOPE_FILE} should delegate GitProjectionError policy to typed advice"
     );
     for forbidden in [
         "NonFastForwardRef",
@@ -140,7 +140,7 @@ fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "{ALLOWED_ENVELOPE_FILE} should render Git bridge recovery advice, not own policy `{forbidden}`"
+            "{ALLOWED_ENVELOPE_FILE} should render retired Git import recovery advice, not own policy `{forbidden}`"
         );
     }
 }
@@ -237,7 +237,7 @@ fn next_action_priority_lives_in_shared_selector() {
         for (line_index, line) in source.lines().enumerate() {
             for fragment in [
                 "remote_tracking.behind > 0",
-                "heddle bridge git import --ref {}",
+                "heddle import git --ref {}",
                 "thread_action.filter(|action| !action.trim().is_empty())",
             ] {
                 if line.contains(fragment) {
@@ -307,7 +307,7 @@ fn git_overlay_mutation_preflight_stays_shared() {
     let mut violations = Vec::new();
     for (file, forbidden) in [
         (
-            "cli/commands/git_adapter.rs",
+            "cli/commands/git_projection.rs",
             &[
                 "plain_git_mutation_advice(",
                 "detached_git_head_mutation_advice(",
@@ -359,7 +359,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
             ][..],
         ),
         (
-            "cli/commands/git_adapter.rs",
+            "cli/commands/git_projection.rs",
             &[
                 "git_overlay_txn::preflight_plain_git_mutation(",
                 "git_overlay_txn::preflight_commit(",
@@ -383,7 +383,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
 
     for file in [
         "cli/commands/checkpoint.rs",
-        "cli/commands/git_adapter.rs",
+        "cli/commands/git_projection.rs",
         "cli/commands/workflow.rs",
     ] {
         let path = src_dir.join(file);

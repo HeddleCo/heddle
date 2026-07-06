@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Top-level CLI commands.
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
-#[cfg(feature = "git-overlay")]
-use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
@@ -23,6 +21,14 @@ use super::{
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SpoolCommands, SupportCommands};
+#[cfg(feature = "git-overlay")]
+use super::{ExportCommands, ImportCommands};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FsckRepairTarget {
+    /// Repair Git projection metadata only.
+    Git,
+}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -34,7 +40,6 @@ pub enum Commands {
     /// Git-overlay repos normally keep Git commits in `.git` and Heddle
     /// metadata in `.heddle`. Use `adopt` only when you explicitly want a
     /// Git-backed checkout converted into native Heddle storage.
-    #[command(visible_alias = "import")]
     Adopt(AdoptArgs),
 
     /// Curated, progressive-disclosure help.
@@ -119,8 +124,8 @@ Examples:
     /// against `docs/json-schemas.md`.
     ///
     /// With no `<verb>`, prints the registered schema verbs. `<verb>`
-    /// is the joined subcommand path — e.g. `status`, `log`, `bridge
-    /// git status`, `marker list`.
+    /// is the joined subcommand path — e.g. `status`, `log`,
+    /// `fsck --repair git`, `marker list`.
     #[command(visible_alias = "schema")]
     Schemas {
         /// The verb whose schema to emit. Run `heddle schemas --help`
@@ -377,9 +382,25 @@ Examples:
         #[arg(long)]
         thorough: bool,
 
-        /// Include Git-overlay mirror, mapping, notes, and checkout checks.
+        /// Include Git projection, mapping, notes, and checkout checks.
         #[arg(long)]
-        bridge: bool,
+        git: bool,
+
+        /// Repair a focused integrity surface before checking it.
+        #[arg(long, value_enum, value_name = "TARGET")]
+        repair: Option<FsckRepairTarget>,
+
+        /// Git ref to reconcile when repairing Git projection state.
+        #[arg(long = "ref", value_name = "BRANCH", requires = "repair")]
+        ref_name: Option<String>,
+
+        /// Which local side should be authoritative for Git ref repair.
+        #[arg(long, value_parser = ["git", "heddle"], requires = "repair")]
+        prefer: Option<String>,
+
+        /// Show the planned Git repair without changing refs.
+        #[arg(long, requires = "repair")]
+        preview: bool,
     },
 
     /// Inspect and repair the operation log.
@@ -390,6 +411,20 @@ Examples:
     Oplog {
         #[command(subcommand)]
         command: OplogCommands,
+    },
+
+    /// Import from another version control system.
+    #[cfg(feature = "git-overlay")]
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
+
+    /// Export to another version control system.
+    #[cfg(feature = "git-overlay")]
+    Export {
+        #[command(subcommand)]
+        command: ExportCommands,
     },
 
     /// Download objects and refs from remote.
@@ -481,20 +516,6 @@ Examples:
     Spool {
         #[command(subcommand)]
         command: SpoolCommands,
-    },
-
-    /// Bridge to other version control systems.
-    #[cfg(feature = "git-overlay")]
-    #[command(after_help = "\
-Examples:
-  heddle bridge git status                       # what would import / export look like?
-  heddle bridge git import --ref main            # adopt one branch as a full Heddle lane
-  heddle bridge git sync                         # bidirectional export + import
-  heddle bridge git export ../mirror.git         # write a bare git mirror
-")]
-    Bridge {
-        #[command(subcommand)]
-        command: BridgeCommands,
     },
 
     /// Semantic analysis queries (call-graph hot-spots, churn,

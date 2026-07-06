@@ -3,8 +3,6 @@
 
 use std::collections::HashSet;
 
-use tracing::debug;
-
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, TreeEntryTarget},
@@ -15,10 +13,11 @@ use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
+use tracing::debug;
 
-use crate::bridge::{
+use crate::git_projection_engine::{
     git_core::{
-        GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
+        GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, SyncMapping,
         copy_reachable_objects, count_exported_commits, delete_reference_if_present,
         git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
         read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
@@ -65,7 +64,7 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 ///
 /// (2) is read off ONE canonical signal — [`State::git_lossy`] — that lossy
 /// import population paths set, rather than enumerating import surfaces or
-/// relying on bridge mapping sidecar state. The state flag closes the whole
+/// relying on Git Projection Mapping sidecar state. The state flag closes the whole
 /// class, including any future lossy entry point.
 ///
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
@@ -110,18 +109,20 @@ pub(crate) fn export_state(
     repo: &SleyRepository,
     state_id: &ChangeId,
     options: ExportStateOptions<'_>,
-) -> GitResult<Option<ObjectId>> {
+) -> GitProjectionResult<Option<ObjectId>> {
     let state = heddle_repo
         .store()
         .get_state(state_id)?
-        .ok_or(GitBridgeError::StateNotFound(*state_id))?;
+        .ok_or(GitProjectionError::StateNotFound(*state_id))?;
 
     // Audience-aware minting. The visibility decision lives here, at the state
     // walk where the `ChangeId` is in scope — never in the blob-keyed
     // `export_tree` (no `ChangeId`/audience).
     let tier = heddle_repo
         .effective_visibility_tier(state_id)
-        .map_err(|e| GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}")))?;
+        .map_err(|e| {
+            GitProjectionError::Git(format!("resolve visibility for {state_id}: {e:#}"))
+        })?;
     if !visible(&tier, options.audience) {
         return Ok(None);
     }
@@ -135,8 +136,8 @@ pub(crate) fn export_state(
     // export no longer depends on the mirror holding the verbatim imported bytes.
     //
     // Routing (#567 round 3): export keys off (is byte-faithful?) AND (does a
-    // bridge mapping exist?). The verbatim / mapped-OID fallback for a lossy
-    // commit applies ONLY when a bridge mapping holds a TRACKED original OID to
+    // Git Projection Mapping exist?). The verbatim / mapped-OID fallback for a lossy
+    // commit applies ONLY when a Git Projection Mapping holds a TRACKED original OID to
     // preserve — and that branch lives in `export_scoped`'s already-mapped path.
     // `export_state` is only ever reached for an UNMAPPED state (the caller's
     // `has_heddle` guard), so there is NO original OID to match and NO verbatim
@@ -162,7 +163,7 @@ pub(crate) fn export_state(
     // durable across remotes; per-scope breakdowns ride on the opt-in
     // git note. For first-pass we audit nothing about the state's
     // annotation set (the audience defaults to "public"); a follow-up
-    // landed with `bridge git export --audience` threads the count
+    // landed with `export git --audience` threads the count
     // through here. See `git_util::build_commit_message_with_footer`.
     let hosted_url = heddle_repo
         .config()
@@ -171,11 +172,11 @@ pub(crate) fn export_state(
         .as_deref()
         .filter(|s| !s.is_empty());
     let message = match options.message_override {
-        Some(message) => GitBridge::build_commit_message_with_footer_with_body(
+        Some(message) => GitProjection::build_commit_message_with_footer_with_body(
             &state, message, hosted_url, /*omitted=*/ 0,
         ),
         None => {
-            GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
+            GitProjection::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
         }
     };
     let parent_oids: Vec<ObjectId> = if let Some(parents) = options.parent_override {
@@ -187,14 +188,14 @@ pub(crate) fn export_state(
             .map(|parent_id| {
                 mapping
                     .get_git(parent_id)
-                    .ok_or(GitBridgeError::StateNotFound(*parent_id))
+                    .ok_or(GitProjectionError::StateNotFound(*parent_id))
             })
-            .collect::<GitResult<Vec<_>>>()?
+            .collect::<GitProjectionResult<Vec<_>>>()?
     };
 
     let sig = if principal_is_default_unknown(&state.attribution.principal) {
         let Some(identity) = options.identity else {
-            return Err(GitBridgeError::Git(
+            return Err(GitProjectionError::Git(
                 "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
         };
@@ -221,7 +222,7 @@ pub fn export_tree(
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
     tree_hash: &ContentHash,
-) -> GitResult<ObjectId> {
+) -> GitProjectionResult<ObjectId> {
     let tree = heddle_repo
         .store()
         .get_tree(tree_hash)?
@@ -231,12 +232,12 @@ pub fn export_tree(
     let mut editor = repo.edit_tree(&empty_tree).map_err(git_err)?;
 
     for entry in tree.entries() {
-        let write_blob_entry = |hash: &ContentHash| -> GitResult<ObjectId> {
+        let write_blob_entry = |hash: &ContentHash| -> GitProjectionResult<ObjectId> {
             // Redaction safety: if the blob carries an active redaction
             // record, export the stub instead of the bytes. This is the
             // single chokepoint between Heddle-side redactions and any
             // downstream Git remote (GitHub, internal mirrors, ...).
-            // Bytes that escape via the bridge are bytes that escape,
+            // Bytes that escape via Git projection are bytes that escape,
             // full stop — we cannot retroactively scrub them from
             // outside repos. The check sits *here*, not in
             // `materialize_blob`, because export reads `blob.content()`
@@ -295,16 +296,22 @@ pub fn export_tree(
 }
 
 /// Export all Heddle states to Git commits.
-pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
+pub fn export_all(bridge: &mut GitProjection) -> GitProjectionResult<ExportStats> {
     bridge.with_mapping_rollback(|bridge| export_scoped(bridge, None))
 }
 
 /// Export one Heddle thread to its matching Git branch.
-pub fn export_current_thread(bridge: &mut GitBridge, thread: &str) -> GitResult<ExportStats> {
+pub fn export_current_thread(
+    bridge: &mut GitProjection,
+    thread: &str,
+) -> GitProjectionResult<ExportStats> {
     bridge.with_mapping_rollback(|bridge| export_scoped(bridge, Some(thread)))
 }
 
-fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<ExportStats> {
+fn export_scoped(
+    bridge: &mut GitProjection,
+    thread: Option<&str>,
+) -> GitProjectionResult<ExportStats> {
     bridge.init_mirror()?;
 
     let states = match thread {
@@ -314,7 +321,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 .refs()
                 .get_thread(&ThreadName::new(thread))?
             else {
-                return Err(GitBridgeError::Git(format!(
+                return Err(GitProjectionError::Git(format!(
                     "thread '{thread}' has no state to export"
                 )));
             };
@@ -327,7 +334,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.build_existing_mapping(None)?;
     let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
-    // The Git bridge publishes the PUBLIC mirror — the export audience is
+    // Git projection export publishes the public projection — the export audience is
     // always `Public`. Per-commit visibility is enforced here, in the OSS
     // bridge, by emitting absence (the authoritative wire serve gate is weft's
     // job, spike §10 #4).
@@ -989,7 +996,7 @@ fn purge_unserved_mappings(
     sorted_states: &[ChangeId],
     reachable: &HashSet<ChangeId>,
     audience: &AudienceTier,
-) -> GitResult<HashSet<ObjectId>> {
+) -> GitProjectionResult<HashSet<ObjectId>> {
     let served = served_change_ids(heddle_repo, sorted_states, reachable, audience)?;
     let mut purged: HashSet<ObjectId> = HashSet::new();
     for state_id in sorted_states {
@@ -1016,13 +1023,13 @@ fn served_change_ids(
     sorted_states: &[ChangeId],
     reachable: &HashSet<ChangeId>,
     audience: &AudienceTier,
-) -> GitResult<HashSet<ChangeId>> {
+) -> GitProjectionResult<HashSet<ChangeId>> {
     let mut served: HashSet<ChangeId> = HashSet::new();
     for state_id in sorted_states {
         let tier = heddle_repo
             .effective_visibility_tier(state_id)
             .map_err(|e| {
-                GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}"))
+                GitProjectionError::Git(format!("resolve visibility for {state_id}: {e:#}"))
             })?;
         let parents_served = match heddle_repo.store().get_state(state_id)? {
             Some(state) => state
@@ -1096,7 +1103,7 @@ fn project_desired_refs(
     mapping: &SyncMapping,
     threads: &[String],
     markers: &[MarkerName],
-) -> GitResult<std::collections::HashMap<String, ObjectId>> {
+) -> GitProjectionResult<std::collections::HashMap<String, ObjectId>> {
     let mut desired = std::collections::HashMap::new();
     for track_name in threads {
         let Some(tip) = heddle_repo
@@ -1130,7 +1137,7 @@ fn frontier_git_oid(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
     tip: ChangeId,
-) -> GitResult<Option<ObjectId>> {
+) -> GitProjectionResult<Option<ObjectId>> {
     let mut visited = HashSet::new();
     let mut stack = vec![tip];
     let mut frontier: Vec<ChangeId> = Vec::new();
@@ -1162,7 +1169,7 @@ fn frontier_git_oid(
 fn reachable_states(
     heddle_repo: &HeddleRepository,
     roots: &[ChangeId],
-) -> GitResult<Vec<ChangeId>> {
+) -> GitProjectionResult<Vec<ChangeId>> {
     let mut stack = roots.to_vec();
     let mut seen = HashSet::new();
     let mut states = Vec::new();

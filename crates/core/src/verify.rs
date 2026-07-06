@@ -8,34 +8,52 @@ use std::{
 };
 
 use ::objects::{HeddleError, error::Result, worktree::WorktreeStatus};
-use repo::{Repository, Thread, ThreadManager, describe_thread_advice, refresh_thread_freshness};
+use repo::{
+    Repository, Thread, ThreadManager, describe_thread_advice,
+    git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
+};
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
+use sley::{BString as GitBString, Index, Repository as SleyRepository};
 
 use crate::{
     ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract,
     schema_for_report,
+    status::{
+        RepositoryVerificationHealth, build_repository_verification_health_with_worktree_status,
+        default_remote_name, git_default_remote_name_from_repo,
+        next_action::remote_tracking_status,
+    },
 };
-
-use crate::status::{
-    GitOverlayHealth, build_git_overlay_health_with_worktree_status, default_remote_name,
-    git_default_remote_name_from_repo,
-};
-use crate::status::next_action::remote_tracking_status;
-use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode, StreamControl};
 
 #[derive(Clone)]
 pub struct VerifyOptions {
     pub start_path: Option<PathBuf>,
+    pub machine_contract_input: MachineContractInput,
+    pub action_audience: ActionAudience,
 }
 
 impl VerifyOptions {
     pub fn new() -> Self {
-        Self { start_path: None }
+        Self {
+            start_path: None,
+            machine_contract_input: MachineContractInput::default(),
+            action_audience: ActionAudience::Human,
+        }
     }
 
     pub fn with_start_path(mut self, start_path: impl Into<PathBuf>) -> Self {
         self.start_path = Some(start_path.into());
+        self
+    }
+
+    pub fn with_machine_contract_input(mut self, input: MachineContractInput) -> Self {
+        self.machine_contract_input = input;
+        self
+    }
+
+    pub fn with_action_audience(mut self, audience: ActionAudience) -> Self {
+        self.action_audience = audience;
         self
     }
 }
@@ -46,6 +64,33 @@ impl Default for VerifyOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionAudience {
+    Human,
+    Agent,
+    Script,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct MachineContractInput {
+    pub coverage: MachineContractCoverage,
+}
+
+impl MachineContractInput {
+    pub fn from_coverage(coverage: MachineContractCoverage) -> Self {
+        Self { coverage }
+    }
+}
+
+impl Default for MachineContractInput {
+    fn default() -> Self {
+        Self {
+            coverage: MachineContractCoverage::not_checked(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct VerifyReport {
     pub output_kind: &'static str,
@@ -53,7 +98,7 @@ pub struct VerifyReport {
     pub repository_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_context: Option<RepositoryContextInfo>,
-    #[serde(flatten)]
+    #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     #[serde(skip)]
     #[schemars(skip)]
@@ -98,8 +143,14 @@ pub struct RepositoryPresentation {
     pub context: Option<RepositoryContextInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct PlainGitVerifyProbe {
+    #[schemars(with = "String")]
+    pub root: PathBuf,
+    pub git_branch: Option<String>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub changes: WorktreeStatus,
     pub trust: RepositoryVerificationState,
 }
 
@@ -218,6 +269,56 @@ pub struct MachineContractCoverage {
     pub undocumented_schema_examples: Vec<String>,
 }
 
+impl MachineContractCoverage {
+    pub fn not_checked() -> Self {
+        Self {
+            status: "not_checked".to_string(),
+            verified_scope: "not_checked".to_string(),
+            advanced_scope: "not_checked".to_string(),
+            summary: "Machine-contract proof was not supplied by this embedder".to_string(),
+            catalog_commands_total: 0,
+            catalog_mutating_commands_total: 0,
+            json_commands_total: 0,
+            json_mutating_commands_total: 0,
+            json_commands_with_schema: 0,
+            json_commands_with_accepted_opaque_schema: 0,
+            json_commands_without_schema: 0,
+            verified_scope_json_commands_total: 0,
+            verified_scope_json_commands_with_schema: 0,
+            verified_scope_json_commands_with_accepted_opaque_schema: 0,
+            verified_scope_json_commands_without_schema: 0,
+            advanced_scope_json_commands_total: 0,
+            advanced_scope_json_commands_with_accepted_opaque_schema: 0,
+            mutating_commands_total: 0,
+            mutating_commands_with_schema: 0,
+            mutating_commands_with_accepted_opaque_schema: 0,
+            mutating_commands_without_schema: 0,
+            verified_scope_mutating_commands_total: 0,
+            verified_scope_mutating_commands_with_schema: 0,
+            verified_scope_mutating_commands_with_accepted_opaque_schema: 0,
+            verified_scope_mutating_commands_without_schema: 0,
+            advanced_scope_mutating_commands_total: 0,
+            advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
+            schema_verbs_total: 0,
+            documented_schema_verbs_total: 0,
+            undocumented_schema_verbs_total: 0,
+            opaque_schema_verbs_total: 0,
+            accepted_opaque_schema_verbs_total: 0,
+            unaccepted_opaque_schema_verbs_total: 0,
+            supports_op_id_total: 0,
+            jsonl_commands_total: 0,
+            missing_schema_examples: Vec::new(),
+            missing_mutating_schema_examples: Vec::new(),
+            verified_scope_missing_schema_examples: Vec::new(),
+            verified_scope_accepted_opaque_schema_examples: Vec::new(),
+            advanced_scope_accepted_opaque_schema_examples: Vec::new(),
+            accepted_opaque_schema_examples: Vec::new(),
+            unaccepted_opaque_schema_examples: Vec::new(),
+            undocumented_schema_examples: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct VerificationCheck {
     pub name: String,
@@ -233,6 +334,16 @@ pub struct VerificationCheck {
 }
 
 pub fn build_plain_git_verification_probe(start: &Path) -> Result<Option<PlainGitVerifyProbe>> {
+    build_plain_git_verification_probe_with_machine_contract(
+        start,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_plain_git_verification_probe_with_machine_contract(
+    start: &Path,
+    machine_contract_input: &MachineContractInput,
+) -> Result<Option<PlainGitVerifyProbe>> {
     let git_repo = match SleyRepository::discover(start) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
@@ -246,24 +357,126 @@ pub fn build_plain_git_verification_probe(start: &Path) -> Result<Option<PlainGi
     if root.join(".heddle").exists() {
         return Ok(None);
     }
-    let git_branch = git_repo
-        .head()
-        .ok()
-        .and_then(|head| head.branch_name().map(ToString::to_string));
+
+    let git_branch = plain_git_current_branch(&git_repo);
+    let git_branches = plain_git_local_branches(&git_repo);
+    let git_tags = plain_git_local_tags(&git_repo);
+    let changes = plain_git_worktree_status(&root, &git_repo)?;
+
     let default_remote = git_default_remote_name_from_repo(&git_repo);
-    let changes_dirty = plain_git_has_changes(&git_repo)?;
-    let machine_contract_coverage = machine_contract_coverage();
     let setup_action = "heddle init".to_string();
     let recovery_commands = vec![setup_action.clone()];
+    let machine_contract_coverage = machine_contract_input.coverage.clone();
+    let mut details = BTreeMap::new();
+    details.insert("path".to_string(), root.display().to_string());
+    if let Some(branch) = &git_branch {
+        details.insert("git_branch".to_string(), branch.clone());
+    }
+    if let Some(remote) = &default_remote {
+        details.insert("default_remote".to_string(), remote.clone());
+    }
+    details.insert(
+        "git_branch_count".to_string(),
+        git_branches.len().to_string(),
+    );
+    details.insert("git_tag_count".to_string(), git_tags.len().to_string());
+
+    let mut checks = vec![
+        VerificationCheck {
+            name: "Git".to_string(),
+            status: "present".to_string(),
+            clean: true,
+            summary: "plain Git repository found".to_string(),
+            recommended_action: None,
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            details,
+        },
+        VerificationCheck {
+            name: "Heddle".to_string(),
+            status: "needs_init".to_string(),
+            clean: false,
+            summary: "Heddle data is not initialized".to_string(),
+            recommended_action: Some(setup_action.clone()),
+            recommended_action_template: action_template(&setup_action),
+            recovery_commands: recovery_commands.clone(),
+            recovery_action_templates: action_templates(&recovery_commands),
+            details: BTreeMap::new(),
+        },
+        VerificationCheck {
+            name: "Mapping".to_string(),
+            status: "git_backed".to_string(),
+            clean: true,
+            summary: "Git refs will stay in Git storage after Heddle initialization".to_string(),
+            recommended_action: None,
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            details: BTreeMap::new(),
+        },
+    ];
+    checks.push(verification_check(
+        "Worktree",
+        changes.is_clean(),
+        if changes.is_clean() {
+            "clean"
+        } else {
+            "dirty_worktree"
+        },
+        if changes.is_clean() {
+            "Git worktree is clean"
+        } else {
+            "Git worktree has uncommitted changes"
+        },
+        None,
+        Vec::new(),
+    ));
+    checks.push(verification_check(
+        "Remote",
+        false,
+        "unknown",
+        "remote drift is checked after Heddle initialization",
+        None,
+        Vec::new(),
+    ));
+    checks.push(verification_check(
+        "Operation",
+        true,
+        "clean",
+        "no Heddle operation in progress",
+        None,
+        Vec::new(),
+    ));
+    checks.push(verification_check(
+        "Workflow",
+        false,
+        "not_checked",
+        "workflow readiness is checked after Heddle initialization",
+        None,
+        Vec::new(),
+    ));
+    checks.push(machine_contract_verification_check(
+        &machine_contract_coverage,
+    ));
+    checks.push(verification_check(
+        "Clone",
+        true,
+        "not_applicable",
+        "clone verification is not applicable to this checkout",
+        None,
+        Vec::new(),
+    ));
+
     let trust = RepositoryVerificationState {
         verified: false,
         status: "needs_init".to_string(),
         repository_mode: "plain-git".to_string(),
         heddle_initialized: false,
-        git_branch,
+        git_branch: git_branch.clone(),
         heddle_thread: None,
-        worktree_dirty: changes_dirty,
-        worktree_state: if changes_dirty { "dirty" } else { "clean" }.to_string(),
+        worktree_dirty: !changes.is_clean(),
+        worktree_state: if changes.is_clean() { "clean" } else { "dirty" }.to_string(),
         import_state: "git_backed".to_string(),
         mapping_state: "git_backed".to_string(),
         remote_drift: "unknown".to_string(),
@@ -279,109 +492,231 @@ pub fn build_plain_git_verification_probe(start: &Path) -> Result<Option<PlainGi
         recommended_action_template: action_template(&setup_action),
         recovery_commands: recovery_commands.clone(),
         recovery_action_templates: action_templates(&recovery_commands),
-        checks: vec![
-            verification_check("Git", true, "present", "plain Git repository found", None, Vec::new()),
-            verification_check(
-                "Heddle",
-                false,
-                "needs_init",
-                "Heddle data is not initialized",
-                Some(setup_action),
-                recovery_commands,
-            ),
-            verification_check(
-                "Mapping",
-                false,
-                "not_checked",
-                "mapping is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Worktree",
-                false,
-                "not_checked",
-                "worktree agreement is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Remote",
-                false,
-                "not_checked",
-                "remote drift is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Operation",
-                false,
-                "not_checked",
-                "operation state is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Workflow",
-                false,
-                "not_checked",
-                "workflow readiness is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Machine contract",
-                false,
-                "not_checked",
-                "runtime schema coverage is checked after Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-            verification_check(
-                "Clone",
-                true,
-                "not_applicable",
-                "clone verification is not applicable before Heddle initialization",
-                None,
-                Vec::new(),
-            ),
-        ],
+        checks,
     };
-    Ok(Some(PlainGitVerifyProbe { trust }))
+    Ok(Some(PlainGitVerifyProbe {
+        root,
+        git_branch,
+        changes,
+        trust,
+    }))
 }
 
-fn plain_git_has_changes(git_repo: &SleyRepository) -> Result<bool> {
-    let mut dirty = false;
+fn plain_git_current_branch(git_repo: &SleyRepository) -> Option<String> {
+    git_repo.head().ok()?.branch_name().map(str::to_string)
+}
+
+fn plain_git_local_branches(git_repo: &SleyRepository) -> Vec<String> {
+    let Ok(branches) = git_repo.references().list_refs() else {
+        return Vec::new();
+    };
+    let mut names = branches
+        .into_iter()
+        .filter_map(|branch| branch.name.strip_prefix("refs/heads/").map(str::to_string))
+        .filter(|branch| !branch.trim().is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn plain_git_local_tags(git_repo: &SleyRepository) -> Vec<String> {
+    let Ok(tags) = git_repo.references().list_refs() else {
+        return Vec::new();
+    };
+    let mut names = tags
+        .into_iter()
+        .filter_map(|tag| tag.name.strip_prefix("refs/tags/").map(str::to_string))
+        .filter(|tag| !tag.trim().is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn plain_git_worktree_status(root: &Path, git_repo: &SleyRepository) -> Result<WorktreeStatus> {
+    let index = plain_git_index_or_empty(git_repo).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to inspect Git index at '{}': {error}",
+            root.display()
+        ))
+    })?;
+    let head_index = plain_git_head_index_or_empty(git_repo).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to inspect Git HEAD tree at '{}': {error}",
+            root.display()
+        ))
+    })?;
+
+    let mut head_entries = BTreeMap::new();
+    for entry in &head_index.entries {
+        head_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
+    }
+    let mut index_entries = BTreeMap::new();
+    for entry in &index.entries {
+        index_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
+    }
+
+    let mut added = BTreeSet::new();
+    let mut modified = BTreeSet::new();
+    let mut deleted = BTreeSet::new();
+
+    for (path, (oid, mode)) in &index_entries {
+        match head_entries.get(path) {
+            None => {
+                added.insert(PathBuf::from(path));
+            }
+            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
+                modified.insert(PathBuf::from(path));
+            }
+            Some(_) => {}
+        }
+    }
+    for path in head_entries.keys() {
+        if !index_entries.contains_key(path) {
+            deleted.insert(PathBuf::from(path));
+        }
+    }
+
+    for (path, (oid, mode)) in &index_entries {
+        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode, None)? {
+            GitWorktreeEntryState::Clean => {}
+            GitWorktreeEntryState::Deleted => {
+                deleted.insert(PathBuf::from(path));
+            }
+            GitWorktreeEntryState::Modified => {
+                modified.insert(PathBuf::from(path));
+            }
+        }
+    }
+
+    let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
+    for path in plain_git_untracked_paths(root, &tracked_paths)? {
+        added.insert(PathBuf::from(path));
+    }
+
+    for path in &added {
+        modified.remove(path);
+    }
+    for path in &deleted {
+        modified.remove(path);
+    }
+
+    Ok(WorktreeStatus {
+        modified: modified.into_iter().collect(),
+        added: added.into_iter().collect(),
+        deleted: deleted.into_iter().collect(),
+    })
+}
+
+fn plain_git_untracked_paths(root: &Path, tracked_paths: &BTreeSet<&str>) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .filter_entry(|entry| !plain_git_excluded_walk_entry(entry.path()))
+        .build();
+    for entry in walker {
+        let entry = entry.map_err(|error| HeddleError::Config(error.to_string()))?;
+        let file_type = entry.file_type();
+        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
+            continue;
+        }
+        let path = plain_git_repo_relative_path(root, entry.path())?;
+        if !tracked_paths.contains(path.as_str()) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn plain_git_excluded_walk_entry(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".git" || name == ".heddle")
+}
+
+fn plain_git_repo_relative_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to relativize Git worktree path '{}': {}",
+            path.display(),
+            error
+        ))
+    })?;
+    Ok(path_to_plain_git_path(relative))
+}
+
+fn path_to_plain_git_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn plain_git_empty_index() -> Index {
+    Index {
+        version: 2,
+        entries: Vec::new(),
+        extensions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn plain_git_index_or_empty(
+    git_repo: &SleyRepository,
+) -> std::result::Result<Index, sley::GitError> {
     git_repo
-        .stream_short_status_with_options(
-            ShortStatusOptions {
-                untracked_mode: StatusUntrackedMode::All,
-                ..ShortStatusOptions::default()
-            },
-            |entry| {
-                if entry.index != b' ' || entry.worktree != b' ' {
-                    dirty = true;
-                    return Ok(StreamControl::Stop);
-                }
-                Ok(StreamControl::Continue)
-            },
-        )
-        .map_err(|err| HeddleError::Config(format!("failed to inspect Git status: {err}")))?;
-    Ok(dirty)
+        .open_index()
+        .map(|index| index.unwrap_or_else(plain_git_empty_index))
 }
 
-pub fn build_repository_verification_state(repo: &Repository) -> Result<RepositoryVerificationState> {
+fn plain_git_head_index_or_empty(
+    git_repo: &SleyRepository,
+) -> std::result::Result<Index, sley::GitError> {
+    let head = git_repo.head()?;
+    let Some(oid) = head.oid else {
+        return Ok(plain_git_empty_index());
+    };
+    let commit = git_repo.read_commit(&oid)?;
+    git_repo.index_from_tree(&commit.tree)
+}
+
+fn plain_git_path(path: &GitBString) -> String {
+    String::from_utf8_lossy(path.as_bytes()).into_owned()
+}
+
+pub fn build_repository_verification_state(
+    repo: &Repository,
+) -> Result<RepositoryVerificationState> {
+    build_repository_verification_state_with_machine_contract(
+        repo,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_repository_verification_state_with_machine_contract(
+    repo: &Repository,
+    machine_contract_input: &MachineContractInput,
+) -> Result<RepositoryVerificationState> {
     let worktree_status = if repo.capability() == repo::RepositoryCapability::GitOverlay {
         repo.git_overlay_worktree_status()
     } else {
         native_worktree_status(repo)
     };
-    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
-    Ok(build_repository_verification_state_with_worktree_status(
-        repo,
-        health,
-        &worktree_status,
-    ))
+    let health = build_repository_verification_health_with_worktree_status(repo, &worktree_status);
+    Ok(
+        build_repository_verification_state_with_worktree_status_and_machine_contract(
+            repo,
+            health,
+            &worktree_status,
+            machine_contract_input,
+        ),
+    )
 }
 
 fn native_worktree_status(repo: &Repository) -> Result<Option<WorktreeStatus>> {
@@ -394,13 +729,30 @@ fn native_worktree_status(repo: &Repository) -> Result<Option<WorktreeStatus>> {
 
 pub fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
-    health: GitOverlayHealth,
+    health: RepositoryVerificationHealth,
     worktree_status: &Result<Option<WorktreeStatus>>,
+) -> RepositoryVerificationState {
+    build_repository_verification_state_with_worktree_status_and_machine_contract(
+        repo,
+        health,
+        worktree_status,
+        &MachineContractInput::default(),
+    )
+}
+
+pub fn build_repository_verification_state_with_worktree_status_and_machine_contract(
+    repo: &Repository,
+    health: RepositoryVerificationHealth,
+    worktree_status: &Result<Option<WorktreeStatus>>,
+    machine_contract_input: &MachineContractInput,
 ) -> RepositoryVerificationState {
     let git_branch = repo.git_overlay_current_branch().ok().flatten();
     let heddle_thread = repo.current_lane().ok().flatten();
     let active_operation = repo.operation_status().ok().flatten().map(|operation| {
-        format!("{} {} ({})", operation.scope, operation.kind, operation.state)
+        format!(
+            "{} {} ({})",
+            operation.scope, operation.kind, operation.state
+        )
     });
     let remote_drift = repo
         .git_remote_tracking_status()
@@ -448,14 +800,10 @@ pub fn build_repository_verification_state_with_worktree_status(
         Ok(Some(status)) if !status.is_clean()
     );
     let worktree_dirty = git_worktree_dirty
-        || health
-            .checks
-            .iter()
-            .any(|check| {
-                matches!(check.name.as_str(), "worktree" | "heddle_worktree")
-                    && check.status != "clean"
-            });
-    let machine_contract_coverage = machine_contract_coverage();
+        || health.checks.iter().any(|check| {
+            matches!(check.name.as_str(), "worktree" | "heddle_worktree") && check.status != "clean"
+        });
+    let machine_contract_coverage = machine_contract_input.coverage.clone();
     let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
     let mut recovery_commands = health.recovery_commands.clone();
     let remote_action = remote_sync_action(&health);
@@ -508,7 +856,10 @@ pub fn build_repository_verification_state_with_worktree_status(
         clone_verification: if repo.capability() == repo::RepositoryCapability::GitOverlay {
             if health.clean {
                 "verified"
-            } else if matches!(health.status.as_str(), "dirty_worktree" | "needs_checkpoint") {
+            } else if matches!(
+                health.status.as_str(),
+                "dirty_worktree" | "needs_checkpoint"
+            ) {
                 "not_checked"
             } else {
                 "blocked"
@@ -531,7 +882,7 @@ pub fn build_repository_verification_state_with_worktree_status(
 }
 
 fn verification_checks_from_health(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     coverage: &MachineContractCoverage,
     is_git_overlay: bool,
     workflow_status: &str,
@@ -562,8 +913,14 @@ fn machine_contract_verification_check(coverage: &MachineContractCoverage) -> Ve
     let mut details = BTreeMap::new();
     details.insert("coverage_status".to_string(), coverage.status.clone());
     details.insert("coverage_summary".to_string(), coverage.summary.clone());
-    details.insert("verified_scope".to_string(), coverage.verified_scope.clone());
-    details.insert("advanced_scope".to_string(), coverage.advanced_scope.clone());
+    details.insert(
+        "verified_scope".to_string(),
+        coverage.verified_scope.clone(),
+    );
+    details.insert(
+        "advanced_scope".to_string(),
+        coverage.advanced_scope.clone(),
+    );
     details.insert(
         "catalog_commands_total".to_string(),
         coverage.catalog_commands_total.to_string(),
@@ -630,7 +987,7 @@ fn git_verification_check(is_git_overlay: bool) -> VerificationCheck {
 }
 
 fn mapping_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     is_git_overlay: bool,
 ) -> VerificationCheck {
     if !is_git_overlay {
@@ -638,14 +995,16 @@ fn mapping_verification_check(
             "Mapping",
             true,
             "not_applicable",
-            "native Heddle refs do not require Git-overlay mapping",
+            "native Heddle refs do not require Git Projection Mapping",
             None,
             Vec::new(),
         );
     }
-    if let Some(check) = health.checks.iter().find(|check| {
-        check.name == "head_mapping" && !verification_status_is_clean(&check.status)
-    }) {
+    if let Some(check) = health
+        .checks
+        .iter()
+        .find(|check| check.name == "head_mapping" && !verification_status_is_clean(&check.status))
+    {
         return verification_check_from_health("Mapping", check, health);
     }
     if let Some(check) = find_health_check(health, "import")
@@ -681,7 +1040,7 @@ fn mapping_verification_check(
     )
 }
 
-fn worktree_verification_check(health: &GitOverlayHealth) -> VerificationCheck {
+fn worktree_verification_check(health: &RepositoryVerificationHealth) -> VerificationCheck {
     for name in ["worktree", "heddle_worktree"] {
         if let Some(check) = find_health_check(health, name)
             && check.status != "clean"
@@ -714,7 +1073,7 @@ fn worktree_verification_check(health: &GitOverlayHealth) -> VerificationCheck {
     )
 }
 
-fn remote_verification_check(health: &GitOverlayHealth) -> VerificationCheck {
+fn remote_verification_check(health: &RepositoryVerificationHealth) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "remote_tracking") {
         if matches!(check.status.as_str(), "remote_ahead" | "remote_untracked") {
             let mut remote_check = verification_check(
@@ -740,7 +1099,7 @@ fn remote_verification_check(health: &GitOverlayHealth) -> VerificationCheck {
     )
 }
 
-fn operation_verification_check(health: &GitOverlayHealth) -> VerificationCheck {
+fn operation_verification_check(health: &RepositoryVerificationHealth) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "operation") {
         return verification_check_from_health("Operation", check, health);
     }
@@ -755,7 +1114,7 @@ fn operation_verification_check(health: &GitOverlayHealth) -> VerificationCheck 
 }
 
 fn workflow_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     workflow_status: &str,
     workflow_summary: &str,
 ) -> VerificationCheck {
@@ -785,7 +1144,7 @@ fn workflow_verification_check(
 }
 
 fn clone_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     is_git_overlay: bool,
 ) -> VerificationCheck {
     if !is_git_overlay {
@@ -808,7 +1167,10 @@ fn clone_verification_check(
             Vec::new(),
         );
     }
-    if matches!(health.status.as_str(), "dirty_worktree" | "needs_checkpoint") {
+    if matches!(
+        health.status.as_str(),
+        "dirty_worktree" | "needs_checkpoint"
+    ) {
         return verification_check(
             "Clone",
             true,
@@ -830,8 +1192,8 @@ fn clone_verification_check(
 
 fn verification_check_from_health(
     name: &str,
-    health_check: &crate::status::GitOverlayHealthCheck,
-    health: &GitOverlayHealth,
+    health_check: &crate::status::RepositoryVerificationCheck,
+    health: &RepositoryVerificationHealth,
 ) -> VerificationCheck {
     let recommended_action = (!verification_status_is_clean(&health_check.status))
         .then(|| health.recovery_commands.first().cloned())
@@ -853,7 +1215,7 @@ fn verification_check_from_health(
     check
 }
 
-fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
+fn remote_sync_action(health: &RepositoryVerificationHealth) -> Option<String> {
     find_health_check(health, "remote_tracking").and_then(|check| {
         matches!(check.status.as_str(), "remote_ahead" | "remote_untracked")
             .then(|| "heddle push".to_string())
@@ -861,9 +1223,9 @@ fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
 }
 
 fn find_health_check<'a>(
-    health: &'a GitOverlayHealth,
+    health: &'a RepositoryVerificationHealth,
     name: &str,
-) -> Option<&'a crate::status::GitOverlayHealthCheck> {
+) -> Option<&'a crate::status::RepositoryVerificationCheck> {
     health.checks.iter().find(|check| check.name == name)
 }
 
@@ -953,9 +1315,7 @@ fn verification_check(
         clean,
         summary: summary.to_string(),
         recommended_action: recommended_action.clone(),
-        recommended_action_template: recommended_action
-            .as_deref()
-            .and_then(action_template),
+        recommended_action_template: recommended_action.as_deref().and_then(action_template),
         recovery_action_templates: action_templates(&recovery_commands),
         recovery_commands,
         details: BTreeMap::new(),
@@ -996,31 +1356,85 @@ fn concrete_action_template(action: &str) -> Option<ActionTemplate> {
 
 fn recommended_action_templates() -> Vec<ActionTemplate> {
     [
-        ("heddle capture -m \"...\"", &["heddle", "capture", "-m", "<message>"][..], &["message"][..], true),
-        ("heddle checkpoint -m \"...\"", &["heddle", "checkpoint", "-m", "<message>"][..], &["message"][..], true),
-        ("heddle commit -m \"...\"", &["heddle", "commit", "-m", "<message>"][..], &["message"][..], true),
-        ("heddle commit --all -m \"...\"", &["heddle", "commit", "--all", "-m", "<message>"][..], &["message"][..], true),
+        (
+            "heddle capture -m \"...\"",
+            &["heddle", "capture", "-m", "<message>"][..],
+            &["message"][..],
+            true,
+        ),
+        (
+            "heddle checkpoint -m \"...\"",
+            &["heddle", "checkpoint", "-m", "<message>"][..],
+            &["message"][..],
+            true,
+        ),
+        (
+            "heddle commit -m \"...\"",
+            &["heddle", "commit", "-m", "<message>"][..],
+            &["message"][..],
+            true,
+        ),
+        (
+            "heddle commit --all -m \"...\"",
+            &["heddle", "commit", "--all", "-m", "<message>"][..],
+            &["message"][..],
+            true,
+        ),
         ("heddle init", &["heddle", "init"][..], &[][..], false),
-        ("heddle init --principal-name <name> --principal-email <email>", &["heddle", "init", "--principal-name", "<name>", "--principal-email", "<email>"][..], &["name", "email"][..], true),
-        ("heddle ready -m \"...\"", &["heddle", "ready", "-m", "<message>"][..], &["message"][..], true),
+        (
+            "heddle init --principal-name <name> --principal-email <email>",
+            &[
+                "heddle",
+                "init",
+                "--principal-name",
+                "<name>",
+                "--principal-email",
+                "<email>",
+            ][..],
+            &["name", "email"][..],
+            true,
+        ),
+        (
+            "heddle ready -m \"...\"",
+            &["heddle", "ready", "-m", "<message>"][..],
+            &["message"][..],
+            true,
+        ),
         ("heddle status", &["heddle", "status"][..], &[][..], false),
-        ("heddle switch <branch>", &["heddle", "switch", "<branch>"][..], &["branch"][..], false),
+        (
+            "heddle switch <branch>",
+            &["heddle", "switch", "<branch>"][..],
+            &["branch"][..],
+            false,
+        ),
         ("heddle verify", &["heddle", "verify"][..], &[][..], false),
-        ("heddle diagnose", &["heddle", "diagnose"][..], &[][..], false),
-        ("heddle doctor schemas --output json", &["heddle", "doctor", "schemas", "--output", "json"][..], &[][..], false),
+        (
+            "heddle diagnose",
+            &["heddle", "diagnose"][..],
+            &[][..],
+            false,
+        ),
+        (
+            "heddle doctor schemas --output json",
+            &["heddle", "doctor", "schemas", "--output", "json"][..],
+            &[][..],
+            false,
+        ),
     ]
     .into_iter()
-    .map(|(action, argv_template, required_inputs, agent_may_fill)| ActionTemplate {
-        action: action.to_string(),
-        argv_template: normalize_heddle_argv(
-            argv_template.iter().map(|arg| (*arg).to_string()).collect(),
-        ),
-        required_inputs: required_inputs
-            .iter()
-            .map(|input| (*input).to_string())
-            .collect(),
-        agent_may_fill,
-    })
+    .map(
+        |(action, argv_template, required_inputs, agent_may_fill)| ActionTemplate {
+            action: action.to_string(),
+            argv_template: normalize_heddle_argv(
+                argv_template.iter().map(|arg| (*arg).to_string()).collect(),
+            ),
+            required_inputs: required_inputs
+                .iter()
+                .map(|input| (*input).to_string())
+                .collect(),
+            agent_may_fill,
+        },
+    )
     .collect()
 }
 
@@ -1078,65 +1492,10 @@ fn split_action(action: &str) -> std::result::Result<Vec<String>, String> {
     Ok(args)
 }
 
-pub fn machine_contract_coverage() -> MachineContractCoverage {
-    let schema_verbs = BTreeSet::from([
-        "status",
-        "verify",
-        "diff",
-        "fsck",
-        "query",
-        "error",
-    ]);
-    MachineContractCoverage {
-        status: "available".to_string(),
-        verified_scope: "everyday_and_agent".to_string(),
-        advanced_scope: "advanced_internal_admin".to_string(),
-        summary: "core status/verify reports have concrete schemas".to_string(),
-        catalog_commands_total: 3,
-        catalog_mutating_commands_total: 0,
-        json_commands_total: 3,
-        json_mutating_commands_total: 0,
-        json_commands_with_schema: 2,
-        json_commands_with_accepted_opaque_schema: 1,
-        json_commands_without_schema: 0,
-        verified_scope_json_commands_total: 2,
-        verified_scope_json_commands_with_schema: 2,
-        verified_scope_json_commands_with_accepted_opaque_schema: 0,
-        verified_scope_json_commands_without_schema: 0,
-        advanced_scope_json_commands_total: 1,
-        advanced_scope_json_commands_with_accepted_opaque_schema: 1,
-        mutating_commands_total: 0,
-        mutating_commands_with_schema: 0,
-        mutating_commands_with_accepted_opaque_schema: 0,
-        mutating_commands_without_schema: 0,
-        verified_scope_mutating_commands_total: 0,
-        verified_scope_mutating_commands_with_schema: 0,
-        verified_scope_mutating_commands_with_accepted_opaque_schema: 0,
-        verified_scope_mutating_commands_without_schema: 0,
-        advanced_scope_mutating_commands_total: 0,
-        advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
-        schema_verbs_total: schema_verbs.len(),
-        documented_schema_verbs_total: schema_verbs.len(),
-        undocumented_schema_verbs_total: 0,
-        opaque_schema_verbs_total: 1,
-        accepted_opaque_schema_verbs_total: 1,
-        unaccepted_opaque_schema_verbs_total: 0,
-        supports_op_id_total: 1,
-        jsonl_commands_total: 0,
-        missing_schema_examples: Vec::new(),
-        missing_mutating_schema_examples: Vec::new(),
-        verified_scope_missing_schema_examples: Vec::new(),
-        verified_scope_accepted_opaque_schema_examples: Vec::new(),
-        advanced_scope_accepted_opaque_schema_examples: vec![
-            "advanced/internal/admin".to_string()
-        ],
-        accepted_opaque_schema_examples: vec!["advanced/internal/admin".to_string()],
-        unaccepted_opaque_schema_examples: Vec::new(),
-        undocumented_schema_examples: Vec::new(),
-    }
-}
-
 fn machine_contract_is_clean(coverage: &MachineContractCoverage) -> bool {
+    if matches!(coverage.status.as_str(), "not_checked" | "not_applicable") {
+        return true;
+    }
     coverage.verified_scope_json_commands_without_schema == 0
         && coverage.verified_scope_mutating_commands_without_schema == 0
         && coverage.undocumented_schema_verbs_total == 0
@@ -1144,10 +1503,11 @@ fn machine_contract_is_clean(coverage: &MachineContractCoverage) -> bool {
 }
 
 pub fn machine_contract_status(coverage: &MachineContractCoverage) -> &'static str {
-    if machine_contract_is_clean(coverage) {
-        "available"
-    } else {
-        "available_with_schema_gaps"
+    match coverage.status.as_str() {
+        "not_checked" => "not_checked",
+        "not_applicable" => "not_applicable",
+        _ if machine_contract_is_clean(coverage) => "available",
+        _ => "available_with_schema_gaps",
     }
 }
 
@@ -1163,7 +1523,10 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
     };
 
     let probe_start = Instant::now();
-    let plain_git_probe = build_plain_git_verification_probe(start)?;
+    let plain_git_probe = build_plain_git_verification_probe_with_machine_contract(
+        start,
+        &opts.machine_contract_input,
+    )?;
     let plain_git_probe_ms = probe_start.elapsed().as_millis();
     let mut profile = VerifyProfile {
         plain_git_probe_ms,
@@ -1191,7 +1554,10 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
         &opened
     };
     let verification_start = Instant::now();
-    let trust = build_repository_verification_state(repo)?;
+    let trust = build_repository_verification_state_with_machine_contract(
+        repo,
+        &opts.machine_contract_input,
+    )?;
     profile.verification_ms = verification_start.elapsed().as_millis();
     let presentation = repository_presentation(repo, None, None);
     Ok(VerifyReport {

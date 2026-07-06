@@ -2,7 +2,7 @@
 //! Shared status and command next-action selection.
 
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
     shell_quote,
 };
 
@@ -18,7 +18,7 @@ pub enum NextActionScope {
 pub struct NextActionInput<'a> {
     pub operation: Option<&'a RepositoryOperationStatus>,
     pub remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-    pub import_hint: Option<&'a GitOverlayImportHint>,
+    pub import_hint: Option<&'a GitImportGuidance>,
     pub fallback: Option<&'a str>,
     pub thread_health: Option<&'a str>,
     pub trust: Option<&'a RepositoryVerificationState>,
@@ -29,7 +29,7 @@ impl<'a> NextActionInput<'a> {
     pub fn default(
         operation: Option<&'a RepositoryOperationStatus>,
         remote_tracking: Option<&'a GitRemoteTrackingStatus>,
-        import_hint: Option<&'a GitOverlayImportHint>,
+        import_hint: Option<&'a GitImportGuidance>,
         fallback: Option<&'a str>,
     ) -> Self {
         Self {
@@ -95,7 +95,11 @@ fn ready_next_action(input: NextActionInput<'_>) -> String {
 fn current_thread_next_action(input: NextActionInput<'_>) -> String {
     let thread_action = non_empty_action(input.fallback);
     if input.operation.is_none()
-        && thread_recovery_precedes_publish(input.remote_tracking, input.thread_health, thread_action)
+        && thread_recovery_precedes_publish(
+            input.remote_tracking,
+            input.thread_health,
+            thread_action,
+        )
     {
         return thread_action.unwrap_or_default().to_string();
     }
@@ -123,7 +127,7 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return action.to_string();
     }
     if let Some(hint) = input.import_hint
-        && import_hint_includes_active_branch(hint)
+        && import_guidance_includes_active_branch(hint)
     {
         return hint.recommended_command.clone();
     }
@@ -157,7 +161,7 @@ pub fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<S
             if upstream.is_empty() {
                 Some("heddle fetch".to_string())
             } else {
-                Some(canonical_bridge_import_ref_command(upstream))
+                Some(canonical_git_import_ref_command(upstream))
             }
         }
         _ => None,
@@ -176,38 +180,32 @@ pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
     heddle_action(["adopt", "--ref", ref_name])
 }
 
-pub fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
-    heddle_action(["bridge", "git", "import", "--ref", ref_name])
+pub fn canonical_git_import_ref_command(ref_name: &str) -> String {
+    heddle_action(["import", "git", "--ref", ref_name])
 }
 
-pub fn canonical_bridge_reconcile_ref_preview_command(
+pub fn canonical_git_repair_ref_preview_command(
     prefer: Option<&str>,
     ref_name: &str,
 ) -> String {
     match prefer {
         Some(prefer) => heddle_action([
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--prefer",
             prefer,
             "--ref",
             ref_name,
             "--preview",
         ]),
-        None => heddle_action(["bridge", "git", "reconcile", "--ref", ref_name, "--preview"]),
+        None => heddle_action(["fsck", "--repair", "git", "--ref", ref_name, "--preview"]),
     }
 }
 
-pub fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
+pub fn canonical_git_repair_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
-        "bridge",
-        "git",
-        "reconcile",
-        "--prefer",
-        prefer,
-        "--ref",
-        ref_name,
+        "fsck", "--repair", "git", "--prefer", prefer, "--ref", ref_name,
     ])
 }
 
@@ -310,7 +308,7 @@ pub fn contextual_thread_action(
     action.to_string()
 }
 
-pub fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
+pub fn import_guidance_includes_active_branch(hint: &GitImportGuidance) -> bool {
     hint.missing_branches
         .iter()
         .any(|branch| branch == &hint.current_branch)
@@ -387,7 +385,7 @@ mod tests {
         assert_eq!(
             remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
                 .as_deref(),
-            Some("heddle bridge git import --ref origin/main")
+            Some("heddle import git --ref origin/main")
         );
         assert_eq!(
             remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
@@ -399,13 +397,8 @@ mod tests {
     fn current_thread_recovery_precedes_publish_when_thread_action_is_primary() {
         let remote = remote("feature", "origin/feature", 1, 0, "heddle push");
         let action = effective_next_action(
-            NextActionInput::default(
-                None,
-                Some(&remote),
-                None,
-                Some("heddle commit -m \"...\""),
-            )
-            .current_thread(Some("dirty_worktree")),
+            NextActionInput::default(None, Some(&remote), None, Some("heddle commit -m \"...\""))
+                .current_thread(Some("dirty_worktree")),
         );
         assert_eq!(action, "heddle commit -m \"...\"");
     }

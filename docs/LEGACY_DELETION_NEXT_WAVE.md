@@ -4,6 +4,13 @@ This note tracks cleanup that should come after the current deletion wave. The
 project is pre-1.0 and should prefer the current model over compatibility shims,
 but durable signed data still needs a deletion path that preserves verification.
 
+Active cleanup plan: `docs/VERIFICATION_CLEANUP_PLAN.md` tracks the staged
+removal of duplicate CLI/core verification ownership and stale bridge-mirror
+language. The null-only plain-Git import hint sidecar has been deleted, and
+public `status` / `doctor` JSON no longer emits legacy
+`git_overlay_import_hint` / `git_overlay_health` sidecars. Remaining work is
+core/CLI verification ownership and internal naming cleanup.
+
 ## Deleted In The Current Wave
 
 - `objects::delta` and `objects::store::compression` re-export modules were
@@ -40,8 +47,7 @@ but durable signed data still needs a deletion path that preserves verification.
   the target state contains a subtree for the path, and otherwise refuses the
   unexpected file-vs-directory mismatch instead of recursing by current ignore
   rules.
-- The current Git command adapter was renamed from `git_compat` internals to
-  `git_adapter` internals. User-facing `commit` / `switch` behavior is
+- The current Git command projection path now lives under `git_projection` internals. User-facing `commit` / `switch` behavior is
   unchanged; the code no longer looks like a legacy compatibility shim.
 - `maintenance index` and `maintenance monitor` graduated from hidden clap
   subcommands to discoverable admin maintenance commands. Their machine
@@ -184,9 +190,9 @@ entry targets whose value is a format-aware Sley Git object id.
 
 Removed runtime writers/readers:
 - `crates/ingest/src/importer.rs` now writes first-class Gitlink tree entries.
-- `crates/cli/src/cli/commands/git_adapter.rs` now writes first-class Gitlink
+- `crates/cli/src/cli/commands/git_projection.rs` now writes first-class Gitlink
   entries for Git-index gitlinks.
-- `crates/cli/src/bridge/git_export.rs` now emits Git gitlinks only from
+- `crates/cli/src/git_projection_engine/git_export.rs` now emits Git gitlinks only from
   first-class Gitlink targets and never sniffs ordinary blob content.
 
 Completed deletion direction:
@@ -217,7 +223,7 @@ Verification:
 - Golden V1 and V2 tree fixtures.
 - Proven legacy gitlink migration and ambiguous magic-prefix-file migration
   tests.
-- Git bridge round-trip tests for submodules.
+- Git Projection round-trip tests for submodules.
 - Diff patch conformance against Git worktrees containing gitlinks.
 - Export test proving the Gitlink target object does not need to exist in the
   superproject object database.

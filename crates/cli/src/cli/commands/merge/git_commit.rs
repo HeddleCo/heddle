@@ -22,7 +22,7 @@ use sley::{
 };
 
 use super::super::advice::RecoveryAdvice;
-use crate::bridge::{git_core::LocalGitIdentity, git_export};
+use crate::git_projection_engine::{git_core::LocalGitIdentity, git_export};
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -99,7 +99,7 @@ pub(super) fn validate_git_state(
 
     let expected: std::collections::HashSet<&str> =
         expected_paths.iter().map(|p| p.as_str()).collect();
-    let git_intent = match super::super::git_adapter::git_index_intent_for_root(repo_root) {
+    let git_intent = match super::super::git_projection::git_index_intent_for_root(repo_root) {
         Ok(intent) => intent,
         Err(err) => {
             blockers.push(format!("failed to inspect git worktree status: {err}"));
@@ -148,7 +148,7 @@ pub(super) fn validate_git_state(
 }
 
 fn unrelated_git_index_intent_paths(
-    intent: &super::super::git_adapter::GitIndexIntent,
+    intent: &super::super::git_projection::GitIndexIntent,
     expected: &std::collections::HashSet<&str>,
 ) -> Vec<String> {
     let mut unrelated = Vec::new();
@@ -216,7 +216,7 @@ pub(super) fn write_git_commit(
         .store()
         .get_state(state_id)?
         .ok_or_else(|| anyhow!("merge state {} was not found", state_id.short()))?;
-    let identity = crate::bridge::git_core::resolve_git_commit_identity(
+    let identity = crate::git_projection_engine::git_core::resolve_git_commit_identity(
         repo_root,
         &state.attribution.principal,
     )?;

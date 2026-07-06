@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use heddle_core::status::next_action::{
-    NextActionInput, canonical_bridge_reconcile_ref_preview_command, effective_next_action,
+    NextActionInput, canonical_git_repair_ref_preview_command, effective_next_action,
     thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
 };
 use objects::{
@@ -24,8 +24,8 @@ use objects::{
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus,
-    Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
+    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
+    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
     ThreadView, describe_thread_advice, shell_quote,
@@ -37,18 +37,17 @@ use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, heddle_action, recommended_action_template},
-    git_overlay_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state,
-        git_overlay_mutation_preflight_advice, override_trust_recommended_action,
-        serialize_empty_action_as_null,
-    },
     mount_lifecycle,
     next_action::{NextActionValidationContext, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
+    verification_health::{
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        override_trust_recommended_action, serialize_empty_action_as_null,
+    },
     worktree_cmd::{
         helpers::{plan_worktree_target, write_isolated_checkout},
         shared_target,
@@ -314,13 +313,13 @@ struct ThreadListOutput {
     recovery_action_templates: Vec<ActionTemplate>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --output json` instead.
+    /// `heddle status --output json` instead.
     #[serde(skip)]
-    git_overlay_import_hint: Option<ThreadListGitOverlayImportHintOutput>,
+    import_guidance: Option<ThreadListImportGuidanceOutput>,
 }
 
 #[derive(Serialize)]
-struct ThreadListGitOverlayImportHintOutput {
+struct ThreadListImportGuidanceOutput {
     current_branch: String,
     missing_branch_count: usize,
     missing_branches: Vec<String>,
@@ -555,7 +554,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
     let current = repo.current_lane()?;
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status().unwrap_or(None);
-    let import_hint = repo.git_overlay_import_hint().unwrap_or(None);
+    let import_hint = repo.git_import_guidance().unwrap_or(None);
     let branch_tips = repo
         .git_overlay_branch_tips()
         .unwrap_or_default()
@@ -684,7 +683,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.coordination_status = CoordinationStatus::Clean;
             summary.blockers.clear();
             summary.recommended_action =
-                canonical_bridge_reconcile_ref_preview_command(None, &summary.name);
+                canonical_git_repair_ref_preview_command(None, &summary.name);
         }
         if summary.is_current {
             enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
@@ -1277,11 +1276,11 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         recovery_commands: trust.recovery_commands.clone(),
         recovery_action_templates: trust.recovery_action_templates.clone(),
         trust,
-        git_overlay_import_hint: if as_json {
+        import_guidance: if as_json {
             None
         } else {
-            repo.git_overlay_import_hint()?
-                .map(|hint| ThreadListGitOverlayImportHintOutput {
+            repo.git_import_guidance()?
+                .map(|hint| ThreadListImportGuidanceOutput {
                     current_branch: hint.current_branch,
                     missing_branch_count: hint.missing_branch_count,
                     missing_branches: hint.missing_branches,
@@ -1322,7 +1321,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
             print_next_step(&output.recommended_action);
         }
         if output.trust.verified
-            && let Some(hint) = &output.git_overlay_import_hint
+            && let Some(hint) = &output.import_guidance
         {
             println!(
                 "{}",
@@ -2762,10 +2761,10 @@ pub(crate) fn cmd_thread_switch(
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
         {
-            let mut bridge = crate::bridge::GitBridge::new(repo);
+            let mut bridge = crate::git_projection_engine::GitProjection::new(repo);
             match bridge.write_through_thread_checkout(&name)? {
-                crate::bridge::WriteThroughOutcome::Wrote(_) => {}
-                crate::bridge::WriteThroughOutcome::Skipped(reason) => {
+                crate::git_projection_engine::WriteThroughOutcome::Wrote(_) => {}
+                crate::git_projection_engine::WriteThroughOutcome::Skipped(reason) => {
                     return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
                         &name,
                         reason.to_string()
@@ -2842,7 +2841,7 @@ fn thread_switch_would_overwrite_worktree_advice(thread: &str) -> RecoveryAdvice
 }
 
 fn thread_switch_git_checkout_skipped_advice(thread: &str, reason: String) -> RecoveryAdvice {
-    let primary_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), thread);
+    let primary_command = canonical_git_repair_ref_preview_command(Some("heddle"), thread);
     RecoveryAdvice::safety_refusal(
         "thread_switch_git_checkout_skipped",
         format!("switched Heddle to '{thread}', but could not update Git checkout: {reason}"),
@@ -3604,7 +3603,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle bridge git reconcile --prefer heddle --ref feature/git --preview"
+            "heddle fsck --repair git --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

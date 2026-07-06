@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command;
+use heddle_core::status::next_action::canonical_git_repair_ref_preview_command;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
@@ -26,7 +26,7 @@ use tokio::time::{Duration, sleep};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     marker::cmd_thread_marker,
     mount_lifecycle,
     next_action::normalized_action,
@@ -910,7 +910,7 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
 }
 
 fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
-    let reconcile_preview = canonical_bridge_reconcile_ref_preview_command(None, thread_id);
+    let reconcile_preview = canonical_git_repair_ref_preview_command(None, thread_id);
     RecoveryAdvice::safety_refusal(
         "imported_git_ref_not_managed_thread",
         format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
@@ -1086,9 +1086,8 @@ fn try_three_way_merge_refresh(
     thread: &Thread,
     target_thread_name: &str,
 ) -> Result<ThreeWayMergeRefresh> {
-    use objects::object::Attribution;
-
     use ::merge::{ConflictLabels, MergeStrategy};
+    use objects::object::Attribution;
 
     use super::merge::{ThreeWayMergeOutcome, try_three_way_merge_between_tips};
 
@@ -1438,7 +1437,7 @@ fn print_thread_output(
     }
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let recommended_action = primary_next_action(
         operation.as_ref(),
         remote_tracking.as_ref(),

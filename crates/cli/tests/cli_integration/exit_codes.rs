@@ -3,14 +3,14 @@
 //!
 //! `docs/exit-codes.md` promises a sysexits-style taxonomy for the swept
 //! commands (`init`, `status`, `verify`, `commit`, `merge`, `push`,
-//! `pull`, and the three `bridge git` verbs). Agents branch on these
+//! `pull`, and the Git import/sync/repair verbs). Agents branch on these
 //! codes without parsing stderr, so a divergence between the documented
 //! code and the runtime exit silently mis-handles a failure path.
 //!
 //! Persona round 3/5 (HeddleCo/heddle#252) caught two such divergences
 //! (`push`/`commit` returning the `IoErr` catch-all instead of the
 //! documented `Config`/`DataErr`) plus the `pull` and
-//! `bridge git reconcile` siblings. These tests pin the documented code
+//! `fsck --repair git` siblings. These tests pin the documented code
 //! for a reproducible documented condition of each swept command so the
 //! contract can't regress.
 
@@ -142,41 +142,29 @@ fn merge_preview_exits_zero() {
 }
 
 #[test]
-fn bridge_git_import_exits_zero() {
+fn import_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
 }
 
 #[test]
-fn bridge_git_sync_exits_zero() {
+fn sync_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
-    assert_exit(&["bridge", "git", "sync"], repo.path(), 0);
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
+    assert_exit(&["sync", "git"], repo.path(), 0);
 }
 
 #[test]
-fn bridge_git_reconcile_without_side_is_data_err() {
+fn fsck_git_repair_without_side_is_data_err() {
     // Documented: `65 DataErr` — manual resolution required. The
     // `reconcile_direction_required` refusal (no `--prefer` side) was the
     // `74 IoErr` catch-all before HeddleCo/heddle#252.
     let repo = adopted_git_overlay();
+    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
     assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
-    assert_exit(
-        &["bridge", "git", "reconcile", "--ref", "main"],
+        &["fsck", "--repair", "git", "--ref", "main"],
         repo.path(),
         65,
     );

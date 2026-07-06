@@ -230,7 +230,7 @@ commits or any serve path:
 > and tests** (grep: no external callers), and `resolve_default_visibility` is
 > exercised only by its own tests. The tier *machinery* is built and tested;
 > it is **not yet wired into any live serve/render path**. Likewise the
-> `bridge git export --audience` / `--notes` flags referenced in code comments
+> `export git --audience` / `--notes` flags referenced in code comments
 > (`crates/cli/src/bridge/git_export.rs:45-46`) are **planned** — the shipped
 > export subcommand takes only `--destination`
 > (`crates/cli/src/cli/cli_args/commands_bridge.rs:76-81`). So the tier model is
@@ -1919,7 +1919,7 @@ Justification, verb by verb (none is "for completeness"):
 
 ### 8.3 The reader side reuses existing grammar
 
-"Operate as audience X" (clone/fetch, and the planned `bridge git export
+"Operate as audience X" (clone/fetch, and the planned `export git
 --audience`) reuses the **already-shipped** `--audience
 internal|public|team:NAME|restricted:LABEL` grammar (`visibility.rs:60-87`)
 rather than minting a parallel selector. No new reader-side vocabulary: an

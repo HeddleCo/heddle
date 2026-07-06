@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
+use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
     action_line::print_next_step,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
@@ -14,13 +13,14 @@ use super::{
         open_operator_repo_from_path, recommend_next_action,
     },
     remote::resolve_default_remote_name,
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     workflow::cmd_sync,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    bridge::GitBridge,
     cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
     config::UserConfig,
+    git_projection_engine::GitProjection,
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
@@ -66,7 +66,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Sync)?;
 
     if let Some(remote) = repo.git_remote_tracking_status()? {
-        let remote_decision = super::git_overlay_health::remote_drift_decision(&repo, &remote);
+        let remote_decision = super::verification_health::remote_drift_decision(&repo, &remote);
         if remote_decision.status == "remote_diverged" {
             let recommended_action = remote_decision
                 .primary_action
@@ -93,7 +93,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
         if remote_decision.status == "remote_behind" {
             ensure_worktree_clean(&repo, "sync")?;
             let remote_name = resolve_default_remote_name(&repo, None)?;
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             let outcome = bridge.pull(&remote_name)?;
             let verification = build_repository_verification_state(&repo);
             if !verification.verified {
@@ -194,7 +194,7 @@ fn emit(
 pub(crate) fn primary_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
 ) -> String {
     recommend_next_action(operation, remote_tracking, import_hint, fallback)
@@ -203,7 +203,7 @@ pub(crate) fn primary_next_action(
 pub(crate) fn primary_next_action_with_verification(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
     trust: &RepositoryVerificationState,
 ) -> String {

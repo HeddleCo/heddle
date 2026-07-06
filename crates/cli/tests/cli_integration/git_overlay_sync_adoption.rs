@@ -64,7 +64,7 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     configure_git_identity(&work);
 
     heddle(&["status", "--output", "json"], Some(&work)).unwrap();
-    heddle(&["bridge", "git", "import", "--ref", "main"], Some(&work)).unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(&work)).unwrap();
     let before = status_json(&work);
     let before_state = before["current_state"]
         .as_str()
@@ -104,7 +104,7 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     assert_ne!(after["recommended_action"], "heddle capture");
     assert_eq!(git(&work, &["rev-parse", "HEAD"]), new_git_tip);
 
-    let import_again = heddle_output(&["bridge", "git", "import", "--ref", "main"], Some(&work))
+    let import_again = heddle_output(&["import", "git", "--ref", "main"], Some(&work))
         .expect("import command should run");
     assert!(
         import_again.status.success(),
@@ -175,10 +175,10 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     assert!(
         !work
             .join(".heddle")
-            .join("git-bridge")
-            .join("bridge-mapping.json")
+            .join("git-projection")
+            .join("git-projection-mapping.json")
             .exists(),
-        "adopt/import must not publish the served bridge mapping cache"
+        "adopt/import must not publish the Git projection mapping cache"
     );
 }
 

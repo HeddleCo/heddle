@@ -14,7 +14,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
-use heddle_core::status::next_action::canonical_bridge_import_ref_command;
+use heddle_core::status::next_action::canonical_git_import_ref_command;
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -34,20 +34,20 @@ use sley::{
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
-    bridge::{
-        GitBridge,
+    cli::{Cli, should_output_json, style},
+    client::LocalSync,
+    git_projection_engine::{
+        GitProjection,
         git_core::{
             clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
         },
         git_ingest::import_git_history,
     },
-    cli::{Cli, should_output_json, style},
-    client::LocalSync,
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 
@@ -380,7 +380,7 @@ fn finish_git_overlay_clone(
 ) -> Result<()> {
     configure_git_overlay_origin(local_path, &remote_label)?;
     let repo = Repository::init(local_path)?;
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     let refs = options
         .thread
         .as_ref()
@@ -496,7 +496,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
             "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?;
     let Some(reference) = reference else {
@@ -504,7 +504,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is missing"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
             "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         )));
     };
     let target = reference.peeled_oid(&git_repo).map_err(|err| {
@@ -514,7 +514,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             ),
             format!("Git ref '{branch_ref}' could not be peeled to a commit"),
             "Git status would report upstream tracking for an unreadable branch",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?
     .ok_or_else(|| {
@@ -522,7 +522,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is unborn"),
             format!("Git ref '{branch_ref}' could not be peeled to a commit"),
             "Git status would report upstream tracking for an unreadable branch",
-            canonical_bridge_import_ref_command(branch),
+            canonical_git_import_ref_command(branch),
         ))
     })?;
     set_reference(
@@ -590,7 +590,7 @@ fn verify_git_overlay_clone(
             "clone verification failed: .git/HEAD is not attached to a branch",
             "Git HEAD is detached after clone verification",
             "Heddle cannot prove which Git branch should map to the imported thread",
-            canonical_bridge_import_ref_command(track_name),
+            canonical_git_import_ref_command(track_name),
         ))
     })?;
     if git_head != track_name {
@@ -600,7 +600,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git HEAD branch '{git_head}' does not match Heddle thread '{track_name}'"),
             "continuing would leave Git and Heddle attached to different active names",
-            canonical_bridge_import_ref_command(&git_head),
+            canonical_git_import_ref_command(&git_head),
         )));
     }
 
@@ -636,7 +636,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git branch '{track_name}' does not map to imported Heddle state {state_id}"),
             "continuing would leave the Git/Heddle mapping unproven for this clone",
-            canonical_bridge_import_ref_command(track_name),
+            canonical_git_import_ref_command(track_name),
         )));
     }
 
@@ -1595,8 +1595,12 @@ fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "monorepo_clone_option_unsupported",
             format!("{flag} is not supported with --recursive monorepo clones"),
-            format!("Run the monorepo clone without `{flag}`, or clone the individual spool with `{flag}` non-recursively."),
-            format!("`{flag}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk"),
+            format!(
+                "Run the monorepo clone without `{flag}`, or clone the individual spool with `{flag}` non-recursively."
+            ),
+            format!(
+                "`{flag}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk"
+            ),
             "accepting the flag could leave nodes materialized under mismatched fetch semantics",
             "no destination directory or spool content was written",
             "heddle clone <hosted-spool> <path> --recursive",
@@ -1808,7 +1812,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// `PartialFetchMetadata` records blake3 hashes only, but
 /// `Repository::read_object` is keyed by Git OID. The bridge
 /// already computes blake3↔git mappings *for commits* (see
-/// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
+/// `SyncMapping` in `git_projection_engine/git_core.rs`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
 /// mapping here, populated by the caller (clone-time or test-time)
 /// before [`Self::hydrate`] fires. Future work: persist a sidecar

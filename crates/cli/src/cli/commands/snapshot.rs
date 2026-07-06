@@ -26,22 +26,22 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     error_envelope::print_error_with_hint,
-    git_overlay_health::{
+    next_action::{NextActionValidationContext, write_command_json},
+    operator_core::complete_current_thread_manual_resolution,
+    thread::find_active_thread_entry,
+    thread_cmd::current_thread,
+    verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         git_overlay_mutation_preflight_advice_with_worktree_status,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
-    next_action::{NextActionValidationContext, write_command_json},
-    operator_core::complete_current_thread_manual_resolution,
-    thread::find_active_thread_entry,
-    thread_cmd::current_thread,
 };
 use crate::{
     attribution::clean_attribution_value,
-    bridge::GitBridge,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
+    git_projection_engine::GitProjection,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
 
@@ -271,7 +271,7 @@ pub async fn cmd_snapshot(
     if git_overlay {
         match repo.current_state() {
             Ok(Some(state)) => {
-                let bridge = GitBridge::new(&repo);
+                let bridge = GitProjection::new(&repo);
                 if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
                     debug!("intent-to-add index update skipped: {err}");
                 }
@@ -471,12 +471,13 @@ fn current_thread_name(repo: &Repository) -> String {
 }
 
 /// Large-capture safety preflight for `commit`'s dirty path, reusing an
-/// already-computed git-overlay worktree status instead of re-walking the
-/// worktree. The git adapter has already computed the same pre-mutation status
-/// for its own preflights and the clean classification, so threading it here
+/// already-computed Git-overlay worktree status instead of re-walking the
+/// worktree. The Git Projection commit path has already computed the same
+/// pre-mutation status for its own preflights and the clean classification, so
+/// threading it here
 /// removes a redundant full walk. The large-capture gating decision is
 /// byte-identical because it reads the same `WorktreeStatus`.
-pub(crate) fn preflight_large_capture_for_git_adapter_commit_with_worktree_status(
+pub(crate) fn preflight_large_capture_for_git_projection_commit_with_worktree_status(
     force: bool,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> Result<()> {

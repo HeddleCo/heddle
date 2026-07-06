@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Persistence and discovery for Git bridge mappings.
+//! Persistence and discovery for Git Projection Mapping.
 
 use std::{
     collections::HashSet,
@@ -12,7 +12,9 @@ use objects::{object::ChangeId, store::ObjectStore};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
-use super::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
+use super::git_core::{
+    GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, git_err,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
@@ -31,7 +33,7 @@ struct GitIdentityIndex {
 }
 
 impl GitIdentityIndex {
-    fn from_notes(repo: &SleyRepository) -> GitResult<Self> {
+    fn from_notes(repo: &SleyRepository) -> GitProjectionResult<Self> {
         let mut index = Self::default();
         for (change_id, git_oid) in super::git_notes::read_identity_mappings(repo)? {
             index.mapping.insert_checked(change_id, git_oid)?;
@@ -56,19 +58,19 @@ impl GitIdentityIndex {
     }
 }
 
-impl<'a> GitBridge<'a> {
+impl<'a> GitProjection<'a> {
     pub(crate) fn mapping_path(&self) -> PathBuf {
         self.heddle_repo
             .heddle_dir()
-            .join("git-bridge")
-            .join("bridge-mapping.json")
+            .join("git-projection")
+            .join("git-projection-mapping.json")
     }
 
     pub(crate) fn mapping_tmp_path(&self) -> PathBuf {
         self.mapping_path().with_extension("json.tmp")
     }
 
-    fn read_mapping_cache_from_disk(&self) -> GitResult<SyncMapping> {
+    fn read_mapping_cache_from_disk(&self) -> GitProjectionResult<SyncMapping> {
         self.recover_mapping_tmp()?;
         let path = self.mapping_path();
         if !path.exists() {
@@ -77,7 +79,7 @@ impl<'a> GitBridge<'a> {
 
         let data = fs::read_to_string(&path)?;
         let file: MappingFile = serde_json::from_str(&data)
-            .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
+            .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
 
         let mut mapping = SyncMapping::new();
         for entry in file.entries {
@@ -89,7 +91,7 @@ impl<'a> GitBridge<'a> {
         Ok(mapping)
     }
 
-    fn recover_mapping_tmp(&self) -> GitResult<()> {
+    fn recover_mapping_tmp(&self) -> GitProjectionResult<()> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if !tmp_path.exists() {
@@ -103,7 +105,7 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    fn mapping_bytes(mapping: &SyncMapping) -> GitResult<Vec<u8>> {
+    fn mapping_bytes(mapping: &SyncMapping) -> GitProjectionResult<Vec<u8>> {
         let entries = mapping
             .iter()
             .map(|(change_id, git_oid)| MappingEntry {
@@ -114,14 +116,17 @@ impl<'a> GitBridge<'a> {
 
         let file = MappingFile { entries };
         serde_json::to_vec_pretty(&file)
-            .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
+            .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))
     }
 
-    pub(crate) fn write_mapping_tmp_to_disk(&self) -> GitResult<PathBuf> {
+    pub(crate) fn write_mapping_tmp_to_disk(&self) -> GitProjectionResult<PathBuf> {
         self.write_mapping_tmp_value_to_disk(&self.mapping)
     }
 
-    fn write_mapping_tmp_value_to_disk(&self, mapping: &SyncMapping) -> GitResult<PathBuf> {
+    fn write_mapping_tmp_value_to_disk(
+        &self,
+        mapping: &SyncMapping,
+    ) -> GitProjectionResult<PathBuf> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if let Some(parent) = path.parent() {
@@ -137,11 +142,11 @@ impl<'a> GitBridge<'a> {
         Ok(tmp_path)
     }
 
-    pub(crate) fn commit_mapping_tmp_to_disk(&self) -> GitResult<()> {
+    pub(crate) fn commit_mapping_tmp_to_disk(&self) -> GitProjectionResult<()> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if !tmp_path.exists() {
-            return Err(GitBridgeError::InvalidMapping(format!(
+            return Err(GitProjectionError::InvalidMapping(format!(
                 "mapping temp file is missing: {}",
                 tmp_path.display()
             )));
@@ -154,11 +159,11 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    pub(crate) fn save_mapping_to_disk(&self) -> GitResult<()> {
+    pub(crate) fn save_mapping_to_disk(&self) -> GitProjectionResult<()> {
         self.write_mapping_tmp_to_disk()?;
         // Fault-injection checkpoint: a crash here leaves the
-        // sidecar in tmp form (`bridge-mapping.json.tmp`) without a
-        // committed `bridge-mapping.json`. The next mapping-cache read
+        // sidecar in tmp form (`git-projection-mapping.json.tmp`) without a
+        // committed `git-projection-mapping.json`. The next mapping-cache read
         // atomically renames the tmp into place. Tested by
         // `bridge_recovers_from_crash_after_tmp_before_commit`.
         objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
@@ -167,10 +172,13 @@ impl<'a> GitBridge<'a> {
 
     /// Build the export identity mapping from portable metadata and the served
     /// bridge cache. `refs/notes/heddle` is authoritative because it travels
-    /// with Git history; `bridge-mapping.json` is the local served/export cache
+    /// with Git history; `git-projection-mapping.json` is the local served/export cache
     /// after visibility filtering. Ingest identity lives separately at
     /// `.heddle/ingest/sha_map.sqlite` and is intentionally not folded in here.
-    pub(crate) fn build_existing_mapping(&mut self, git_repo_path: Option<&Path>) -> GitResult<()> {
+    pub(crate) fn build_existing_mapping(
+        &mut self,
+        git_repo_path: Option<&Path>,
+    ) -> GitProjectionResult<()> {
         let repo = match git_repo_path {
             Some(path) => super::git_core::open_repo(path)?,
             None => self.open_git_repo()?,
@@ -188,7 +196,7 @@ impl<'a> GitBridge<'a> {
     pub(crate) fn seed_ingest_identity_mappings_from_mirror(
         &mut self,
         repo: &SleyRepository,
-    ) -> GitResult<()> {
+    ) -> GitProjectionResult<()> {
         let ingest = self.heddle_repo.git_overlay_ingest_commit_mapping()?;
         for (git_sha, change_id) in ingest {
             let change_id = ChangeId::parse(&change_id)?;
@@ -208,7 +216,7 @@ impl<'a> GitBridge<'a> {
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
+    pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitProjectionResult<usize> {
         let repo = self.open_git_repo()?;
         self.mapping = self.read_mapping_cache_from_disk()?;
         let reachable: HashSet<_> = collect_commit_oids(&repo)?.into_iter().collect();
@@ -219,16 +227,17 @@ impl<'a> GitBridge<'a> {
         Ok(removed)
     }
 
-    /// Consolidate the git-overlay MIRROR (`.heddle/git`) — heddle's canonical
-    /// git object store, a bare sley repo — by packing every on-disk object into
-    /// a single pack and dropping the now-redundant loose copies.
+    /// Consolidate the legacy Bridge Mirror (`.heddle/git`) — the bare Sley repo used
+    /// by explicit Git projection import/export/sync paths — by packing every
+    /// on-disk object into a single pack and dropping the now-redundant loose
+    /// copies.
     ///
     /// The mirror accumulates one loose object per minted/imported commit, tree,
-    /// and blob (thousands on a real clone). Loose-object reads dominate the
-    /// uninstrumented cost of `git_overlay_worktree_status`, which every read
-    /// command (status/diff/verify) and write command (capture/commit) pays.
-    /// `heddle maintenance gc` already consolidates heddle's NATIVE store; this
-    /// brings the mirror to parity.
+    /// and blob (thousands on a real clone). Loose-object reads dominate legacy Bridge Mirror import/export
+    /// and reconstruction paths. Active Git-overlay status
+    /// and checkpoint paths use the checkout's real `.git` repository, not this
+    /// mirror. `heddle maintenance gc` already consolidates Heddle's native
+    /// store; this brings the legacy Bridge Mirror to parity.
     ///
     /// Correctness: this uses [`repack_all_objects`], which gathers EVERY object
     /// on disk (every loose object and every pack), not the reachability closure
@@ -245,7 +254,7 @@ impl<'a> GitBridge<'a> {
     /// Returns the number of loose objects consolidated into the pack (and thus
     /// removed from disk). `Ok(0)` when the mirror has no objects to pack.
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn consolidate_mirror(&self) -> GitResult<usize> {
+    pub(crate) fn consolidate_mirror(&self) -> GitProjectionResult<usize> {
         use sley::plumbing::sley_odb::{install_repack_result, repack_all_objects};
 
         let repo = self.open_git_repo()?;
@@ -267,7 +276,7 @@ impl<'a> GitBridge<'a> {
 /// Walk all branch- and tag-tipped commit ancestry. Skips refs that peel
 /// to non-commit objects (annotated-tag-points-at-blob/tree), matching the
 /// marker model's current commit-target-only constraint.
-fn collect_commit_oids(repo: &SleyRepository) -> GitResult<Vec<SleyObjectId>> {
+fn collect_commit_oids(repo: &SleyRepository) -> GitProjectionResult<Vec<SleyObjectId>> {
     let mut tips = Vec::new();
 
     for reference in repo.references().list_refs().map_err(git_err)? {
@@ -309,16 +318,16 @@ fn collect_commit_oids(repo: &SleyRepository) -> GitResult<Vec<SleyObjectId>> {
     Ok(seen.into_iter().collect())
 }
 
-fn parse_stored_git_oid(value: &str) -> GitResult<SleyObjectId> {
+fn parse_stored_git_oid(value: &str) -> GitProjectionResult<SleyObjectId> {
     let format = match value.len() {
         40 => ObjectFormat::Sha1,
         64 => ObjectFormat::Sha256,
         _ => {
-            return Err(GitBridgeError::InvalidMapping(format!(
+            return Err(GitProjectionError::InvalidMapping(format!(
                 "invalid git oid length for {value}"
             )));
         }
     };
     SleyObjectId::from_hex(format, value)
-        .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
+        .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))
 }

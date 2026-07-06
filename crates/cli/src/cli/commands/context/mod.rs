@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 pub use context_mutate::*;
 pub use context_query::*;
 use objects::{
+    error::HeddleError,
     object::{
         Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
         State,
@@ -15,15 +16,11 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::Repository;
+use repo::{Repository, ResolvePolicy};
 use serde::Serialize;
 
-use objects::error::HeddleError;
-use repo::ResolvePolicy;
-
 use super::{
-    advice::RecoveryAdvice,
-    history_target::resolve_state_id_with_policy,
+    advice::RecoveryAdvice, history_target::resolve_state_id_with_policy,
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -286,7 +283,7 @@ pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects:
         })
     };
     let policy = ResolvePolicy {
-        git_overlay_import_hints: true,
+        git_import_guidance: true,
         bootstrap_on_empty_head: Some(&bootstrap),
     };
     resolve_state_id_with_policy(repo, spec, policy)

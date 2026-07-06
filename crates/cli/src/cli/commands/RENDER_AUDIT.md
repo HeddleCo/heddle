@@ -23,7 +23,7 @@ of each file. Treat the table as a punch list, not a contract.
 | `auth_cmd.rs`                                                 | text-only  | Auth flow needs structured output.                 |
 | `bisect.rs`                                                   | partial    |                                                    |
 | `blame.rs`                                                    | partial    |                                                    |
-| `bridge.rs`                                                   | partial    | `cmd_bridge_git_status` now routes through `render_bridge_git_status`; remaining sites are inside `cmd_bridge_git`'s subcommand dispatcher and the import-progress reporter — still to chip. |
+| `bridge.rs`                                                   | partial    | Remaining sites are inside the Git projection subcommand dispatcher and the import-progress reporter — still to chip. |
 | `checkpoint.rs`                                               | partial    |                                                    |
 | `cherry_pick.rs`                                              | partial    |                                                    |
 | `clean.rs`                                                    | text-only  |                                                    |

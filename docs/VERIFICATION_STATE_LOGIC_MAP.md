@@ -13,14 +13,20 @@ Target rows describe the next model and must not be cited as shipped behavior.
 
 - `RepositoryVerificationState` is the canonical proof surface. `heddle verify
   --output json` emits it directly when clean; `status`, `diagnose`,
-  `status`, `thread list/show`, `bridge git status`, many
+  `thread list/show`, many
   post-operation envelopes, and mutating command preflights embed or defer to
-  the same shape. `bridge git import` and `bridge git reconcile` post-operation
+  the same shape. `import git` and `fsck --repair git` post-operation
   JSON do not yet embed this proof; embedding it there is target behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
-  machines.
+  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Git Projection Mapping,
+  Git Checkpoint, Repository Verification State, and Machine-Contract Proof. Use
+  Bridge Mirror only when describing legacy mirror migration or repair.
+- In Git-overlay mode, active Git reads and writes use the checkout's real
+  `.git`. Heddle stores Git Projection Mapping metadata under
+  `.heddle/git-projection/` and uses legacy Bridge Mirror data only as
+  migration or repair input when present.
 - `verified: true` means repository safety checks are clean. It does not mean
   there is no useful workflow action. Ready threads and local commits waiting to
   push can keep repository verification clean while setting a next action.
@@ -47,7 +53,7 @@ A clean verification report means all applicable dimensions agree:
 | Side-branch and tag import | Missing non-active Git branch tips are reported as `available` import work and do not block the active checkout. Tags visible to the checkout map to Heddle markers. | `tags_need_import`, `tag_marker_mismatch`; `available` is informational. |
 | Worktree | Git index/worktree and Heddle worktree compare cleanly. Native Heddle worktrees compare cleanly against the current state. | `dirty_worktree`, `needs_checkpoint`, native `uncaptured`, or worktree inspection `degraded`. |
 | Remote tracking | No upstream work must be integrated before local mutation. `remote_ahead` and `remote_untracked` are verified-clean publish guidance. | `remote_behind`, `remote_diverged`, `remote_contains_undone_checkpoint`, or remote check `degraded`. |
-| Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or bridge operation needs continue, abort, resolve, or raw-Git handoff. |
+| Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or Git projection operation needs continue, abort, resolve, or raw-Git handoff. |
 | Workflow | Ready work is reported as workflow guidance after repository safety is known, and merged-thread metadata agrees with target history. | `workflow_status: blocked` when ready work exists but a repository blocker prevents landing; `stale_integration_metadata` when merged-thread records no longer match target history. |
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. `available_with_doc_gaps` is currently non-blocking. | `machine_contract_gaps` / `schema_gaps`, command contract drift, schema validation failures. |
 | Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |
@@ -101,7 +107,7 @@ flowchart TD
 
 | Command family | Gate |
 |---|---|
-| Observe-only commands | `status`, strict `verify`, `doctor`, `bridge git status`, `thread list/show`, `log`, `show`, `diff`, `help`, and `schemas` may probe plain Git, but must not create `.heddle`, write refs, or change `git status --short`. Blocked `verify` exits nonzero and carries the proof in the JSON error envelope. |
+| Observe-only commands | `status`, strict `verify`, `doctor`, `thread list/show`, `log`, `show`, `diff`, `help`, and `schemas` may probe plain Git, but must not create `.heddle`, write refs, or change `git status --short`. Blocked `verify` exits nonzero and carries the proof in the JSON error envelope. |
 | First-run adoption | `adopt` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle adopt --ref <branch>`; multi-ref repos may recommend `heddle adopt`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
 | Active branch import | Mutating commands that could capture, checkpoint, move refs, materialize work, or claim up-to-date must refuse while the active Git branch needs import or mapping repair. |
 | Side-branch import | Missing side-branch tips are surfaced as available import work, but do not make the current checkout unverified and must not replace the active repair action. |
@@ -113,7 +119,7 @@ flowchart TD
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle undo --redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
 | Integrated remote divergence | If a diverged upstream has been fetched, imported, and merged into the current Heddle state, `needs_checkpoint` becomes the primary blocker even while Git tracking still reports divergence. `checkpoint` is allowed in exactly that integrated state because it is the operation that writes the Git merge checkpoint and turns the remaining state into ordinary `heddle push` work. |
-| Bridge import/reconcile JSON (**Target**) | `bridge git import` and `bridge git reconcile` success JSON do not yet embed the post-operation `RepositoryVerificationState` — the `trust` field is `#[serde(skip_serializing)]`, so it is omitted from `--output json`. Agents still need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. Embedding the proof inline (alongside recommended action and recovery command metadata) is target behavior. |
+| Git projection import/repair JSON (**Target**) | `import git` and `fsck --repair git` success JSON do not yet embed the post-operation `RepositoryVerificationState` — the `trust` field is `#[serde(skip_serializing)]`, so it is omitted from `--output json`. Agents still need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. Embedding the proof inline (alongside recommended action and recovery command metadata) is target behavior. |
 | Generated artifact safety | `status`, `capture`, `commit`, and `merge` must respect explicit ignore rules, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Git-overlay mode prefers `.gitignore` for shared ignore policy so raw `git status --short` and Heddle agree by construction; `.heddleignore` remains available for Heddle-only excludes. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Large captures and deletions require explicit force. |
 | JSON and op-id | Runtime command surfaces, command catalog output, schemas, JSON envelopes, and op-id support are derived from the command contract table. No current command advertises generated-resume op-id persistence; agents that need replay must supply an explicit id only to commands with `supports_op_id: true`. |
 | Persona-driven UX | Human text answers what happened, current state, and next step. Agent/script JSON keeps stdout parseable, stderr reserved for error envelopes, and action metadata executable or explicitly templated. Support/maintainer diagnostics live in `doctor`, and verbose/version surfaces. |
@@ -142,7 +148,7 @@ the new behavior.
 | Commit and undo are one user-visible logical loop | `git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe`; `git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle`; `git_overlay_matrix_undo_text_reports_non_clean_post_verify_next_action` |
 | Pushed undo keeps intent explicit | `git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull` |
 | Remote drift closes after push/pull | `git_overlay_matrix_bridge_push_pull_report_verification_state`; `git_overlay_matrix_top_level_push_closes_remote_verification_loop`; `git_overlay_matrix_commit_refuses_remote_divergence_before_capture`; `git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge` |
-| Bridge import/reconcile run without git on PATH (schema-covered) | `git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_path`; `target/debug/heddle doctor schemas --output json` |
+| Git projection import/export/sync/repair run without git on PATH (schema-covered) | `git_replacement_matrix` no-git projection coverage; `target/debug/heddle doctor schemas --output json` |
 | Remote publish state is guidance, not disverification | `git_overlay_matrix_top_level_push_closes_remote_verification_loop`; `git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking`; `git_overlay_matrix_remote_add_configures_default_push_remote` |
 | Remote undone checkpoint remains explicit | `git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull` |
 | No command claims up to date while verification is blocked | `git_overlay_matrix_local_ahead_noop_merge_preserves_merge_relation`; `git_overlay_matrix_rebase_noop_defers_up_to_date_claim_to_verification` |
@@ -172,8 +178,8 @@ the new behavior.
   `out_of_band_commit_count` detail) and the recovery is the one-line manual
   `heddle adopt --ref <branch>`. Auto-reconcile-on-read is deliberately not
   implemented: observe-only read paths (`status`, `verify`, `doctor`,
-  `bridge git status`) must not mutate repository state, and the explicit
-  reconcile keeps an auditable record of when external Git history entered
+  `status`) must not mutate repository state, and the explicit
+  adoption/repair step keeps an auditable record of when external Git history entered
   Heddle. Decision recorded 2026-06-12 (HeddleCo/heddle#534).
 - Every concrete `recommended_action` emitted by verification must parse through
   the command catalog. Display-only placeholders must carry explicit template or

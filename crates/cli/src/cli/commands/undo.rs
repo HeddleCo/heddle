@@ -15,7 +15,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,
@@ -198,7 +198,7 @@ pub fn cmd_undo(
 
     // heddle#305: capture the pre-undo state into thread history BEFORE the
     // reset, so the worktree content the undone batch(es) absorbed is never
-    // silently discarded. The reset below hard-resets the Git mirror and
+    // silently discarded. The reset below hard-resets the Git projection ref and
     // rewinds the heddle thread; recording the current tip in the internal
     // recovery ref keeps it a first-class, addressable recovery point —
     // durable even if a later divergent capture/commit strands the redo path.

@@ -22,7 +22,7 @@ struct RuntimeContractParseSample {
 // Representative parseable invocations for every runtime leaf command in
 // CONTRACTS. The only intentionally skipped rows are non-runtime grouping
 // contracts whose Clap variants require a subcommand, e.g. `thread`,
-// `bridge git`, and `redact trust`.
+// Git projection grouping rows, and `redact trust`.
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
@@ -120,36 +120,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "init"], &["bridge", "git", "init"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "export"], &["bridge", "git", "export"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "sync"], &["bridge", "git", "sync"]),
+    sample(&["import", "git"], &["import", "git"]),
     #[cfg(feature = "git-overlay")]
     sample(
-        &["bridge", "git", "reconcile"],
-        &[
-            "bridge",
-            "git",
-            "reconcile",
-            "--prefer",
-            "heddle",
-            "--ref",
-            "main",
-        ],
+        &["export", "git"],
+        &["export", "git", "--destination", "out.git"],
     ),
     #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "push"], &["bridge", "git", "push"]),
-    #[cfg(feature = "git-overlay")]
-    sample(&["bridge", "git", "pull"], &["bridge", "git", "pull"]),
-    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+    sample(&["sync", "git"], &["sync", "git"]),
+    #[cfg(feature = "ingest")]
     sample(
-        &["bridge", "git", "reason"],
-        &["bridge", "git", "reason", "--path", "."],
+        &["context", "reason", "git"],
+        &["context", "reason", "git", "--path", "."],
     ),
     sample(&["capture"], &["capture"]),
     sample(&["checkpoint"], &["checkpoint"]),
@@ -396,7 +378,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["spool", "attach", "acme/root", "acme/lib"],
     ),
     #[cfg(feature = "client")]
-    sample(&["spool", "detach"], &["spool", "detach", "acme/root", "libs"]),
+    sample(
+        &["spool", "detach"],
+        &["spool", "detach", "acme/root", "libs"],
+    ),
     #[cfg(feature = "client")]
     sample(&["spool", "children"], &["spool", "children", "acme/root"]),
     #[cfg(feature = "client")]
@@ -530,7 +515,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
         "heddle clone /tmp/source <path> --thread main",
-        "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        "heddle import git --path <full-git-repo> --ref <ref>",
         "heddle thread promote main",
         "heddle thread resolve main",
     ] {
@@ -540,11 +525,11 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
     #[cfg(feature = "git-overlay")]
     {
         for action in [
-            "heddle bridge git import --ref main",
-            "heddle bridge git import --ref origin/main",
+            "heddle import git --ref main",
+            "heddle import git --ref origin/main",
             "heddle merge origin/main --preview",
-            "heddle bridge git reconcile --ref main --preview",
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
+            "heddle fsck --repair git --ref main --preview",
+            "heddle fsck --repair git --prefer heddle --ref main --preview",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -640,15 +625,14 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert!(!dynamic_clone.agent_may_fill);
 
     let import =
-        recommended_action_template("heddle bridge git import --path <full-git-repo> --ref <ref>")
+        recommended_action_template("heddle import git --path <full-git-repo> --ref <ref>")
             .expect("shallow import recovery placeholder should resolve");
     assert_eq!(
         import.argv_template,
         vec![
             "heddle",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -1031,7 +1015,7 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.surface,
-                "native" | "git_adapter" | "automation" | "admin" | "internal"
+                "native" | "git_projection" | "automation" | "admin" | "internal"
             ),
             "`{display}` has unknown product surface `{}`",
             contract.surface
@@ -1039,27 +1023,27 @@ fn command_contract_metadata_is_internally_consistent() {
         assert!(
             matches!(
                 contract.help_visibility,
-                "everyday" | "advanced" | "git_adapter" | "hidden"
+                "everyday" | "advanced" | "git_projection" | "hidden"
             ),
             "`{display}` has unknown help visibility `{}`",
             contract.help_visibility
         );
-        if contract.help_visibility == "git_adapter" {
+        if contract.help_visibility == "git_projection" {
             assert_eq!(
-                contract.surface, "git_adapter",
-                "`{display}` Git adapter commands must live on the Git adapter surface"
+                contract.surface, "git_projection",
+                "`{display}` Git projection commands must live on the Git projection surface"
             );
             assert!(
                 contract.canonical_command.is_some(),
-                "`{display}` Git-shaped aliases must name a canonical Heddle command"
+                "`{display}` Git projection commands must name a canonical Heddle command"
             );
             assert!(
                 contract.canonical_kind.is_some(),
-                "`{display}` Git-shaped aliases must classify the canonical action"
+                "`{display}` Git projection commands must classify the canonical action"
             );
             assert!(
                 contract.canonical_note.is_some(),
-                "`{display}` Git-shaped aliases must explain the canonical action"
+                "`{display}` Git projection commands must explain the canonical action"
             );
         }
         if contract.help_visibility == "everyday" {
@@ -1220,16 +1204,9 @@ fn native_only_catalog_excludes_git_overlay_commands() {
     let catalog = build_command_catalog();
     for display in [
         "bridge",
-        "bridge git",
-        "bridge git status",
-        "bridge git init",
-        "bridge git import",
-        "bridge git export",
-        "bridge git sync",
-        "bridge git reconcile",
-        "bridge git push",
-        "bridge git pull",
-        "bridge git reason",
+        "status",
+        "sync git",
+        "context reason git",
         "git-overlay",
     ] {
         assert!(
@@ -1342,7 +1319,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // revert, purge, redact, stash, clean, discuss, context, review,
     // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
-    // session verbs, bridge git push/pull, continue, daemon stop,
+    // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
     // maintenance gc/index, merge --preview, pull, push, query, ready,
     // the remote family, start, switch, sync, and the thread lifecycle
@@ -1387,12 +1364,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth logout",
             "auth status",
             "auth create-service-token",
-            "bridge git status",
-            "bridge git import",
-            "bridge git sync",
-            "bridge git reconcile",
-            "bridge git push",
-            "bridge git pull",
+            "import git",
+            "export git",
+            "sync git",
             "capture",
             "checkpoint",
             "cherry-pick",
@@ -1822,6 +1796,15 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
         vec!["constraint", "invariant", "rationale"]
     );
 
+    let fsck_options = catalog
+        .options_for_display("fsck")
+        .expect("fsck should be cataloged");
+    let repair = fsck_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("repair"))
+        .expect("fsck --repair should be cataloged");
+    assert_eq!(repair.possible_values, vec!["git"]);
+
     let integration_install_options = catalog
         .options_for_display("integration install")
         .expect("integration install should be cataloged");
@@ -1881,8 +1864,8 @@ fn command_contract_table_drives_help_tiers() {
         (
             "switch",
             "advanced",
-            "git_adapter",
-            "git_adapter",
+            "git_projection",
+            "git_projection",
             Some("thread switch"),
             Some("direct_command"),
             false,
@@ -2032,7 +2015,6 @@ fn op_id_persistence_reads_contract_table() {
         ("init", false, "bootstrap"),
         ("adopt", false, "bootstrap"),
         ("clone", false, "bootstrap"),
-        ("bridge git init", false, "bootstrap"),
     ] {
         let entry = catalog
             .commands

@@ -481,19 +481,45 @@ mod fsck {
     }
 
     #[test]
-    fn test_fsck_rejects_removed_repair_flag() {
+    fn test_fsck_repair_requires_target() {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
         let result = heddle(&["fsck", "--repair"], Some(temp.path()));
         assert!(
             result.is_err(),
-            "fsck --repair should be rejected after no-op repair removal"
+            "fsck --repair should require an explicit repair target"
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("unexpected argument '--repair'") || err.contains("unrecognized"),
-            "removed flag should fail at CLI parsing, got: {err}"
+            err.contains("a value is required") || err.contains("requires a value"),
+            "bare repair flag should fail at CLI parsing, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_fsck_repair_git_json_surface() {
+        let temp = TempDir::new().unwrap();
+        setup_repo_with_file(&temp, "file.txt", "content");
+
+        let result = heddle(
+            &["fsck", "--repair", "git", "--output", "json"],
+            Some(temp.path()),
+        );
+        assert!(
+            result.is_ok(),
+            "fsck --repair git --output json failed: {:?}",
+            result.err()
+        );
+
+        let output: Value = serde_json::from_str(&result.unwrap()).expect("should be JSON");
+        assert_eq!(output["valid"], true);
+        assert_eq!(output["git_projection_checked"], true);
+        assert_eq!(output["repair_target"], "git");
+        assert_eq!(output["repaired"], false);
+        assert!(
+            output["repairs"].is_array(),
+            "repair surface should report repair actions: {output}"
         );
     }
 

@@ -34,7 +34,7 @@ extract time.
 |---|---|---|---|
 | `clone` | `cargo test --locked -p heddle-cli --test cli_integration realworld_fixtures_clone_and_import_round_trip -- --ignored --nocapture` | Pass | Real public fixtures clone with `PATH=""`. |
 | `bridge import` | Same real-world fixture test | Pass | Imports all refs with `PATH=""`. |
-| `fsck --bridge --output json` | Same real-world fixture test | Pass | JSON parses and `valid=true` with `PATH=""`; no host-`git` carve-out remains in this test. |
+| `fsck --git --output json` | Same real-world fixture test | Pass | JSON parses and `valid=true` with `PATH=""`; no host-`git` carve-out remains in this test. |
 | `thread list --output json` | Same real-world fixture test | Pass | JSON parses and exposes imported threads with `PATH=""`. |
 | `status --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `git-shaped` dirty long-path probe | Pass | Fresh Git worktree without Heddle state reports `git-overlay`, current thread, and dirty path with `PATH=""`; large fixture probe detected `untracked dirty file.txt` under a long path with spaces. |
 | `diagnose --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit; manual `git-shaped` dirty long-path probe | Pass | No longer fails when upstream drift probing cannot spawn `git`; large dirty-worktree probe parsed cleanly with `PATH=""`. |
@@ -74,7 +74,7 @@ extract time.
 - Expanded `git_replacement_matrix` to cover a fresh Git worktree with no
   Heddle state under `PATH=""` for `status`, `diagnose`, `thread list`,
   `status`, and `ready`.
-- Updated real-world fixture tests so `fsck --bridge --output json` and
+- Updated real-world fixture tests so `fsck --git --output json` and
   `thread list --output json` run under `PATH=""` rather than borrowing host Git.
 - Classified missing path IO errors as `path_not_found` in JSON-mode error
   envelopes, with an actionable `--repo` / `heddle init` recovery hint.
@@ -295,11 +295,11 @@ C-or-lower or hard-gate findings remain open.
 |---|---:|---|---|
 | `status` | A | JSON/text/no-git/error cases sampled; machine-stream no-git regression pass; large dirty long-path `git-shaped` probe pass; narrow/no-color text pass; TTY auto/text and explicit JSON pass | Low residual risk. |
 | `thread` | A | `thread list --output json` no-git real fixtures pass; public help paths pass; cleanup safety suite pass; narrow/no-color text pass; unknown-thread recovery points at `heddle thread list` | Low residual risk on rare subcommands. |
-| `bridge` | A | `bridge import` no-git real fixtures pass; bridge init/export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Runtime `git` subprocesses are forbidden and linted. |
+| `bridge` | A | `bridge import` no-git real fixtures pass; bridge export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Runtime `git` subprocesses are forbidden and linted. |
 | `diagnose` | A | JSON no-git pass; narrow/no-color text pass; plain-Git baseline and branch-switch coverage pass; recovery shape sampled | Low residual risk. |
 | `help` | A | All rubric everyday commands and visible public command paths have `help`, `--help`, and `-h` coverage; typo suggestions and unknown-topic recovery sampled | Low residual risk. |
 | `clone` | A | no-git real fixtures pass; local/bare clone path with `PATH=""` pass; unsupported lazy/depth/filter/file-url flags reject cleanly; text completion names next step | Remote-network progress remains an optional long-running polish area. |
-| `fsck` | A | `fsck --bridge --output json` no-git real fixtures pass; narrow/no-color text pass; corrupt ref recovery passes in JSON and text | Low residual risk. |
+| `fsck` | A | `fsck --git --output json` no-git real fixtures pass; narrow/no-color text pass; corrupt ref recovery passes in JSON and text | Low residual risk. |
 | `ready` | A | no-git JSON pass; clean machine-stream regression pass; text ready/already-ready no-op pass; stale/heavy-impact coverage exists in multi-agent tests | Low residual risk. |
 | `status` / `thread list` workspace view | A | no-git JSON pass; grouped current/stacked/parallel threads covered; promoted to the curated core-loop surface through canonical commands | Low residual risk on very large thread lists. |
 | `doctor` | A | `doctor docs` and `doctor schemas` gates clean; narrow/no-color text pass; text/json recovery sampled; docs-doctor unknown flags and unreadable paths pass | Low residual risk. |

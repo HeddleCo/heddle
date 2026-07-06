@@ -3,8 +3,8 @@ use std::path::Path;
 
 use objects::{
     object::{
-        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin,
-        OriginSet, Principal, State, Tree, TreeEntry,
+        Attribution, Blob, ChangeId, ContentHash, FileProvenance, LineSpan, Origin, OriginSet,
+        Principal, State, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -439,11 +439,9 @@ fn lookup_tree_entry_characterizes_entry_policy_paths() {
         ]))
         .unwrap();
     let missing_parent = store
-        .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
-            "ghost".to_string(),
-            missing_subtree_hash,
-        )
-        .unwrap()]))
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::directory("ghost".to_string(), missing_subtree_hash).unwrap(),
+        ]))
         .unwrap();
     let root_hash = store
         .put_tree(&Tree::from_entries(vec![

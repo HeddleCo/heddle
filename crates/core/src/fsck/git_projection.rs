@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Fork note: this module mirrors the bridge note/mapping logic from
-//! `crates/cli/src/bridge/git_notes.rs` and
-//! `crates/cli/src/bridge/git_mapping.rs`. Until GitBridge is fully extracted
+//! Fork note: this module mirrors the Git projection note/mapping logic from
+//! `crates/cli/src/git_projection_engine/git_notes.rs` and
+//! `crates/cli/src/git_projection_engine/git_mapping.rs`. Until Git projection support is fully extracted
 //! into `heddle-core`, we keep the behavior aligned (notably required note
 //! fields and skip-on-deserialization-failure semantics).
 use std::{
@@ -19,34 +19,34 @@ use super::{FsckError, invalid_fsck_config, make_error};
 
 const NOTES_REF: &str = "refs/notes/heddle";
 
-pub(crate) fn check_bridge(
+pub(crate) fn check_git_projection(
     repo: &Repository,
     errors: &mut Vec<FsckError>,
     warnings: &mut Vec<String>,
     objects_checked: &mut usize,
 ) -> Result<()> {
     if !mirror_path(repo).exists() {
-        warnings.push("Git-overlay mirror has not been initialized yet".to_string());
+        warnings.push("legacy Bridge Mirror is absent; mirror-backed Git projection checks were skipped".to_string());
         return Ok(());
     }
 
     let mirror = open_git_repo(&mirror_path(repo))
-        .map_err(|err| invalid_fsck_config(format!("bridge mirror open failed: {err}")))?;
+        .map_err(|err| invalid_fsck_config(format!("legacy Bridge Mirror open failed: {err}")))?;
     let mapping = build_existing_mapping(repo, &mirror)
-        .map_err(|err| invalid_fsck_config(format!("bridge mapping check failed: {err}")))?;
+        .map_err(|err| invalid_fsck_config(format!("Git Projection Mapping check failed: {err}")))?;
 
     for (change_id, git_oid) in mapping.iter() {
         *objects_checked += 1;
         if mirror.read_object(git_oid).is_err() {
             errors.push(make_error(
-                "bridge-mapping",
-                &format!("mapped Git object {git_oid} is missing from the mirror"),
+                "git-projection-mapping",
+                &format!("mapped Git object {git_oid} is missing from the legacy Bridge Mirror"),
                 Some(change_id.to_string()),
             ));
         }
         if repo.store().get_state(change_id)?.is_none() {
             errors.push(make_error(
-                "bridge-mapping",
+                "git-projection-mapping",
                 &format!("mapped Heddle state {change_id} is missing from the store"),
                 Some(git_oid.to_string()),
             ));
@@ -54,12 +54,12 @@ pub(crate) fn check_bridge(
     }
 
     for (git_oid, note) in read_all_notes(&mirror)
-        .map_err(|err| invalid_fsck_config(format!("bridge notes check failed: {err}")))?
+        .map_err(|err| invalid_fsck_config(format!("Git projection notes check failed: {err}")))?
     {
         *objects_checked += 1;
         let Ok(change_id) = ChangeId::parse(&note.change_id) else {
             errors.push(make_error(
-                "bridge-notes",
+                "git-projection-notes",
                 &format!("note for {git_oid} contains an invalid Heddle change id"),
                 Some(note.change_id),
             ));
@@ -67,8 +67,8 @@ pub(crate) fn check_bridge(
         };
         if mapping.get_git(&change_id) != Some(git_oid) {
             errors.push(make_error(
-                "bridge-notes",
-                &format!("note for {git_oid} does not round-trip through the bridge mapping"),
+                "git-projection-notes",
+                &format!("note for {git_oid} does not round-trip through Git Projection Mapping"),
                 Some(change_id.to_string()),
             ));
         }
@@ -81,7 +81,7 @@ pub(crate) fn check_bridge(
         *objects_checked += 1;
         if repo.store().get_state(&state_id)?.is_none() {
             errors.push(make_error(
-                "bridge-thread",
+                "git-projection-thread",
                 &format!("thread '{thread}' points at a missing state"),
                 Some(state_id.to_string()),
             ));
@@ -137,8 +137,8 @@ fn mirror_path(repo: &Repository) -> PathBuf {
 
 fn mapping_path(repo: &Repository) -> PathBuf {
     repo.heddle_dir()
-        .join("git-bridge")
-        .join("bridge-mapping.json")
+        .join("git-projection")
+        .join("git-projection-mapping.json")
 }
 
 fn mapping_tmp_path(repo: &Repository) -> PathBuf {
@@ -367,16 +367,16 @@ mod tests {
 
     use super::*;
 
-    fn write_bridge_mapping(repo: &Repository, change_id: &str, git_oid: &sley::ObjectId) {
+    fn write_projection_mapping(repo: &Repository, change_id: &str, git_oid: &sley::ObjectId) {
         let mapping_path = repo
             .heddle_dir()
-            .join("git-bridge")
-            .join("bridge-mapping.json");
+            .join("git-projection")
+            .join("git-projection-mapping.json");
         let mapping_parent = mapping_path.parent().expect("mapping path has parent");
-        fs::create_dir_all(mapping_parent).expect("create bridge mapping directory");
+        fs::create_dir_all(mapping_parent).expect("create Git projection mapping directory");
         let contents =
             format!(r#"{{"entries":[{{"change_id":"{change_id}","git_oid":"{git_oid}"}}]}}"#);
-        std::fs::write(&mapping_path, contents).expect("write bridge mapping");
+        std::fs::write(&mapping_path, contents).expect("write Git projection mapping");
     }
 
     fn write_bridge_note(mirror: &SleyRepository, target: sley::ObjectId, body: &str) {
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bridge_skips_foreign_note_without_status() {
+    fn test_git_projection_skips_foreign_note_without_status() {
         let temp = TempDir::new().expect("create temp dir");
         let repo = Repository::init_default(temp.path()).expect("init repo");
 
@@ -434,25 +434,25 @@ mod tests {
             r#"{{"change_id":"{}","status":"published"}}"#,
             state_change_id
         );
-        write_bridge_mapping(&repo, &state_change_id, &valid_note_target);
+        write_projection_mapping(&repo, &state_change_id, &valid_note_target);
         write_bridge_note(&mirror, foreign_note_target, &foreign_note);
         write_bridge_note(&mirror, valid_note_target, &valid_note);
 
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         let mut objects_checked = 0;
-        check_bridge(&repo, &mut errors, &mut warnings, &mut objects_checked)
-            .expect("run bridge check");
+        check_git_projection(&repo, &mut errors, &mut warnings, &mut objects_checked)
+            .expect("run Git projection check");
 
         assert!(warnings.is_empty());
         let expected_objects_checked = repo.refs().list_threads().expect("list threads").len() + 2;
         assert!(
-            !errors.iter().any(|error| error.kind == "bridge-notes"),
-            "unexpected bridge-notes errors: {errors:?}",
+            !errors.iter().any(|error| error.kind == "git-projection-notes"),
+            "unexpected git-projection-notes errors: {errors:?}",
         );
         assert!(
-            !errors.iter().any(|error| error.kind == "bridge-mapping"),
-            "unexpected bridge-mapping errors: {errors:?}",
+            !errors.iter().any(|error| error.kind == "git-projection-mapping"),
+            "unexpected git-projection-mapping errors: {errors:?}",
         );
         assert_eq!(
             objects_checked, expected_objects_checked,

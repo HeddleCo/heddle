@@ -68,6 +68,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 }
 
 schema_registry! {
+    (&["fsck --repair git"], FsckReport),
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
@@ -106,7 +107,6 @@ schema_registry! {
     (&["fetch"], FetchSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
-    (&["bridge git status"], BridgeGitStatusSchema),
     (&["expand"], ExpandSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
@@ -126,13 +126,9 @@ schema_registry! {
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
-    (&["bridge git init"], BridgeInitSchema),
-    (&["bridge git export"], BridgeExportSchema),
-    (&["bridge git import"], BridgeImportSchema),
-    (&["bridge git sync"], BridgeSyncSchema),
-    (&["bridge git reconcile"], BridgeGitReconcileSchema),
-    (&["bridge git push"], BridgePushSchema),
-    (&["bridge git pull"], BridgePullSchema),
+    (&["export git"], ExportGitSchema),
+    (&["import git"], ImportGitSchema),
+    (&["sync git"], SyncGitSchema),
     (&["stash push", "stash pop", "stash apply", "stash drop", "stash clear"], StashMutationSchema),
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
@@ -2206,50 +2202,6 @@ pub struct ActionTemplateSchema {
     pub agent_may_fill: bool,
 }
 
-// ---- bridge git status ----------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeGitStatusSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub mirror_path: Option<String>,
-    pub mirror_initialized: bool,
-    pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
-    pub git_overlay_health: GitOverlayHealthSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayImportHintSchema {
-    pub current_branch: String,
-    pub missing_branch_count: usize,
-    pub missing_branches: Vec<String>,
-    pub recommended_command: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthSchema {
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recovery_commands: Vec<String>,
-    pub checks: Vec<GitOverlayHealthCheckSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitOverlayHealthCheckSchema {
-    pub name: String,
-    pub status: String,
-    pub summary: String,
-}
-
-// ---- log ------------------------------------------------------------------
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LogSchema {
     pub output_kind: Option<String>,
@@ -2823,13 +2775,7 @@ pub struct TrySchema {
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
-// ---- bridge ops -----------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeInitSchema {
-    pub initialized: bool,
-    pub path: String,
-}
+// ---- git projection ops -----------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExportedRefSchema {
@@ -2838,7 +2784,8 @@ pub struct ExportedRefSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeExportSchema {
+pub struct ExportGitSchema {
+    pub output_kind: Option<String>,
     pub states_exported: u64,
     pub commits_total: u64,
     pub threads_synced: u64,
@@ -2849,7 +2796,7 @@ pub struct BridgeExportSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeImportSchema {
+pub struct ImportGitSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: Option<String>,
@@ -2875,7 +2822,7 @@ pub struct LossyImportEntrySchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeSyncSchema {
+pub struct SyncGitSchema {
     pub output_kind: Option<String>,
     pub status: String,
     pub action: Option<String>,
@@ -2888,44 +2835,6 @@ pub struct BridgeSyncSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgeGitReconcileSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: Option<String>,
-    pub prefer: Option<String>,
-    pub ref_name: String,
-    pub preview: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgePushSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub pushed: bool,
-    pub changed: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BridgePullSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub success: Option<bool>,
-    pub pulled: bool,
-    pub changed: Option<bool>,
-    pub transport: Option<String>,
-    pub remote: String,
 }
 
 // ---- stash / revert -------------------------------------------------------
@@ -2966,6 +2875,8 @@ pub struct RevertSchema {
     pub message: String,
 }
 
+// ---- git overlay diagnostics ---------------------------------------------
+
 // ---- diagnose -------------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2975,8 +2886,6 @@ pub struct DiagnoseSchema {
     pub repository_capability: String,
     pub storage_model: String,
     pub hosted_enabled: bool,
-    pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
-    pub git_overlay_health: GitOverlayHealthSchema,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
     pub operation: OpaqueObject,
@@ -3383,15 +3292,10 @@ mod tests {
     fn native_only_schema_registry_excludes_git_overlay_verbs() {
         let catalog = command_catalog::build_command_catalog();
         for verb in [
-            "bridge git status",
-            "bridge git init",
-            "bridge git import",
-            "bridge git export",
-            "bridge git sync",
-            "bridge git reconcile",
-            "bridge git push",
-            "bridge git pull",
-            "bridge git reason",
+            "import git",
+            "export git",
+            "sync git",
+            "context reason git",
             "git-overlay",
         ] {
             assert!(
@@ -3438,6 +3342,7 @@ mod tests {
             "repository_capability",
             "storage_model",
             "hosted_enabled",
+            "verification",
             "thread",
             "current_state",
             "actor",
@@ -3447,6 +3352,31 @@ mod tests {
             assert!(
                 properties.contains_key(*required),
                 "status schema missing property '{required}'"
+            );
+        }
+        for legacy in &["git_overlay_import_hint", "git_overlay_health"] {
+            assert!(
+                !properties.contains_key(*legacy),
+                "status schema must expose verification, not legacy Git overlay sidecar '{legacy}'"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_schema_nests_repository_verification_state() {
+        let schema = schema_for_verb("verify").expect("verify schema");
+        let properties = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("verify schema has properties");
+        assert!(
+            properties.contains_key("verification"),
+            "verify schema must expose nested verification state"
+        );
+        for flattened in ["verified", "status", "checks", "recommended_action"] {
+            assert!(
+                !properties.contains_key(flattened),
+                "verify schema must not expose flattened verification property `{flattened}`"
             );
         }
     }

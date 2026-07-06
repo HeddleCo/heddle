@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tests for the shared repository verification contract.
 //!
-//! Extracted verbatim from `git_overlay_health.rs` (heddle#609 phase 2):
+//! Extracted verbatim from `verification_health.rs` (heddle#609 phase 2):
 //! the `mod tests` body moved into this sibling file unchanged (de-indented
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
-use objects::object::ThreadName;
 use heddle_core::status::next_action::{
-    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     remote_tracking_next_action,
 };
+use objects::object::ThreadName;
 use repo::{GitRemoteTrackingStatus, Repository};
-use sley::Repository as SleyRepository;
 use tempfile::TempDir;
 
 use super::{
-    RepositoryVerificationState, VerificationActionPlan, action_template,
-    clean_health, machine_contract_coverage, remote_drift_decision,
-    repository_setup_guidance, repository_verification_blocked_advice,
+    RepositoryVerificationState, VerificationActionPlan, action_template, clean_health,
+    machine_contract_coverage, remote_drift_decision, repository_setup_guidance,
+    repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;
 
@@ -87,24 +86,24 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
 
 #[test]
 fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
-    let import = canonical_bridge_import_ref_command("feature with spaces");
+    let import = canonical_git_import_ref_command("feature with spaces");
     assert_eq!(
         action_template(&import)
             .expect("import command should expose a template")
             .argv_template[1..],
-        ["bridge", "git", "import", "--ref", "feature with spaces"]
+        ["import", "git", "--ref", "feature with spaces"]
     );
 
     let reconcile =
-        canonical_bridge_reconcile_ref_preview_command(Some("heddle"), "feature 'quoted'");
+        canonical_git_repair_ref_preview_command(Some("heddle"), "feature 'quoted'");
     assert_eq!(
         action_template(&reconcile)
             .expect("reconcile command should expose a template")
             .argv_template[1..],
         [
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--prefer",
             "heddle",
             "--ref",
@@ -140,9 +139,9 @@ fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
 #[test]
 fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
     let trust = verification_state(
-        "heddle bridge git reconcile --ref main --preview",
+        "heddle fsck --repair git --ref main --preview",
         vec![
-            "heddle bridge git reconcile --ref main --preview".to_string(),
+            "heddle fsck --repair git --ref main --preview".to_string(),
             "heddle verify".to_string(),
         ],
     );
@@ -160,7 +159,7 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 
     assert_eq!(
         advice.primary_command,
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
     assert_eq!(advice.recovery_commands, trust.recovery_commands);
 }
@@ -168,8 +167,8 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 #[test]
 fn repository_verification_blocked_advice_keeps_primary_override_first() {
     let trust = verification_state(
-        "heddle bridge git import --ref origin/main",
-        vec!["heddle bridge git import --ref origin/main".to_string()],
+        "heddle import git --ref origin/main",
+        vec!["heddle import git --ref origin/main".to_string()],
     );
 
     let advice = repository_verification_blocked_advice(
@@ -247,7 +246,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
     assert_eq!(
         remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
             .as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
@@ -264,13 +263,13 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     assert_eq!(unimported.status, "remote_diverged");
     assert_eq!(
         unimported.primary_action.as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         unimported.recovery_commands,
         vec![
-            "heddle bridge git import --ref origin/main",
-            "heddle bridge git reconcile --ref origin/main --preview"
+            "heddle import git --ref origin/main",
+            "heddle fsck --repair git --ref origin/main --preview"
         ]
     );
 
@@ -281,13 +280,13 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     let stale_thread = remote_drift_decision(&repo, &diverged);
     assert_eq!(
         stale_thread.primary_action.as_deref(),
-        Some("heddle bridge git import --ref origin/main")
+        Some("heddle import git --ref origin/main")
     );
     assert_eq!(
         stale_thread.recovery_commands,
         vec![
-            "heddle bridge git import --ref origin/main",
-            "heddle bridge git reconcile --ref origin/main --preview"
+            "heddle import git --ref origin/main",
+            "heddle fsck --repair git --ref origin/main --preview"
         ]
     );
 }
@@ -382,8 +381,10 @@ fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
         }
     }
 
-    let git_repo = SleyRepository::discover(root).expect("open git repo");
-    let status = super::plain_git_worktree_status(root, &git_repo).expect("status");
+    let status = super::build_plain_git_verification_probe(root)
+        .expect("probe result")
+        .expect("plain git probe")
+        .changes;
 
     let target = PathBuf::from("file.txt");
     assert!(

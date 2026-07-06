@@ -18,10 +18,10 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
             "{} repository is valid ({counted} checked)\n",
             style::ok_marker(),
         ));
-        if report.bridge_checked {
+        if report.git_projection_checked {
             text.push_str(&format!(
                 "  {}\n",
-                style::field("Bridge", "mirror and mapping checked")
+                style::field("Git projection", "mapping, notes, and checkout checked")
             ));
         }
     } else {
@@ -43,6 +43,25 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
                     "  {} {}\n",
                     style::error(&format!("[{}]", error.kind)),
                     error.message
+                ));
+            }
+        }
+    }
+    if let Some(target) = &report.repair_target {
+        let status = if report.repaired {
+            "repaired"
+        } else {
+            "no changes"
+        };
+        text.push_str(&format!(
+            "  {}\n",
+            style::field("Repair", &format!("{target}: {status}"))
+        ));
+        for repair in &report.repairs {
+            if repair.count > 0 || repair.repaired {
+                text.push_str(&format!(
+                    "    {} {} ({})\n",
+                    repair.name, repair.detail, repair.count
                 ));
             }
         }

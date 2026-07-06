@@ -22,8 +22,8 @@ use super::{
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::cli::progress_render::{clear_line, progress_for};
@@ -34,13 +34,13 @@ use crate::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
 use crate::{
-    bridge::{
-        GitBridge,
-        git_core::{GitPushScope, set_reference},
-    },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
+    git_projection_engine::{
+        GitProjection,
+        git_core::{GitPushScope, set_reference},
+    },
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -61,7 +61,7 @@ pub(crate) fn push_git_overlay_refs(
     Option<String>,
     Option<GitOverlayTrackingRefresh>,
     Vec<String>,
-    super::git_overlay_health::RepositoryVerificationState,
+    super::verification_health::RepositoryVerificationState,
 )> {
     let remote_name = resolve_default_remote_name(repo, remote)?;
     let scope = if all_threads {
@@ -77,7 +77,7 @@ pub(crate) fn push_git_overlay_refs(
     } else {
         None
     };
-    let mut bridge = GitBridge::new(repo);
+    let mut bridge = GitProjection::new(repo);
     let refs_written = bridge.push_with_scope_force(&remote_name, scope, force)?;
     let tracking_refresh = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
     let trust = build_repository_verification_state(repo);
@@ -176,7 +176,7 @@ struct GitUpstreamConfiguredOutput {
 ///
 /// `mirror` is an ad-hoc dual-push escape hatch (heddle#25): after the
 /// primary push to the Heddle/git-overlay remote succeeds, also push to
-/// the named git-bridge remote. Best-effort — mirror failure surfaces
+/// the named Git remote. Best-effort — mirror failure surfaces
 /// as a warning and does NOT abort the primary push.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_push(
@@ -246,7 +246,7 @@ pub async fn cmd_push(
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
             if let Some(mirror_remote) = mirror.as_deref() {
-                let mut bridge = GitBridge::new(&repo);
+                let mut bridge = GitProjection::new(&repo);
                 let outcome = bridge.push(mirror_remote);
                 render_mirror_outcome(cli, &repo, mirror_remote, outcome);
             }
@@ -344,7 +344,7 @@ pub async fn cmd_push(
         // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
         // `--mirror` fires here too, best-effort, after the primary push.
         if let Some(mirror_remote) = mirror.as_deref() {
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             let outcome = bridge.push(mirror_remote);
             render_mirror_outcome(cli, &repo, mirror_remote, outcome);
         }
@@ -439,10 +439,10 @@ pub async fn cmd_push(
     }
 
     // Ad-hoc dual-push (heddle#25): after the primary push, also push to
-    // the named git-bridge mirror. Best-effort — mirror failure does not
+    // the named Git remote mirror. Best-effort — mirror failure does not
     // abort the primary push.
     if let Some(mirror_remote) = mirror.as_deref() {
-        let mut bridge = GitBridge::new(&repo);
+        let mut bridge = GitProjection::new(&repo);
         let outcome = bridge.push(mirror_remote);
         render_mirror_outcome(cli, &repo, mirror_remote, outcome);
     }
@@ -481,7 +481,7 @@ fn render_mirror_outcome(
     cli: &Cli,
     repo: &Repository,
     mirror_remote: &str,
-    outcome: crate::bridge::GitResult<Vec<String>>,
+    outcome: crate::git_projection_engine::GitProjectionResult<Vec<String>>,
 ) {
     let json = should_output_json(cli, Some(repo.config()));
     match outcome {
@@ -1201,11 +1201,14 @@ struct PushableThread {
 /// name for deterministic output. Threads whose ref cannot be resolved to a
 /// state are skipped (they carry no pushable state).
 fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
-    let remote_names = crate::bridge::git_export::git_remote_names(repo);
+    let remote_names = crate::git_projection_engine::git_export::git_remote_names(repo);
     let mut threads: Vec<PushableThread> = Vec::new();
     for thread in repo.refs().list_threads()? {
         let name = thread.to_string();
-        if crate::bridge::git_export::is_remote_tracking_thread_name(&name, &remote_names) {
+        if crate::git_projection_engine::git_export::is_remote_tracking_thread_name(
+            &name,
+            &remote_names,
+        ) {
             continue;
         }
         if let Some(state) = repo.refs().get_thread(&thread)? {
@@ -1324,30 +1327,30 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     };
 
     // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
-    // per pushable thread. The git-overlay mirror path (the #846 default)
-    // already ships EVERY ref in one transfer, so a mirror push IS an
+    // per pushable thread. The Git-backed projection path (the #846 default)
+    // already ships EVERY ref in one transfer, so a projection push IS an
     // all-threads push — routing it through the per-thread loop would rebuild
     // and re-upload the identical full pack once per thread and print a
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
-    // single mirror push below; only the non-git-overlay path loops.
+    // single projection push below; only the non-Git-backed path loops.
     if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
-    // Git-overlay repos DEFAULT to the git-backed fast path (#846): ship the
+    // Git-overlay repos DEFAULT to the Git-backed projection path (#846): ship the
     // git format (one multi-root pack + all refs) straight through weft's git
     // lane with no native conversion. Native heddle conversion stays opt-in via
     // `heddle adopt`, after which the repo is no longer GitOverlay and takes the
     // plain native push below. `progress` drives the live push line on a TTY.
     //
     // In `--all-threads` mode `state_id` is `None` (the fan-out resolves each
-    // thread's tip); the mirror push nominates the current checkout state as
+    // thread's tip); the projection push nominates the current checkout state as
     // its advisory `local_state` — every ref ships regardless.
     let progress = progress_for(options.cli, repo);
     let state_id = match options.state_id {
         Some(state_id) => *state_id,
         None => {
-            // --all-threads git-overlay+hosted: mirror ships all refs, so the
+            // --all-threads Git-backed projection+hosted: projection ships all refs, so the
             // nominated state is advisory. Use the current checkout state.
             let user_config = UserConfig::load_default()?;
             ensure_current_state(
@@ -1382,10 +1385,12 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 style::bold(options.track_name)
             );
             if options.all_threads {
-                // Single git-overlay mirror push covers every ref/thread.
+                // Single Git Projection push covers every ref/thread.
                 println!(
                     "{}",
-                    style::dim("mirror push covers all threads (every ref shipped in one transfer)")
+                    style::dim(
+                        "Git Projection push covers all threads (every ref shipped in one transfer)"
+                    )
                 );
             }
             if let Some(new_state) = result.new_state {
@@ -1482,10 +1487,7 @@ async fn push_network_all_threads(
                     if let Some(new_state) = result.new_state {
                         println!(
                             "{}",
-                            style::field(
-                                "remote state",
-                                &style::change_id(&new_state.to_string())
-                            )
+                            style::field("remote state", &style::change_id(&new_state.to_string()))
                         );
                     }
                 }

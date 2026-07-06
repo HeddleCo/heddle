@@ -133,7 +133,7 @@ EOF
       cat >> "$transcript" <<'EOF'
 
 Fixture profile: complex Git history
-  proof: source Git tag v1.0.0 exists; scoped tag adopt reports Tags ready: 1 and marker list includes v1.0.0
+  proof: source Git tag v1.0.0 exists; scoped tag adopt reports Tags ready: 1 and thread marker list includes v1.0.0
   proof: merge commit, prior Git rename commit src/main.txt -> src/renamed.txt, binary assets/blob.bin, and side branch side
   daily edit: delete/add move src/renamed.txt -> src/final-name.txt, binary update, and merged-file follow-up
 EOF
@@ -176,7 +176,7 @@ EOF
   esac
 }
 
-blame_target_for_shape() {
+attribution_target_for_shape() {
   local shape="$1"
   case "$shape" in
     small-app) printf 'flow.txt\n' ;;
@@ -231,12 +231,14 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected clean verified report, got {data!r}")
 PYJSON
 }
 
-assert_first_run_adopt_ref() {
+assert_first_run_init_ref() {
   local json_file="$1"
   local branch="$2"
   python3 - "$json_file" "$branch" <<'PYJSON'
@@ -244,31 +246,49 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("kind") == "verify_failed":
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
+    data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 branch = sys.argv[2]
-expected = f"heddle adopt --ref {branch}"
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
-expected_suffix = ["adopt", "--ref", branch]
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
-    raise SystemExit(f"first-run verify should require adoption, got {data!r}")
-if data.get("recommended_action") != expected or not heddle_argv or argv[1:] != expected_suffix:
-    raise SystemExit(f"first-run verify should recommend scoped adoption, got {data!r}")
+    raise SystemExit(f"first-run verify should require initialization, got {data!r}")
+if data.get("recommended_action") != "heddle init" or not heddle_argv or argv[1:] != ["init"]:
+    raise SystemExit(f"first-run verify should recommend initialization before adopting {branch}, got {data!r}")
+checks = {check.get("name"): check for check in data.get("checks", [])}
+if (checks.get("Mapping") or {}).get("status") != "git_backed":
+    raise SystemExit(f"first-run verify should report direct Git-backed mapping, got {data!r}")
 PYJSON
 }
 
-assert_first_run_adopt_all() {
+assert_first_run_init_all() {
   local json_file="$1"
   python3 - "$json_file" <<'PYJSON'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+if data.get("kind") == "verify_failed":
+    verification = data.get("verification")
+    if not isinstance(verification, dict):
+        raise SystemExit(f"verify_failed should include nested verification, got {data!r}")
+    data = verification
+elif data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
-    raise SystemExit(f"first-run verify should require adoption, got {data!r}")
-if data.get("recommended_action") != "heddle adopt" or not heddle_argv or argv[1:] != ["adopt"]:
-    raise SystemExit(f"first-run verify should recommend full adoption, got {data!r}")
+    raise SystemExit(f"first-run verify should require initialization, got {data!r}")
+if data.get("recommended_action") != "heddle init" or not heddle_argv or argv[1:] != ["init"]:
+    raise SystemExit(f"first-run verify should recommend initialization, got {data!r}")
+checks = {check.get("name"): check for check in data.get("checks", [])}
+if (checks.get("Mapping") or {}).get("status") != "git_backed":
+    raise SystemExit(f"first-run verify should report direct Git-backed mapping, got {data!r}")
 PYJSON
 }
 
@@ -321,8 +341,8 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
-expected = f"heddle merge {thread} --preview"
-context_expected_suffix = ["merge", thread, "--preview"]
+expected = f"heddle land --thread {thread} --no-push"
+context_expected_suffix = ["land", "--thread", thread, "--no-push"]
 verify = data.get("verification", data)
 if verify.get("verified") is not True or verify.get("status") != "clean":
     raise SystemExit(f"ready work should keep repository verify clean, got {data!r}")
@@ -331,11 +351,11 @@ context_ready = (
     len(argv) >= 6
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1] == "--repo"
-    and argv[-3:] == context_expected_suffix
+    and argv[-4:] == context_expected_suffix
 )
 plain_ready = (
     verify.get("recommended_action") == expected
-    and len(argv) == 4
+    and len(argv) == 5
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1:] == context_expected_suffix
 )
@@ -344,7 +364,7 @@ if verify.get("workflow_status") != "ready" or not (context_ready or plain_ready
 PYJSON
 }
 
-assert_merge_preview_points_to_ship() {
+assert_merge_preview_points_to_land() {
   local json_file="$1"
   local thread="$2"
   python3 - "$json_file" "$thread" <<'PYJSON'
@@ -353,16 +373,17 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
-expected = f"heddle ship --thread {thread} --no-push"
+expected = f"heddle land --thread {thread} --no-push"
 if data.get("preview_only") is not True or data.get("merge_relation") != "fast_forward":
     raise SystemExit(f"expected a clean fast-forward preview: {data!r}")
 if data.get("recommended_action") != expected or data.get("next_action") != expected:
-    raise SystemExit(f"merge preview should point to ship, got {data!r}")
-verify = data.get("verification") or {}
-if verify.get("verified") is not True or verify.get("status") != "clean":
-    raise SystemExit(f"merge preview should keep repository verify clean, got {data!r}")
-if verify.get("workflow_status") != "ready" or verify.get("recommended_action") != expected:
-    raise SystemExit(f"nested verify should align with the preview's ship action, got {data!r}")
+    raise SystemExit(f"merge preview should point to land, got {data!r}")
+verify = data.get("verification")
+if verify is not None:
+    if verify.get("verified") is not True or verify.get("status") != "clean":
+        raise SystemExit(f"merge preview should keep repository verify clean, got {data!r}")
+    if verify.get("workflow_status") != "ready" or verify.get("recommended_action") != expected:
+        raise SystemExit(f"nested verify should align with the preview's land action, got {data!r}")
 PYJSON
 }
 
@@ -380,17 +401,17 @@ assert_transcript_claims() {
     "ready" \
     "--preview" \
     "Git repo detected" \
-    "connect this branch with heddle adopt" \
+    "initialize Heddle with heddle init" \
     ".heddle metadata" \
     "Git worktree stays clean" \
-    "blame" \
+    "query --attribution" \
     "saved: local Git commit recorded" \
     "merge type:" \
     "landed: on parent" \
     "push: not pushed" \
     "Next: heddle --repo" \
     "merge feature-" \
-    "Next step: heddle ship --thread feature-" \
+    "Next step: heddle land --thread feature-" \
     "--no-push" \
     "hd-" \
     "Workspace: verified" \
@@ -407,7 +428,7 @@ assert_transcript_claims() {
     "next: heddle merge main" \
     "RUN: heddle capture -m" \
     "RUN: heddle checkpoint -m" \
-    "Then: heddle ship --thread" \
+    "Then: heddle land --thread" \
     "Nothing to capture" \
     "Last 5 captures" \
     "Captures on" \
@@ -470,7 +491,7 @@ assert_shape_transcript_claims() {
         "Fixture profile: complex Git history"
         "source Git tag v1.0.0 exists"
         "Tags ready: 1"
-        "marker list includes v1.0.0"
+        "thread marker list includes v1.0.0"
         "v1.0.0 -> hd-"
         "delete/add move src/renamed.txt -> src/final-name.txt"
         "Branches ready: 2"
@@ -527,6 +548,8 @@ assert_current_verify_clean() {
 import json
 import sys
 data = json.loads(sys.argv[1])
+if data.get("output_kind") == "verify" and isinstance(data.get("verification"), dict):
+    data = data["verification"]
 if data.get("verified") is not True or data.get("status") != "clean":
     raise SystemExit(f"expected recommended action to restore clean verify, got {data!r}")
 PYJSON
@@ -589,9 +612,9 @@ run_shape() {
   run_text "$transcript" "$repo" status --output text
   capture_verify_failed_verification "$repo" "$plain_verify_json" "$plain_verify_err"
   if [[ "$shape" == "complex-git" ]]; then
-    assert_first_run_adopt_all "$plain_verify_json"
+    assert_first_run_init_all "$plain_verify_json"
   else
-    assert_first_run_adopt_ref "$plain_verify_json" main
+    assert_first_run_init_ref "$plain_verify_json" main
   fi
   test ! -e "$repo/.heddle"
 
@@ -603,14 +626,14 @@ run_shape() {
   assert_clean_git_status "$repo"
   if [[ "$shape" == "complex-git" ]]; then
     run_text "$transcript" "$repo" adopt --ref v1.0.0 --output text
-    run_text "$transcript" "$repo" marker list --output text
+    run_text "$transcript" "$repo" thread marker list --output text
   fi
   run_text "$transcript" "$repo" verify --output text
   run_text "$transcript" "$repo" status --output text
   run_text "$transcript" "$repo" doctor --output text
   run_text "$transcript" "$repo" thread list --output text
   run_text "$transcript" "$repo" thread show --output text
-  run_text "$transcript" "$repo" workspace show --output text
+  run_text "$transcript" "$repo" status --output text
 
   make_human_main_edit "$repo" "$shape" first
   run_text "$transcript" "$repo" diff --output text
@@ -632,7 +655,7 @@ run_shape() {
   run_text "$transcript" "$repo" pull "$origin" --output text
   run_text "$transcript" "$repo" ready --output text
   assert_clean_git_status "$repo"
-  run_text "$transcript" "$repo" blame "$(blame_target_for_shape "$shape")" --output text
+  run_text "$transcript" "$repo" query --attribution "$(attribution_target_for_shape "$shape")" --output text
   run_text "$transcript" "$repo" log --output text
 
   local feature_thread="feature-$shape"
@@ -650,9 +673,9 @@ run_shape() {
   assert_ready_workflow "$ready_verify_json" "$feature_thread"
   run_text "$transcript" "$repo" merge "$feature_thread" --preview --with-diff --output text
   (cd "$repo" && heddle_runtime merge "$feature_thread" --preview --with-diff --output json) > "$merge_preview_json"
-  assert_merge_preview_points_to_ship "$merge_preview_json" "$feature_thread"
+  assert_merge_preview_points_to_land "$merge_preview_json" "$feature_thread"
   run_text "$transcript" "$repo" thread show "$feature_thread" --output text
-  run_text "$transcript" "$repo" ship --thread "$feature_thread" --no-push --output text
+  run_text "$transcript" "$repo" land --thread "$feature_thread" --no-push --output text
   run_text "$transcript" "$repo" verify --output text
   run_text "$transcript" "$repo" push "$origin" --output text
 

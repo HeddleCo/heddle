@@ -10,7 +10,7 @@ use objects::worktree::WorktreeStatus;
 use repo::{Config, Repository};
 
 use super::{
-    super::git_overlay_health::{
+    super::verification_health::{
         build_plain_git_verification_probe, build_repository_verification_state,
         plain_git_setup_advice, trust_visible_worktree_status,
     },

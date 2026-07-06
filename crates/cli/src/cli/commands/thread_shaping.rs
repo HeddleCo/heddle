@@ -8,13 +8,13 @@ use heddle_core::{
     CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
 };
 use objects::object::ThreadName;
-use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
+use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::merge_thread_into_current,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
@@ -370,7 +370,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let recommended_action = thread_resolve_next_action(
         &blockers,
         operation.as_ref(),
@@ -416,7 +416,7 @@ fn thread_resolve_next_action(
     blockers: &[String],
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     local_action: &str,
 ) -> Option<String> {
     let action = if blockers.is_empty() {
@@ -558,13 +558,14 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
             vec![details.primary_command.to_string()],
         )),
         ThreadShapingError::ThreadNotFound { thread_id, action } => {
-            anyhow!(super::thread_cmd::thread_not_found_advice(&thread_id, action))
+            anyhow!(super::thread_cmd::thread_not_found_advice(
+                &thread_id, action
+            ))
         }
         ThreadShapingError::ImportedGitRefNotManaged { thread_id } => {
             let reconcile_preview =
-                heddle_core::status::next_action::canonical_bridge_reconcile_ref_preview_command(
-                    None,
-                    &thread_id,
+                heddle_core::status::next_action::canonical_git_repair_ref_preview_command(
+                    None, &thread_id,
                 );
             anyhow!(RecoveryAdvice::safety_refusal(
                 "imported_git_ref_not_managed_thread",
@@ -572,7 +573,9 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
                 format!(
                     "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
                 ),
-                format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
+                format!(
+                    "thread ref '{thread_id}' exists, but no managed thread metadata exists for it"
+                ),
                 "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
                 "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
                 reconcile_preview.clone(),
@@ -628,7 +631,7 @@ fn emit_thread_resolve(cli: &Cli, repo: &Repository, output: &ThreadResolveOutpu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::commands::git_overlay_health::VerificationCheck;
+    use crate::cli::commands::verification_health::VerificationCheck;
 
     fn trust_state(verified: bool) -> RepositoryVerificationState {
         let check = VerificationCheck {
@@ -652,7 +655,7 @@ mod tests {
             details: std::collections::BTreeMap::new(),
         };
         let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+            crate::cli::commands::verification_health::machine_contract_coverage();
         RepositoryVerificationState {
             verified,
             status: if verified { "clean" } else { "needs_import" }.to_string(),
@@ -668,7 +671,7 @@ mod tests {
             active_operation: None,
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
                 &machine_contract_coverage,
             )
             .to_string(),
@@ -789,10 +792,8 @@ mod tests {
             heddle_core::NoPathsMatchedDetails {
                 action: "thread move",
                 error: "No captured paths matched the requested prefixes",
-                unsafe_condition:
-                    "the source thread has no captured paths under the requested prefixes",
-                would_change:
-                    "thread move would not move any captured files into the target thread",
+                unsafe_condition: "the source thread has no captured paths under the requested prefixes",
+                would_change: "thread move would not move any captured files into the target thread",
                 primary_command: "heddle thread show",
             },
         ));

@@ -34,10 +34,10 @@ use objects::object::{Annotation, VisibilityTier};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudienceTier {
     /// Workspace-internal viewer — sees every annotation regardless of
-    /// scope. The `--audience internal` value on bridge export.
+    /// scope. The `--audience internal` value on Git projection export.
     Internal,
     /// Anonymous public viewer — sees only `Public` annotations. Default
-    /// for bridge export and the public-PR review surface.
+    /// for Git projection export and the public-PR review surface.
     Public,
     /// A specific team. Sees Public, Internal (assumed in-network), and
     /// `TeamScoped` annotations whose team matches.
@@ -121,7 +121,7 @@ pub fn filter_for_audience<'a>(
 }
 
 /// Same as [`filter_for_audience`] but also reports per-scope drop
-/// counts. Used by `bridge git export` to populate
+/// counts. Used by `export git` to populate
 /// `Heddle-Annotations-Omitted` and the optional notes breakdown.
 pub fn filter_for_audience_with_drops<'a>(
     annotations: &'a [Annotation],
@@ -148,7 +148,7 @@ pub fn filter_for_audience_with_drops<'a>(
 /// Single source-of-truth for the visibility×audience mapping. Pulled
 /// out so the borrowing and dropping variants share the exact same
 /// rules — drift between them would be invisible at the call site and
-/// catastrophic for the bridge export footer.
+/// catastrophic for the Git projection export footer.
 pub fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
     match (visibility, audience) {
         // Public is universally visible.

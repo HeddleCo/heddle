@@ -28,7 +28,7 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 
 - Migration cost — how much existing git knowledge transfers.
 - Surprise — places heddle's model differs from git in ways they wouldn't predict.
-- `bridge git import` / `git_adapter` — the heddle/git interop surface.
+- `import git` / `git_projection` — the Heddle/Git projection surface.
 - `--help` and topic docs — they want the canonical reference.
 - "Why is this different from `git X`?" questions.
 
@@ -83,7 +83,7 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 | P2 — `heddle init` welcome lacks next-step | Regular AI dev |
 | P3 — `heddle help advanced` flat 40-cmd list | Git veteran / Regular AI dev |
 | P4 — clone `--help` flag overflow | Git veteran / Regular AI dev |
-| P5 — `bridge git import` lacks `--principal-*` symmetry | Git veteran |
+| P5 — `import git` lacks `--principal-*` symmetry | Git veteran |
 
 ## How to run a round
 

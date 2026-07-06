@@ -16,17 +16,17 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, git_overlay_health::build_repository_verification_state,
-    remote::resolved_default_remote_name,
+    advice::RecoveryAdvice, remote::resolved_default_remote_name,
+    verification_health::build_repository_verification_state,
 };
 #[cfg(feature = "client")]
 use crate::client::{HostedAuthMode, HostedGrpcClient};
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
 use crate::{
-    bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     client::LocalSync,
+    git_projection_engine::GitProjection,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
 
@@ -43,7 +43,7 @@ struct FetchOutput {
     #[allow(dead_code)]
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
-    trust: super::git_overlay_health::RepositoryVerificationState,
+    trust: super::verification_health::RepositoryVerificationState,
 }
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
@@ -77,14 +77,13 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
         // Peel off hosted-network remotes; the rest fetch via the overlay
         // exporter. A repo with a mixed set gets each remote routed by scheme.
-        let (hosted_remotes, overlay_remotes): (Vec<String>, Vec<String>) = remotes
-            .into_iter()
-            .partition(|name| {
+        let (hosted_remotes, overlay_remotes): (Vec<String>, Vec<String>) =
+            remotes.into_iter().partition(|name| {
                 super::remote::push_target_is_hosted_network(&repo, Some(name.as_str()))
             });
 
         for remote_name in &overlay_remotes {
-            let mut bridge = GitBridge::new(&repo);
+            let mut bridge = GitProjection::new(&repo);
             bridge.fetch(remote_name)?;
         }
 

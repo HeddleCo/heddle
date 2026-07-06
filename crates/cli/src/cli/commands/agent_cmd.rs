@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{
+    verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
     },

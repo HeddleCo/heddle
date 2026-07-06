@@ -18,8 +18,9 @@
 //! (cli_integration/output_kind_invariant.rs): like that test it drives a
 //! curated set of representative invocations rather than every verb, since
 //! most error conditions need a hand-built fixture. The swept set is the
-//! `init`/`status`/`verify`/`commit`/`merge`/`push`/`pull` + `bridge git`
-//! subset whose codes `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
+//! `init`/`status`/`verify`/`commit`/`merge`/`push`/`pull` plus the current
+//! Git projection import/sync/repair surfaces whose codes
+//! `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
 //! guards that each is exercised here.
 
 use std::path::Path;
@@ -40,9 +41,9 @@ const SWEPT_COVERAGE: &[&str] = &[
     "merge",
     "push",
     "pull",
-    "bridge git import",
-    "bridge git sync",
-    "bridge git reconcile",
+    "import git",
+    "sync git",
+    "fsck --repair git",
 ];
 
 /// One representative error case: the swept command it covers, the argv
@@ -98,12 +99,11 @@ fn adopted_git_overlay() -> TempDir {
     git(&["add", "a.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
     heddle_output(&["adopt"], Some(dir)).expect("heddle adopt");
-    heddle_output(&["bridge", "git", "import", "--ref", "main"], Some(dir))
-        .expect("heddle bridge git import");
+    heddle_output(&["import", "git", "--ref", "main"], Some(dir)).expect("heddle import git");
     temp
 }
 
-/// `init` / `status` / `verify` / `merge` / `bridge git import|sync` exit
+/// `init` / `status` / `verify` / `merge` / `import git|sync` exit
 /// `0` on their documented happy paths, so this lint covers them through
 /// adjacent error conditions: an unparseable invocation (`init`), a
 /// missing-state lookup (`status`/`verify`/`merge` share the
@@ -154,26 +154,25 @@ fn cases() -> Vec<ErrorCase> {
             fixture: init_repo,
         },
         ErrorCase {
-            covers: &["bridge git import"],
-            label: "bridge git import of a missing ref",
-            argv: &["bridge", "git", "import", "--ref", "no-such-branch"],
+            covers: &["import git"],
+            label: "import git of a missing ref",
+            argv: &["import", "git", "--ref", "no-such-branch"],
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            // `sync` has its own handler (bridge.rs `GitCommands::Sync`)
-            // that builds the error envelope independently of reconcile —
+            // `sync git` has its own Git projection error-envelope path —
             // exercise it directly so a regression that drops Sync's `Next:`
             // fields fails the lint. A `--path` at a nonexistent source
             // reaches the handler (export runs, then the import half fails).
-            covers: &["bridge git sync"],
-            label: "bridge git sync against a missing source",
-            argv: &["bridge", "git", "sync", "--path", "/heddle/no/such/source"],
+            covers: &["sync git"],
+            label: "sync git against a missing source",
+            argv: &["sync", "git", "--path", "/heddle/no/such/source"],
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            covers: &["bridge git reconcile"],
-            label: "bridge git reconcile without a --prefer side",
-            argv: &["bridge", "git", "reconcile", "--ref", "main"],
+            covers: &["fsck --repair git"],
+            label: "fsck --repair git without a --prefer side",
+            argv: &["fsck", "--repair", "git", "--ref", "main"],
             fixture: adopted_git_overlay,
         },
     ]

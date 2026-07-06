@@ -262,8 +262,8 @@ impl<'a> TestReferenceTarget<'a> {
 
 #[path = "cli_integration/basics.rs"]
 mod basics;
-#[path = "cli_integration/bridge.rs"]
-mod bridge;
+#[path = "cli_integration/git_projection_commands.rs"]
+mod git_projection_commands;
 #[path = "cli_integration/cli_help_consistency.rs"]
 mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]

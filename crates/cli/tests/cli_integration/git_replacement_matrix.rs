@@ -22,6 +22,24 @@ fn heddle_output_without_git(args: &[&str], cwd: &std::path::Path) -> Output {
         .expect("invoke heddle without git")
 }
 
+fn verify_state_for_assertions(value: Value) -> Value {
+    let Some(verification) = value.get("verification") else {
+        return value;
+    };
+    let mut state = verification.clone();
+    if let Some(object) = state.as_object_mut() {
+        object
+            .entry("output_kind".to_string())
+            .or_insert_with(|| Value::String("verify".to_string()));
+        if let Some(clean) = value.get("clean") {
+            object
+                .entry("clean".to_string())
+                .or_insert_with(|| clean.clone());
+        }
+    }
+    state
+}
+
 fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value {
     let output = heddle_output_without_git(args, cwd);
     let stdout = str::from_utf8(&output.stdout).unwrap_or("");
@@ -36,6 +54,9 @@ fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value 
     );
     let value: Value = serde_json::from_str(stdout)
         .unwrap_or_else(|err| panic!("{args:?} should emit parseable JSON: {err}: {stdout}"));
+    if args.contains(&"verify") {
+        return verify_state_for_assertions(value);
+    }
     inject_post_verification_without_git(cwd, value)
 }
 
@@ -65,6 +86,8 @@ fn inject_post_verification_without_git(cwd: &std::path::Path, mut value: Value)
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -189,7 +212,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     for args in [
         &["doctor", "--output", "json"][..],
         &["doctor", "--output", "json"],
-        &["bridge", "git", "status", "--output", "json"],
+        &["status", "--output", "json"],
         &["thread", "list", "--output", "json"],
         &["status", "--output", "json"],
     ] {
@@ -302,9 +325,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
     assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
 
     let output = heddle_output_without_git(
-        &[
-            "--output", "json", "bridge", "git", "import", "--ref", "main",
-        ],
+        &["--output", "json", "import", "git", "--ref", "main"],
         temp.path(),
     );
     let stdout = str::from_utf8(&output.stdout).unwrap_or("");
@@ -328,7 +349,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
         envelope["recovery_commands"],
         serde_json::json!([
             "heddle clone <remote> <fresh-path>",
-            "heddle bridge git import --path <full-git-repo> --ref <ref>"
+            "heddle import git --path <full-git-repo> --ref <ref>"
         ])
     );
     assert_eq!(
@@ -337,7 +358,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
     );
     assert_eq!(
         envelope["recovery_action_templates"][1]["action"],
-        "heddle bridge git import --path <full-git-repo> --ref <ref>"
+        "heddle import git --path <full-git-repo> --ref <ref>"
     );
 }
 
@@ -369,7 +390,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
     let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
     assert_eq!(status["operation"]["scope"], "git");
     assert_eq!(status["operation"]["kind"], "merge");
-    assert_eq!(status["recommended_action"], "heddle bridge git status");
+    assert_eq!(status["recommended_action"], "heddle verify");
 
     let continued_output =
         heddle_output_without_git(&["--output", "json", "continue"], temp.path());
@@ -394,7 +415,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
             .is_some_and(|message| message.contains("no-git runtime")),
         "continue handoff should explain the no-git contract: {continued}"
     );
-    assert_eq!(continued["recommended_action"], "heddle bridge git status");
+    assert_eq!(continued["recommended_action"], "heddle verify");
 }
 
 #[test]
@@ -677,9 +698,8 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
         &[
             "--output",
             "json",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             &origin_url,
             "--ref",
@@ -689,7 +709,7 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
     );
     assert!(
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
-        "file:// bridge import should copy locally without Git helpers: {import}"
+        "file:// Git import should copy locally without Git helpers: {import}"
     );
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &import_work);
     assert_eq!(
@@ -699,7 +719,7 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
 }
 
 #[test]
-fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_path() {
+fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -716,25 +736,21 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     .unwrap();
     configure_repo_local_git_identity(&work);
 
-    let bridge_init =
-        assert_clean_json_without_git(&["--output", "json", "bridge", "git", "init"], &work);
-    assert_eq!(bridge_init["initialized"], true);
-
     let origin_arg = origin.to_str().expect("origin path should be utf8");
     let import = assert_clean_json_without_git(
         &[
-            "--output", "json", "bridge", "git", "import", "--path", origin_arg, "--ref", "main",
+            "--output", "json", "import", "git", "--path", origin_arg, "--ref", "main",
         ],
         &work,
     );
     assert!(
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
-        "explicit bridge import should walk Git commits natively: {import}"
+        "explicit Git import should walk Git commits natively: {import}"
     );
-    assert_eq!(import["output_kind"], "bridge_git_import");
+    assert_eq!(import["output_kind"], "import_git");
     assert_eq!(
         import["verification"]["verified"], true,
-        "bridge import should embed post-operation verification: {import}"
+        "Git import should embed post-operation verification: {import}"
     );
 
     let export_path = temp.path().join("exported.git");
@@ -742,9 +758,8 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
         &[
             "--output",
             "json",
-            "bridge",
-            "git",
             "export",
+            "git",
             "--destination",
             export_path.to_str().expect("export path should be utf8"),
         ],
@@ -753,43 +768,43 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     assert!(
         export["states_exported"].as_u64().unwrap_or(0) >= 1
             || export["threads_synced"].as_u64().unwrap_or(0) >= 1,
-        "explicit bridge export should write Git-format refs natively: {export}"
+        "explicit Git projection export should write Git-format refs natively: {export}"
     );
     let exported = open_git(&export_path).expect("open exported git repo");
     find_reference(&exported, "refs/heads/main").expect("export should write main branch");
 
     let sync = assert_clean_json_without_git(
-        &[
-            "--output", "json", "bridge", "git", "sync", "--path", origin_arg,
-        ],
+        &["--output", "json", "sync", "git", "--path", origin_arg],
         &work,
     );
-    assert_eq!(sync["output_kind"], "bridge_git_sync");
+    assert_eq!(sync["output_kind"], "sync_git");
 
     let reconcile = assert_clean_json_without_git(
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
             "--preview",
         ],
         &work,
     );
-    assert_eq!(reconcile["status"], "preview");
-    assert_eq!(reconcile["preview"], true);
-    assert!(
-        reconcile["verification"].is_object(),
-        "bridge reconcile should embed verification proof: {reconcile}"
+    assert_eq!(reconcile["valid"], true);
+    assert_eq!(reconcile["repair_target"], "git");
+    assert_eq!(reconcile["repaired"], false);
+    assert_eq!(
+        reconcile["repairs"].as_array().map(Vec::len),
+        Some(2),
+        "fsck git repair preview should report both local repair choices: {reconcile}"
     );
 
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(
         verify["verified"], true,
-        "explicit bridge operations should leave verification clean without git on PATH: {verify}"
+        "explicit Git import operations should leave verification clean without git on PATH: {verify}"
     );
 }
 
@@ -841,7 +856,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         "undo should rewind the visible Git checkout without invoking git"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
@@ -849,11 +864,11 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         .to_string();
     assert_eq!(
         mirror_tip, base,
-        "undo should rewind the internal Git mirror branch without invoking git"
+        "undo should rewind the legacy Bridge Mirror branch without invoking git"
     );
 
     let status = assert_clean_json_without_git(&["--output", "json", "status"], &work);
-    assert_eq!(status["git_overlay_health"]["status"], "clean");
+    assert_eq!(status["verification"]["status"], "clean");
     assert!(
         status["changes"]["modified"].as_array().unwrap().is_empty()
             && status["changes"]["added"].as_array().unwrap().is_empty()
@@ -862,7 +877,7 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
     );
 }
 
-/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the Git mirror
+/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the legacy Bridge Mirror
 /// to the parent — no revert commit recorded as Git history — while preserving
 /// the pre-undo state in heddle's thread history via the internal
 /// `undo-recovery` handle (heddle#305 r2: a heddle-internal ref, not a user
@@ -906,7 +921,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
     assert_eq!(undo["action"], "undo");
 
-    // Git mirror is hard-reset to the parent — not a revert commit on top.
+    // legacy Bridge Mirror is hard-reset to the parent — not a revert commit on top.
     assert_eq!(
         git_head_oid(&work),
         base,
@@ -1388,7 +1403,7 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
 }
 
 #[test]
-fn git_replacement_matrix_fsck_bridge_validates_mapping_notes_and_checkout_without_git_on_path() {
+fn git_replacement_matrix_fsck_git_projection_validates_mapping_notes_and_checkout_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -1404,14 +1419,14 @@ fn git_replacement_matrix_fsck_bridge_validates_mapping_notes_and_checkout_witho
     )
     .unwrap();
     configure_repo_local_git_identity(&work);
-    std::fs::write(work.join("story.txt"), "fsck bridge\n").unwrap();
-    heddle_without_git(&["capture", "-m", "fsck bridge"], &work).unwrap();
-    heddle_without_git(&["checkpoint", "-m", "fsck bridge checkpoint"], &work).unwrap();
+    std::fs::write(work.join("story.txt"), "git projection fsck\n").unwrap();
+    heddle_without_git(&["capture", "-m", "git projection fsck"], &work).unwrap();
+    heddle_without_git(&["checkpoint", "-m", "git projection fsck checkpoint"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
-    assert_eq!(parsed["valid"], true, "bridge fsck should pass: {fsck}");
-    assert_eq!(parsed["bridge_checked"], true);
+    assert_eq!(parsed["valid"], true, "Git projection fsck should pass: {fsck}");
+    assert_eq!(parsed["git_projection_checked"], true);
 }
 
 #[test]
@@ -1536,14 +1551,14 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
         "pull text should explain remote movement without requiring git on PATH: {pull}"
     );
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
         .expect("peel mirror main");
     assert_eq!(
         mirror_tip, advanced_tip,
-        "heddle pull should advance the native Git mirror without using git on PATH"
+        "heddle pull should advance the native legacy Bridge Mirror without using git on PATH"
     );
 }
 
@@ -1690,7 +1705,7 @@ fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path(
         .expect("peel checkout remote-tracking branch");
     assert_eq!(checkout_topic, topic_tip);
 
-    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror = open_git(work.join(".heddle/git")).expect("open legacy Bridge Mirror");
     let mirror_topic = find_reference(&mirror, "refs/remotes/origin/topic-remote")
         .expect("fetch should mirror remote-tracking branch")
         .peel_to_id()
@@ -1701,9 +1716,8 @@ fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path(
         &[
             "--output",
             "json",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--ref",
             "origin/topic-remote",
         ],

@@ -921,11 +921,9 @@ mod tree_path_tests {
             ]))
             .unwrap();
         let missing_parent = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
-                "ghost".to_string(),
-                missing_subtree_hash,
-            )
-            .unwrap()]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::directory("ghost".to_string(), missing_subtree_hash).unwrap(),
+            ]))
             .unwrap();
         let root_hash = store
             .put_tree(&Tree::from_entries(vec![
@@ -937,10 +935,7 @@ mod tree_path_tests {
             .unwrap();
         let state = state_with_tree(&repo, root_hash);
 
-        assert_eq!(
-            blob_at_path(&repo, &state, "file.txt").unwrap(),
-            blob_hash
-        );
+        assert_eq!(blob_at_path(&repo, &state, "file.txt").unwrap(), blob_hash);
         assert_eq!(
             blob_at_path(&repo, &state, "dir/inner.txt").unwrap(),
             nested_blob_hash
@@ -950,14 +945,16 @@ mod tree_path_tests {
         assert!(symlink_err.to_string().contains("path 'link' not in state"));
 
         let missing_err = blob_at_path(&repo, &state, "nope.txt").unwrap_err();
-        assert!(missing_err
-            .to_string()
-            .contains("path 'nope.txt' not in state"));
+        assert!(
+            missing_err
+                .to_string()
+                .contains("path 'nope.txt' not in state")
+        );
 
         let subtree_err = blob_at_path(&repo, &state, "missing/ghost/inner.txt").unwrap_err();
-        assert!(subtree_err
-            .to_string()
-            .contains("subtree")
-            && subtree_err.to_string().contains("missing from store"));
+        assert!(
+            subtree_err.to_string().contains("subtree")
+                && subtree_err.to_string().contains("missing from store")
+        );
     }
 }

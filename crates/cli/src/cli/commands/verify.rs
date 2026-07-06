@@ -5,15 +5,12 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    RepositoryVerificationState, VerificationCheck, VerifyOptions, VerifyReport,
-    verify as core_verify,
+    MachineContractInput, RepositoryVerificationState, VerificationCheck, VerifyOptions,
+    VerifyReport, verify as core_verify,
 };
 use repo::Repository;
 
-use super::{
-    RecoveryAdvice,
-    action_line::print_next,
-};
+use super::{RecoveryAdvice, action_line::print_next};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -25,7 +22,14 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let ctx = verify_execution_context_from_cli(cli, &start)?;
-    let output = core_verify(&ctx, VerifyOptions::new().with_start_path(start.clone()))?;
+    let output = core_verify(
+        &ctx,
+        VerifyOptions::new()
+            .with_start_path(start.clone())
+            .with_machine_contract_input(MachineContractInput::from_coverage(
+                super::verification_health::machine_contract_coverage(),
+            )),
+    )?;
     if profile_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
@@ -465,7 +469,7 @@ struct VerifySetupGuidance {
 enum RepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -485,7 +489,7 @@ fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<Veri
         RepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         RepositorySetupActionKind::Other => {
@@ -509,7 +513,7 @@ fn repository_setup_guidance(trust: &RepositoryVerificationState) -> Option<Veri
         RepositorySetupActionKind::Adopt => {
             format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
         }
         RepositorySetupActionKind::Other => {
@@ -524,8 +528,8 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
         RepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
-        RepositorySetupActionKind::BridgeImport
+    } else if action.starts_with("heddle import git") {
+        RepositorySetupActionKind::GitImport
     } else {
         RepositorySetupActionKind::Other
     }

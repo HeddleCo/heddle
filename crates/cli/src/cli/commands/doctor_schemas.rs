@@ -16,7 +16,7 @@
 //! We deliberately do not pull in a full JSON-Schema validator here:
 //! disk is tight, and the keys-only check catches every drift class
 //! the doc has historically suffered (renames, deletions, leaks of
-//! fields like `git_overlay_import_hint` into per-command outputs).
+//! fields like `git_import_guidance` into per-command outputs).
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ use sley::Repository as SleyRepository;
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
-    git_overlay_health::{MachineContractCoverage, machine_contract_coverage},
+    verification_health::{MachineContractCoverage, machine_contract_coverage},
     schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
 };
 use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};
@@ -997,8 +997,8 @@ fn is_plausible_verb_phrase(s: &str) -> bool {
 
 /// `## heddle status --output json` matches the verb `"status"`. Strips
 /// the `heddle ` prefix, output-mode selectors, and any `<state>`-style
-/// placeholders. Pipe-separated headings (e.g. `heddle bridge git
-/// init|export|import|sync|push|pull --output json`) match every variant.
+/// placeholders. Pipe-separated headings (e.g. `heddle schemas
+/// status|log|verify --output json`) match every variant.
 fn sample_matches_verb(heading: &str, verb: &str) -> bool {
     let stripped = heading.trim_start_matches('`').trim_end_matches('`').trim();
     let stripped = stripped.trim_start_matches("heddle ").trim();
@@ -1122,8 +1122,8 @@ Some prose.
             "status"
         ));
         assert!(sample_matches_verb(
-            "`heddle bridge git status --output json`",
-            "bridge git status"
+            "`heddle status --output json`",
+            "status"
         ));
         assert!(sample_matches_verb(
             "`heddle show <state> --output json`",

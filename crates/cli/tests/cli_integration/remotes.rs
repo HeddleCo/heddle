@@ -21,7 +21,8 @@ fn verify_json(cwd: &std::path::Path) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
-        return serde_json::from_str(&stdout).expect("verify JSON should parse");
+        let parsed: Value = serde_json::from_str(&stdout).expect("verify JSON should parse");
+        return parsed.get("verification").cloned().unwrap_or(parsed);
     }
     let envelope: Value =
         serde_json::from_str(&stderr).expect("verify failure envelope should parse");
@@ -80,6 +81,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -406,8 +409,8 @@ fn git_overlay_fetch_heddle_scheme_routes_to_hosted_not_git_exporter() {
     .expect("add hosted origin remote");
 
     for fetch_arg in [hosted_url, "origin"] {
-        let output = heddle_output(&["fetch", fetch_arg], Some(source.path()))
-            .expect("spawn heddle fetch");
+        let output =
+            heddle_output(&["fetch", fetch_arg], Some(source.path())).expect("spawn heddle fetch");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -460,8 +463,7 @@ fn git_overlay_fetch_all_routes_mixed_remotes_per_scheme() {
 
     // Add a SECOND, hosted heddle:// remote alongside the git `origin`.
     let hosted_url = "heddle://127.0.0.1:1/org/repo";
-    heddle(&["remote", "add", "hosted", hosted_url], Some(&work))
-        .expect("add hosted remote");
+    heddle(&["remote", "add", "hosted", hosted_url], Some(&work)).expect("add hosted remote");
 
     let output = heddle_output(&["fetch", "--all"], Some(&work)).expect("spawn heddle fetch --all");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1001,7 +1003,11 @@ fn git_overlay_push_defaults_to_current_thread_branch() {
         "default push must not push tags"
     );
     assert!(
-        find_reference(&remote_repo, cli::bridge::git_notes::NOTES_REF).is_ok(),
+        find_reference(
+            &remote_repo,
+            cli::git_projection_engine::git_notes::NOTES_REF
+        )
+        .is_ok(),
         "default push must carry Heddle notes so clones preserve state identity"
     );
 }
@@ -1275,7 +1281,7 @@ fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, SleyRepository) {
     .unwrap();
 
     heddle(&["init"], Some(work.path())).unwrap();
-    heddle(&["bridge", "git", "import"], Some(work.path())).unwrap();
+    heddle(&["import", "git"], Some(work.path())).unwrap();
     (work, remote, remote_repo)
 }
 
@@ -1828,7 +1834,7 @@ fn test_cli_clone_git_overlay_missing_requested_branch_uses_typed_advice() {
 ///
 /// We exercise the local-overlay path (`copy_local_repo_to_bare`)
 /// because it's hermetic. The URL-overlay path has its own unit-level
-/// regression in `bridge::git_core::tests` that verifies
+/// regression in `git_projection_engine::git_core::tests` that verifies
 /// `clone_url_to_bare` mirrors the remote symref into `.git/HEAD`,
 /// which is what feeds the same `select_clone_thread` selection
 /// logic this test pins.
@@ -2167,7 +2173,11 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
     let second_tree = git_tree_with_file(&src, "tracked.txt", b"two\n");
     let second = git_commit_with_tree(&src, Some("refs/heads/main"), second_tree, "two", &[first]);
     git_set_reference(&src, "refs/tags/v2.0", second);
-    git_set_reference(&src, cli::bridge::git_notes::NOTES_REF, second);
+    git_set_reference(
+        &src,
+        cli::git_projection_engine::git_notes::NOTES_REF,
+        second,
+    );
 
     let fetch_json =
         heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
@@ -2197,13 +2207,19 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
         "fetch must not move the local checkout HEAD"
     );
 
-    let mirror = open_git(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
+    let mirror = open_git(work.join(".heddle").join("git")).expect("open legacy Bridge Mirror");
     assert!(
-        find_reference(&mirror, cli::bridge::git_notes::NOTES_REF).is_ok(),
+        find_reference(&mirror, cli::git_projection_engine::git_notes::NOTES_REF).is_ok(),
         "fetch should carry refs/notes/heddle for Heddle identity metadata"
     );
     assert_eq!(
-        git_stdout_trimmed(&["rev-parse", cli::bridge::git_notes::NOTES_REF], &work),
+        git_stdout_trimmed(
+            &[
+                "rev-parse",
+                cli::git_projection_engine::git_notes::NOTES_REF
+            ],
+            &work
+        ),
         second.to_string(),
         "fetch should refresh the checkout's refs/notes/heddle when it reports fetching Heddle notes"
     );
@@ -2890,7 +2906,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let verify = verify_json(&local);
     assert_eq!(verify["remote_drift"], "remote_diverged", "{verify}");
     assert_eq!(
-        verify["recommended_action"], "heddle bridge git import --ref origin/main",
+        verify["recommended_action"], "heddle import git --ref origin/main",
         "diverged verify should recommend importing the fetched upstream tip before previewing integration: {verify}"
     );
     let short_status = heddle(&["status", "--short", "--output", "text"], Some(&local))
@@ -2906,16 +2922,16 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let sync: Value = serde_json::from_str(&sync_json).expect("sync JSON parses");
     assert_eq!(sync["status"], "blocked", "{sync}");
     assert_eq!(
-        sync["recommended_action"], "heddle bridge git import --ref origin/main",
+        sync["recommended_action"], "heddle import git --ref origin/main",
         "sync should fail closed before invoking raw git rebase and point at remote integration: {sync}"
     );
     let neutral_preview_json = heddle(
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
             "--preview",
@@ -2925,36 +2941,46 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     .expect("neutral reconcile preview should succeed");
     let neutral_preview: Value =
         serde_json::from_str(&neutral_preview_json).expect("neutral preview JSON parses");
-    assert_eq!(neutral_preview["status"], "preview", "{neutral_preview}");
-    assert_eq!(neutral_preview["prefer"], Value::Null, "{neutral_preview}");
+    assert_eq!(neutral_preview["valid"], true, "{neutral_preview}");
     assert_eq!(
-        neutral_preview["recommended_action"],
-        Value::Null,
-        "neutral local reconcile preview must not bias automation toward one side: {neutral_preview}"
+        neutral_preview["repair_target"], "git",
+        "{neutral_preview}"
+    );
+    assert_eq!(
+        neutral_preview["repaired"], false,
+        "neutral local reconcile preview must not mutate any side: {neutral_preview}"
+    );
+    let neutral_repairs = neutral_preview["repairs"]
+        .as_array()
+        .expect("preview should report repair choices");
+    assert_eq!(
+        neutral_repairs.len(),
+        2,
+        "neutral preview should report both local repair choices without biasing automation: {neutral_preview}"
     );
     assert!(
-        neutral_preview["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("does not push")
-                && summary.contains("move refs")
-                && summary.contains("change worktree files")),
-        "neutral preview should explain that it is inspection-only: {neutral_preview}"
+        neutral_repairs
+            .iter()
+            .all(|repair| repair["repaired"] == false),
+        "neutral preview must leave every repair choice unapplied: {neutral_preview}"
     );
-    assert_eq!(
-        neutral_preview["recovery_commands"],
-        serde_json::json!([
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
-            "heddle bridge git reconcile --prefer git --ref main --preview"
-        ]),
-        "{neutral_preview}"
+    let neutral_details = neutral_repairs
+        .iter()
+        .filter_map(|repair| repair["detail"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        neutral_details.contains(&"heddle fsck --repair git --prefer heddle --ref main --preview")
+            && neutral_details
+                .contains(&"heddle fsck --repair git --prefer git --ref main --preview"),
+        "neutral preview should surface both prefer-heddle and prefer-git recovery paths: {neutral_preview}"
     );
     let no_direction = heddle_output(
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
         ],
@@ -2974,24 +3000,15 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let no_direction_envelope: Value =
         serde_json::from_str(no_direction_stderr).expect("no-direction envelope parses");
     assert_eq!(
-        no_direction_envelope["kind"], "reconcile_direction_required",
+        no_direction_envelope["kind"], "git_repair_direction_required",
         "{no_direction_envelope}"
     );
     assert_eq!(
-        no_direction_envelope["primary_command"],
-        "heddle bridge git reconcile --ref main --preview",
+        no_direction_envelope["primary_command"], "heddle fsck --repair git --ref main --preview",
         "{no_direction_envelope}"
     );
     let import_remote_json = heddle(
-        &[
-            "--output",
-            "json",
-            "bridge",
-            "git",
-            "import",
-            "--ref",
-            "origin/main",
-        ],
+        &["--output", "json", "import", "git", "--ref", "origin/main"],
         Some(&local),
     )
     .expect("import fetched upstream branch");
@@ -3000,8 +3017,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     assert_eq!(import_remote["branches_synced"], 1, "{import_remote}");
     let after_import = verify_json(&local);
     assert_eq!(
-        after_import["recommended_action"],
-        "heddle bridge git reconcile --ref origin/main --preview",
+        after_import["recommended_action"], "heddle fsck --repair git --ref origin/main --preview",
         "after importing the upstream tip, verify should recommend upstream integration, not local Git/Heddle reconcile: {after_import}"
     );
     let thread_list_json = heddle(&["thread", "list", "--output", "json"], Some(&local))
@@ -3021,15 +3037,14 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         "{thread_list}"
     );
     assert_eq!(
-        origin_main["recommended_action"],
-        "heddle bridge git reconcile --ref origin/main --preview",
+        origin_main["recommended_action"], "heddle fsck --repair git --ref origin/main --preview",
         "remote-tracking refs should be presented as upstream integration previews: {thread_list}"
     );
     assert!(
         origin_main["recommended_action"]
             .as_str()
             .is_some_and(|action| !action.contains("land")
-                && action.contains("bridge git reconcile --ref origin/main --preview")),
+                && action.contains("fsck --repair git --ref origin/main --preview")),
         "remote-tracking refs must avoid dead-end land advice: {thread_list}"
     );
     let merge_preview = heddle(
@@ -3125,7 +3140,7 @@ fn test_cli_git_overlay_pull_refuses_diverged_branch_before_visible_git_updates(
         "{envelope}"
     );
     assert_eq!(
-        envelope["primary_command"], "heddle bridge git import --ref origin/main",
+        envelope["primary_command"], "heddle import git --ref origin/main",
         "{envelope}"
     );
     assert_eq!(
@@ -3667,21 +3682,13 @@ fn native_push_named_mismatched_thread_refuses_without_force() {
     // tip differs from main's.
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--output",
-                "json",
-                "start",
-                "feat-x",
-                "--workspace",
-                "auto",
-            ],
+            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
             Some(source.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    let feat_checkout =
-        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    let feat_checkout = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
     std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
     heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
 
@@ -3695,11 +3702,8 @@ fn native_push_named_mismatched_thread_refuses_without_force() {
     // Push `feat-x` BY NAME from the MAIN checkout (HEAD is on main). feat-x
     // exists with a DIFFERENT tip → must refuse without --force.
     let remote_path = remote.path().to_string_lossy().to_string();
-    let output = heddle_output(
-        &["push", &remote_path, "feat-x"],
-        Some(source.path()),
-    )
-    .expect("invoke push");
+    let output =
+        heddle_output(&["push", &remote_path, "feat-x"], Some(source.path())).expect("invoke push");
     assert!(
         !output.status.success(),
         "push under a mismatched existing thread must fail closed"
@@ -3723,12 +3727,22 @@ fn native_push_named_mismatched_thread_refuses_without_force() {
 
     // With --force, push the CURRENT (main) checkout state under feat-x.
     let output = heddle(
-        &["--output", "json", "push", &remote_path, "feat-x", "--force"],
+        &[
+            "--output",
+            "json",
+            "push",
+            &remote_path,
+            "feat-x",
+            "--force",
+        ],
         Some(source.path()),
     )
     .expect("forced push under named thread succeeds");
     let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
-    assert_eq!(parsed["success"], true, "forced push should succeed: {parsed}");
+    assert_eq!(
+        parsed["success"], true,
+        "forced push should succeed: {parsed}"
+    );
 
     let remote_repo = Repository::open(remote.path()).unwrap();
     let remote_feat = remote_repo
@@ -3769,7 +3783,10 @@ fn native_push_new_named_thread_creates_from_current_state() {
     )
     .expect("push creating a new named thread succeeds");
     let parsed: Value = serde_json::from_str(&output).expect("push JSON parses");
-    assert_eq!(parsed["success"], true, "create-thread push should succeed: {parsed}");
+    assert_eq!(
+        parsed["success"], true,
+        "create-thread push should succeed: {parsed}"
+    );
 
     // The remote brand-new ref must hold the current checkout state.
     let remote_repo = Repository::open(remote.path()).unwrap();
@@ -3800,21 +3817,13 @@ fn native_push_explicit_state_overrides_named_thread_tip() {
 
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--output",
-                "json",
-                "start",
-                "feat-x",
-                "--workspace",
-                "auto",
-            ],
+            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
             Some(source.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    let feat_checkout =
-        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    let feat_checkout = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
     std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
     heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
     let feat_state = current_thread_state(source.path(), "feat-x");
@@ -3823,13 +3832,7 @@ fn native_push_explicit_state_overrides_named_thread_tip() {
     // Name feat-x but pin the state to the base state — the explicit state wins.
     let remote_path = remote.path().to_string_lossy().to_string();
     heddle(
-        &[
-            "push",
-            &remote_path,
-            "feat-x",
-            "--state",
-            &base_state,
-        ],
+        &["push", &remote_path, "feat-x", "--state", &base_state],
         Some(source.path()),
     )
     .expect("push with explicit --state succeeds");
@@ -3862,21 +3865,13 @@ fn native_push_all_threads_fans_out_every_thread() {
 
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--output",
-                "json",
-                "start",
-                "feat-x",
-                "--workspace",
-                "auto",
-            ],
+            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
             Some(source.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    let feat_checkout =
-        std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    let feat_checkout = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
     std::fs::write(feat_checkout.join("feat.txt"), "feat work").unwrap();
     heddle(&["capture", "-m", "feat work"], Some(&feat_checkout)).unwrap();
     let feat_state = current_thread_state(source.path(), "feat-x");
@@ -3907,8 +3902,7 @@ fn native_push_all_threads_fans_out_every_thread() {
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
     assert!(
-        refs_written.contains(&"main".to_string())
-            && refs_written.contains(&"feat-x".to_string()),
+        refs_written.contains(&"main".to_string()) && refs_written.contains(&"feat-x".to_string()),
         "refs_written must list every pushed thread (heddle#838): {refs_written:?}"
     );
 

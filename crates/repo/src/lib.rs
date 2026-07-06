@@ -102,7 +102,7 @@ pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
     ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitOverlayBranchTip,
-    GitOverlayImportHint, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
+    GitImportGuidance, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
     HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT,
     MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
     PackFilesInspection, PartialFetchInspection, PullPlannerCacheInspection, RedactConfig,

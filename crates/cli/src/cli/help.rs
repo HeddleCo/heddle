@@ -4,7 +4,7 @@
 //!
 //! The Heddle CLI's default `heddle help` lists only the native loop
 //! from the command contract table. Advanced affordances, automation,
-//! admin commands, and Git adapter commands are reachable
+//! admin commands, and Git projection commands are reachable
 //! via `heddle help advanced` or `heddle help <topic>`. Per-verb help
 //! via `heddle <verb> --help` continues to derive from clap
 //! doc-comments.
@@ -100,7 +100,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
     match topic {
         [] => {
             let catalog = crate::cli::commands::build_command_catalog();
-            let _ = writeln!(out, "Heddle — AI-native version control");
+            let _ = writeln!(out, "Heddle — agent-native version control");
             let _ = writeln!(out);
             let _ = writeln!(out, "Common loop:");
             for name in primary_loop_verbs(&catalog) {
@@ -152,7 +152,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                  `heddle help advanced` for power surfaces, automation, and Git interop, \
                  or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
                  `git-overlay`, \
-                 `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
+                 `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
                  `remotes`, `output-formats`, `git-dependencies`)."
             );
         }
@@ -460,7 +460,7 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     }
 
     // `heddle <path> --help` pre-parse direct help (e.g. `clone --help`,
-    // `bridge git import --help`).
+    // `import git --help`).
     if let Some(rendered) = render_direct_help_for_raw(&command, &raw) {
         return Some(rendered);
     }
@@ -500,7 +500,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
-        "bridge" | "footer" | "notes" => BRIDGE_TOPIC,
+        "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
         _ => return None,
     })
@@ -510,8 +510,8 @@ const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automati
 \n\
 The default `heddle help` curates the native loop: init/adopt/clone,\n\
 status/diff/commit/start, ready/land/push/pull, resolve/continue/abort,\n\
-doctor/verify. Power nouns such as thread/workspace/remote/bridge/agent and\n\
-Git adapter commands live behind this topic. Use `heddle help\n\
+doctor/verify. Power nouns such as thread/workspace/remote/Git projection/agent and\n\
+Git projection commands live behind this topic. Use `heddle help\n\
 <verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
 docs.\n\
 \n\
@@ -641,7 +641,7 @@ Core nouns:
   Use it for risky edits, agent work, or parallel experiments without stash
   juggling.
 - Capture: a cheap recoverable save point on the current thread.
-- Commit: the normal save path; Git-overlay repos also write the Git boundary.
+- Commit: the normal save path; Git-overlay repos also write the Git Checkpoint.
 - Checkpoint: the advanced Git-overlay boundary for already-captured work.
 - Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
   remotes, active operations, clone state, and machine contracts agree.
@@ -660,7 +660,7 @@ Everyday loop:
 Existing Git checkout:
 
     heddle status
-    heddle init                  # create the sidecar; Git commits stay in .git
+    heddle init                  # initialize Heddle metadata; Git commits stay in .git
     heddle verify
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
@@ -671,7 +671,7 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
 
 | Git concept | Heddle concept + semantic difference |
 |-------------|--------------------------------------|
-| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git boundary. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
+| `git commit` | `heddle commit -m "..."`: saves Heddle state and, in Git-overlay repos, writes the matching Git Checkpoint. Advanced flows may split this into `heddle capture -m "..."` plus `heddle checkpoint -m "..."`. |
 | Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
 | `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
 | `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
@@ -838,18 +838,18 @@ Core loop:\n\
 Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
 paths depending on the workflow. Top-level `fetch`, `push`, and `pull` use the\n\
 default remote unless a positional remote name is supplied, for example\n\
-`heddle fetch backup`. `heddle bridge git status` shows Git-overlay mapping and\n\
-drift before a sync operation changes refs.\n\
+`heddle fetch backup`. `heddle verify` reports repository verification state\n\
+before and after remote operations.\n\
 \n\
 When a remote action is unsafe, Heddle reports the blocker and one primary\n\
 next command instead of falling back to raw Git.\n";
 
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
-Supported Git-overlay workflows use native/library paths and are tested with\n\
-`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `bridge git\n\
-import`, `bridge git status`, `bridge git sync/export` where implemented,\n\
-`thread list`, `workspace`, `log`, `show`, `diff`, `checkpoint`, `merge`,\n\
+Supported Git Projection workflows use native/library paths and are tested with\n\
+`PATH` stripped of `git`: `init`, `status`, local/bare `clone`, `fetch`,\n\
+`push`, `pull`, `import git`, `export git`, `thread list`, `workspace`,\n\
+`log`, `show`, `diff`, `checkpoint`, `merge`,\n\
 `ready`, and `fsck`.\n\
 \n\
 Heddle is Git-compatible, not Git-binary-dependent. Public CLI runtime paths\n\
@@ -867,7 +867,7 @@ fail closed with recovery advice instead of silently invoking a `git` binary.\n\
 \n\
 Run `heddle help --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
-bridge-state problems.\n";
+Git Projection state problems.\n";
 
 const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
 \n\
@@ -905,18 +905,18 @@ const GIT_OVERLAY_TOPIC: &str = "Git-overlay workflow\n\
 \n\
 Use this when you want Heddle's captured states, isolated threads, merge\n\
 previews, undo, provenance, and machine-safe JSON with Git compatibility kept\n\
-behind the bridge/adapter.\n\
+as a projection surface.\n\
 \n\
 Start in an existing Git checkout:\n\
 \n\
     heddle status\n\
-    heddle init                               # create the sidecar; Git commits stay in .git\n\
+    heddle init                               # initialize Heddle metadata; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Save and sync ordinary work:\n\
 \n\
     heddle diff\n\
-    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
     # advanced split: heddle capture -m \"...\" && heddle checkpoint -m \"...\"\n\
     heddle push\n\
 \n\
@@ -940,22 +940,22 @@ State-specific recovery:\n\
     Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
     Convert Git history to native Heddle storage: heddle adopt --ref <branch>\n";
 
-const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
+const GIT_PROJECTION_TOPIC: &str = "Git Projection — adopt existing Git repos without a hidden mirror.\n\
 \n\
-Use the bridge when you are standing in a normal Git checkout and want Heddle's\n\
+Use Git Projection when you are standing in a normal Git checkout and want Heddle's\n\
 captured states, isolated threads, merge previews, undo, and machine-safe JSON\n\
 while keeping Git remotes and commits available as interoperability surfaces.\n\
 \n\
 First run:\n\
 \n\
     heddle status\n\
-    heddle init                               # create the sidecar; Git commits stay in .git\n\
+    heddle init                               # initialize Heddle metadata; Git commits stay in .git\n\
     heddle verify\n\
 \n\
 Manual setup, when you want one ref at a time:\n\
 \n\
     heddle init\n\
-    heddle bridge git import --ref <branch>\n\
+    heddle import git --ref <branch>\n\
 \n\
 Explicit conversion to native Heddle storage:\n\
 \n\
@@ -964,7 +964,7 @@ Explicit conversion to native Heddle storage:\n\
 Daily loop:\n\
 \n\
     heddle status\n\
-    heddle commit -m \"...\"                    # save state and write the Git boundary\n\
+    heddle commit -m \"...\"                    # save state and write the Git Checkpoint\n\
     heddle push                               # Git-overlay remotes use the top-level verb\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\
@@ -972,10 +972,9 @@ Daily loop:\n\
 \n\
 Recovery and inspection:\n\
 \n\
-    heddle bridge git status\n\
-    heddle bridge git reconcile --ref <branch> --preview\n\
-    heddle doctor\n\
+    heddle status\n\
     heddle verify --output json\n\
+    heddle doctor\n\
 \n\
 Export metadata for Git readers:\n\
 \n\
@@ -1053,7 +1052,8 @@ mod tests {
             "review",
             "discuss",
             "discussions",
-            "bridge",
+            "git-projection",
+            "git-projections",
             "footer",
             "notes",
             "signals",
@@ -1119,7 +1119,7 @@ mod tests {
                  the everyday surface"
             );
         }
-        for verb in ["review", "discuss", "context", "thread", "bridge"] {
+        for verb in ["review", "discuss", "context", "thread", "git-projection"] {
             assert!(
                 !everyday.contains(verb),
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"

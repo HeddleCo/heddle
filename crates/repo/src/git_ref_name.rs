@@ -4,7 +4,8 @@
 /// Sentinel remote name for refs owned by the local repository.
 ///
 /// Local branches, tags, and notes use this owner when represented in the
-/// bridge parser. A user remote named `git` would collide with that sentinel.
+/// Git projection parser. A user remote named `git` would collide with
+/// that sentinel.
 pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
 
 /// The content namespaces Heddle intentionally mirrors as named Git refs.
@@ -123,7 +124,7 @@ impl<'a> GitRefName<'a> {
         !self.is_local_only()
     }
 
-    /// Return the named content namespace Heddle surfaces in local Git bridge
+    /// Return the named content namespace Heddle surfaces in local Git projection
     /// operations.
     pub fn content_namespace(&self) -> Option<GitRefContentNamespace> {
         match self.namespace() {
@@ -161,9 +162,9 @@ impl<'a> GitRefName<'a> {
             .or_else(|| self.note_name())
     }
 
-    /// Parse a bridge-visible ref. Notes are content refs in Heddle and are
+    /// Parse a Git-projection-visible ref. Notes are content refs in Heddle and are
     /// accepted here to match hosted mirror behavior.
-    pub fn bridge_ref(&self) -> Option<ParsedGitRef<'a>> {
+    pub fn git_projection_ref(&self) -> Option<ParsedGitRef<'a>> {
         match self.namespace() {
             GitRefNamespace::Branch => {
                 let name = self.branch_name()?;
@@ -265,7 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_every_git_namespace_used_by_sync_and_bridge() {
+    fn classifies_every_git_namespace_used_by_sync_and_projection() {
         let cases = [
             (
                 "refs/heads/main",
@@ -356,9 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_bridge_visible_refs() {
+    fn parses_git_projection_visible_refs() {
         assert_eq!(
-            GitRefName::new("refs/heads/main").bridge_ref(),
+            GitRefName::new("refs/heads/main").git_projection_ref(),
             Some(ParsedGitRef {
                 kind: GitRefKind::Branch,
                 name: "main",
@@ -366,7 +367,7 @@ mod tests {
             })
         );
         assert_eq!(
-            GitRefName::new("refs/remotes/origin/feature/x").bridge_ref(),
+            GitRefName::new("refs/remotes/origin/feature/x").git_projection_ref(),
             Some(ParsedGitRef {
                 kind: GitRefKind::Branch,
                 name: "feature/x",
@@ -374,7 +375,7 @@ mod tests {
             })
         );
         assert_eq!(
-            GitRefName::new("refs/tags/v1.0").bridge_ref(),
+            GitRefName::new("refs/tags/v1.0").git_projection_ref(),
             Some(ParsedGitRef {
                 kind: GitRefKind::Tag,
                 name: "v1.0",
@@ -382,7 +383,7 @@ mod tests {
             })
         );
         assert_eq!(
-            GitRefName::new("refs/notes/heddle").bridge_ref(),
+            GitRefName::new("refs/notes/heddle").git_projection_ref(),
             Some(ParsedGitRef {
                 kind: GitRefKind::Note,
                 name: "heddle",
@@ -392,10 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_symbolic_head_and_reserved_remote_from_bridge_parse() {
-        assert_eq!(GitRefName::new("refs/heads/HEAD").bridge_ref(), None);
-        assert_eq!(GitRefName::new("refs/remotes/origin/HEAD").bridge_ref(), None);
-        assert_eq!(GitRefName::new("refs/remotes/git/main").bridge_ref(), None);
+    fn rejects_symbolic_head_and_reserved_remote_from_git_projection_parse() {
+        assert_eq!(GitRefName::new("refs/heads/HEAD").git_projection_ref(), None);
+        assert_eq!(GitRefName::new("refs/remotes/origin/HEAD").git_projection_ref(), None);
+        assert_eq!(GitRefName::new("refs/remotes/git/main").git_projection_ref(), None);
     }
 
     #[test]

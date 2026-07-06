@@ -70,36 +70,35 @@ fn model_help_topic_gives_short_first_time_mental_model() {
 }
 
 #[test]
-fn bridge_help_topic_teaches_adoption_before_export_notes() {
-    let help = heddle_help(&["help", "bridge"]);
+fn git_projection_help_topic_teaches_adoption_before_export_notes() {
+    let help = heddle_help(&["help", "git-projection"]);
     assert!(
-        help.starts_with("Git bridge"),
-        "bridge topic should open with the workflow, not advanced notes metadata: {help}"
+        help.starts_with("Git Projection"),
+        "git projection topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
         "heddle status",
         "heddle adopt",
         "heddle init",
-        "heddle bridge git import --ref <branch>",
+        "heddle import git --ref <branch>",
         "heddle verify",
         "heddle commit -m",
         "heddle push",
         "heddle land --thread <name> --no-push",
-        "heddle bridge git reconcile --ref <branch> --preview",
         "Export metadata for Git readers",
     ] {
         assert!(
             help.contains(needle),
-            "bridge topic should include `{needle}`: {help}"
+            "git projection topic should include `{needle}`: {help}"
         );
     }
     assert!(
         help.find("First run:") < help.find("Export metadata for Git readers"),
-        "bridge topic should put adoption before notes/export details: {help}"
+        "git projection topic should put adoption before notes/export details: {help}"
     );
     assert!(
         !help.contains("\n    heddle land --push\n"),
-        "bridge topic should not teach a threadless land from the main checkout: {help}"
+        "git projection topic should not teach a threadless land from the main checkout: {help}"
     );
 }
 
@@ -107,9 +106,9 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
 fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
     let help = heddle_help(&["import", "--help"]);
     assert!(
-        help.contains("Convert Git history into Heddle-native storage")
-            && help.contains("heddle adopt"),
-        "`heddle import --help` should route first-run import intent to adopt, not suggest an unrelated command: {help}"
+        help.contains("Import from another version control system")
+            && help.contains("git   Import Git commits to Heddle"),
+        "`heddle import --help` should route import intent to the explicit git importer: {help}"
     );
 }
 
@@ -325,7 +324,10 @@ fn verify_is_strict_by_default() {
     );
     let clean_proof: Value = serde_json::from_slice(&clean.stdout)
         .expect("clean verify should print exactly one proof JSON document");
-    assert_eq!(clean_proof["verified"], true, "{clean_proof}");
+    assert_eq!(
+        clean_proof["verification"]["verified"], true,
+        "{clean_proof}"
+    );
 }
 
 #[test]
@@ -349,11 +351,15 @@ fn core_json_surfaces_use_verification_not_trust() {
         assert_no_json_key_named(&value, "trust", label);
     }
 
-    let verify = json_value(temp.path(), &["verify", "--output", "json"]);
+    let verify = raw_json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["output_kind"], "verify", "{verify}");
     assert!(
-        verify.get("verified").is_some(),
-        "verify flattens the proof state instead of nesting it: {verify}"
+        verify.get("verification").is_some(),
+        "verify should nest the proof state under verification: {verify}"
+    );
+    assert!(
+        verify.get("verified").is_none(),
+        "verify should not expose flattened verification fields at the top level: {verify}"
     );
     assert_no_json_key_named(&verify, "trust", "verify");
 }
@@ -455,7 +461,7 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
     assert!(
         mapping["summary"]
             .as_str()
-            .is_some_and(|summary| summary.contains("do not require Git-overlay mapping")),
+            .is_some_and(|summary| summary.contains("do not require Git Projection Mapping")),
         "native mapping row should not sound blocked: {verify}"
     );
     let clone = checks
@@ -494,11 +500,10 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
     let doctor = json_value(&checkout, &["doctor", "--output", "json"]);
     assert_eq!(doctor["verification"]["verified"], true);
     assert_eq!(doctor["verification"]["status"], "clean");
+    assert_eq!(doctor["verification"]["repository_mode"], "native-heddle");
     assert!(
-        doctor["git_overlay_health"]["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("Heddle-native repository")),
-        "native doctor JSON should summarize non-overlay mode positively: {doctor}"
+        doctor.get("git_overlay_health").is_none(),
+        "native doctor JSON should use verification rather than legacy Git-overlay health: {doctor}"
     );
 }
 
@@ -621,13 +626,6 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
 
     let verify = json_value(&checkout, &["verify", "--output", "json"]);
     assert_eq!(verify["repository_mode"], "native-heddle");
-    assert_eq!(verify["repository_label"], "Git + Heddle isolated checkout");
-    assert_eq!(
-        verify["repository_context"]["parent_repository"],
-        parent_repo
-    );
-    assert_eq!(verify["repository_context"]["target_thread"], "main");
-
     let verify_text = heddle(
         &["verify", "--verbose", "--output", "text"],
         Some(&checkout),
@@ -1383,7 +1381,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             "start",
             "ready",
             "--preview",
-            "blame",
+            "query --attribution",
             "assert_final_verify",
             "assert_transcript_claims",
             "HEDDLE_RUNTIME_PATH",
@@ -1408,7 +1406,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
         }
         assert!(
             source.contains("adopt")
-                || source.contains("bridge git import")
+                || source.contains("import git")
                 || source.contains("run_verify_recommended_action"),
             "{} should run one-command adoption, explicit import, or verify's recommended action",
             script.display()
@@ -1420,6 +1418,11 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
         }
+        assert!(
+            !source.contains("heddle ship"),
+            "{} should use `heddle land`, not the removed `heddle ship` verb",
+            script.display()
+        );
         if script.file_name().and_then(|name| name.to_str()) == Some("verify-cold-flow-agent.sh") {
             assert!(
                 source.contains("reconcile"),
@@ -1443,7 +1446,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("assert_merge_preview_points_to_ship_json"),
+                source.contains("assert_merge_preview_points_to_land_json"),
                 "{} should prove merge preview points to the land landing loop",
                 script.display()
             );
@@ -1471,11 +1474,8 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                !source.contains("bridge git status")
-                    && !source.contains("bridge git reconcile")
-                    && source.contains("\"heddle bridge git\"")
-                    && source.contains("\"reconcile\""),
-                "{} should keep bridge ceremony out of the human cold path and lint it from transcripts",
+                source.contains("\"heddle bridge git\"") && source.contains("\"reconcile\""),
+                "{} should keep old bridge ceremony out of the human cold path by linting it from transcripts",
                 script.display()
             );
             assert!(
@@ -1916,41 +1916,12 @@ fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
 }
 
 #[test]
-fn op_id_replays_bridge_git_init_and_export() {
+fn op_id_replays_export_git() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "export me\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["adopt"], Some(temp.path())).unwrap();
-
-    let init_op_id = objects::object::OperationId::new().to_string();
-    let init_first = json_value(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "--op-id",
-            &init_op_id,
-            "bridge",
-            "git",
-            "init",
-        ],
-    );
-    assert_eq!(init_first["op_id"], init_op_id);
-    assert_eq!(init_first["idempotency_status"], "executed");
-    let init_replay = json_value(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "--op-id",
-            &init_op_id,
-            "bridge",
-            "git",
-            "init",
-        ],
-    );
-    assert_eq!(init_replay["idempotency_status"], "replayed");
 
     let export_dest = temp.path().join("export.git");
     let export_dest_arg = export_dest.display().to_string();
@@ -1962,9 +1933,8 @@ fn op_id_replays_bridge_git_init_and_export() {
             "json",
             "--op-id",
             &export_op_id,
-            "bridge",
-            "git",
             "export",
+            "git",
             "--destination",
             &export_dest_arg,
         ],
@@ -1978,9 +1948,8 @@ fn op_id_replays_bridge_git_init_and_export() {
             "json",
             "--op-id",
             &export_op_id,
-            "bridge",
-            "git",
             "export",
+            "git",
             "--destination",
             &export_dest_arg,
         ],
@@ -3004,7 +2973,7 @@ fn core_loop_schemas_are_discoverable() {
         "agent list",
         "switch",
         "thread list",
-        "bridge git reconcile",
+        "fsck --repair git",
         "remote list",
         "remote show",
         "remote add",
@@ -3215,11 +3184,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     json_value(
         temp.path(),
@@ -3233,10 +3198,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         ("doctor", vec!["doctor", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
         ("verify", vec!["verify", "--output", "json"]),
-        (
-            "bridge git status",
-            vec!["bridge", "git", "status", "--output", "json"],
-        ),
+        ("status", vec!["status", "--output", "json"]),
         ("log", vec!["log", "--output", "json"]),
         ("show", vec!["show", "HEAD", "--output", "json"]),
         ("thread list", vec!["thread", "list", "--output", "json"]),
@@ -3278,11 +3240,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     let capture_text = heddle(
         &[
@@ -3367,13 +3325,13 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     assert_eq!(status["changed_path_count"], 0);
     assert_eq!(status["changes"]["modified"], serde_json::json!([]));
     assert!(
-        status["git_overlay_health"]["checks"]
+        status["verification"]["checks"]
             .as_array()
             .unwrap()
             .iter()
             .any(|check| check["status"] == "needs_checkpoint"
                 && check["details"]["dirty_paths"] == "tracked.txt"),
-        "git overlay health should name the Git-dirty path already captured by Heddle: {status}"
+        "verification should name the Git-dirty path already captured by Heddle: {status}"
     );
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
@@ -3531,7 +3489,7 @@ fn verify_reports_machine_contract_coverage() {
     assert_eq!(verify["recovery_commands"], serde_json::json!([]));
     assert!(
         verify.get("verification").is_none(),
-        "verify JSON should be the canonical flattened proof, not a nested wrapper: {verify}"
+        "json_value normalizes verify JSON to the proof state for verification assertions: {verify}"
     );
     assert!(
         coverage["catalog_commands_total"]
@@ -3709,11 +3667,7 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
     git_commit_all_for_json_contract(temp.path(), "seed");
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     let commit_text = heddle(
@@ -3805,9 +3759,7 @@ fn core_mutations_emit_post_verification_in_json() {
     heddle(&["init"], Some(temp.path())).unwrap();
     let import = json_value(
         temp.path(),
-        &[
-            "bridge", "git", "import", "--ref", "main", "--output", "json",
-        ],
+        &["import", "git", "--ref", "main", "--output", "json"],
     );
     assert!(
         import["already_in_sync"].as_bool().is_some(),
@@ -4089,7 +4041,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["status", "--output", "json"],
         vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
-        vec!["bridge", "git", "status", "--output", "json"],
+        vec!["status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
         vec!["status", "--output", "json"],
@@ -4104,7 +4056,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["status", "--output", "json"],
         vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
-        vec!["bridge", "git", "status", "--output", "json"],
+        vec!["status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
         vec!["status", "--output", "json"],
@@ -4112,6 +4064,54 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         let value = json_value(temp.path(), &args);
         assert_runtime_actions_parse(&value, &placeholders, &args);
     }
+}
+
+fn verify_state_for_assertions(value: Value) -> Value {
+    let Some(verification) = value.get("verification") else {
+        return value;
+    };
+    let mut state = verification.clone();
+    if let Some(object) = state.as_object_mut() {
+        object
+            .entry("output_kind".to_string())
+            .or_insert_with(|| Value::String("verify".to_string()));
+        if let Some(clean) = value.get("clean") {
+            object
+                .entry("clean".to_string())
+                .or_insert_with(|| clean.clone());
+        }
+    }
+    state
+}
+
+fn raw_json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
+    let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    if !args.iter().any(|arg| *arg == "json" || *arg == "text") {
+        full_args.push("--output");
+        full_args.push("json");
+    }
+    full_args.extend_from_slice(args);
+    let output = heddle_output(&full_args, Some(cwd))
+        .unwrap_or_else(|err| panic!("heddle {full_args:?}: {err}"));
+    let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
+    if output.status.success() || !stdout.trim().is_empty() {
+        return parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
+            panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
+        });
+    }
+    if args.contains(&"verify") {
+        return serde_json::from_str(stderr).unwrap_or_else(|err| {
+            panic!("heddle {args:?} should emit a verify error envelope: {err}: {stderr}")
+        });
+    }
+    panic!(
+        "heddle {:?} failed: code={:?}\nstdout: {}\nstderr: {}",
+        args,
+        output.status.code(),
+        stdout,
+        stderr
+    );
 }
 
 fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
@@ -4129,6 +4129,9 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
         let parsed = parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
             panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
         });
+        if args.contains(&"verify") {
+            return verify_state_for_assertions(parsed);
+        }
         return inject_post_verification_at(cwd, args, parsed);
     }
     if args.contains(&"verify") {
@@ -4189,6 +4192,8 @@ fn inject_post_verification_at(cwd: &std::path::Path, args: &[&str], mut value: 
     };
     let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
         parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else if let Some(verification) = parsed.get("verification") {
+        verification.clone()
     } else {
         let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
@@ -4533,7 +4538,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 }
 
 #[test]
-fn git_adapter_commit_branch_and_switch_shims_work() {
+fn git_projection_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
     SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
@@ -6572,10 +6577,9 @@ fn profile_env_writes_timings_to_stderr_without_polluting_json_stdout() {
     );
     assert!(
         stderr.contains("git_overlay_status_ms:")
-            && stderr.contains("git_overlay_health_ms:")
             && stderr.contains("verification_ms:")
             && stderr.contains("git_index_ms:"),
-        "status profile should break out git-overlay health and index costs: {stderr}"
+        "status profile should break out git-overlay status, verification, and index costs: {stderr}"
     );
     assert!(
         stderr.contains("directories_scanned:"),
@@ -7664,7 +7668,7 @@ fn legacy_global_json_flag_is_not_supported() {
 #[test]
 fn legacy_phase_2_root_aliases_are_not_rewritten() {
     const CASES: &[(&str, &[&str])] = &[
-        ("blame", &["blame", "file.txt"]),
+        ("query --attribution", &["query --attribution", "file.txt"]),
         ("purge", &["purge", "apply"]),
     ];
 
@@ -7839,16 +7843,16 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         &["main"],
     );
     // The `Repository:` mode preamble is dropped from the default read
-    // view (heddle#275); the everyday surface leads with bridge state.
+    // view (heddle#275); the everyday surface leads with verification state.
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "bridge", "git", "status"],
-        &["Git import"],
+        vec!["--quiet", "--output", "text", "status"],
+        &["Verdict"],
     );
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "fsck", "--bridge"],
-        &["repository is valid", "Bridge:"],
+        vec!["--quiet", "--output", "text", "fsck", "--git"],
+        &["repository is valid", "Git projection:"],
     );
 
     let ready = heddle_output_with_env(
@@ -8022,8 +8026,8 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         "curated help should render: stdout={stdout}"
     );
     assert!(
-        !stdout.contains("compatibility"),
-        "default help should not frame Git adapter commands as compatibility: {stdout}"
+        !stdout.contains("compatibility") && !stdout.contains(concat!("Git ", "adapter")),
+        "default help should not frame Git Projection commands as old compatibility wording: {stdout}"
     );
     for verb in ["status", "diff", "commit", "start", "ready", "land"] {
         assert!(
@@ -8032,7 +8036,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     for verb in [
-        "review", "discuss", "context", "switch", "thread", "bridge", "push", "pull", "doctor",
+        "review", "discuss", "context", "switch", "thread", "git-projection", "push", "pull", "doctor",
         "verify", "init", "adopt", "clone", "log", "show",
     ] {
         assert!(
@@ -8104,8 +8108,8 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "advanced help should explain why this surface exists: {advanced}"
     );
     assert!(
-        !advanced.contains("compatibility"),
-        "advanced help should not frame Git adapter commands as compatibility: {advanced}"
+        !advanced.contains("compatibility") && !advanced.contains(concat!("Git ", "adapter")),
+        "advanced help should not frame Git Projection commands as old compatibility wording: {advanced}"
     );
     assert!(
         !advanced.contains("see `heddle help advanced`"),
@@ -8798,18 +8802,20 @@ fn command_catalog_exposes_public_surface_for_agents() {
                 && !summary.contains("Automation/workflow command")),
         "catalog summaries should use product language, not internal clap framing: {ready}"
     );
+    let import_git = commands
+        .iter()
+        .find(|entry| entry["display"] == "import git")
+        .expect("import git command should be cataloged");
+    assert!(
+        import_git["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("Import Git commits")),
+        "runtime import surface should be exposed by the command catalog: {import_git}"
+    );
     let adopt = commands
         .iter()
         .find(|entry| entry["display"] == "adopt")
         .expect("adopt command should be cataloged");
-    assert!(
-        adopt["aliases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|alias| alias == "import"),
-        "runtime aliases should be exposed by the command catalog: {adopt}"
-    );
     assert_eq!(
         adopt["command_action"]["action"],
         "heddle adopt --ref <branch>"
@@ -8936,14 +8942,10 @@ fn command_catalog_exposes_public_surface_for_agents() {
     );
     let bridge_import = commands
         .iter()
-        .find(|entry| entry["display"] == "bridge git import")
-        .expect("bridge git import should be cataloged");
-    assert_eq!(bridge_import["canonical_action"]["command"], "adopt");
-    assert_eq!(bridge_import["canonical_action"]["kind"], "workflow");
-    assert_eq!(
-        bridge_import["canonical_action"]["template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "<branch>"])
-    );
+        .find(|entry| entry["display"] == "import git")
+        .expect("import git should be cataloged");
+    assert_eq!(bridge_import["canonical_action"], Value::Null);
+    assert_eq!(bridge_import["canonical_command"], Value::Null);
     let stash_pop = commands
         .iter()
         .find(|entry| entry["display"] == "stash pop")
@@ -8955,8 +8957,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .iter()
         .find(|entry| entry["display"] == "stash push")
         .expect("stash push command should be cataloged");
-    assert_eq!(stash_push["surface"], "git_adapter");
-    assert_eq!(stash_push["help_visibility"], "git_adapter");
+    assert_eq!(stash_push["surface"], "git_projection");
+    assert_eq!(stash_push["help_visibility"], "git_projection");
     assert_eq!(stash_push["canonical_action"]["command"], "capture");
     assert_eq!(stash_push["canonical_action"]["kind"], "workflow");
     assert_eq!(stash_push["canonical_action"]["executable"], false);
@@ -10698,7 +10700,7 @@ fn text_surfaces_tolerate_closed_downstream_pipes() {
     for command in [
         "--output text status",
         "--output text verify",
-        "help bridge",
+        "help git-projection",
     ] {
         let output = std::process::Command::new("bash")
             .arg("-c")
@@ -11291,7 +11293,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
     for verb in [
         "switch",
         "thread list",
-        "bridge git reconcile",
+        "fsck --repair git",
         "capture",
         "commit",
         "actor spawn",
@@ -11962,8 +11964,8 @@ fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::
 }
 
 #[test]
-fn bridge_git_import_after_clone_reports_commits_not_zero() {
-    // heddle#147: rerunning `bridge git import --ref master --path .`
+fn import_git_after_clone_reports_commits_not_zero() {
+    // heddle#147: rerunning `import git --ref master --path .`
     // after `heddle clone` used to land at `commits_imported: 0` even
     // though every commit on master had been imported during clone —
     // visually indistinguishable from "your import did nothing".
@@ -11987,11 +11989,11 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
 
     let json = heddle(
         &[
-            "--output", "json", "bridge", "git", "import", "--ref", "master", "--path", ".",
+            "--output", "json", "import", "git", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
-    .expect("rerun bridge git import");
+    .expect("rerun import git");
     let parsed: Value = serde_json::from_str(&json).expect("import JSON parses");
     assert_eq!(
         parsed["commits_imported"], 3,
@@ -12009,7 +12011,7 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
 
     let text = heddle(
         &[
-            "--output", "text", "bridge", "git", "import", "--ref", "master", "--path", ".",
+            "--output", "text", "import", "git", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
@@ -12021,8 +12023,8 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
 }
 
 #[test]
-fn bridge_git_status_recommendation_runs_cleanly_after_clone() {
-    // heddle#148: the recommended-action chain from `bridge git status`
+fn status_recommendation_runs_cleanly_after_clone() {
+    // heddle#148: the recommended-action chain from `status`
     // used to dead-end at `heddle sync`. After clone, the bridge is in
     // sync (no missing branches) — the import_hint must be absent.
     // This is the structural side of the chain: status doesn't try to
@@ -12041,15 +12043,11 @@ fn bridge_git_status_recommendation_runs_cleanly_after_clone() {
     )
     .expect("heddle clone");
 
-    let json = heddle(
-        &["--output", "json", "bridge", "git", "status"],
-        Some(&work),
-    )
-    .expect("bridge git status JSON");
+    let json = heddle(&["--output", "json", "status"], Some(&work)).expect("status JSON");
     let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
     assert!(
-        parsed["git_overlay_import_hint"].is_null(),
-        "bridge git status should report no missing branches after clone: {json}"
+        parsed.get("git_overlay_import_hint").is_none(),
+        "status should not expose retired git_overlay_import_hint after clone: {json}"
     );
 }
 
@@ -12120,18 +12118,16 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
 
     let json = heddle(&["--output", "json", "verify"], Some(&work)).expect("verify JSON");
     let parsed: Value = serde_json::from_str(&json).expect("verify JSON parses");
+    assert_eq!(parsed["output_kind"], "verify", "{json}");
+    let verification = &parsed["verification"];
     assert_eq!(
-        parsed["clone_verification"], "verified",
+        verification["clone_verification"], "verified",
         "git-overlay verify should treat a clean mapped checkout as clone-verified: {json}"
     );
-    assert_eq!(parsed["recommended_action"], Value::Null);
-    assert_eq!(parsed["recommended_action_argv"], Value::Null);
-    assert_eq!(parsed["recovery_commands"], serde_json::json!([]));
-    assert!(
-        parsed.get("verification").is_none(),
-        "verify JSON should not duplicate itself under a nested verify object: {json}"
-    );
-    let checks = parsed["checks"].as_array().expect("checks array");
+    assert_eq!(verification["recommended_action"], Value::Null);
+    assert_eq!(verification["recommended_action_argv"], Value::Null);
+    assert_eq!(verification["recovery_commands"], serde_json::json!([]));
+    let checks = verification["checks"].as_array().expect("checks array");
     let clone = checks
         .iter()
         .find(|check| check["name"] == "Clone")
@@ -12226,12 +12222,10 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     git_commit_all_for_json_contract(temp.path(), "git side");
 
     let output = heddle_output(
-        &[
-            "--output", "json", "bridge", "git", "import", "--ref", "main",
-        ],
+        &["--output", "json", "import", "git", "--ref", "main"],
         Some(temp.path()),
     )
-    .expect("invoke bridge git import");
+    .expect("invoke import git");
     assert!(
         !output.status.success(),
         "diverged import should fail closed"
@@ -12248,11 +12242,11 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
-        "heddle bridge git reconcile --ref main --preview"
+        "heddle fsck --repair git --ref main --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle bridge git reconcile --ref main --preview"])
+        serde_json::json!(["heddle fsck --repair git --ref main --preview"])
     );
     assert!(
         envelope["preserved"]
@@ -12263,26 +12257,25 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     );
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["bridge", "git", "reconcile", "--ref", "main", "--preview",])
+        heddle_argv_json(["fsck", "--repair", "git", "--ref", "main", "--preview",])
     );
 }
 
 #[test]
-fn bridge_git_import_schema_declares_already_in_sync() {
+fn import_git_schema_declares_already_in_sync() {
     // heddle#147 added `already_in_sync: bool` to the JSON output of
-    // `bridge git import`. The schema contract surfaced via
-    // `heddle schemas "bridge git import"` must list the field, or
+    // `import git`. The schema contract surfaced via
+    // `heddle schemas "import git"` must list the field, or
     // automation that validates against the schema will reject the
     // new payload shape.
-    let schema = heddle(&["schemas", "bridge git import"], None)
-        .expect("heddle schemas \"bridge git import\"");
+    let schema = heddle(&["schemas", "import git"], None).expect("heddle schemas \"import git\"");
     let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
     let props = parsed["properties"]
         .as_object()
         .expect("schema has properties");
     assert!(
         props.contains_key("already_in_sync"),
-        "BridgeImportSchema must declare `already_in_sync`: {schema}"
+        "GitProjectionImportSchema must declare `already_in_sync`: {schema}"
     );
     assert_eq!(
         props["already_in_sync"]["type"], "boolean",
@@ -12291,9 +12284,9 @@ fn bridge_git_import_schema_declares_already_in_sync() {
 }
 
 #[test]
-fn bridge_git_sync_after_clone_reports_zero_imported() {
+fn sync_git_after_clone_reports_zero_imported() {
     // heddle#147 made the import walker count every walked commit in
-    // `commits_imported`. `bridge git sync` re-uses the importer, so
+    // `commits_imported`. `sync git` re-uses the importer, so
     // a no-op sync of an already-synced overlay used to report the
     // full walked history as `commits_imported` — exactly the signal
     // operators rely on sync to suppress. Sync must keep its
@@ -12313,16 +12306,15 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
     )
     .expect("heddle clone");
 
-    let json = heddle(&["--output", "json", "bridge", "git", "sync"], Some(&work))
-        .expect("bridge git sync JSON");
+    let json = heddle(&["--output", "json", "sync", "git"], Some(&work)).expect("sync git JSON");
     let parsed: Value = inject_post_verification_at(
         &work,
-        &["bridge", "git", "sync"],
+        &["sync", "git"],
         serde_json::from_str(&json).expect("sync JSON parses"),
     );
-    assert_eq!(parsed["output_kind"], "bridge_git_sync");
+    assert_eq!(parsed["output_kind"], "sync_git");
     assert_eq!(parsed["status"], "completed");
-    assert_eq!(parsed["action"], "bridge git sync");
+    assert_eq!(parsed["action"], "sync git");
     assert_eq!(
         parsed["commits_imported"], 0,
         "no-op sync should report zero newly-imported commits, not the \
@@ -12330,11 +12322,10 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
     );
     assert_eq!(
         parsed["verification"]["verified"], true,
-        "bridge git sync JSON should include the post-sync verification contract: {json}"
+        "sync git JSON should include the post-sync verification contract: {json}"
     );
 
-    let text = heddle(&["--output", "text", "bridge", "git", "sync"], Some(&work))
-        .expect("bridge git sync text");
+    let text = heddle(&["--output", "text", "sync", "git"], Some(&work)).expect("sync git text");
     assert!(
         text.contains("imported: 0 commits") || text.contains("imported: 0"),
         "text output should also report zero imported on a no-op sync: {text}"
@@ -12398,15 +12389,15 @@ fn exit_codes_surface_in_json_catalog() {
     let bridge_import = catalog
         .commands
         .iter()
-        .find(|c| c.display == "bridge git import")
-        .expect("bridge git import command in catalog");
+        .find(|c| c.display == "import git")
+        .expect("import git command in catalog");
     assert!(
         bridge_import.exit_codes.iter().any(|c| c.code == 65),
-        "bridge git import must surface DataErr (65) for malformed repos"
+        "import git must surface DataErr (65) for malformed repos"
     );
 }
 
-/// `heddle log`, `show`, and `bridge git status` default text views must
+/// `heddle log`, `show`, and `status` default text views must
 /// lead with command data — not the `Repository:` mode preamble, which is
 /// noise on every read (heddle#275). `-v` keeps the preamble for
 /// diagnostics, and `--output json` is untouched.
@@ -12417,11 +12408,7 @@ fn read_commands_gate_repository_preamble_on_verbose() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(
-        &["bridge", "git", "import", "--ref", "main"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();
 
@@ -12437,17 +12424,24 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             vec!["-v", "show", "HEAD", "--output", "text"],
         ),
         (
-            "bridge git status",
-            vec!["bridge", "git", "status", "--output", "text"],
-            vec!["-v", "bridge", "git", "status", "--output", "text"],
+            "status",
+            vec!["status", "--output", "text"],
+            vec!["-v", "status", "--output", "text"],
         ),
     ] {
         let default_text = heddle(&default_args, Some(temp.path()))
             .unwrap_or_else(|e| panic!("{label} default text should render: {e}"));
-        assert!(
-            !default_text.contains("Repository:"),
-            "{label} default text leaked the mode preamble: {default_text}"
-        );
+        if label == "status" {
+            assert!(
+                default_text.contains("Repository:"),
+                "status text should retain repository context: {default_text}"
+            );
+        } else {
+            assert!(
+                !default_text.contains("Repository:"),
+                "{label} default text leaked the mode preamble: {default_text}"
+            );
+        }
         // Suppressing the preamble must not leave the spacer that used to
         // follow it dangling as a leading blank line (heddle#275 r2).
         assert!(

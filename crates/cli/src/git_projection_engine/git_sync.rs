@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Sync threads/markers functionality for Git bridge.
+//! Sync threads/markers for Git Projection Mapping.
 
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use refs::RefExpectation;
@@ -7,12 +7,12 @@ use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
 
-use crate::bridge::git_core::{
-    GitBridge, GitBridgeError, GitResult, git_err, thread_is_unclaimed_bootstrap,
+use crate::git_projection_engine::git_core::{
+    GitProjection, GitProjectionError, GitProjectionResult, git_err, thread_is_unclaimed_bootstrap,
 };
 
 /// Sync Heddle threads to Git branches.
-pub fn sync_threads(bridge: &mut GitBridge) -> GitResult<usize> {
+pub fn sync_threads(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
@@ -30,7 +30,7 @@ pub fn sync_threads(bridge: &mut GitBridge) -> GitResult<usize> {
 }
 
 /// Sync Heddle markers to Git tags.
-pub fn sync_markers(bridge: &mut GitBridge) -> GitResult<usize> {
+pub fn sync_markers(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
@@ -48,7 +48,7 @@ pub fn sync_markers(bridge: &mut GitBridge) -> GitResult<usize> {
 }
 
 /// Sync Git branches to Heddle threads.
-pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
+pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
@@ -64,7 +64,7 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge, &existing, &change_id)?
             {
-                return Err(GitBridgeError::GitHeddleThreadDiverged {
+                return Err(GitProjectionError::GitHeddleThreadDiverged {
                     thread: name.to_string(),
                     branch: name.to_string(),
                     thread_change: existing,
@@ -81,10 +81,10 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
 }
 
 fn thread_can_adopt_change(
-    bridge: &GitBridge<'_>,
+    bridge: &GitProjection<'_>,
     existing: &ChangeId,
     change_id: &ChangeId,
-) -> GitResult<bool> {
+) -> GitProjectionResult<bool> {
     if existing == change_id {
         return Ok(true);
     }
@@ -92,11 +92,11 @@ fn thread_can_adopt_change(
         return Ok(true);
     }
     wire::is_ancestor(bridge.heddle_repo.store(), *existing, *change_id)
-        .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
+        .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))
 }
 
 /// Sync Git tags to Heddle markers.
-pub fn sync_tags(bridge: &mut GitBridge) -> GitResult<usize> {
+pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
@@ -134,7 +134,7 @@ pub fn sync_track_to_branch(
     repo: &SleyRepository,
     track_name: &str,
     git_oid: SleyObjectId,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let branch_ref = format!("refs/heads/{}", track_name);
 
     if let Some(branch) = repo.find_reference(&branch_ref).map_err(git_err)? {
@@ -175,7 +175,7 @@ pub fn sync_marker_to_tag(
     repo: &SleyRepository,
     marker_name: &str,
     git_oid: SleyObjectId,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let tag_ref = format!("refs/tags/{}", marker_name);
     if let Some(reference) = repo.find_reference(&tag_ref).map_err(git_err)? {
         let existing = peeled_oid(repo, &tag_ref, &reference.target)?;
@@ -221,7 +221,7 @@ fn set_ref(
     oid: SleyObjectId,
     precondition: RefPrecondition,
     message: &str,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     let old_oid = match &precondition {
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
         | RefPrecondition::ExistingMustMatch(ReferenceTarget::Direct(oid)) => *oid,
@@ -236,7 +236,7 @@ fn set_ref(
         Some(sley::plumbing::sley_refs::ReflogEntry {
             old_oid,
             new_oid: oid,
-            committer: bridge_identity(),
+            committer: git_projection_identity(),
             message: message.as_bytes().to_vec(),
         }),
     );
@@ -248,7 +248,7 @@ fn ensure_commit_update_fast_forward(
     ref_name: &str,
     old: SleyObjectId,
     new: SleyObjectId,
-) -> GitResult<()> {
+) -> GitProjectionResult<()> {
     if sley::plumbing::sley_rev::is_ancestor(
         repo.git_dir(),
         repo.object_format(),
@@ -260,7 +260,7 @@ fn ensure_commit_update_fast_forward(
     {
         Ok(())
     } else {
-        Err(GitBridgeError::NonFastForwardRef {
+        Err(GitProjectionError::NonFastForwardRef {
             name: ref_name.to_string(),
             old,
             new,
@@ -272,7 +272,7 @@ fn peeled_oid(
     repo: &SleyRepository,
     name: &str,
     target: &ReferenceTarget,
-) -> GitResult<Option<SleyObjectId>> {
+) -> GitProjectionResult<Option<SleyObjectId>> {
     let Some(oid) = (match target {
         ReferenceTarget::Direct(oid) => Ok(Some(*oid)),
         ReferenceTarget::Symbolic(_) => {
@@ -295,7 +295,7 @@ fn peeled_oid(
     }
 }
 
-fn bridge_identity() -> Vec<u8> {
+fn git_projection_identity() -> Vec<u8> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

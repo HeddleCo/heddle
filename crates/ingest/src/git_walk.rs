@@ -838,7 +838,7 @@ fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
 /// Built straight from the raw commit object bytes via
 /// [`objects::object::parse_commit_extension_headers`] so `encoding` / `gpgsig`
 /// / `mergetag` / any unknown header all land at their TRUE captured position
-/// through one code path — the SAME path the bridge importer uses. We do NOT
+/// through one code path — the SAME path the Git projection importer uses. We do NOT
 /// stitch the vec from typed accessors (`CommitRef::encoding`, ...): some
 /// headers are surfaced outside `extra_headers`, and re-inserting them by hand
 /// reorders them (the close-the-class bug this replaces). #564 de-lossy step 1.

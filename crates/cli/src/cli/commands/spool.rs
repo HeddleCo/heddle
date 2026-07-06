@@ -46,9 +46,13 @@ async fn open_hosted_client(repo: &Repository, remote_name: &str) -> Result<Host
         RemoteTarget::Local(_) => {
             return Err(anyhow!(RecoveryAdvice::safety_refusal(
                 "hosted_remote_required",
-                format!("spool operations require a hosted remote; remote '{remote_name}' is local"),
+                format!(
+                    "spool operations require a hosted remote; remote '{remote_name}' is local"
+                ),
                 "Configure a hosted remote or retry against one that resolves to a network target.",
-                format!("remote '{remote_name}' is local, but spool child edges live on the hosted server"),
+                format!(
+                    "remote '{remote_name}' is local, but spool child edges live on the hosted server"
+                ),
                 "running locally would imply a hosted spool change that no server recorded",
                 "no hosted request was sent and local repository state was left unchanged",
                 "heddle remote list",

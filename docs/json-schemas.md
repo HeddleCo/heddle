@@ -15,7 +15,7 @@ Schema for any verb with:
     heddle schemas <verb>             # e.g. heddle schemas status
     heddle schemas log --reflog       # subcommands taking --flags work too
     heddle schemas merge --preview --output text
-    heddle schemas bridge git status
+    heddle schemas status
 
 (Indented as plain text rather than a fenced block so the
 `heddle doctor docs` flag-checker doesn't flag `--reflog` as
@@ -47,8 +47,8 @@ and assume the discipline holds.
    key. The exception is genuinely conditional fields whose presence
    itself carries meaning (e.g. `git_commit_preview`, only present in
    `--preview` mode); those are documented as conditional.
-3. **No leakage of unrelated context.** Bridge import-hint information
-   lives only in `heddle bridge git status --output json` (and the
+3. **No leakage of unrelated context.** Git import guidance
+   lives only in `heddle status --output json` (and the
    comprehensive `heddle doctor --output json`). Per-command outputs do not
    carry it. Transports do not silently piggy-back state.
 4. **Empty collections serialize as `[]` / `{}`, not omitted.** An
@@ -172,13 +172,6 @@ in-progress operation.
   "hosted_enabled": false,
   "operation": null,
   "remote_tracking": null,
-  "git_overlay_health": {
-    "status": "clean",
-    "clean": true,
-    "summary": "Git overlay and Heddle agree",
-    "recovery_commands": [],
-    "checks": []
-  },
   "verification": {
     "verified": true,
     "status": "clean",
@@ -194,62 +187,6 @@ in-progress operation.
     "default_remote": null,
     "clone_verification": "not_applicable",
     "machine_contract": "available",
-    "machine_contract_coverage": {
-      "status": "available",
-      "verified_scope": "everyday_and_agent",
-      "advanced_scope": "advanced_internal_admin",
-      "catalog_commands_total": 220,
-      "json_commands_total": 176,
-      "json_commands_with_schema": 129,
-      "json_commands_with_accepted_opaque_schema": 47,
-      "json_commands_without_schema": 0,
-      "verified_scope_json_commands_total": 43,
-      "verified_scope_json_commands_with_schema": 43,
-      "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-      "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 133,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-      "mutating_commands_with_accepted_opaque_schema": 27,
-      "mutating_commands_without_schema": 0,
-      "verified_scope_mutating_commands_total": 26,
-      "verified_scope_mutating_commands_with_schema": 26,
-      "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-      "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-      "schema_verbs_total": 182,
-      "documented_schema_verbs_total": 182,
-      "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 47,
-      "accepted_opaque_schema_verbs_total": 47,
-      "unaccepted_opaque_schema_verbs_total": 0,
-      "jsonl_commands_total": 4,
-      "missing_schema_examples": [],
-      "missing_mutating_schema_examples": [],
-      "verified_scope_missing_schema_examples": [],
-      "verified_scope_accepted_opaque_schema_examples": [],
-      "advanced_scope_accepted_opaque_schema_examples": [
-        "help",
-        "transaction begin",
-        "transaction abort",
-        "transaction status",
-        "redact apply",
-        "redact list",
-        "redact show",
-        "redact trust add"
-      ],
-      "accepted_opaque_schema_examples": [
-        "help",
-        "transaction begin",
-        "transaction abort",
-        "transaction status",
-        "redact apply",
-        "redact list",
-        "redact show",
-        "redact trust add"
-      ],
-      "unaccepted_opaque_schema_examples": [],
-      "undocumented_schema_examples": []
-    },
     "summary": "Git overlay and Heddle agree",
     "recommended_action": null,
     "recovery_commands": [],
@@ -295,7 +232,6 @@ in-progress operation.
 | `hosted_enabled` | bool | required | Whether the repo is connected to a hosted server. |
 | `operation` | object \| null | required | In-progress operation (`merge`, `rebase`, …) or `null`. |
 | `remote_tracking` | object \| null | required | Remote drift summary or `null`. |
-| `git_overlay_health` | object | required | Compatibility health view derived from the shared verification checks. |
 | `verification` | object | required | Full `RepositoryVerificationState`; status next actions defer to this when verification is blocked. |
 | `thread` | string \| null | required | Current thread name; `null` for detached HEAD. |
 | `base_state`, `base_root` | string \| null | required | Thread base anchor change-ids. |
@@ -322,8 +258,8 @@ in-progress operation.
 | `git_checkpoint` | object \| null | required | Latest git checkpoint, when configured. |
 | `changes` | object | required | Worktree status: `{modified: [], added: [], deleted: []}`. |
 
-**Note:** Bridge import-hint information is not part of this output.
-Use `heddle bridge git status --output json`.
+**Note:** Git import guidance is not part of this output.
+Use `heddle status --output json`.
 
 ---
 
@@ -344,39 +280,41 @@ blocked verification state on stdout.
   "output_kind": "verify",
   "clean": true,
   "repository_label": "Git + Heddle",
-  "verified": true,
-  "status": "clean",
-  "repository_mode": "git-overlay",
-  "heddle_initialized": true,
-  "git_branch": "main",
-  "heddle_thread": "main",
-  "worktree_dirty": false,
-  "worktree_state": "clean",
-  "import_state": "clean",
-  "mapping_state": "clean",
-  "remote_drift": "clean",
-  "active_operation": null,
-  "default_remote": null,
-  "clone_verification": "not_applicable",
-  "machine_contract": "available",
-  "workflow_status": "idle",
-  "workflow_summary": "No ready thread is waiting to merge",
-  "summary": "Git overlay and Heddle agree",
-  "checks": [
-    {
-      "name": "Git",
-      "status": "clean",
-      "clean": true,
-      "summary": "Git worktree is clean",
-      "recommended_action": null,
-      "recovery_commands": [],
-      "details": {}
-    }
-  ],
-  "recommended_action": null,
-  "recommended_action_template": null,
-  "recovery_commands": [],
-  "recovery_action_templates": []
+  "verification": {
+    "verified": true,
+    "status": "clean",
+    "repository_mode": "git-overlay",
+    "heddle_initialized": true,
+    "git_branch": "main",
+    "heddle_thread": "main",
+    "worktree_dirty": false,
+    "worktree_state": "clean",
+    "import_state": "clean",
+    "mapping_state": "clean",
+    "remote_drift": "clean",
+    "active_operation": null,
+    "default_remote": null,
+    "clone_verification": "not_applicable",
+    "machine_contract": "available",
+    "workflow_status": "idle",
+    "workflow_summary": "No ready thread is waiting to merge",
+    "summary": "Git overlay and Heddle agree",
+    "checks": [
+      {
+        "name": "Git",
+        "status": "clean",
+        "clean": true,
+        "summary": "Git worktree is clean",
+        "recommended_action": null,
+        "recovery_commands": [],
+        "details": {}
+      }
+    ],
+    "recommended_action": null,
+    "recommended_action_template": null,
+    "recovery_commands": [],
+    "recovery_action_templates": []
+  }
 }
 ```
 
@@ -384,20 +322,21 @@ blocked verification state on stdout.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload without a wrapper object. |
+| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload. |
 | `repository_label` | string | required | Human-facing repository identity; managed Git-overlay child checkouts use `"Git + Heddle isolated checkout"`. |
 | `repository_context` | object | optional | Present for managed child checkouts; includes `kind`, `parent_repository`, and any recorded `target_thread` / `parent_thread`. |
-| `verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
-| `clean` | bool | required | Alias of `verified` for agents that sort command results into clean/blocked buckets. |
-| `status` | string | required | Overall verification status, e.g. `clean`, `needs_import`, or `dirty_worktree`. |
-| `repository_mode`, `heddle_initialized`, `git_branch`, `heddle_thread`, `worktree_dirty`, `worktree_state`, `import_state`, `mapping_state`, `remote_drift`, `active_operation`, `default_remote`, `clone_verification`, `machine_contract`, `machine_contract_coverage`, `workflow_status`, `workflow_summary` | mixed | required except nullable fields | The flattened `RepositoryVerificationState`; `heddle verify --output json` is the canonical verification state, not a wrapper around another `verification` object. |
-| `summary` | string | required | Human-sized explanation of the top verification state. |
-| `checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
-| `recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
-| `recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
-| `recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
-| `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
-| `checks[].recommended_action_template`, `checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
+| `clean` | bool | required | Alias of `verification.verified` for agents that sort command results into clean/blocked buckets. |
+| `verification` | object | required | Full `RepositoryVerificationState`; this is the canonical verification proof shared with status, doctor, and post-operation reports. |
+| `verification.verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
+| `verification.status` | string | required | Overall verification status, e.g. `clean`, `needs_import`, or `dirty_worktree`. |
+| `verification.repository_mode`, `verification.heddle_initialized`, `verification.git_branch`, `verification.heddle_thread`, `verification.worktree_dirty`, `verification.worktree_state`, `verification.import_state`, `verification.mapping_state`, `verification.remote_drift`, `verification.active_operation`, `verification.default_remote`, `verification.clone_verification`, `verification.machine_contract`, `verification.machine_contract_coverage`, `verification.workflow_status`, `verification.workflow_summary` | mixed | required except nullable fields | Repository verification dimensions. |
+| `verification.summary` | string | required | Human-sized explanation of the top verification state. |
+| `verification.checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
+| `verification.recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
+| `verification.recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
+| `verification.recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
+| `verification.recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
+| `verification.checks[].recommended_action_template`, `verification.checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
 
 ### Blocked JSON verify
 
@@ -448,8 +387,9 @@ These verbs are the everyday loop agents use after discovery through
 `heddle help --output json`: capture state, save it as a
 Git-compatible commit when needed, undo/redo the last logical
 operation, and ask whether a thread is ready. The lower-level
-`checkpoint` command is documented here as an explicit Git-adapter
-surface; the native first-run loop should prefer `commit`.
+`checkpoint` command is documented here as an advanced native surface
+for writing a Git-facing commit boundary; the first-run loop should
+prefer `commit`.
 
 `heddle capture --output json` emits:
 
@@ -2194,45 +2134,36 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 ---
 
-## `heddle bridge git status --output json`
+## `heddle status --output json`
 
-Canonical surface for the Git-overlay bridge state. This is the
-advanced Git-adapter surface, so its recovery actions intentionally
-name `heddle bridge git import ...`. Native first-run flows should use
-the `heddle adopt --ref <branch>` recommendation from `status`,
-`init`, and `verification`. This is the only command whose JSON output
-carries `git_overlay_import_hint`.
+Canonical surface for Git-overlay state. Recovery actions intentionally
+name `heddle import git ...` for imported Heddle repositories; native
+first-run flows should use the `heddle adopt --ref <branch>` recommendation
+from `status`, `init`, and `verification`.
+
+`verification` is the public proof block. Legacy `git_overlay_import_hint`
+and `git_overlay_health` sidecars are internal render data, not public JSON
+contract fields.
 
 ### Sample
 
 ```json
 {
-  "output_kind": "bridge_git_status",
+  "output_kind": "status",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "mirror_path": "/repo/.heddle/git",
-  "mirror_initialized": true,
-  "git_overlay_import_hint": {
-    "current_branch": "main",
-    "missing_branch_count": 1,
-    "missing_branches": ["support/import-me"],
-    "recommended_command": "heddle bridge git import --ref support/import-me"
-  },
-  "git_overlay_health": {
+  "verification": {
+    "verified": false,
     "status": "needs_import",
-    "clean": false,
+    "import_state": "needs_import",
+    "mapping_state": "needs_import",
     "summary": "1 Git branch tip(s) still need Heddle import",
-    "recovery_commands": ["heddle bridge git import --ref support/import-me"],
-    "checks": [
-      {
-        "name": "import",
-        "status": "needs_import",
-        "summary": "1 Git branch tip(s) still need Heddle import"
-      }
-    ]
+    "checks": [],
+    "recommended_action": "heddle import git --ref support/import-me",
+    "recovery_commands": ["heddle import git --ref support/import-me"]
   },
-  "recommended_action": "heddle bridge git import --ref support/import-me",
-  "recovery_commands": ["heddle bridge git import --ref support/import-me"]
+  "recommended_action": "heddle import git --ref support/import-me",
+  "recovery_commands": ["heddle import git --ref support/import-me"]
 }
 ```
 
@@ -2242,14 +2173,6 @@ carries `git_overlay_import_hint`.
 |-------|------|-------------|-----------|
 | `repository_capability` | string | required | Same vocabulary as `heddle status`. |
 | `storage_model` | string | required | Same. |
-| `mirror_path` | string \| null | required | Path to the bridge mirror, when known. |
-| `mirror_initialized` | bool | required | `true` when `.heddle/git` exists. |
-| `git_overlay_import_hint` | object \| null | required | `null` when bridge is in sync. |
-| `git_overlay_import_hint.current_branch` | string | required when hint is present | Active branch on the Git side. |
-| `git_overlay_import_hint.missing_branch_count` | int | required when hint is present | Length of `missing_branches`. |
-| `git_overlay_import_hint.missing_branches` | array<string> | required when hint is present | Branch names visible only on the Git side. |
-| `git_overlay_import_hint.recommended_command` | string | required when hint is present | Suggested `heddle bridge git import …` invocation. |
-| `git_overlay_health` | object | required | Health summary derived from the shared verification engine. |
 | `recommended_action` | string | required | Top-level mirror of the verification engine's primary next command. |
 | `recommended_action_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for the primary action; `null` when none. |
 | `recovery_commands` | array<string> | required | Verification recovery commands. Empty when clean. |
@@ -2635,8 +2558,8 @@ for the field-level definition. Notable invariants:
 
 Public command catalog for agents, shell integrations, and generated docs.
 Use `heddle help --output json` in automation. The catalog includes
-native commands first and lower-level Git-adapter actions only where a
-command explicitly belongs to that surface.
+native commands first and lower-level Git Projection actions only where
+a command explicitly belongs to that surface.
 
 Agents can bound the response before parsing it:
 
@@ -2656,8 +2579,8 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].display` | string | required | Joined command path. |
 | `commands[].aliases` | array<string> | required | Alternate command spellings advertised by the command contract table. |
 | `commands[].tier` | string | required | Derived discovery tier for broad filtering (`everyday`, `advanced`, or `hidden`). |
-| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_adapter`, `automation`, `admin`, or `internal`). |
-| `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_adapter`, or `hidden`). |
+| `commands[].surface` | string | required | Product surface from the command contract table (`native`, `git_projection`, `automation`, `admin`, or `internal`). |
+| `commands[].help_visibility` | string | required | Human discovery placement from the command contract table (`everyday`, `advanced`, `git_projection`, or `hidden`). |
 | `commands[].help_rank` | int | required | Stable ordering key for human command discovery. Lower ranks appear earlier. |
 | `commands[].canonical_command` | string \| null | required | Canonical Heddle command for Git-shaped aliases; `null` for native commands. |
 | `commands[].canonical_action` | object \| null | required | Structured canonical mapping for Git-shaped aliases. Contains `command`, `kind`, `executable`, `note`, `argv`, and `template`; `null` for native commands. `kind` is `direct_command`, `command_family`, `workflow`, or `conceptual_home`. |
@@ -2936,57 +2859,70 @@ human-readable dump text in `dump` instead of writing a second stdout payload.
 }
 ```
 
-## `heddle bridge git init|export|import|sync|push|pull --output json`
+## `heddle export git --output json`
 
-All bridge ops emit JSON via `serde_json::json!{}` with consistent
+Export emits:
+
+```json
+{"output_kind": "export_git", "states_exported": 3, "commits_total": 3, "threads_synced": 1, "markers_synced": 2, "branches": [{"name": "main", "tip": "0123456789abcdef0123456789abcdef01234567"}], "tags": [{"name": "v1.0.0", "tip": "89abcdef0123456789abcdef0123456789abcdef"}], "destination": "/work/project.git"}
+```
+
+Export requires an explicit destination and does not default to `.heddle/git`.
+
+## `heddle import git --output json`
+
+Import emits:
+
+```json
+{"output_kind": "import_git", "status": "completed", "action": "import git", "summary": "Imported Git history from /work/project; repository verification is clean", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false, "recommended_action": null, "recommended_action_template": null, "recovery_commands": []}
+```
+
+### Import Git Fields
+
+| Field | Type | Optionality | Semantics |
+|-------|------|-------------|-----------|
+| `lossy_entries` | array<object> | required | Entries dropped or converted only when `--lossy` was explicitly passed; empty for lossless imports. |
+
+---
+
+## Git Projection import/export/sync JSON
+
+Explicit Git Projection ops emit JSON via `serde_json::json!{}` with consistent
 key naming:
 
 | Verb | Shape |
 |------|-------|
-| `init` | `{"initialized": true, "path": "..."}` |
-| `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
-| `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
-| `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
-| `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
+| `export` | `{"output_kind": "export_git", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
+| `import` | `{"output_kind": "import_git", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
+| `sync` | `{"output_kind": "sync_git", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 
-`heddle bridge git init --output json` emits:
+## `heddle export git --output json`
 
-```json
-{"initialized": true, "path": "/work/project/.heddle/git"}
-```
-
-`heddle bridge git export --output json` emits:
+Export emits:
 
 ```json
-{"states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project/.heddle/git"}
+{"output_kind": "export_git", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
 
-`heddle bridge git import --output json` emits:
+Export requires an explicit destination and does not default to `.heddle/git`.
+
+## `heddle import git --output json`
+
+Import emits:
 
 ```json
-{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
+{"output_kind": "import_git", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
-`heddle bridge git sync --output json` emits:
+## `heddle sync git --output json`
+
+Sync emits:
 
 ```json
-{"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
+{"output_kind": "sync_git", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
-`heddle bridge git push --output json` emits:
-
-```json
-{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}
-```
-
-`heddle bridge git pull --output json` emits:
-
-```json
-{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}
-```
-
-### Bridge Git Import Fields
+### Import Git Fields
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
@@ -3019,10 +2955,9 @@ List every runtime schema verb and the subset enforced by
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
-verification report and the primary recovery command. This is the one
-place outside `bridge git status` where `git_overlay_import_hint` is part
-of the JSON contract — doctor is the catch-all health surface and its job
-is to surface every relevant signal for the operator.
+verification report and the primary recovery command. Public proof lives in
+`verification`; legacy Git-overlay health/import sidecars are internal render
+data, not JSON contract fields.
 
 ```json
 {
@@ -3031,8 +2966,6 @@ is to surface every relevant signal for the operator.
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "hosted_enabled": false,
-  "git_overlay_import_hint": null,
-  "git_overlay_health": {"status": "clean", "clean": true, "summary": "Git overlay and Heddle agree", "recovery_commands": [], "checks": []},
   "verification": {"verified": true, "status": "clean", "checks": [], "recommended_action": "", "recovery_commands": []},
   "operation": null,
   "remote_tracking": null,
@@ -3111,26 +3044,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 133,
+    "advanced_scope_json_commands_total": 128,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
-    "advanced_scope_mutating_commands_total": 81,
+    "advanced_scope_mutating_commands_total": 78,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 220,
-    "catalog_mutating_commands_total": 112,
-    "json_commands_total": 176,
+    "catalog_commands_total": 216,
+    "catalog_mutating_commands_total": 109,
+    "json_commands_total": 171,
     "json_commands_with_accepted_opaque_schema": 47,
-    "json_commands_with_schema": 129,
+    "json_commands_with_schema": 124,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 107,
+    "json_mutating_commands_total": 104,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 107,
+    "mutating_commands_total": 104,
     "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_with_schema": 80,
+    "mutating_commands_with_schema": 77,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "220 command(s), 176 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3168,7 +3101,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "220 command(s), 176 JSON command(s), 112 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3323,21 +3256,32 @@ shape when the target resolves as a state rather than a thread.
 
 ---
 
-## `heddle bridge git reconcile --output json`
+## `heddle fsck --repair git --output json`
 
 Preview or apply a ref reconciliation between Git and Heddle.
 
 ```json
 {
-  "output_kind": "bridge_git_reconcile",
-  "status": "preview",
-  "prefer": null,
-  "ref_name": "main",
-  "preview": true,
-  "summary": "Preview: local Git/Heddle repair choices for 'main'. This does not push, pull, rewrite remotes, move refs, update the index, or change worktree files",
-  "recovery_commands": [
-    "heddle bridge git reconcile --prefer heddle --ref main --preview",
-    "heddle bridge git reconcile --prefer git --ref main --preview"
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "objects_checked": 42,
+  "git_projection_checked": true,
+  "repair_target": "git",
+  "repaired": false,
+  "repairs": [
+    {
+      "name": "git_projection_ref_reconcile_preview",
+      "repaired": false,
+      "detail": "heddle fsck --repair git --prefer heddle --ref main --preview",
+      "count": 0
+    },
+    {
+      "name": "git_projection_ref_reconcile_preview",
+      "repaired": false,
+      "detail": "heddle fsck --repair git --prefer git --ref main --preview",
+      "count": 0
+    }
   ]
 }
 ```
@@ -3423,7 +3367,7 @@ required:
 {"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
-`heddle bridge git reason --output json` emits:
+`heddle context reason git --output json` emits:
 
 ```json
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
@@ -3492,7 +3436,7 @@ nothing to stop — both exit 0):
 `heddle fsck --output json` emits:
 
 ```json
-{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "bridge_checked": false}
+{"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
 `heddle oplog recover --output json` emits an operator recovery report
@@ -3546,7 +3490,7 @@ itself):
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
 report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
-counts loose Git-overlay mirror objects packed into the mirror's own pack):
+counts loose legacy Bridge Mirror objects packed into the mirror's own pack):
 
 ```json
 {"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
@@ -3674,9 +3618,9 @@ Each of these:
 - Uses `created_at` (not `timestamp` or `recorded_at`) for state-creation timestamps.
 - Serializes `Option<...>` semantic fields as explicit `null`.
 - Serializes empty collections as `[]` / `{}`.
-- Does not carry `git_overlay_import_hint` or `missing_branches`
-  payloads; those live only in `heddle bridge git status` and
-  `heddle doctor`.
+- Does not carry retired `git_overlay_import_hint` sidecars or raw
+  `missing_branches` payloads; import guidance, when present, is exposed
+  through current command-specific fields.
 
 ---
 

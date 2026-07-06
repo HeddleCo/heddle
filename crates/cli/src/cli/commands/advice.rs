@@ -4,7 +4,7 @@
 use std::{error::Error, fmt};
 
 use heddle_core::status::next_action::{
-    canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
 };
 use serde_json::{Map, Value};
 
@@ -106,8 +106,7 @@ impl RecoveryAdvice {
         let current_oid = current_oid.into();
         let expected_oid = expected_oid.into();
         let branch = branch.into();
-        let primary_command =
-            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), &branch);
+        let primary_command = canonical_git_repair_ref_preview_command(Some("heddle"), &branch);
         let dirty_summary = if dirty_paths.is_empty() {
             "dirty paths: none".to_string()
         } else {
@@ -372,13 +371,13 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn bridge_ingest_required(map_path: &str, git_path: &str) -> Self {
-        let command = format!("heddle bridge git import --path {git_path}");
+    pub(crate) fn git_import_metadata_required(map_path: &str, git_path: &str) -> Self {
+        let command = format!("heddle import git --path {git_path}");
         Self::safety_refusal(
-            "bridge_ingest_required",
+            "git_import_metadata_required",
             format!("No Git SHA map exists at {map_path}"),
             format!("Build the SHA map with `{command}`, then retry."),
-            format!("bridge import metadata is missing at {map_path}"),
+            format!("git import metadata is missing at {map_path}"),
             "reasoning import cannot map transcript references to Git commits without the SHA map",
             "repository state, refs, metadata, and worktree files were left unchanged",
             command.clone(),
@@ -853,27 +852,29 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn from_git_bridge_error(
-        error: &crate::bridge::git_core::GitBridgeError,
+    pub(crate) fn from_git_projection_error(
+        error: &crate::git_projection_engine::git_core::GitProjectionError,
     ) -> Option<Self> {
-        use crate::bridge::git_core::GitBridgeError;
+        use crate::git_projection_engine::git_core::GitProjectionError;
         match error {
-            GitBridgeError::NonFastForwardRef { name, .. }
-                if name == crate::bridge::git_notes::NOTES_REF =>
+            GitProjectionError::NonFastForwardRef { name, .. }
+                if name == crate::git_projection_engine::git_notes::NOTES_REF =>
             {
                 Some(Self::git_overlay_note_ref_conflict())
             }
-            GitBridgeError::NonFastForwardRef { name, .. } => name
+            GitProjectionError::NonFastForwardRef { name, .. } => name
                 .strip_prefix("refs/heads/")
                 .map(Self::git_overlay_remote_push_rejected),
-            GitBridgeError::MappingConflict { .. } => Some(Self::git_overlay_mapping_conflict()),
-            GitBridgeError::GitHeddleThreadDiverged { thread, branch, .. } => {
+            GitProjectionError::MappingConflict { .. } => {
+                Some(Self::git_overlay_mapping_conflict())
+            }
+            GitProjectionError::GitHeddleThreadDiverged { thread, branch, .. } => {
                 Some(Self::git_heddle_thread_diverged(thread, branch))
             }
-            GitBridgeError::RemoteDiverged {
+            GitProjectionError::RemoteDiverged {
                 branch, upstream, ..
             } => Some(Self::git_overlay_remote_diverged(branch, upstream)),
-            GitBridgeError::ShallowClone {
+            GitProjectionError::ShallowClone {
                 repository,
                 retry_command,
             } => Some(Self::git_overlay_shallow_clone(repository, retry_command)),
@@ -901,9 +902,9 @@ impl RecoveryAdvice {
     pub(crate) fn git_overlay_mapping_conflict() -> Self {
         Self::safety_refusal(
             "git_overlay_mapping_conflict",
-            "Git-overlay mapping metadata disagrees with refs/notes/heddle",
-            "The local sidecar and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
-            "one Git commit maps to different Heddle change ids across the sidecar and refs/notes/heddle",
+            "Git Projection Mapping metadata disagrees with refs/notes/heddle",
+            "Git Projection Mapping and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
+            "one Git commit maps to different Heddle change ids across Git Projection Mapping and refs/notes/heddle",
             "continuing would corrupt or hide the Git/Heddle identity mapping",
             "the command stopped before applying the requested ref or worktree update",
             "heddle clone <remote> <fresh-path>",
@@ -934,7 +935,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
-        let primary_command = canonical_bridge_reconcile_ref_preview_command(None, branch);
+        let primary_command = canonical_git_repair_ref_preview_command(None, branch);
         Self::safety_refusal(
             "git_heddle_thread_diverged",
             "Git branch and Heddle thread have diverged",
@@ -968,7 +969,7 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
-        let import_command = canonical_bridge_import_ref_command(upstream);
+        let import_command = canonical_git_import_ref_command(upstream);
         let merge_preview = super::thread_landing::merge_preview_command(upstream);
         Self::safety_refusal(
             "git_overlay_remote_diverged",
@@ -1405,15 +1406,15 @@ impl Error for RecoveryAdvice {}
 #[cfg(test)]
 mod tests {
     use super::RecoveryAdvice;
-    use crate::bridge::git_core::GitBridgeError;
+    use crate::git_projection_engine::git_core::GitProjectionError;
 
     #[test]
-    fn git_bridge_mapping_conflict_returns_typed_advice() {
-        let error = GitBridgeError::MappingConflict {
+    fn git_projection_mapping_conflict_returns_typed_advice() {
+        let error = GitProjectionError::MappingConflict {
             message: "git oid abc mapped to old-change (new new-change)".to_string(),
         };
 
-        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+        let advice = RecoveryAdvice::from_git_projection_error(&error)
             .expect("mapping conflict should be classified");
 
         assert_eq!(advice.kind, "git_overlay_mapping_conflict");
@@ -1426,23 +1427,23 @@ mod tests {
     }
 
     #[test]
-    fn git_bridge_plain_conflict_message_does_not_classify_as_mapping_conflict() {
-        let error = GitBridgeError::Conflict(
+    fn git_projection_plain_conflict_message_does_not_classify_as_mapping_conflict() {
+        let error = GitProjectionError::Conflict(
             "git oid abc mapped to old-change (new new-change)".to_string(),
         );
 
-        assert!(RecoveryAdvice::from_git_bridge_error(&error).is_none());
+        assert!(RecoveryAdvice::from_git_projection_error(&error).is_none());
     }
 
     #[test]
-    fn git_bridge_shallow_clone_returns_typed_advice() {
-        let retry_command = "heddle bridge git import --ref main";
-        let error = GitBridgeError::ShallowClone {
+    fn git_projection_shallow_clone_returns_typed_advice() {
+        let retry_command = "heddle import git --ref main";
+        let error = GitProjectionError::ShallowClone {
             repository: std::path::PathBuf::from("/tmp/shallow"),
             retry_command: retry_command.to_string(),
         };
 
-        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+        let advice = RecoveryAdvice::from_git_projection_error(&error)
             .expect("shallow clone should be classified");
 
         assert_eq!(advice.kind, "git_overlay_shallow_clone");

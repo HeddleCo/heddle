@@ -24,6 +24,34 @@ _Avoid_: submodule file, synthetic source file, magic blob
 Heddle's native Git-format engine. Sley owns Git object identity semantics and Git operation behavior, while Heddle owns the stable durable encoding of Heddle source history objects.
 _Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
 
+**Git Overlay**:
+A Heddle sidecar operating on an existing Git checkout. Active Git-overlay reads and writes use the checkout's real `.git` repository for Git commits, refs, packs, index, and worktree state; Heddle stores native metadata such as captures, threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
+_Avoid_: copied Git mirror, imported-only Git repo, hidden Git checkout
+
+**Bridge Mirror**:
+The bare Git repository at `.heddle/git` used by explicit Git bridge import, export, sync, reconstruction, and maintenance paths. It is not the active Git-overlay repository and should not be described as the place where normal `status`, `commit`, `checkpoint`, or branch movement writes Git state.
+_Avoid_: active Git store, Git-overlay `.git`, canonical Git object store
+
+**Git Checkpoint**:
+The Git commit that binds a Heddle state into the Git history of a Git-overlay checkout. A checkpoint writes through to the checkout's real `.git` repository and is the Git-facing handle shown to raw Git tooling; the Heddle-facing handle remains the `hd-...` state id.
+_Avoid_: Heddle capture, bridge mirror commit, native state id
+
+**Raw Git Object Residual**:
+Verbatim Git object bytes preserved because Heddle cannot reconstruct them byte-for-byte from native state, such as lossy imports or identities that were not representable in Heddle's normalized model. Residuals are an exception path for Git fidelity, not the normal source of Git-overlay state.
+_Avoid_: bridge mirror, active Git store, reconstructed object
+
+**Git Projection Mapping**:
+The durable relationship between Heddle states and the Git object ids, refs, and projection metadata needed to reproduce or synchronize Git-facing history. It survives without a Bridge Mirror and explains how Heddle state projects into Git.
+_Avoid_: bridge mapping, mirror mapping, Git checkout state
+
+**Repository Verification State**:
+The machine-readable proof surface that describes repository mode, Git/Heddle agreement, worktree dirt, remote drift, active operations, workflow guidance, and machine-contract coverage. Human status text and command breadcrumbs should be rendered from this proof rather than from separate local guesses.
+_Avoid_: health text, status prose, ad hoc preflight
+
+**Machine-Contract Proof**:
+The verification dimension that proves command catalog metadata, JSON envelopes, schema introspection, documentation drift checks, and op-id support agree. It should be derived from the command contract source of truth, not hand-maintained counters.
+_Avoid_: hardcoded schema summary, docs-only checklist
+
 **CRDT Collaboration Record**:
 A concurrently editable collaboration artifact, such as a discussion or context annotation, that can merge independent local edits without replacing Heddle's immutable source history model.
 _Avoid_: CRDT state model, CRDT source history

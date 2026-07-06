@@ -6,7 +6,7 @@ mod commands_advanced;
 mod commands_agent;
 mod commands_args;
 #[cfg(feature = "git-overlay")]
-mod commands_bridge;
+mod commands_git_projection;
 #[cfg(feature = "client")]
 mod commands_client;
 mod commands_context;
@@ -54,12 +54,14 @@ pub use commands_args::{
     WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};
+pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, SyncCommands};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
 };
 pub use commands_context::ContextCommands;
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+pub use commands_context::ContextReasonCommands;
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
     DiscussShowArgs, ResolveModeArg,
@@ -71,7 +73,7 @@ pub use commands_integration::{
 #[cfg(feature = "client")]
 pub use commands_main::PresenceCommands;
 pub use commands_main::{
-    ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands,
+    ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands, SessionCommands,
 };
 pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;

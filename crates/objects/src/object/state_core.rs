@@ -227,7 +227,7 @@ pub struct State {
     /// came into being in its current form. `authored_at` is the
     /// *author* time — when someone actually wrote the change — which
     /// survives `git rebase`, cherry-pick, squash-merge, and `git
-    /// commit --amend`. The ingest-backed `bridge git import` path fills
+    /// commit --amend`. The ingest-backed `import git` path fills
     /// this from the git author time; native heddle commits leave it
     /// `None` and blame falls back to `created_at`.
     ///

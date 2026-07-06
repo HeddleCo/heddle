@@ -50,7 +50,7 @@ try {
 
 Covered harness ops have convenience methods (`adopt`, `init`, `status`,
 `start`, `commit`, `log`, `diff`, `fetch`, `push`, `export` →
-`bridge git export`); any schema-backed verb is reachable via
+`export git`); any schema-backed verb is reachable via
 `heddle.run(verb, args, opts)`.
 
 ### Timeline helpers for agent experimentation
@@ -183,7 +183,7 @@ canonical verbs; the doc column links the field-by-field reference.
 | diff | `diff` | `DiffSchema` | `heddle diff --output json` |
 | fetch | `fetch` | `FetchSchema` | (transport schemas) |
 | push | `push` | `PushSchema` | (transport schemas) |
-| export | `bridge git export` | `BridgeExportSchema` | `heddle bridge git export --output json` |
+| export | `export git` | `BridgeExportSchema` | `heddle export git --output json` |
 
 ## `--op-id` retry convention
 
@@ -205,7 +205,7 @@ mutation. The wrapper should:
    recorded operation, not a fresh apply — the retry was a safe no-op.
 
 All mutating harness ops support `--op-id` (`init`, `adopt`, `commit`,
-`start`, `fetch`, `push`, `bridge git export`, …); read-only ops (`status`,
+`start`, `fetch`, `push`, `export git`, …); read-only ops (`status`,
 `log`, `diff`, `show`) don't mutate and so take none. The authoritative
 per-command list is the command catalog: `heddle help --output json`,
 field `supports_op_id`.

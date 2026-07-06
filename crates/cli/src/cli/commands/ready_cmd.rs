@@ -3,12 +3,10 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::status::next_action::{
-    NextActionInput, effective_next_action, non_empty_action,
-};
+use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 use objects::object::Tree;
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
     ThreadFreshness, ThreadState,
 };
 use serde::{
@@ -19,7 +17,7 @@ use serde::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
@@ -116,10 +114,10 @@ impl Serialize for ReadyOutput {
             normalized_action(self.operator.recommended_action.clone().unwrap_or_default());
         let next_action_template = next_action
             .as_deref()
-            .and_then(super::git_overlay_health::action_template);
+            .and_then(super::verification_health::action_template);
         let recommended_action_template = recommended_action
             .as_deref()
-            .and_then(super::git_overlay_health::action_template);
+            .and_then(super::verification_health::action_template);
         let verification = serde_json::to_value(&self.trust).map_err(S::Error::custom)?;
         let readiness = self.readiness_summary();
 
@@ -380,7 +378,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
-    let import_hint = repo.git_overlay_import_hint()?;
+    let import_hint = repo.git_import_guidance()?;
     let mut trust = build_repository_verification_state(&repo);
     let report_recommended_action = ready_report_recommended_action(&report);
     let recommended_action = ready_scoped_next_action(
@@ -452,7 +450,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
 fn ready_scoped_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     thread_action: Option<&str>,
 ) -> String {
     effective_next_action(
@@ -706,7 +704,7 @@ fn missing_ready_capture_intent_report_for(
             "commit the work with -m/--message/--intent before readiness checks".to_string(),
         ],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::git_overlay_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
 }
@@ -871,17 +869,18 @@ fn trust_blocked_report_for(
         conflict_count: 0,
         blockers: vec!["repository verification is blocked".to_string()],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::git_overlay_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli::commands::git_overlay_health;
     use heddle_core::status::next_action as core_next_action;
     use repo::{OperationKind, OperationScope};
+
+    use super::*;
+    use crate::cli::commands::verification_health;
 
     fn report(merge_relation: &str, recommended_action: &str) -> ThreadPreviewReport {
         ThreadPreviewReport {
@@ -899,7 +898,7 @@ mod tests {
             conflict_count: 0,
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
-            recommended_action_template: git_overlay_health::action_template(recommended_action),
+            recommended_action_template: verification_health::action_template(recommended_action),
             thread_health: "ready".to_string(),
         }
     }
@@ -929,8 +928,8 @@ mod tests {
         }
     }
 
-    fn import_hint() -> GitOverlayImportHint {
-        GitOverlayImportHint {
+    fn import_hint() -> GitImportGuidance {
+        GitImportGuidance {
             current_branch: "feature".to_string(),
             missing_branch_count: 1,
             missing_branches: vec!["feature".to_string()],
@@ -946,10 +945,25 @@ mod tests {
         let hint = import_hint();
 
         for (operation, remote_tracking, import_hint, fallback) in [
-            (Some(&operation), None, None, Some("heddle land --thread feature --no-push")),
-            (None, Some(&remote_ahead), None, Some("heddle land --thread feature --no-push")),
+            (
+                Some(&operation),
+                None,
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
+            (
+                None,
+                Some(&remote_ahead),
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
             (None, Some(&remote_diverged), None, None),
-            (None, None, None, Some("heddle land --thread feature --no-push")),
+            (
+                None,
+                None,
+                None,
+                Some("heddle land --thread feature --no-push"),
+            ),
             (None, None, Some(&hint), None),
         ] {
             let cli_action =

@@ -12,18 +12,18 @@ compile_error!(
 
 pub(crate) mod attribution;
 pub mod bench;
-// The bridge module stays always-compiled so light consumers (fsck,
+// The Git projection module stays always-compiled so light consumers (fsck,
 // clone, fetch, remote, checkpoint, operator_loop, gc) keep working in
 // native-only builds without fanning #[cfg] through their use blocks.
 // User-visible separation is enforced at the command surface:
-// `Commands::Bridge` and `Commands::GitOverlay` are gated behind
+// `Commands::GitOverlay` is gated behind
 // `git-overlay`, so a native-only `heddle` binary exposes no
 // overlay-specific subcommands. Deeper code-elimination can come later.
-pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod exit;
 pub mod extensions;
+pub mod git_projection_engine;
 pub mod harness;
 pub mod operation_id;
 pub mod perf;

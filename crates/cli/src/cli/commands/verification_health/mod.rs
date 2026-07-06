@@ -3,26 +3,27 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
-pub(crate) use heddle_core::{
-    ActionTemplate, GitOverlayHealth, GitOverlayHealthCheck, MachineContractCoverage,
-    RepositoryVerificationState, VerificationCheck, verify::serialize_empty_action_as_null,
-};
 use heddle_core::status::next_action::{
-    canonical_adopt_ref_command, canonical_bridge_import_ref_command,
-    canonical_bridge_reconcile_ref_preview_command, heddle_action as core_heddle_action,
-    import_hint_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
+    canonical_adopt_ref_command, canonical_git_import_ref_command,
+    canonical_git_repair_ref_preview_command, heddle_action as core_heddle_action,
+    import_guidance_includes_active_branch, remote_tracking_next_action, remote_tracking_status,
+};
+pub(crate) use heddle_core::{
+    ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
+    RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
+    VerificationCheck, verify::serialize_empty_action_as_null,
 };
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
-    CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
+    CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits,
     GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager, ThreadState,
-    describe_thread_advice, git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
+    describe_thread_advice, refresh_thread_freshness,
 };
-use sley::{BString as GitBString, Index, Repository as SleyRepository};
+use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -33,28 +34,13 @@ use super::{
 };
 use crate::{cli::worktree_status_options, remote::RemoteConfig};
 
-#[derive(Debug)]
-pub(crate) struct PlainGitVerificationProbe {
-    pub root: PathBuf,
-    pub git_branch: Option<String>,
-    pub import_hint: Option<PlainGitImportHint>,
-    pub changes: WorktreeStatus,
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlainGitImportHint {
-    pub current_branch: String,
-    pub missing_branch_count: usize,
-    pub missing_branches: Vec<String>,
-    pub recommended_command: String,
-}
+pub(crate) type PlainGitVerificationProbe = PlainGitVerifyProbe;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -81,9 +67,9 @@ struct VerificationActionPlan {
 
 pub(crate) fn clean_health(
     summary: impl Into<String>,
-    checks: Vec<GitOverlayHealthCheck>,
-) -> GitOverlayHealth {
-    GitOverlayHealth {
+    checks: Vec<RepositoryVerificationCheck>,
+) -> RepositoryVerificationHealth {
+    RepositoryVerificationHealth {
         status: "clean".to_string(),
         clean: true,
         summary: summary.into(),
@@ -92,27 +78,20 @@ pub(crate) fn clean_health(
     }
 }
 
-pub(crate) fn primary_recovery_command(health: &GitOverlayHealth) -> Option<&str> {
+pub(crate) fn primary_recovery_command(health: &RepositoryVerificationHealth) -> Option<&str> {
     health.recovery_commands.first().map(String::as_str)
-}
-
-pub(crate) fn repository_verification_state_from_health(
-    repo: &Repository,
-    health: GitOverlayHealth,
-) -> RepositoryVerificationState {
-    repository_verification_state_from_health_inner(repo, health, None)
 }
 
 /// Verification-state build that reuses an already-computed git-overlay
 /// worktree status instead of re-walking + re-SHA-1ing every tracked file.
 /// `worktree_status` must be the exact `Result` from
 /// `git_overlay_worktree_status()` so the dirty/clean classification stays
-/// byte-identical to [`repository_verification_state_from_health`]. Callers
+/// byte-identical to the normal repository verification build. Callers
 /// that already hold the status thread it through here to avoid a second full
 /// walk.
 pub(crate) fn repository_verification_state_from_health_with_worktree_status(
     repo: &Repository,
-    health: GitOverlayHealth,
+    health: RepositoryVerificationHealth,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
     repository_verification_state_from_health_inner(repo, health, Some(worktree_status))
@@ -120,7 +99,7 @@ pub(crate) fn repository_verification_state_from_health_with_worktree_status(
 
 fn repository_verification_state_from_health_inner(
     repo: &Repository,
-    health: GitOverlayHealth,
+    health: RepositoryVerificationHealth,
     precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
 ) -> RepositoryVerificationState {
     let git_branch = repo.git_overlay_current_branch().ok().flatten();
@@ -151,7 +130,7 @@ fn repository_verification_state_from_health_inner(
         .iter()
         .find(|check| {
             matches!(check.name.as_str(), "head_mapping" | "tag_mapping")
-                && git_overlay_mapping_status_blocks(&check.status)
+                && projection_mapping_status_blocks(&check.status)
         })
         .or_else(|| {
             health
@@ -299,7 +278,7 @@ fn repository_verification_state_from_health_inner(
 
 impl VerificationActionPlan {
     fn from_parts(
-        health: &GitOverlayHealth,
+        health: &RepositoryVerificationHealth,
         remote_action: Option<String>,
         workflow_action: Option<String>,
         machine_contract_action: Option<String>,
@@ -422,7 +401,7 @@ fn ready_thread_actions(repo: &Repository) -> Vec<WorkflowThreadAction> {
 }
 
 fn verification_checks_from_health(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     action_plan: &VerificationActionPlan,
     is_git_overlay: bool,
     ready_threads: &[WorkflowThreadAction],
@@ -672,7 +651,7 @@ fn machine_contract_summary(coverage: &MachineContractCoverage) -> String {
 }
 
 fn workflow_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     action_plan: &VerificationActionPlan,
     ready_threads: &[WorkflowThreadAction],
 ) -> VerificationCheck {
@@ -748,7 +727,7 @@ fn workflow_verification_check(
 }
 
 fn clone_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     recommended_action: &str,
     is_git_overlay: bool,
 ) -> VerificationCheck {
@@ -792,7 +771,7 @@ fn clone_verification_check(
     }
 }
 
-fn clone_verification_waits_for_primary_blocker(health: &GitOverlayHealth) -> bool {
+fn clone_verification_waits_for_primary_blocker(health: &RepositoryVerificationHealth) -> bool {
     matches!(
         health.status.as_str(),
         "dirty_worktree" | "needs_checkpoint"
@@ -800,7 +779,7 @@ fn clone_verification_waits_for_primary_blocker(health: &GitOverlayHealth) -> bo
 }
 
 fn mapping_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     recommended_action: &str,
     is_git_overlay: bool,
 ) -> VerificationCheck {
@@ -809,13 +788,13 @@ fn mapping_verification_check(
             "Mapping",
             true,
             "not_applicable",
-            "native Heddle refs do not require Git-overlay mapping",
+            "native Heddle refs do not require Git Projection Mapping",
             None,
             Vec::new(),
         );
     }
     if let Some(mapping) = find_health_check(health, "head_mapping")
-        && git_overlay_mapping_status_blocks(&mapping.status)
+        && projection_mapping_status_blocks(&mapping.status)
     {
         return verification_check_from_health("Mapping", mapping, recommended_action, health);
     }
@@ -858,12 +837,12 @@ fn mapping_verification_check(
     )
 }
 
-fn git_overlay_mapping_status_blocks(status: &str) -> bool {
+fn projection_mapping_status_blocks(status: &str) -> bool {
     !matches!(status, "clean" | "git_backed")
 }
 
 fn worktree_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     recommended_action: &str,
 ) -> VerificationCheck {
     for name in ["worktree", "heddle_worktree"] {
@@ -897,7 +876,7 @@ fn worktree_verification_check(
 }
 
 fn remote_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     action_plan: &VerificationActionPlan,
 ) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "remote_tracking") {
@@ -954,7 +933,7 @@ fn remote_verification_check(
 }
 
 fn operation_verification_check(
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
     recommended_action: &str,
 ) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "operation") {
@@ -972,9 +951,9 @@ fn operation_verification_check(
 
 fn verification_check_from_health(
     public_name: &str,
-    check: &GitOverlayHealthCheck,
+    check: &RepositoryVerificationCheck,
     recommended_action: &str,
-    health: &GitOverlayHealth,
+    health: &RepositoryVerificationHealth,
 ) -> VerificationCheck {
     let clean = check.status == "clean";
     let mut trust = verification_check(
@@ -994,13 +973,13 @@ fn verification_check_from_health(
 }
 
 fn find_health_check<'a>(
-    health: &'a GitOverlayHealth,
+    health: &'a RepositoryVerificationHealth,
     name: &str,
-) -> Option<&'a GitOverlayHealthCheck> {
+) -> Option<&'a RepositoryVerificationCheck> {
     health.checks.iter().find(|check| check.name == name)
 }
 
-fn head_mapping_is_git_backed(checks: &[GitOverlayHealthCheck]) -> bool {
+fn head_mapping_is_git_backed(checks: &[RepositoryVerificationCheck]) -> bool {
     checks
         .iter()
         .any(|check| check.name == "head_mapping" && check.status == "git_backed")
@@ -1043,7 +1022,7 @@ pub(crate) fn build_repository_verification_state(
     } else {
         Ok(None)
     };
-    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, &worktree_status);
     repository_verification_state_from_health_with_worktree_status(repo, health, &worktree_status)
 }
 
@@ -1072,7 +1051,7 @@ pub(crate) fn build_repository_verification_state_profiled(
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
     let health_start = std::time::Instant::now();
-    let health = build_git_overlay_health_with_worktree_status(repo, &worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, &worktree_status);
     let health_ms = health_start.elapsed().as_millis();
 
     let from_health_start = std::time::Instant::now();
@@ -1103,7 +1082,7 @@ pub(crate) fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
-    let health = build_git_overlay_health_with_worktree_status(repo, worktree_status);
+    let health = build_verification_health_with_worktree_status(repo, worktree_status);
     repository_verification_state_from_health_with_worktree_status(repo, health, worktree_status)
 }
 
@@ -1115,10 +1094,10 @@ pub(crate) fn unimported_git_history_advice(
         return Ok(None);
     }
 
-    let Some(hint) = repo.git_overlay_import_hint()? else {
+    let Some(hint) = repo.git_import_guidance()? else {
         return Ok(None);
     };
-    if !import_hint_includes_active_branch(&hint) {
+    if !import_guidance_includes_active_branch(&hint) {
         return Ok(None);
     }
     let missing = hint.missing_branches;
@@ -1148,7 +1127,7 @@ pub(crate) fn raw_git_operation_mutation_advice(
     if !matches!(operation.scope, OperationScope::Git) {
         return Ok(None);
     }
-    let primary_command = "heddle bridge git status".to_string();
+    let primary_command = "heddle verify".to_string();
     let hint = raw_git_operation_recovery_hint(&operation.kind, &primary_command, action);
     Ok(Some(RecoveryAdvice::safety_refusal(
         "raw_git_operation_in_progress",
@@ -1479,7 +1458,7 @@ pub(crate) fn repository_setup_guidance(
         RepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         RepositorySetupActionKind::Other => {
@@ -1503,7 +1482,7 @@ pub(crate) fn repository_setup_guidance(
         RepositorySetupActionKind::Adopt => {
             format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
         }
-        RepositorySetupActionKind::BridgeImport => {
+        RepositorySetupActionKind::GitImport => {
             format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
         }
         RepositorySetupActionKind::Other => {
@@ -1518,8 +1497,8 @@ fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
         RepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
-        RepositorySetupActionKind::BridgeImport
+    } else if action.starts_with("heddle import git") {
+        RepositorySetupActionKind::GitImport
     } else {
         RepositorySetupActionKind::Other
     }
@@ -1666,375 +1645,12 @@ fn dirty_details(status: &WorktreeStatus) -> BTreeMap<String, String> {
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
-    let git_repo = match SleyRepository::discover(start) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(None),
-    };
-    let Some(workdir) = git_repo.workdir() else {
-        return Ok(None);
-    };
-    let root = workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf());
-    if root.join(".heddle").exists() {
-        return Ok(None);
-    }
-
-    let git_branch = plain_git_current_branch(&git_repo);
-    let git_branches = plain_git_local_branches(&git_repo);
-    let git_tags = plain_git_local_tags(&git_repo);
-    let changes = plain_git_worktree_status(&root, &git_repo)?;
-
-    let default_remote = git_default_remote_name_from_repo(&git_repo);
-    let init = "heddle init".to_string();
-    let setup_action = init.clone();
-    let setup_recovery_commands = vec![init.clone()];
-    let import_hint = None;
-    let machine_contract_coverage = machine_contract_coverage();
-    let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
-    let action_plan = VerificationActionPlan {
-        primary_action: setup_action.clone(),
-        recovery_commands: setup_recovery_commands.clone(),
-        remote_action: None,
-        workflow_action: None,
-        machine_contract_action: (!machine_contract_clean)
-            .then(|| "heddle doctor schemas --output json".to_string()),
-    };
-    let mut details = BTreeMap::new();
-    details.insert("path".to_string(), root.display().to_string());
-    if let Some(branch) = &git_branch {
-        details.insert("git_branch".to_string(), branch.clone());
-    }
-    if let Some(remote) = &default_remote {
-        details.insert("default_remote".to_string(), remote.clone());
-    }
-    details.insert(
-        "git_branch_count".to_string(),
-        git_branches.len().to_string(),
-    );
-    details.insert("git_tag_count".to_string(), git_tags.len().to_string());
-    let setup_action_fields = ActionFields::from_action(&setup_action);
-    let mut checks = vec![
-        VerificationCheck {
-            name: "Git".to_string(),
-            status: "present".to_string(),
-            clean: true,
-            summary: "plain Git repository found".to_string(),
-            recommended_action: None,
-            recommended_action_template: None,
-            recovery_commands: Vec::new(),
-            recovery_action_templates: Vec::new(),
-            details,
-        },
-        VerificationCheck {
-            name: "Heddle".to_string(),
-            status: "needs_init".to_string(),
-            clean: false,
-            summary: "Heddle data is not initialized".to_string(),
-            recommended_action: Some(setup_action.clone()),
-            recommended_action_template: setup_action_fields.template.clone(),
-            recovery_commands: setup_recovery_commands.clone(),
-            recovery_action_templates: action_templates(&setup_recovery_commands),
-            details: BTreeMap::new(),
-        },
-        VerificationCheck {
-            name: "Mapping".to_string(),
-            status: "git_backed".to_string(),
-            clean: true,
-            summary: "Git refs will stay in Git storage after Heddle initialization".to_string(),
-            recommended_action: None,
-            recommended_action_template: None,
-            recovery_commands: Vec::new(),
-            recovery_action_templates: Vec::new(),
-            details: BTreeMap::new(),
-        },
-    ];
-    checks.push(verification_check(
-        "Worktree",
-        changes.is_clean(),
-        if changes.is_clean() {
-            "clean"
-        } else {
-            "dirty_worktree"
-        },
-        if changes.is_clean() {
-            "Git worktree is clean"
-        } else {
-            "Git worktree has uncommitted changes"
-        },
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Remote",
-        false,
-        "unknown",
-        "remote drift is checked after Heddle initialization",
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Operation",
-        true,
-        "clean",
-        "no Heddle operation in progress",
-        None,
-        Vec::new(),
-    ));
-    checks.push(verification_check(
-        "Workflow",
-        false,
-        "not_checked",
-        "workflow readiness is checked after Heddle initialization",
-        None,
-        Vec::new(),
-    ));
-    checks.push(machine_contract_verification_check(
-        &machine_contract_coverage,
-        Some(&action_plan),
-    ));
-    checks.push(verification_check(
-        "Clone",
-        true,
-        "not_applicable",
-        "clone verification is not applicable to this checkout",
-        None,
-        Vec::new(),
-    ));
-    let setup_action_fields = ActionFields::from_action(&setup_action);
-    let trust = RepositoryVerificationState {
-        verified: false,
-        status: "needs_init".to_string(),
-        repository_mode: "plain-git".to_string(),
-        heddle_initialized: false,
-        git_branch: git_branch.clone(),
-        heddle_thread: None,
-        worktree_dirty: !changes.is_clean(),
-        worktree_state: if changes.is_clean() { "clean" } else { "dirty" }.to_string(),
-        import_state: "git_backed".to_string(),
-        mapping_state: "git_backed".to_string(),
-        remote_drift: "unknown".to_string(),
-        active_operation: None,
-        default_remote,
-        clone_verification: "not_applicable".to_string(),
-        machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
-        machine_contract_coverage,
-        workflow_status: "not_checked".to_string(),
-        workflow_summary: "workflow readiness is checked after Heddle initialization".to_string(),
-        summary: "Git repository has not been initialized for Heddle".to_string(),
-        recommended_action_template: setup_action_fields.template,
-        recovery_action_templates: action_templates(&setup_recovery_commands),
-        recommended_action: setup_action,
-        recovery_commands: setup_recovery_commands,
-        checks,
-    };
-    Ok(Some(PlainGitVerificationProbe {
-        root,
-        git_branch,
-        import_hint,
-        changes,
-        trust,
-    }))
-}
-
-fn plain_git_current_branch(git_repo: &SleyRepository) -> Option<String> {
-    git_repo.head().ok()?.branch_name().map(str::to_string)
-}
-
-fn plain_git_local_branches(git_repo: &SleyRepository) -> Vec<String> {
-    let Ok(branches) = git_repo.references().list_refs() else {
-        return Vec::new();
-    };
-    let mut names = branches
-        .into_iter()
-        .filter_map(|branch| branch.name.strip_prefix("refs/heads/").map(str::to_string))
-        .filter(|branch| !branch.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn plain_git_local_tags(git_repo: &SleyRepository) -> Vec<String> {
-    let Ok(tags) = git_repo.references().list_refs() else {
-        return Vec::new();
-    };
-    let mut names = tags
-        .into_iter()
-        .filter_map(|tag| tag.name.strip_prefix("refs/tags/").map(str::to_string))
-        .filter(|tag| !tag.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn plain_git_worktree_status(
-    root: &Path,
-    git_repo: &SleyRepository,
-) -> anyhow::Result<WorktreeStatus> {
-    let index = plain_git_index_or_empty(git_repo).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to inspect Git index at '{}': {error}",
-            root.display()
-        )
-    })?;
-    let head_index = plain_git_head_index_or_empty(git_repo).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to inspect Git HEAD tree at '{}': {error}",
-            root.display()
-        )
-    })?;
-
-    let mut head_entries = BTreeMap::new();
-    for entry in &head_index.entries {
-        head_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-    let mut index_entries = BTreeMap::new();
-    for entry in &index.entries {
-        index_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
-    }
-
-    let mut added = BTreeSet::new();
-    let mut modified = BTreeSet::new();
-    let mut deleted = BTreeSet::new();
-
-    for (path, (oid, mode)) in &index_entries {
-        match head_entries.get(path) {
-            None => {
-                added.insert(PathBuf::from(path));
-            }
-            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                modified.insert(PathBuf::from(path));
-            }
-            Some(_) => {}
-        }
-    }
-    for path in head_entries.keys() {
-        if !index_entries.contains_key(path) {
-            deleted.insert(PathBuf::from(path));
-        }
-    }
-
-    for (path, (oid, mode)) in &index_entries {
-        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode, None)? {
-            GitWorktreeEntryState::Clean => {}
-            GitWorktreeEntryState::Deleted => {
-                deleted.insert(PathBuf::from(path));
-            }
-            GitWorktreeEntryState::Modified => {
-                modified.insert(PathBuf::from(path));
-            }
-        }
-    }
-
-    let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
-    for path in plain_git_untracked_paths(root, &tracked_paths)? {
-        added.insert(PathBuf::from(path));
-    }
-
-    // `git rm --cached path` produces both an index-vs-HEAD deletion
-    // and a fresh untracked entry for the same path; both signals are
-    // load-bearing for `heddle status`/`diff`/verification. Only
-    // suppress `modified` duplicates here — `added` and `deleted` for
-    // the same path are two different views (worktree-vs-index and
-    // index-vs-HEAD) of the same intentional change.
-    for path in &added {
-        modified.remove(path);
-    }
-    for path in &deleted {
-        modified.remove(path);
-    }
-
-    Ok(WorktreeStatus {
-        modified: modified.into_iter().collect(),
-        added: added.into_iter().collect(),
-        deleted: deleted.into_iter().collect(),
-    })
-}
-
-fn plain_git_untracked_paths(
-    root: &Path,
-    tracked_paths: &BTreeSet<&str>,
-) -> anyhow::Result<Vec<String>> {
-    let mut paths = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .filter_entry(|entry| !plain_git_excluded_walk_entry(entry.path()))
-        .build();
-    for entry in walker {
-        let entry = entry?;
-        let file_type = entry.file_type();
-        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
-            continue;
-        }
-        let path = plain_git_repo_relative_path(root, entry.path())?;
-        if !tracked_paths.contains(path.as_str()) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn plain_git_excluded_walk_entry(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".git" || name == ".heddle")
-}
-
-fn plain_git_repo_relative_path(root: &Path, path: &Path) -> anyhow::Result<String> {
-    let relative = path.strip_prefix(root).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to relativize Git worktree path '{}': {}",
-            path.display(),
-            error
-        )
-    })?;
-    Ok(path_to_plain_git_path(relative))
-}
-
-fn path_to_plain_git_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn plain_git_empty_index() -> Index {
-    Index {
-        version: 2,
-        entries: Vec::new(),
-        extensions: Vec::new(),
-        checksum: None,
-    }
-}
-
-fn plain_git_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    git_repo
-        .open_index()
-        .map(|index| index.unwrap_or_else(plain_git_empty_index))
-}
-
-fn plain_git_head_index_or_empty(
-    git_repo: &SleyRepository,
-) -> std::result::Result<Index, sley::GitError> {
-    let head = git_repo.head()?;
-    let Some(oid) = head.oid else {
-        return Ok(plain_git_empty_index());
-    };
-    let commit = git_repo.read_commit(&oid)?;
-    git_repo.index_from_tree(&commit.tree)
-}
-
-fn plain_git_path(path: &GitBString) -> String {
-    String::from_utf8_lossy(path.as_bytes()).into_owned()
+    Ok(
+        heddle_core::verify::build_plain_git_verification_probe_with_machine_contract(
+            start,
+            &MachineContractInput::from_coverage(machine_contract_coverage()),
+        )?,
+    )
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
@@ -2313,7 +1929,7 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
         )
 }
 
-fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
+fn remote_sync_action(health: &RepositoryVerificationHealth) -> Option<String> {
     find_health_check(health, "remote_tracking").and_then(|check| {
         matches!(check.status.as_str(), "remote_ahead" | "remote_untracked")
             .then(|| "heddle push".to_string())
@@ -2384,8 +2000,8 @@ pub(crate) fn remote_drift_decision(
                     requires_clean_worktree: false,
                 };
             }
-            let import = canonical_bridge_import_ref_command(upstream);
-            let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
+            let import = canonical_git_import_ref_command(upstream);
+            let reconcile = canonical_git_repair_ref_preview_command(None, upstream);
             let imported = upstream_thread_matches_current_git_tip(repo, upstream);
             RemoteDriftDecision {
                 status,
@@ -2477,8 +2093,8 @@ fn git_default_remote_name_from_repo(repo: &SleyRepository) -> Option<String> {
         .find(|name| name == "origin")
 }
 
-pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
-    build_git_overlay_health_inner(repo, None)
+pub(crate) fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
+    build_verification_health_inner(repo, None)
 }
 
 /// `status` hot-path variant: reuse the caller's already-computed git-overlay
@@ -2487,24 +2103,24 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
 /// `status` command otherwise pays it twice (here and in `build_status_output`).
 /// `worktree_status` is the exact `Result` from `git_overlay_worktree_status()`,
 /// so the clean/dirty/degraded classification stays byte-identical.
-pub(crate) fn build_git_overlay_health_with_worktree_status(
+pub(crate) fn build_verification_health_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
-) -> GitOverlayHealth {
-    build_git_overlay_health_inner(repo, Some(worktree_status))
+) -> RepositoryVerificationHealth {
+    build_verification_health_inner(repo, Some(worktree_status))
 }
 
-fn build_git_overlay_health_inner(
+fn build_verification_health_inner(
     repo: &Repository,
     precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
-) -> GitOverlayHealth {
+) -> RepositoryVerificationHealth {
     if repo.capability() != repo::RepositoryCapability::GitOverlay {
         return build_native_heddle_health(repo);
     }
     if repo.root().join(".heddle/objectstore").is_file() && !repo.root().join(".git").exists() {
         return clean_health(
             "Heddle-managed isolated checkout; Git verification belongs to the parent checkout",
-            vec![GitOverlayHealthCheck {
+            vec![RepositoryVerificationCheck {
                 name: "worktree".to_string(),
                 status: "clean".to_string(),
                 summary: "No .git directory is present in this isolated checkout".to_string(),
@@ -2517,13 +2133,13 @@ fn build_git_overlay_health_inner(
 
     match repo.operation_status() {
         Ok(Some(operation)) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "operation".to_string(),
                 status: "operation_in_progress".to_string(),
                 summary: operation.message.clone(),
                 details: BTreeMap::new(),
             });
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "operation_in_progress".to_string(),
                 clean: false,
                 summary: operation.message,
@@ -2531,14 +2147,14 @@ fn build_git_overlay_health_inner(
                 checks,
             };
         }
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "operation".to_string(),
             status: "clean".to_string(),
             summary: "no Git or Heddle operation in progress".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "operation".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2554,14 +2170,14 @@ fn build_git_overlay_health_inner(
             if let Ok(Some(commit)) = repo.git_overlay_detached_head_commit() {
                 details.insert("git_commit".to_string(), commit);
             }
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "detached_head".to_string(),
                 summary: "Git HEAD is detached; attach a branch before mutating this Git overlay"
                     .to_string(),
                 details,
             });
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "detached_head".to_string(),
                 clean: false,
                 summary: "Git HEAD is detached; attach a branch before mutating this Git overlay"
@@ -2572,7 +2188,7 @@ fn build_git_overlay_health_inner(
         }
         Ok(false) => {}
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2582,10 +2198,10 @@ fn build_git_overlay_health_inner(
         }
     }
 
-    let import_hint = match repo.git_overlay_import_hint() {
+    let import_hint = match repo.git_import_guidance() {
         Ok(hint) => hint,
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "import".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2601,7 +2217,7 @@ fn build_git_overlay_health_inner(
                 && repo.current_state().ok().flatten().is_some()
                 && import_hint
                     .as_ref()
-                    .is_some_and(import_hint_includes_active_branch) =>
+                    .is_some_and(import_guidance_includes_active_branch) =>
         {
             let out_of_band = repo
                 .git_overlay_out_of_band_commits(&tip.git_commit)
@@ -2623,7 +2239,7 @@ fn build_git_overlay_health_inner(
                     );
                 }
             }
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "git_branch_advanced".to_string(),
                 summary: format!(
@@ -2633,9 +2249,9 @@ fn build_git_overlay_health_inner(
                 details,
             });
             if let Some(hint) = &import_hint
-                && import_hint_includes_active_branch(hint)
+                && import_guidance_includes_active_branch(hint)
             {
-                checks.push(GitOverlayHealthCheck {
+                checks.push(RepositoryVerificationCheck {
                     name: "import".to_string(),
                     status: "needs_import".to_string(),
                     summary: format!(
@@ -2645,7 +2261,7 @@ fn build_git_overlay_health_inner(
                     details: BTreeMap::new(),
                 });
             }
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "git_branch_advanced".to_string(),
                 clean: false,
                 summary: format!(
@@ -2660,7 +2276,7 @@ fn build_git_overlay_health_inner(
             let mut details = BTreeMap::new();
             details.insert("git_branch".to_string(), tip.branch.clone());
             details.insert("git_commit".to_string(), tip.git_commit.clone());
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "git_backed".to_string(),
                 summary: format!(
@@ -2671,20 +2287,20 @@ fn build_git_overlay_health_inner(
                 details,
             });
         }
-        Ok(Some(tip)) => checks.push(GitOverlayHealthCheck {
+        Ok(Some(tip)) => checks.push(RepositoryVerificationCheck {
             name: "head_mapping".to_string(),
             status: "clean".to_string(),
             summary: format!("Git branch '{}' maps to imported Heddle state", tip.branch),
             details: BTreeMap::new(),
         }),
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "head_mapping".to_string(),
             status: "clean".to_string(),
             summary: "No attached Git branch to map".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2695,10 +2311,10 @@ fn build_git_overlay_health_inner(
     }
 
     match import_hint {
-        Some(hint) if import_hint_includes_active_branch(&hint) => {
+        Some(hint) if import_guidance_includes_active_branch(&hint) => {
             return needs_import(checks, hint);
         }
-        Some(hint) => checks.push(GitOverlayHealthCheck {
+        Some(hint) => checks.push(RepositoryVerificationCheck {
             name: "import".to_string(),
             status: "available".to_string(),
             summary: format!(
@@ -2707,7 +2323,7 @@ fn build_git_overlay_health_inner(
             ),
             details: BTreeMap::new(),
         }),
-        None => checks.push(GitOverlayHealthCheck {
+        None => checks.push(RepositoryVerificationCheck {
             name: "import".to_string(),
             status: "clean".to_string(),
             summary: "Git refs are read directly from Git storage".to_string(),
@@ -2729,7 +2345,7 @@ fn build_git_overlay_health_inner(
         Ok(Some(status)) if !status.is_clean() => {
             let changed = status.modified.len() + status.added.len() + status.deleted.len();
             if heddle_worktree_is_clean(repo) {
-                checks.push(GitOverlayHealthCheck {
+                checks.push(RepositoryVerificationCheck {
                     name: "worktree".to_string(),
                     status: "needs_checkpoint".to_string(),
                     summary: format!(
@@ -2737,7 +2353,7 @@ fn build_git_overlay_health_inner(
                     ),
                     details: dirty_details(status),
                 });
-                return GitOverlayHealth {
+                return RepositoryVerificationHealth {
                     status: "needs_checkpoint".to_string(),
                     clean: false,
                     summary: format!(
@@ -2747,13 +2363,13 @@ fn build_git_overlay_health_inner(
                     checks,
                 };
             }
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "worktree".to_string(),
                 status: "dirty_worktree".to_string(),
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
                 details: dirty_details(status),
             });
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "dirty_worktree".to_string(),
                 clean: false,
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
@@ -2765,13 +2381,13 @@ fn build_git_overlay_health_inner(
                 checks,
             };
         }
-        Ok(Some(_)) => checks.push(GitOverlayHealthCheck {
+        Ok(Some(_)) => checks.push(RepositoryVerificationCheck {
             name: "worktree".to_string(),
             status: "clean".to_string(),
             summary: "Git worktree is clean".to_string(),
             details: BTreeMap::new(),
         }),
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "worktree".to_string(),
             status: "clean".to_string(),
             summary: "Git worktree status is not available; Heddle status remains authoritative"
@@ -2779,7 +2395,7 @@ fn build_git_overlay_health_inner(
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "worktree".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2801,10 +2417,10 @@ fn build_git_overlay_health_inner(
             let recovery = if status == "needs_checkpoint" {
                 "heddle checkpoint -m \"...\"".to_string()
             } else {
-                canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
+                canonical_git_repair_ref_preview_command(None, &ref_name)
             };
             checks.push(check);
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status,
                 clean: false,
                 summary,
@@ -2814,7 +2430,7 @@ fn build_git_overlay_health_inner(
         }
         Ok(None) => {}
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "head_mapping".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2834,13 +2450,13 @@ fn build_git_overlay_health_inner(
         && !status.is_clean()
     {
         let changed = status.modified.len() + status.added.len() + status.deleted.len();
-        checks.push(GitOverlayHealthCheck {
+        checks.push(RepositoryVerificationCheck {
             name: "heddle_worktree".to_string(),
             status: "dirty_worktree".to_string(),
             summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
             details: dirty_details(&status),
         });
-        return GitOverlayHealth {
+        return RepositoryVerificationHealth {
             status: "dirty_worktree".to_string(),
             clean: false,
             summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
@@ -2859,7 +2475,7 @@ fn build_git_overlay_health_inner(
             let summary = check.summary.clone();
             let recovery_commands = tag_mapping_recovery_commands(&check);
             checks.push(check);
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status,
                 clean: false,
                 summary,
@@ -2867,14 +2483,14 @@ fn build_git_overlay_health_inner(
                 checks,
             };
         }
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "tag_mapping".to_string(),
             status: "clean".to_string(),
             summary: "Git tags visible to this checkout map to Heddle markers".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "tag_mapping".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2888,7 +2504,7 @@ fn build_git_overlay_health_inner(
         Ok(Some(check)) => {
             let summary = check.summary.clone();
             checks.push(check);
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "stale_integration_metadata".to_string(),
                 clean: false,
                 summary,
@@ -2896,14 +2512,14 @@ fn build_git_overlay_health_inner(
                 checks,
             };
         }
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "thread_integration_metadata".to_string(),
             status: "clean".to_string(),
             summary: "merged thread metadata agrees with target history".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "thread_integration_metadata".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2915,14 +2531,14 @@ fn build_git_overlay_health_inner(
 
     match repo.git_remote_tracking_status() {
         Ok(Some(remote)) => return remote_drift(repo, checks, remote),
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "remote_tracking".to_string(),
             status: "clean".to_string(),
             summary: "No Git upstream drift detected".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "remote_tracking".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -2935,7 +2551,7 @@ fn build_git_overlay_health_inner(
     clean_health("Git overlay and Heddle agree", checks)
 }
 
-fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealthCheck>> {
+fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<RepositoryVerificationCheck>> {
     let mut mismatched = Vec::new();
 
     for tip in repo.git_overlay_tag_tips()? {
@@ -2964,7 +2580,7 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
         "mismatched_tag_count".to_string(),
         mismatched.len().to_string(),
     );
-    Ok(Some(GitOverlayHealthCheck {
+    Ok(Some(RepositoryVerificationCheck {
         name: "tag_mapping".to_string(),
         status: "tag_marker_mismatch".to_string(),
         summary: format!(
@@ -2980,7 +2596,7 @@ fn short_oid(oid: &str) -> &str {
     oid.get(..12).unwrap_or(oid)
 }
 
-fn tag_mapping_recovery_commands(check: &GitOverlayHealthCheck) -> Vec<String> {
+fn tag_mapping_recovery_commands(check: &RepositoryVerificationCheck) -> Vec<String> {
     let tag_names = check
         .details
         .get("missing_tags")
@@ -3004,7 +2620,7 @@ fn tag_mapping_recovery_commands(check: &GitOverlayHealthCheck) -> Vec<String> {
 
 fn stale_integration_metadata_check(
     repo: &Repository,
-) -> anyhow::Result<Option<GitOverlayHealthCheck>> {
+) -> anyhow::Result<Option<RepositoryVerificationCheck>> {
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut stale = Vec::new();
     let mut graph = CommitGraphIndex::new(repo);
@@ -3051,7 +2667,7 @@ fn stale_integration_metadata_check(
     let mut details = BTreeMap::new();
     details.insert("stale_thread_count".to_string(), stale.len().to_string());
     details.insert("stale_threads".to_string(), stale.join("; "));
-    Ok(Some(GitOverlayHealthCheck {
+    Ok(Some(RepositoryVerificationCheck {
         name: "thread_integration_metadata".to_string(),
         status: "stale_integration_metadata".to_string(),
         summary: format!(
@@ -3062,8 +2678,8 @@ fn stale_integration_metadata_check(
     }))
 }
 
-fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
-    let mut checks = vec![GitOverlayHealthCheck {
+fn build_native_heddle_health(repo: &Repository) -> RepositoryVerificationHealth {
+    let mut checks = vec![RepositoryVerificationCheck {
         name: "capability".to_string(),
         status: "clean".to_string(),
         summary: "native Heddle repository".to_string(),
@@ -3072,13 +2688,13 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
 
     match repo.operation_status() {
         Ok(Some(operation)) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "operation".to_string(),
                 status: "operation_in_progress".to_string(),
                 summary: operation.message.clone(),
                 details: BTreeMap::new(),
             });
-            return GitOverlayHealth {
+            return RepositoryVerificationHealth {
                 status: "operation_in_progress".to_string(),
                 clean: false,
                 summary: operation.message,
@@ -3086,14 +2702,14 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                 checks,
             };
         }
-        Ok(None) => checks.push(GitOverlayHealthCheck {
+        Ok(None) => checks.push(RepositoryVerificationCheck {
             name: "operation".to_string(),
             status: "clean".to_string(),
             summary: "no Heddle operation in progress".to_string(),
             details: BTreeMap::new(),
         }),
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "operation".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -3116,7 +2732,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
     match worktree_status {
         Ok(status) if !status.is_clean() => {
             let changed = status.modified.len() + status.added.len() + status.deleted.len();
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "heddle_worktree".to_string(),
                 status: "uncaptured".to_string(),
                 summary: format!(
@@ -3124,7 +2740,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                 ),
                 details: dirty_details(&status),
             });
-            GitOverlayHealth {
+            RepositoryVerificationHealth {
                 status: "uncaptured".to_string(),
                 clean: false,
                 summary: format!(
@@ -3139,7 +2755,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
             }
         }
         Ok(_) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "heddle_worktree".to_string(),
                 status: "clean".to_string(),
                 summary: "Heddle worktree matches the current state".to_string(),
@@ -3151,7 +2767,7 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
             )
         }
         Err(error) => {
-            checks.push(GitOverlayHealthCheck {
+            checks.push(RepositoryVerificationCheck {
                 name: "heddle_worktree".to_string(),
                 status: "degraded".to_string(),
                 summary: error.to_string(),
@@ -3163,10 +2779,10 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
 }
 
 fn needs_import(
-    mut checks: Vec<GitOverlayHealthCheck>,
-    hint: GitOverlayImportHint,
-) -> GitOverlayHealth {
-    checks.push(GitOverlayHealthCheck {
+    mut checks: Vec<RepositoryVerificationCheck>,
+    hint: GitImportGuidance,
+) -> RepositoryVerificationHealth {
+    checks.push(RepositoryVerificationCheck {
         name: "import".to_string(),
         status: "needs_import".to_string(),
         summary: format!(
@@ -3175,7 +2791,7 @@ fn needs_import(
         ),
         details: BTreeMap::new(),
     });
-    GitOverlayHealth {
+    RepositoryVerificationHealth {
         status: "needs_import".to_string(),
         clean: false,
         summary: format!(
@@ -3205,9 +2821,9 @@ fn out_of_band_commit_clause(out_of_band: Option<&GitOverlayOutOfBandCommits>) -
 
 fn remote_drift(
     repo: &Repository,
-    mut checks: Vec<GitOverlayHealthCheck>,
+    mut checks: Vec<RepositoryVerificationCheck>,
     remote: GitRemoteTrackingStatus,
-) -> GitOverlayHealth {
+) -> RepositoryVerificationHealth {
     let decision = remote_drift_decision(repo, &remote);
     let mut details = BTreeMap::new();
     details.insert("branch".to_string(), remote.branch.clone());
@@ -3226,14 +2842,14 @@ fn remote_drift(
             "true".to_string(),
         );
     }
-    checks.push(GitOverlayHealthCheck {
+    checks.push(RepositoryVerificationCheck {
         name: "remote_tracking".to_string(),
         status: decision.status.to_string(),
         summary: remote.message.clone(),
         details,
     });
     if decision.verified_as_clean {
-        return GitOverlayHealth {
+        return RepositoryVerificationHealth {
             status: "clean".to_string(),
             clean: true,
             summary: match decision.status {
@@ -3246,7 +2862,7 @@ fn remote_drift(
             checks,
         };
     }
-    GitOverlayHealth {
+    RepositoryVerificationHealth {
         status: decision.status.to_string(),
         clean: false,
         summary: remote.message,
@@ -3255,14 +2871,17 @@ fn remote_drift(
     }
 }
 
-fn degraded(mut checks: Vec<GitOverlayHealthCheck>, summary: &str) -> GitOverlayHealth {
-    checks.push(GitOverlayHealthCheck {
+fn degraded(
+    mut checks: Vec<RepositoryVerificationCheck>,
+    summary: &str,
+) -> RepositoryVerificationHealth {
+    checks.push(RepositoryVerificationCheck {
         name: "contract".to_string(),
         status: "degraded".to_string(),
         summary: "health could not be proven clean".to_string(),
         details: BTreeMap::new(),
     });
-    GitOverlayHealth {
+    RepositoryVerificationHealth {
         status: "degraded".to_string(),
         clean: false,
         summary: summary.to_string(),
@@ -3290,7 +2909,7 @@ fn branch_tip_needs_reconcile(repo: &Repository, tip: &GitOverlayBranchTip) -> b
 
 fn clean_git_branch_reconcile_check(
     repo: &Repository,
-) -> anyhow::Result<Option<GitOverlayHealthCheck>> {
+) -> anyhow::Result<Option<RepositoryVerificationCheck>> {
     let Some(tip) = current_branch_tip(repo)? else {
         return Ok(None);
     };
@@ -3319,7 +2938,7 @@ fn clean_git_branch_reconcile_check(
             current.change_id.to_string(),
         );
         details.insert("relation".to_string(), relation.to_string());
-        return Ok(Some(GitOverlayHealthCheck {
+        return Ok(Some(RepositoryVerificationCheck {
             name: "worktree".to_string(),
             status: "needs_checkpoint".to_string(),
             summary: format!(
@@ -3338,7 +2957,7 @@ fn clean_git_branch_reconcile_check(
         current.change_id.to_string(),
     );
     details.insert("relation".to_string(), relation.to_string());
-    Ok(Some(GitOverlayHealthCheck {
+    Ok(Some(RepositoryVerificationCheck {
         name: "head_mapping".to_string(),
         status: "needs_reconcile".to_string(),
         summary: format!(

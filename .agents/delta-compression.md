@@ -167,7 +167,7 @@ contain the ideal base when there are hundreds of `.go` files.
 
 ### High potential
 
-1. **Temporal ordering from import history** — During `heddle bridge git import`, walk the
+1. **Temporal ordering from import history** — During `heddle import git`, walk the
    Git commit graph and assign each object a "generation number" or commit
    timestamp. Sort by `(extension, basename, generation desc)` so recent
    versions of the same file land adjacent. This is the single biggest

@@ -10,7 +10,7 @@
 //! Each fixture builds a small, deterministic real git repo (fixed
 //! author/committer identity + dates so SHAs are stable), records every
 //! object SHA reachable from every ref, runs `import` → `export_to_path`
-//! through the same `GitBridge` surface real users drive, then asserts:
+//! through the same `GitProjection` surface real users drive, then asserts:
 //!   1. every ref (branch / tag / note) in the source is present in the
 //!      export pointing at the **same** object id — which, by git's
 //!      content-addressing, transitively proves every reachable commit /
@@ -24,12 +24,12 @@ use std::{collections::BTreeMap, path::Path, process::Command};
 
 use cli::{
     ObjectStore, Repository,
-    bridge::{git_core::GitBridge, test_support},
+    git_projection_engine::{git_core::GitProjection, test_support},
 };
 use tempfile::TempDir;
 
 fn ingest_into_bridge(
-    bridge: &mut GitBridge<'_>,
+    bridge: &mut GitProjection<'_>,
     source: &Path,
     lossy: bool,
 ) -> Result<(), String> {
@@ -147,7 +147,7 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     ingest_into_bridge(&mut bridge, source, lossy)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
@@ -527,7 +527,7 @@ fn import_preserves_noncanonical_extension_header_order() {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitBridge::new(&repo);
+    let mut bridge = GitProjection::new(&repo);
     ingest_into_bridge(&mut bridge, dir, false).expect("import from git failed");
 
     // Re-open to read the freshly installed states without a borrow tangle.

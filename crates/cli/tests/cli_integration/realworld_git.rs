@@ -206,11 +206,11 @@ fn realworld_git_complex_fixture_round_trips_overlay_inventory_without_git_on_pa
         temp.path(),
     )
     .unwrap();
-    // `bridge git import` imports every ref by default; the legacy `--all`
+    // `import git` imports every ref by default; the legacy `--all`
     // flag was retired once the default flow was the all-refs path.
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "complex fixture should fsck: {fsck}");
 
@@ -263,7 +263,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
         metadata.len() > 0,
         "large checkout should materialize a blob or a safety pointer"
     );
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "large fixture should fsck: {fsck}");
 }
@@ -281,7 +281,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
 // -----------------------------------------------------------------
 
 /// R1: a five-commit linear chain rebased onto a new base must
-/// round-trip every commit through heddle bridge import and surface
+/// round-trip every commit through `heddle import git` and surface
 /// the rebased tip as the active branch. Verifies the import path
 /// preserves rewritten history rather than collapsing it.
 #[test]
@@ -354,7 +354,7 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
         temp.path(),
     )
     .unwrap();
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
 
     let threads = serde_json::from_str::<Value>(
         &heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap(),
@@ -393,9 +393,9 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
 }
 
 /// R3: divergent origin + upstream remotes both expose `main` at
-/// different tips. Heddle's bridge import + remote listing must
+/// different tips. Heddle Git import and remote listing must
 /// surface both remotes and treat them as distinct sources. The
-/// `heddle bridge import --ref origin/main` form picks origin
+/// `heddle import git --ref origin/main` form picks origin
 /// explicitly; the upstream tip remains imported but not the active
 /// thread.
 #[test]
@@ -446,7 +446,7 @@ fn realworld_git_multi_remote_divergent_main_resolves_origin_first() {
 }
 
 /// R4: an annotated tag retargeted to a new commit and re-annotated
-/// must round-trip through heddle bridge import without losing the
+/// must round-trip through `heddle import git` without losing the
 /// tag message or moving the original commit.
 #[test]
 #[ignore = "nightly real-world matrix: annotated tag rename + re-annotate"]
@@ -493,18 +493,18 @@ fn realworld_git_annotated_tag_rename_round_trips() {
         temp.path(),
     )
     .unwrap();
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
 
-    // The bridge mirror should expose the retargeted tag at the new
+    // The legacy Bridge Mirror should expose the retargeted tag at the new
     // tag oid; both A and B remain reachable.
     let mirror = work.join(".heddle").join("git");
-    let mirror_repo = open_git(&mirror).expect("open bridge mirror");
+    let mirror_repo = open_git(&mirror).expect("open legacy Bridge Mirror");
     let tag_ref = find_reference(&mirror_repo, "refs/tags/v0.1").expect("v0.1 ref present");
     let tag_oid = tag_ref.target().try_id().expect("tag oid").to_owned();
     assert_eq!(
         tag_oid,
         tag_b.id(),
-        "bridge mirror should track the retargeted tag oid"
+        "legacy Bridge Mirror should track the retargeted tag oid"
     );
     assert!(
         mirror_repo.find_object(a).is_ok(),
@@ -584,7 +584,7 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
         temp.path(),
     )
     .unwrap();
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
 
     let log_a: Value = serde_json::from_str(
         &heddle_with_host_git(&["--output", "json", "log", "feature/a", "-n", "1"], &work).unwrap(),
@@ -610,7 +610,7 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
 
 /// R10: `heddle gc` must prune mapping entries whose Git object is no
 /// longer reachable while leaving live-thread mappings intact. We
-/// poison the bridge mapping with a synthetic entry pointing at an
+/// poison the Git Projection Mapping with a synthetic entry pointing at an
 /// unreachable oid and verify gc removes it without disturbing the
 /// real mapping rows.
 #[test]
@@ -636,24 +636,18 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
         temp.path(),
     )
     .unwrap();
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
     let export = temp.path().join("export.git");
     heddle_without_git(
-        &[
-            "bridge",
-            "git",
-            "export",
-            "--destination",
-            export.to_str().unwrap(),
-        ],
+        &["export", "git", "--destination", export.to_str().unwrap()],
         &work,
     )
     .unwrap();
 
     let mapping_path = work
         .join(".heddle")
-        .join("git-bridge")
-        .join("bridge-mapping.json");
+        .join("git-projection")
+        .join("git-projection-mapping.json");
     let mapping_text = std::fs::read_to_string(&mapping_path).expect("mapping json");
     let original_entries = mapping_text.matches("\"change_id\"").count();
 
@@ -702,7 +696,7 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
 // -----------------------------------------------------------------
 
 /// Clone each of the four vendored fixtures via `heddle clone`, run
-/// `bridge import` to materialize the git refs as overlay threads, and
+/// `import git` to materialize the git refs as overlay threads, and
 /// assert the heddle workspace lines up with the bare repo it came from.
 /// Heavier than a unit test (untars ~28 MB across four extracts), so it
 /// is gated `#[ignore]` for the nightly realworld matrix run.
@@ -723,14 +717,14 @@ fn realworld_fixtures_clone_and_import_round_trip() {
         )
         .unwrap_or_else(|err| panic!("heddle clone failed for {}: {err}", entry.name));
 
-        // The default `bridge import` walks every ref; the synthetic
+        // The default `import git` walks every ref; the synthetic
         // tests above use the same form. We do not need the legacy
         // `--all` flag.
-        heddle_without_git(&["bridge", "git", "import"], &work)
-            .unwrap_or_else(|err| panic!("bridge import failed for {}: {err}", entry.name));
+        heddle_without_git(&["import", "git"], &work)
+            .unwrap_or_else(|err| panic!("Git import failed for {}: {err}", entry.name));
 
-        let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work)
-            .unwrap_or_else(|err| panic!("fsck --bridge failed for {}: {err}", entry.name));
+        let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work)
+            .unwrap_or_else(|err| panic!("fsck --git failed for {}: {err}", entry.name));
         let parsed: Value = serde_json::from_str(&fsck)
             .unwrap_or_else(|_| panic!("fsck output should parse for {}: {fsck}", entry.name));
         assert_eq!(
@@ -807,15 +801,15 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     );
 
     // ── (10) Discovery of raw Git branches as tip-only overlay threads ──
-    // Create a raw git branch off HEAD before bridge import; the import
-    // should surface it as a thread and `bridge git list` should advise
-    // the scoped import command for any remaining unimported tip.
+    // Create a raw git branch off HEAD before import; the import
+    // should surface it as a thread and advise the scoped import
+    // command for any remaining unimported tip.
     let cloned = open_git(&work).expect("open cloned working tree");
     let head = cloned
         .head_commit()
         .expect("cloned repo should have a HEAD commit");
     git_set_reference(&cloned, "refs/heads/raw-side-branch", head.id());
-    heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
+    heddle_without_git(&["import", "git"], &work).unwrap();
     let threads_json = heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap();
     let threads: Value = serde_json::from_str(&threads_json).unwrap();
     let names: Vec<String> = threads["threads"]

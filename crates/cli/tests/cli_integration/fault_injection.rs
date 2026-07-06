@@ -19,11 +19,11 @@ use oplog::{OpLogBackend, OpRecord};
 
 use super::*;
 
-/// R9: bridge mapping persistence.
+/// R9: Git Projection Mapping persistence.
 ///
-/// `bridge export` writes the served heddle↔git mapping to disk via a
-/// tmp-rename-rename pattern (`bridge-mapping.json.tmp` →
-/// `bridge-mapping.json`). The fault checkpoint
+/// `export git` writes the served heddle↔git mapping to disk via a
+/// tmp-rename-rename pattern (`git-projection-mapping.json.tmp` →
+/// `git-projection-mapping.json`). The fault checkpoint
 /// `mapping_after_tmp_before_commit` panics in the gap between those
 /// two operations, leaving the sidecar in a state where the .tmp
 /// file exists but the canonical file does not (or is stale).
@@ -65,17 +65,11 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // ── Phase 1: spawn the export with fault injection armed ──
     //
     // The process should panic with our intentional message rather
-    // than completing the bridge export. We explicitly assert the
+    // than completing the Git projection export. We explicitly assert the
     // panic message so a regression that silently no-ops the
     // checkpoint surfaces here, not three commits downstream.
     let crashed = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args([
-            "bridge",
-            "git",
-            "export",
-            "--destination",
-            export.to_str().unwrap(),
-        ])
+        .args(["export", "git", "--destination", export.to_str().unwrap()])
         .current_dir(&work)
         .env("HEDDLE_FAULT_INJECT", "mapping_after_tmp_before_commit")
         .env("HEDDLE_CONFIG", work.join(".heddle-user/config.toml"))
@@ -101,9 +95,9 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // happened before or after the rename). Both shapes are valid
     // pre-recovery states; what matters is the recovery primitive
     // accepts both.
-    let mapping_dir = work.join(".heddle").join("git-bridge");
-    let canonical = mapping_dir.join("bridge-mapping.json");
-    let tmp = mapping_dir.join("bridge-mapping.json.tmp");
+    let mapping_dir = work.join(".heddle").join("git-projection");
+    let canonical = mapping_dir.join("git-projection-mapping.json");
+    let tmp = mapping_dir.join("git-projection-mapping.json.tmp");
     assert!(
         tmp.exists() || canonical.exists(),
         "after crash, at least one of the mapping files must exist; \
@@ -121,13 +115,7 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // export. Final assertion: the canonical mapping file exists,
     // is non-empty, and parses as the expected shape.
     let recovered = heddle_output_with_env(
-        &[
-            "bridge",
-            "git",
-            "export",
-            "--destination",
-            export.to_str().unwrap(),
-        ],
+        &["export", "git", "--destination", export.to_str().unwrap()],
         Some(&work),
         &[],
     )

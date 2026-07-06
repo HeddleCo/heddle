@@ -4,7 +4,7 @@ This document describes Heddle's current architecture at a high level. It focuse
 
 ## System Model
 
-Heddle is an AI-native version control system built around three core ideas:
+Heddle is an agent-native version control system built around three core ideas:
 
 1. **Content-addressed storage** - immutable objects addressed by BLAKE3 content hash
 2. **Stable change identity** - logical changes keep stable identifiers even when history is rewritten
@@ -16,7 +16,7 @@ Heddle is an AI-native version control system built around three core ideas:
 
 - local repository model with immutable states
 - threads, markers, refs, oplog, and working tree management
-- remote sync and Git bridge
+- remote sync and Git projection
 - provenance-backed local blame and rewrite preservation
 - semantic diff support
 - multi-agent worktrees and agent registry
@@ -45,12 +45,12 @@ Heddle is an AI-native version control system built around three core ideas:
 ```text
 CLI / Web UI
   -> repository operations and hosted APIs
-  -> refs, oplog, worktree, semantic, bridge, authz
+  -> refs, oplog, worktree, semantic, Git projection, authz
   -> object store and metadata backends
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and bridge functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
+Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and Git interoperability/projection functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
@@ -61,7 +61,7 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  cli/src/bridge/   # Git interoperability (module within the cli crate)
+  cli/src/git_projection_engine/   # Git interoperability (module within the cli crate)
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
@@ -237,7 +237,7 @@ This model supports Heddle's larger review and repository-intelligence story: co
 
 The semantic layer provides code-aware diff and structural inspection. It is intentionally helpful rather than magical: semantic output exists today, but can still be conservative.
 
-## Git Bridge And Remote Sync
+## Git Projection And Remote Sync
 
 Heddle supports:
 
@@ -257,7 +257,7 @@ Hosted Heddle has two major layers.
 - repository object access
 - refs and oplog behavior
 - content inspection APIs
-- sync and Git bridge support
+- sync and Git projection support
 
 ### Control plane
 

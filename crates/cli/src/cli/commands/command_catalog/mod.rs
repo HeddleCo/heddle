@@ -14,6 +14,8 @@ use serde::Serialize;
 
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
+#[cfg(feature = "git-overlay")]
+use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
@@ -28,7 +30,7 @@ use crate::cli::{
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
-use crate::cli::{BridgeCommands, GitCommands};
+use crate::cli::{ExportCommands, ImportCommands};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOutput {
@@ -293,7 +295,7 @@ struct CommandContract {
     /// Area grouping for the `heddle help advanced` listing (heddle#652).
     /// Only meaningful on native-surface root commands with an advanced
     /// help visibility; commands on the `automation` / `admin` /
-    /// `git_adapter` surfaces derive their group from the surface itself
+    /// `git_projection` surfaces derive their group from the surface itself
     /// (see [`advanced_help_groups`]). The
     /// `advanced_help_groups_cover_every_advanced_verb` test forces
     /// every advanced native root command to pick one, so the grouped
@@ -382,8 +384,8 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle clone <remote> <fresh-path>",
     "heddle clone <remote> <path> --thread <thread>",
     // Shallow Git import recovery requires choosing a complete checkout.
-    "heddle bridge git import --path <full-git-repo>",
-    "heddle bridge git import --path <full-git-repo> --ref <ref>",
+    "heddle import git --path <full-git-repo>",
+    "heddle import git --path <full-git-repo> --ref <ref>",
     // Detached Git-overlay recovery requires the caller to choose the
     // branch to reattach before retrying branch-writing operations.
     "heddle switch <branch>",
@@ -630,25 +632,17 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle bridge git import --path <full-git-repo>",
-        &[
-            "heddle",
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            "<full-git-repo>",
-        ],
+        "heddle import git --path <full-git-repo>",
+        &["heddle", "import", "git", "--path", "<full-git-repo>"],
         &["path"],
         false,
     ),
     (
-        "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        "heddle import git --path <full-git-repo> --ref <ref>",
         &[
             "heddle",
-            "bridge",
-            "git",
             "import",
+            "git",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -1053,11 +1047,11 @@ const fn exits(
     }
 }
 
-const fn git_adapter_alias(
+const fn git_projection_alias(
     contract: CommandContract,
     canonical_command: &'static str,
 ) -> CommandContract {
-    git_adapter_action(
+    git_projection_action(
         contract,
         canonical_command,
         "direct_command",
@@ -1065,15 +1059,15 @@ const fn git_adapter_alias(
     )
 }
 
-const fn git_adapter_action(
+const fn git_projection_action(
     contract: CommandContract,
     canonical_command: &'static str,
     canonical_kind: &'static str,
     canonical_note: &'static str,
 ) -> CommandContract {
     CommandContract {
-        surface: "git_adapter",
-        help_visibility: "git_adapter",
+        surface: "git_projection",
+        help_visibility: "git_projection",
         canonical_command: Some(canonical_command),
         canonical_kind: Some(canonical_kind),
         canonical_note: Some(canonical_note),
@@ -1426,54 +1420,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
-    entry(&["bridge"], surface(GROUP, "git_adapter")),
-    entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
+    entry(&["import"], surface(GROUP, "git_projection")),
     entry(
-        &["bridge", "git", "status"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["bridge git status"]),
-                &[json_discriminator(
-                    Some("bridge git status"),
-                    "output_kind",
-                    "bridge_git_status",
-                )],
-            ),
-            "status",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "init"],
-        git_adapter_alias(documented_schemas(INIT, &["bridge git init"]), "init"),
-    ),
-    entry(
-        &["bridge", "git", "export"],
-        git_adapter_alias(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    ..MUTATING
-                },
-                &["bridge git export"],
-            ),
-            "push",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "import"],
+        &["import", "git"],
         exits(
-            git_adapter_action(
-                json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
-                    &[json_discriminator(
-                        Some("bridge git import"),
-                        "output_kind",
-                        "bridge_git_import",
-                    )],
-                ),
-                "adopt",
-                "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
+            json_discriminators(
+                documented_schemas(IMPORTING_MUTATION, &["import git"]),
+                &[json_discriminator(
+                    Some("import git"),
+                    "output_kind",
+                    "import_git",
+                )],
             ),
             &[
                 (0, "ok"),
@@ -1482,16 +1439,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
+    entry(&["export"], surface(GROUP, "git_projection")),
     entry(
-        &["bridge", "git", "sync"],
+        &["export", "git"],
+        json_discriminators(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    ..MUTATING
+                },
+                &["export git"],
+            ),
+            &[json_discriminator(
+                Some("export git"),
+                "output_kind",
+                "export_git",
+            )],
+        ),
+    ),
+    entry(
+        &["sync", "git"],
         exits(
-            git_adapter_action(
+            git_projection_action(
                 json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+                    documented_schemas(IMPORTING_MUTATION, &["sync git"]),
                     &[json_discriminator(
-                        Some("bridge git sync"),
+                        Some("sync git"),
                         "output_kind",
-                        "bridge_git_sync",
+                        "sync_git",
                     )],
                 ),
                 "adopt",
@@ -1503,78 +1478,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (75, "remote unreachable; safe to retry"),
                 (76, "remote rejected payload"),
             ],
-        ),
-    ),
-    entry(
-        &["bridge", "git", "reconcile"],
-        exits(
-            git_adapter_action(
-                json_discriminators(
-                    documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
-                    &[json_discriminator(
-                        Some("bridge git reconcile"),
-                        "output_kind",
-                        "bridge_git_reconcile",
-                    )],
-                ),
-                "adopt",
-                "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
-            ),
-            &[
-                (0, "ok"),
-                (65, "unmergeable divergence; manual resolution required"),
-            ],
-        ),
-    ),
-    entry(
-        &["bridge", "git", "push"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_heddle_refs: false,
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..MUTATING
-                    },
-                    &["bridge git push"],
-                ),
-                &[json_discriminator(
-                    Some("bridge git push"),
-                    "output_kind",
-                    "bridge_git_push",
-                )],
-            ),
-            "push",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "pull"],
-        git_adapter_alias(
-            json_discriminators(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..WORKTREE_MUTATION
-                    },
-                    &["bridge git pull"],
-                ),
-                &[json_discriminator(
-                    Some("bridge git pull"),
-                    "output_kind",
-                    "bridge_git_pull",
-                )],
-            ),
-            "pull",
-        ),
-    ),
-    entry(
-        &["bridge", "git", "reason"],
-        surface(
-            opaque_schemas(DATA_MUTATION, &["bridge git reason"]),
-            "git_adapter",
         ),
     ),
     entry(
@@ -1853,6 +1756,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+    entry(&["context", "reason"], category(GROUP, "context")),
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+    entry(
+        &["context", "reason", "git"],
+        surface(
+            opaque_schemas(DATA_MUTATION, &["context reason git"]),
+            "git_projection",
+        ),
+    ),
     entry(&["daemon"], surface(GROUP, "admin")),
     entry(
         &["daemon", "serve"],
@@ -1977,7 +1890,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fetch"],
-        git_adapter_action(
+        git_projection_action(
             json_discriminators(
                 documented_schemas(
                     CommandContract {
@@ -1997,7 +1910,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
-            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+            documented_schemas(
+                documented_core_report_schema(
+                    CommandContract {
+                        mutates: true,
+                        observe_only: false,
+                        supports_op_id: false,
+                        may_move_ref: false,
+                        writes_heddle_refs: false,
+                        ..READ_JSON
+                    },
+                    FsckReport::CONTRACT,
+                ),
+                &["fsck --repair git"],
+            ),
             "recovery",
         ),
     ),
@@ -2628,7 +2554,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash"],
-        git_adapter_action(
+        git_projection_action(
             READ_TEXT,
             "capture",
             "conceptual_home",
@@ -2637,7 +2563,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "push"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(WORKTREE_ONLY_MUTATION, &["stash push"]),
             "capture",
             "workflow",
@@ -2646,7 +2572,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "list"],
-        git_adapter_action(
+        git_projection_action(
             json_discriminators(
                 documented_schemas(READ_JSON, &["stash list"]),
                 &[json_discriminator(
@@ -2662,7 +2588,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "pop"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(
                 CommandContract {
                     destructive_data: true,
@@ -2677,7 +2603,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "apply"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(WORKTREE_ONLY_MUTATION, &["stash apply"]),
             "undo",
             "conceptual_home",
@@ -2686,7 +2612,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "drop"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash drop"]),
             "thread captures",
             "conceptual_home",
@@ -2695,7 +2621,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "clear"],
-        git_adapter_action(
+        git_projection_action(
             documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash clear"]),
             "thread captures",
             "conceptual_home",
@@ -2704,7 +2630,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "show"],
-        git_adapter_alias(
+        git_projection_alias(
             json_discriminators(
                 documented_schemas(READ_JSON, &["stash show"]),
                 &[json_discriminator(
@@ -2729,10 +2655,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
     ),
-    entry(
-        &["spool"],
-        category(feature_gated(GROUP, "client"), "repo"),
-    ),
+    entry(&["spool"], category(feature_gated(GROUP, "client"), "repo")),
     entry(
         &["spool", "attach"],
         category(feature_gated(MUTATING_TEXT, "client"), "repo"),
@@ -2801,7 +2724,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["switch"],
-        git_adapter_alias(
+        git_projection_alias(
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["switch"]),
                 &[json_discriminator(
@@ -4236,7 +4159,7 @@ fn advanced_help_root_entries() -> Vec<&'static CommandContractEntry> {
 /// as `(display title, verbs)` pairs (heddle#652). The grouping is
 /// contract-table data, not a hand-maintained help string: native
 /// advanced commands carry an explicit `help_category` on their
-/// registration, while `automation` / `admin` / `git_adapter` commands
+/// registration, while `automation` / `admin` / `git_projection` commands
 /// derive their group from the surface they already declare. Verbs keep
 /// contract order (help_rank, then name) within each group — the same
 /// ordering the flat list used. Feature-gated verbs absent from the
@@ -4279,7 +4202,7 @@ fn advanced_help_group_id(contract: &CommandContract) -> &'static str {
     match contract.surface {
         "automation" => "automation",
         "admin" => "admin",
-        "git_adapter" => "git-interop",
+        "git_projection" => "git-interop",
         _ => contract.help_category.unwrap_or(""),
     }
 }
@@ -4711,7 +4634,15 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
         Commands::Run(_) => vec!["run"],
-        Commands::Sync(_) => vec!["sync"],
+        Commands::Sync(args) => {
+            #[cfg(feature = "git-overlay")]
+            {
+                if matches!(args.command, Some(SyncCommands::Git { .. })) {
+                    return vec!["sync", "git"];
+                }
+            }
+            vec!["sync"]
+        }
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
         Commands::Land(_) => vec!["land"],
@@ -4817,6 +4748,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
+        #[cfg(feature = "git-overlay")]
+        Commands::Import { command } => match command {
+            ImportCommands::Git { .. } => vec!["import", "git"],
+        },
+        #[cfg(feature = "git-overlay")]
+        Commands::Export { command } => match command {
+            ExportCommands::Git { .. } => vec!["export", "git"],
+        },
         Commands::Oplog { command } => match command {
             OplogCommands::Recover => vec!["oplog", "recover"],
         },
@@ -4848,6 +4787,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ContextCommands::Check(_) => vec!["context", "check"],
             ContextCommands::Suggest(_) => vec!["context", "suggest"],
             ContextCommands::Audit(_) => vec!["context", "audit"],
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+            ContextCommands::Reason { command } => match command {
+                crate::cli::cli_args::ContextReasonCommands::Git(_) => {
+                    vec!["context", "reason", "git"]
+                }
+            },
         },
         Commands::Integration { command } => match command {
             IntegrationCommands::List => vec!["integration", "list"],
@@ -4879,21 +4824,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SpoolCommands::Children(_) => vec!["spool", "children"],
             SpoolCommands::Governance(_) => vec!["spool", "governance"],
             SpoolCommands::Membership(_) => vec!["spool", "membership"],
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::Bridge { command } => match command {
-            BridgeCommands::Git { command } => match command {
-                GitCommands::Status => vec!["bridge", "git", "status"],
-                GitCommands::Init { .. } => vec!["bridge", "git", "init"],
-                GitCommands::Export { .. } => vec!["bridge", "git", "export"],
-                GitCommands::Import { .. } => vec!["bridge", "git", "import"],
-                GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
-                GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
-                GitCommands::Push { .. } => vec!["bridge", "git", "push"],
-                GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
-                #[cfg(feature = "ingest")]
-                GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
-            },
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {

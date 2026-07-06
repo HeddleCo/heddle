@@ -7,11 +7,16 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
+#[cfg(feature = "client")]
+use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
-    BridgeCommands,
-    commands::{cmd_bridge_git, cmd_git_overlay_guide},
+    ExportCommands, ImportCommands,
+    cli_args::SyncCommands,
+    commands::{cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git},
 };
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+use cli::cli::commands::cmd_context_reason_git;
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
@@ -23,17 +28,17 @@ use cli::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_adapter,
+            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_projection,
             cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
+            cmd_context_history, cmd_context_list, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff,
+            cmd_discuss, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck,
+            cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge,
+            cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
             cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_adapter,
+            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_git_projection,
             cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
             cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
@@ -46,8 +51,6 @@ use cli::{
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
-#[cfg(feature = "client")]
-use cli::cli::commands::cmd_spool;
 use tracing::debug;
 
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
@@ -76,7 +79,7 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     // Install the ring crypto provider as the rustls default. Without this,
-    // any rustls TLS handshake (gRPC, GitHub REST, `bridge git import
+    // any rustls TLS handshake (gRPC, GitHub REST, `import git
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to
     // keep the 80s aws-lc-sys C build out of release builds. Measured
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
@@ -342,18 +345,30 @@ async fn async_main() -> Result<()> {
 
         Commands::Try(args) => cmd_try(&cli, args.clone()),
 
-        Commands::Sync(SyncArgs { thread }) => {
-            // Codex's enhanced sync (rebase-aware fast-forward path);
-            // main wired `cmd_sync` here pre-rebase. The smart variant
-            // is a strict superset, so we use it on the merged
-            // branch.
-            cmd_sync_smart(
-                &cli,
-                SyncArgs {
-                    thread: thread.clone(),
-                },
-            )
-            .await
+        Commands::Sync(args) => {
+            #[cfg(feature = "git-overlay")]
+            {
+                if let Some(SyncCommands::Git { path }) = &args.command {
+                    cmd_sync_git(&cli, path.clone())
+                } else {
+                    // Codex's enhanced sync (rebase-aware fast-forward path);
+                    // main wired `cmd_sync` here pre-rebase. The smart variant
+                    // is a strict superset, so we use it on the merged
+                    // branch.
+                    cmd_sync_smart(
+                        &cli,
+                        SyncArgs {
+                            command: None,
+                            thread: args.thread.clone(),
+                        },
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "git-overlay"))]
+            {
+                cmd_sync_smart(&cli, args.clone()).await
+            }
         }
 
         Commands::Continue => cmd_continue(&cli).await,
@@ -412,7 +427,7 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        Commands::Commit(args) => cmd_commit_git_adapter(&cli, args.clone()).await,
+        Commands::Commit(args) => cmd_commit_git_projection(&cli, args.clone()).await,
 
         Commands::Log(LogArgs {
             state,
@@ -491,7 +506,7 @@ async fn async_main() -> Result<()> {
             *patch,
         ),
 
-        Commands::Switch(args) => cmd_switch_git_adapter(&cli, args.clone()).await,
+        Commands::Switch(args) => cmd_switch_git_projection(&cli, args.clone()).await,
 
         Commands::Revert(RevertArgs {
             state,
@@ -516,11 +531,36 @@ async fn async_main() -> Result<()> {
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
 
+        #[cfg(feature = "git-overlay")]
+        Commands::Import { command } => match command {
+            ImportCommands::Git { path, refs, lossy } => {
+                cmd_import_git(&cli, path.clone(), refs.clone(), *lossy)
+            }
+        },
+
+        #[cfg(feature = "git-overlay")]
+        Commands::Export { command } => match command {
+            ExportCommands::Git { destination } => cmd_export_git(&cli, destination.clone()),
+        },
+
         Commands::Fsck {
             full,
             thorough,
-            bridge,
-        } => cmd_fsck(&cli, *full, *thorough, *bridge),
+            git,
+            repair,
+            ref_name,
+            prefer,
+            preview,
+        } => cmd_fsck(
+            &cli,
+            *full,
+            *thorough,
+            *git,
+            *repair,
+            ref_name.clone(),
+            prefer.clone(),
+            *preview,
+        ),
 
         Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 
@@ -695,6 +735,20 @@ async fn async_main() -> Result<()> {
                 cmd_context_suggest(&cli, args.r#ref.clone(), args.limit).await
             }
             ContextCommands::Audit(args) => cmd_context_audit(&cli, args.r#ref.clone()).await,
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+            ContextCommands::Reason { command } => match command {
+                cli::cli::cli_args::ContextReasonCommands::Git(args) => cmd_context_reason_git(
+                    &cli,
+                    &args.path,
+                    args.max_sessions_per_commit,
+                    args.min_match_confidence,
+                    args.limit,
+                    args.claude_home.clone(),
+                    args.codex_home.clone(),
+                    args.opencode_home.clone(),
+                    args.dry_run,
+                ),
+            },
         },
 
         Commands::Integration { command } => cmd_integration(&cli, command.clone()),
@@ -709,11 +763,6 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
-
-        #[cfg(feature = "git-overlay")]
-        Commands::Bridge { command } => match command {
-            BridgeCommands::Git { command } => cmd_bridge_git(&cli, command.clone()),
-        },
 
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),

@@ -12,11 +12,11 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    git_overlay_health::{
+    import_progress::ImportProgress,
+    verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         build_repository_verification_state_profiled,
     },
-    import_progress::ImportProgress,
 };
 use crate::{
     cli::{AdoptArgs, Cli, should_output_json, style},
@@ -162,7 +162,7 @@ fn import_ingest_for_adopt(
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.checking_notes();
-    crate::bridge::git_core::GitBridge::hydrate_checkout_heddle_notes_without_mirror(repo.root());
+    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(repo.root());
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 

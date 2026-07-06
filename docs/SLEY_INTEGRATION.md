@@ -1,7 +1,7 @@
 # Sley Integration Contract
 
 Status: current Heddle hardening note. Heddle now treats Sley as the Git-format
-engine for Git overlay, Git bridge, plain-Git inspection, and no-`git` runtime
+engine for Git Overlay, Git Projection, plain-Git inspection, and no-`git` runtime
 paths. This page records the Sley-side ergonomics Heddle wants next and the
 Heddle-side gates that should stay required while the integration settles.
 
@@ -32,7 +32,7 @@ let git = SleyRepository::open_with(
 )?;
 ```
 
-Heddle would use this in bridge clone/import/export scratch paths instead of
+Heddle would use this in Git projection clone/import/export scratch paths instead of
 choosing between `open` and `discover` locally.
 
 ### Explicit Missing-Reference APIs
@@ -51,7 +51,7 @@ let head = git.require_reference("refs/remotes/origin/main")?;
 ```
 
 Heddle would use `reference_exists` in health/verify checks and
-`require_reference` in import/export paths where absence is a hard Git boundary.
+`require_reference` in import/export paths where absence is a hard Git projection boundary.
 
 ### Separate Ref Resolution From Object Peeling
 
@@ -172,8 +172,8 @@ Keep these Heddle-side checks required while Sley settles in:
 
 - `cargo test --locked -p heddle-cli --test git_process_lint -- --nocapture`
 - `cargo test --locked -p heddle-cli --test cli_integration git_replacement_matrix -- --nocapture`
-- `cargo test --locked -p heddle-cli --test git_bridge_integration round_trip_preserves_annotated_tag_object_sha -- --nocapture`
-- `cargo test --locked -p heddle-cli --test git_bridge_integration import_populates_mirror_with_identical_annotated_tag_object -- --nocapture`
+- `cargo test --locked -p heddle-cli --test git_projection_engine_integration round_trip_preserves_annotated_tag_object_sha -- --nocapture`
+- `cargo test --locked -p heddle-cli --test git_projection_engine_integration import_populates_mirror_with_identical_annotated_tag_object -- --nocapture`
 - `cargo test --locked -p heddle-cli --test cli_integration remotes::test_cli_raw_git_clone_adopt_fetches_notes_before_import -- --nocapture`
 - `cargo test --locked -p heddle-cli --test cli_integration remotes::git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated -- --nocapture`
 

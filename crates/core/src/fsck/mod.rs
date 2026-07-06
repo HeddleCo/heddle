@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository integrity checks.
 
-mod bridge;
+mod git_projection;
 mod objects;
 mod refs;
 mod state;
@@ -18,7 +18,7 @@ use crate::{ExecutionContext, HeddleReport, MachineOutputKind, ReportContract, s
 pub struct FsckOptions {
     pub full: bool,
     pub thorough: bool,
-    pub bridge: bool,
+    pub git_projection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -27,7 +27,10 @@ pub struct FsckReport {
     pub errors: Vec<FsckError>,
     pub warnings: Vec<String>,
     pub objects_checked: usize,
-    pub bridge_checked: bool,
+    pub git_projection_checked: bool,
+    pub repair_target: Option<String>,
+    pub repaired: bool,
+    pub repairs: Vec<FsckRepair>,
 }
 
 impl FsckReport {
@@ -41,6 +44,14 @@ impl FsckReport {
 
 impl HeddleReport for FsckReport {
     const CONTRACT: ReportContract = FsckReport::CONTRACT;
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct FsckRepair {
+    pub name: String,
+    pub repaired: bool,
+    pub detail: String,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -73,8 +84,8 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
 
     refs::check_refs(repo, &mut errors, &mut warnings)?;
     refs::check_merge_state(repo, &mut warnings)?;
-    if opts.bridge {
-        bridge::check_bridge(repo, &mut errors, &mut warnings, &mut objects_checked)?;
+    if opts.git_projection {
+        git_projection::check_git_projection(repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
 
     let valid = errors.is_empty();
@@ -84,7 +95,10 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
         errors,
         warnings,
         objects_checked,
-        bridge_checked: opts.bridge,
+        git_projection_checked: opts.git_projection,
+        repair_target: None,
+        repaired: false,
+        repairs: Vec::new(),
     })
 }
 

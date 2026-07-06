@@ -11,10 +11,10 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
-    ChangesInfo, CoordinationStatus, FastShortStatusReport,
-    GitIndexPlan as CoreGitIndexPlan, GitOverlayHealth, GitOverlayHealthCheck,
-    MaterializedThreadInfo, StatusDetail, StatusOptions, StatusReport as StatusOutput,
-    changes_from_worktree_status, changes_paths, fast_short_status_report, status as core_status,
+    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
+    MachineContractInput, MaterializedThreadInfo, StatusDetail, StatusOptions,
+    StatusReport as StatusOutput, changes_from_worktree_status, changes_paths,
+    fast_short_status_report, status as core_status,
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
@@ -33,19 +33,19 @@ use tracing::debug;
 
 use super::{
     action_line::print_command,
-    git_adapter::{GitIndexPlan, git_index_plan_for_root},
-    git_overlay_health::{
+    git_projection::{GitIndexPlan, git_index_plan_for_root},
+    verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
 };
+#[cfg(feature = "client")]
+use crate::config::UserConfig;
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-#[cfg(feature = "client")]
-use crate::config::UserConfig;
 
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
@@ -56,7 +56,6 @@ struct PlainGitStatusOutput {
     heddle_initialized: bool,
     git_branch: Option<String>,
     path: String,
-    git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
@@ -234,23 +233,6 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
     };
     let changes = changes_from_worktree_status(&probe.changes);
     let changed_path_count = probe.changes.change_count();
-    let git_overlay_health = GitOverlayHealth {
-        status: probe.trust.status.clone(),
-        clean: probe.trust.verified,
-        summary: probe.trust.summary.clone(),
-        recovery_commands: probe.trust.recovery_commands.clone(),
-        checks: probe
-            .trust
-            .checks
-            .iter()
-            .map(|check| GitOverlayHealthCheck {
-                name: check.name.clone(),
-                status: check.status.clone(),
-                summary: check.summary.clone(),
-                details: check.details.clone(),
-            })
-            .collect(),
-    };
     let trust = probe.trust;
     let git_index = git_index_plan_for_root(&probe.root)?.map(core_git_index_plan);
     Ok(Some(PlainGitStatusOutput {
@@ -269,7 +251,6 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
         changed_path_count,
         changes,
         git_index,
-        git_overlay_health,
         trust,
     }))
 }
@@ -352,7 +333,11 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         .build();
     let output = core_status(
         &ctx,
-        StatusOptions::new(detail, status_options).with_start_path(start),
+        StatusOptions::new(detail, status_options)
+            .with_start_path(start)
+            .with_machine_contract_input(MachineContractInput::from_coverage(
+                super::verification_health::machine_contract_coverage(),
+            )),
     )?;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,
@@ -403,10 +388,6 @@ fn emit_status_profile(output: &StatusOutput) {
         ProfileField::millis(
             "git_overlay_status_ms",
             output.profile.git_overlay_status_ms,
-        ),
-        ProfileField::millis(
-            "git_overlay_health_ms",
-            output.profile.git_overlay_health_ms,
         ),
         ProfileField::millis("verification_ms", output.profile.verification_ms),
         ProfileField::millis("git_index_ms", output.profile.git_index_ms),
@@ -469,13 +450,6 @@ fn emit_profile_status_jsonl_phases(output: &StatusOutput) {
         &[ProfileField::millis(
             "git_overlay_status_ms",
             output.profile.git_overlay_status_ms,
-        )],
-    );
-    emit_profile(
-        "status git overlay health",
-        &[ProfileField::millis(
-            "git_overlay_health_ms",
-            output.profile.git_overlay_health_ms,
         )],
     );
     emit_profile(
@@ -849,7 +823,7 @@ fn render_status_operation(output: &StatusOutput) {
             println!("Remote drift: {}", style::warn(&remote_tracking.message));
         }
     }
-    if let Some(hint) = &output.git_overlay_import_hint
+    if let Some(hint) = &output.import_guidance
         && !hint
             .missing_branches
             .iter()
@@ -863,9 +837,9 @@ fn render_status_operation(output: &StatusOutput) {
             )
         );
     }
-    if !output.git_overlay_health.clean {
+    if !output.verification_health.clean {
         let label = if matches!(
-            output.git_overlay_health.status.as_str(),
+            output.verification_health.status.as_str(),
             "needs_init" | "needs_import"
         ) {
             "Setup needed"
@@ -877,10 +851,10 @@ fn render_status_operation(output: &StatusOutput) {
         } else {
             println!(
                 "{label}: {}",
-                style::warn(&output.git_overlay_health.summary)
+                style::warn(&output.verification_health.summary)
             );
         }
-        if output.git_overlay_health.status == "needs_import"
+        if output.verification_health.status == "needs_import"
             && output.changed_path_count == 0
             && !has_status_changes(output)
         {
@@ -1274,7 +1248,7 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
         return "an operation is in progress; finish or abort it before starting another workflow";
     }
     if output.recommended_action.contains("adopt --ref")
-        || output.git_overlay_import_hint.as_ref().is_some_and(|hint| {
+        || output.import_guidance.as_ref().is_some_and(|hint| {
             hint.missing_branches
                 .iter()
                 .any(|branch| branch == &hint.current_branch)
@@ -1391,7 +1365,7 @@ fn status_repository_setup_guidance(
         StatusRepositorySetupActionKind::Adopt => {
             format!("Git repo detected; connect this branch with {action}")
         }
-        StatusRepositorySetupActionKind::BridgeImport => {
+        StatusRepositorySetupActionKind::GitImport => {
             format!("Git history not imported; import it with {action}")
         }
         StatusRepositorySetupActionKind::Other => {
@@ -1405,7 +1379,7 @@ fn status_repository_setup_guidance(
 enum StatusRepositorySetupActionKind {
     Init,
     Adopt,
-    BridgeImport,
+    GitImport,
     Other,
 }
 
@@ -1414,8 +1388,8 @@ fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupAct
         StatusRepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         StatusRepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle bridge git import") {
-        StatusRepositorySetupActionKind::BridgeImport
+    } else if action.starts_with("heddle import git") {
+        StatusRepositorySetupActionKind::GitImport
     } else {
         StatusRepositorySetupActionKind::Other
     }
@@ -1861,10 +1835,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
-        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        build_status_output, combined_verdict_axes, coordination_axis_clean,
-        coordination_label, render_status_materialized, resolve_coordination_with_trust,
+        ChangesInfo, CoordinationStatus, MaterializedThreadInfo, PlainGitStatusOutput,
+        RepositoryVerificationState, assess_materialized_threads, build_status_output,
+        combined_verdict_axes, coordination_axis_clean, coordination_label,
+        render_status_materialized, resolve_coordination_with_trust,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -2347,7 +2321,7 @@ mod tests {
     #[test]
     fn plain_git_status_serializes_empty_recommended_action_as_null() {
         let machine_contract_coverage =
-            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+            crate::cli::commands::verification_health::machine_contract_coverage();
         let trust = RepositoryVerificationState {
             verified: true,
             status: "verified".to_string(),
@@ -2363,7 +2337,7 @@ mod tests {
             active_operation: None,
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+            machine_contract: crate::cli::commands::verification_health::machine_contract_status(
                 &machine_contract_coverage,
             )
             .to_string(),
@@ -2385,13 +2359,6 @@ mod tests {
             heddle_initialized: false,
             git_branch: Some("main".to_string()),
             path: "/tmp/repo".to_string(),
-            git_overlay_health: GitOverlayHealth {
-                status: "healthy".to_string(),
-                clean: true,
-                summary: "plain Git repository".to_string(),
-                recovery_commands: Vec::new(),
-                checks: Vec::new(),
-            },
             recommended_action: trust.recommended_action.clone(),
             recommended_action_template: trust.recommended_action_template.clone(),
             recovery_commands: trust.recovery_commands.clone(),

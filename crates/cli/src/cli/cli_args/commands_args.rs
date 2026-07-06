@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Named argument structs for top-level CLI commands.
 
+#[cfg(feature = "git-overlay")]
+use super::commands_git_projection::SyncCommands;
+
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -949,6 +952,11 @@ pub struct ReadyArgs {
 /// Arguments for the `sync` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct SyncArgs {
+    /// Optional sync target. Omit for operator/thread sync.
+    #[cfg(feature = "git-overlay")]
+    #[command(subcommand)]
+    pub command: Option<SyncCommands>,
+
     /// Thread to refresh (default: current thread).
     #[arg(long = "thread")]
     pub thread: Option<String>,
@@ -1254,15 +1262,15 @@ pub struct PushArgs {
     pub force: bool,
 
     /// Ad-hoc dual-push: after the primary push to the heddle remote
-    /// succeeds, also push to the named git-bridge remote (default
+    /// succeeds, also push to the named Git remote (default
     /// `origin`). Use `--mirror` alone for `origin`, or `--mirror=<name>`
-    /// to target a specific git remote. The mirror push is best-effort:
+    /// to target a specific Git remote. The secondary Git remote push is best-effort:
     /// if it fails, the primary push is still reported as successful
     /// and the mirror failure surfaces as a warning.
     ///
     /// `require_equals` pairs with `default_missing_value` (clap
     /// requires both, or the next token after `--mirror` would be
-    /// swallowed as the mirror's value — silently consuming the
+    /// swallowed as the Git remote mirror value — silently consuming the
     /// positional primary remote).
     #[arg(
         long,

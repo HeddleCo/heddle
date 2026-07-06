@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Shared utilities and helpers for Git bridge operations.
+//! Shared utilities and helpers for Git Projection operations.
 
 use ingest::LossyImportEntry;
 use objects::object::{State, Status};
 use sley::ObjectId as GitObjectId;
 
-use super::git_core::GitBridge;
+use super::git_core::GitProjection;
 
-impl<'a> GitBridge<'a> {
+impl<'a> GitProjection<'a> {
     /// Build a Git commit message from a Heddle state.
     ///
     /// Phase B (post-2026-05) onward: this is just the state's intent text,
@@ -142,7 +142,7 @@ pub struct ExportedRef {
 /// `commits_imported` counts every commit visited by the ancestry walk;
 /// `states_created` counts only the commits whose heddle state did not
 /// yet exist in the store. They diverge whenever a ref is re-imported
-/// (the second `bridge git import --ref X` against the same source
+/// (the second `import git --ref X` against the same source
 /// reports `commits_imported = N` and `states_created = 0`) — that
 /// distinction is what surfaces "already in sync" instead of leaving
 /// the operator staring at a misleading `commits_imported: 0`
@@ -150,7 +150,7 @@ pub struct ExportedRef {
 #[derive(Debug, Default)]
 pub struct ImportStats {
     /// Total commits walked from the source refs, including ones whose
-    /// heddle state was already present. Mirrors what `bridge git
+    /// heddle state was already present. Mirrors what explicit Git projection
     /// ingest` reports so the two verbs read the same way.
     pub commits_imported: usize,
     /// New state objects written to the heddle store during this
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn footer_emits_state_id_and_zero_omitted_when_no_url() {
         let state = sample_state();
-        let msg = GitBridge::build_commit_message_with_footer(&state, None, 0);
+        let msg = GitProjection::build_commit_message_with_footer(&state, None, 0);
         assert!(msg.contains(&format!(
             "Heddle-State: {}",
             state.change_id.to_string_full()
@@ -205,8 +205,11 @@ mod tests {
     #[test]
     fn footer_emits_url_when_hosted_configured() {
         let state = sample_state();
-        let msg =
-            GitBridge::build_commit_message_with_footer(&state, Some("https://heddle.test/"), 3);
+        let msg = GitProjection::build_commit_message_with_footer(
+            &state,
+            Some("https://heddle.test/"),
+            3,
+        );
         assert!(msg.contains(&format!(
             "Heddle-URL: https://heddle.test/state/{}",
             state.change_id.to_string_full()

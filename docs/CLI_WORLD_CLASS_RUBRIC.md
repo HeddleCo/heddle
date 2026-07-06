@@ -54,8 +54,9 @@ Release thresholds:
 - Everyday commands must score **A or better**: `init`, `adopt`, `status`,
   `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `merge`,
   `resolve`, `undo`, `thread`, `doctor`, `diagnose`, `help`, `version`.
-  Git-adapter commands, including `bridge` and `checkpoint`, must meet the
-  same hard gates but are evaluated as explicit adapter surfaces rather than
+  Git projection commands, including `import git`, `export git`, `sync git`,
+  and `checkpoint`, must meet the
+  same hard gates but are evaluated as explicit Git projection surfaces rather than
   the native first-run loop.
 - Advanced commands must score **B or better** unless hidden from curated help.
 - Hidden/internal commands must still pass hard gates, but may be exempt from
@@ -71,8 +72,8 @@ score. A global hard-gate failure blocks release.
 1. **No `git` executable dependency in Git-overlay mode.** With `PATH` stripped
    of `git`, supported overlay workflows must still work: init/adopt, status,
    verify, clone from local/bare repos where implemented, log/show/diff, commit,
-   merge, and fsck. Explicit Git-adapter workflows such as bridge
-   import/status/sync/export have their own adapter gates. Production CLI
+   merge, and fsck. Explicit Git projection workflows such as `import git`, `export git`, and
+   `sync git` have their own projection gates. Production CLI
    runtime code must not spawn `git`; raw-Git operation interop must preserve
    work and hand off through Heddle recovery commands.
 2. **Correct exit status.** Success returns 0. User, environment, data, conflict,
@@ -206,7 +207,7 @@ real invocation transcripts.
   no-ops, conflicts, and already-in-sync cases.
 - 1 pt: divergent Git/Heddle state offers explicit directional recovery, not a
   generic sync that could lose data.
-- 1 pt: command names and docs describe Heddle concepts first, Git bridge second.
+- 1 pt: command names and docs describe Heddle concepts first, Git projection second.
 - 1 pt: standalone/native mode has parallel terms and outputs where applicable.
 - 1 pt: migration paths from overlay to native are visible and testable.
 - 1 pt: all Git compatibility claims have fixtures against real repositories,

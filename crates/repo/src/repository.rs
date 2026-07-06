@@ -78,11 +78,9 @@ use objects::{
     worktree::WorktreeStatus,
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
-pub use refs::RefSummaryIndexInspection;
-pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
+pub use refs::{RefSummaryIndexInspection, SpoolFacet};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
-use crate::{GitRefContentNamespace, GitRefName};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.
@@ -113,6 +111,8 @@ use sley::{
     StatusUntrackedMode as SleyStatusUntrackedMode, StreamControl as SleyStreamControl,
 };
 
+use crate::{GitRefContentNamespace, GitRefName};
+
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
@@ -137,7 +137,7 @@ pub struct GitCheckpointRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitOverlayImportHint {
+pub struct GitImportGuidance {
     pub current_branch: String,
     pub missing_branch_count: usize,
     pub missing_branches: Vec<String>,
@@ -163,8 +163,9 @@ pub struct GitOverlayTagTip {
 }
 
 /// How many Git commits reachable from a branch tip have no Heddle mapping
-/// (neither bridge-imported nor checkpointed). Used to report how far a Git
-/// branch moved out-of-band before `heddle adopt --ref` reconciles it.
+/// (neither imported/projection-mapped nor checkpointed). Used to report
+/// how far a Git branch moved out-of-band before `heddle adopt --ref`
+/// reconciles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitOverlayOutOfBandCommits {
     pub count: usize,
@@ -247,14 +248,14 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitBridgeMappingEntry {
+struct GitProjectionMappingEntry {
     change_id: String,
     git_oid: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct GitBridgeMappingFile {
-    entries: Vec<GitBridgeMappingEntry>,
+struct GitProjectionMappingFile {
+    entries: Vec<GitProjectionMappingEntry>,
 }
 
 /// Lazy-clone read-time hydration hook.
@@ -471,7 +472,7 @@ impl Repository {
             Err(err) => {
                 // Hydrator construction failed (factory error or
                 // malformed metadata). Surface as a warning rather
-                // than blocking `open` — eager `heddle status` calls
+                // than blocking `open` — eager `heddle verify` calls
                 // shouldn't fail just because a stale hosted
                 // endpoint is unreachable; the user will get the real
                 // error on the first `require_blob` that needs it.
@@ -576,7 +577,7 @@ impl Repository {
     ///
     /// Unlike [`Repository::init_default`], this keeps the repo unseeded and
     /// mirrors the current Git branch attachment into Heddle's HEAD so
-    /// commands like `heddle status` can immediately reflect the user's
+    /// commands like `heddle verify` can immediately reflect the user's
     /// current branch and dirty worktree.
     pub fn bootstrap_git_overlay(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref();
@@ -1057,7 +1058,7 @@ impl Repository {
         }))
     }
 
-    pub fn git_overlay_import_hint(&self) -> Result<Option<GitOverlayImportHint>> {
+    pub fn git_import_guidance(&self) -> Result<Option<GitImportGuidance>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1079,7 +1080,7 @@ impl Repository {
 
         let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
@@ -1106,7 +1107,7 @@ impl Repository {
             let git_commit = target.to_string();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
@@ -1158,7 +1159,7 @@ impl Repository {
 
         let imported_markers: std::collections::HashSet<MarkerName> =
             self.refs().list_markers()?.into_iter().collect();
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
@@ -1184,7 +1185,7 @@ impl Repository {
             let git_commit = target.to_string();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             )?;
@@ -1240,7 +1241,7 @@ impl Repository {
             return Ok(None);
         };
         let full_name = GitRefName::remote_tracking_full_name(name);
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         for reference in git_repo.references().list_refs().map_err(|error| {
@@ -1260,7 +1261,7 @@ impl Repository {
             };
             return self.git_overlay_mapped_change_for_commit(
                 &target.to_string(),
-                &bridge_mapping,
+                &projection_mapping,
                 &ingest_mapping,
                 &checkpoint_mapping,
             );
@@ -1358,11 +1359,11 @@ impl Repository {
         }))
     }
 
-    fn git_overlay_bridge_mapping(&self) -> Result<HashMap<String, String>> {
+    fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
         let path = self
             .heddle_dir
-            .join("git-bridge")
-            .join("bridge-mapping.json");
+            .join("git-projection")
+            .join("git-projection-mapping.json");
         if !path.exists() {
             return Ok(HashMap::new());
         }
@@ -1372,7 +1373,7 @@ impl Repository {
             return Ok(HashMap::new());
         }
 
-        let file: GitBridgeMappingFile = serde_json::from_str(&contents)?;
+        let file: GitProjectionMappingFile = serde_json::from_str(&contents)?;
         Ok(file
             .entries
             .into_iter()
@@ -1443,11 +1444,11 @@ impl Repository {
     fn git_overlay_mapped_change_for_commit(
         &self,
         git_commit: &str,
-        bridge_mapping: &HashMap<String, String>,
+        projection_mapping: &HashMap<String, String>,
         ingest_mapping: &HashMap<String, String>,
         checkpoint_mapping: &HashMap<String, String>,
     ) -> Result<Option<ChangeId>> {
-        let Some(change) = bridge_mapping
+        let Some(change) = projection_mapping
             .get(git_commit)
             .or_else(|| ingest_mapping.get(git_commit))
             .or_else(|| checkpoint_mapping.get(git_commit))
@@ -1488,9 +1489,9 @@ impl Repository {
         &self,
         change_id: &ChangeId,
     ) -> Result<Option<String>> {
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         if let Some(git_commit) =
-            self.git_overlay_mapped_git_commit_for_change_in(change_id, &bridge_mapping)?
+            self.git_overlay_mapped_git_commit_for_change_in(change_id, &projection_mapping)?
         {
             return Ok(Some(git_commit));
         }
@@ -1510,12 +1511,12 @@ impl Repository {
         &self,
         git_commit: &str,
     ) -> Result<Option<ChangeId>> {
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         self.git_overlay_mapped_change_for_commit(
             git_commit,
-            &bridge_mapping,
+            &projection_mapping,
             &ingest_mapping,
             &checkpoint_mapping,
         )
@@ -1529,7 +1530,7 @@ impl Repository {
     }
 
     /// Count the Git commits reachable from `tip_git_commit` that are not
-    /// represented in Heddle state (no served bridge mapping, ingest identity
+    /// represented in Heddle state (no Git Projection Mapping, ingest identity
     /// mapping, or checkpoint mapping). The walk prunes at the first mapped
     /// commit on each lineage, so the cost is proportional to the out-of-band
     /// suffix, capped at `GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT`.
@@ -1551,7 +1552,7 @@ impl Repository {
             return Ok(None);
         };
 
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let projection_mapping = self.git_projection_mapping()?;
         let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
 
@@ -1566,7 +1567,7 @@ impl Repository {
             if self
                 .git_overlay_mapped_change_for_commit(
                     &git_commit,
-                    &bridge_mapping,
+                    &projection_mapping,
                     &ingest_mapping,
                     &checkpoint_mapping,
                 )?
@@ -1702,7 +1703,7 @@ impl Repository {
         }
 
         let git_dir = resolve_git_dir(&self.root)?;
-        let raw_git_next_action = "heddle bridge git status";
+        let raw_git_next_action = "heddle verify";
         let candidates = [
             (
                 git_dir.join("rebase-merge"),
@@ -2384,7 +2385,7 @@ impl Repository {
     ///
     /// Use this whenever a hash recorded in a `State.tree` field or as
     /// a subtree `TreeEntry` MUST resolve to an object: presentation
-    /// paths (`heddle status`, `heddle ready`, `heddle stash show`),
+    /// paths (`heddle verify`, `heddle ready`, `heddle stash show`),
     /// mutation paths (`heddle revert`, `heddle cherry-pick`,
     /// `heddle goto`, `heddle resolve`), and inspection paths
     /// (semantic diff, harness baseline) all qualify.
@@ -2877,7 +2878,12 @@ mod tests {
             .args(args)
             .status()
             .expect("spawn git");
-        assert!(status.success(), "git {:?} failed in {}", args, root.display());
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            root.display()
+        );
     }
 
     fn git_output(root: &Path, args: &[&str]) -> String {
@@ -2980,10 +2986,6 @@ mod tests {
         assert_eq!(status.ahead, 0);
         assert_eq!(status.behind, 0);
         assert!(status.upstream.is_empty());
-        assert!(
-            status
-                .message
-                .contains("has no upstream tracking branch")
-        );
+        assert!(status.message.contains("has no upstream tracking branch"));
     }
 }

@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
-Heddle is an AI-native version control CLI written in Rust. It keeps its own state model and uses the Git bridge/adapter when you want to adopt an existing Git repository, adding:
+Heddle is an agent-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures and Git-compatible commits with explicit human and agent attribution
@@ -14,8 +14,8 @@ Heddle is an AI-native version control CLI written in Rust. It keeps its own sta
 ```bash
 cargo install heddle-cli
 cd /path/to/your/git/repo
-heddle status            # inspect Git safely; Heddle will print the exact init command
-heddle init              # initialize Heddle sidecar metadata for this Git checkout
+heddle status              # inspect Git safely; Heddle prints the exact next command
+heddle adopt --ref main    # initialize Heddle metadata and map the branch
 heddle verify
 ```
 
@@ -30,7 +30,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to adopt the repo
 
-Run the exact `heddle init` command printed by `heddle status` to create Heddle's local sidecar data for the active Git checkout. In Git-overlay mode, Git commits, trees, branches, tags, and packs stay in `.git`; Heddle stores captures, threads, provenance, discussions, and other native metadata in `.heddle`. Lower-level `heddle bridge git ...` commands remain available for explicit Git-adapter import/export/sync work, and `heddle adopt` is the deliberate conversion path when you want Git history copied into native Heddle storage.
+Run the exact command printed by `heddle status`. In a plain Git repo with commits, that is usually `heddle adopt --ref <branch>`: it creates Heddle sidecar data if needed and imports the selected Git branch into Heddle's mapping. Use `heddle init` when you only want the observe-only sidecar bootstrap, such as an unborn Git repo or an explicit no-import setup. In Git-overlay mode, Git commits, trees, branches, tags, packs, index, and worktree state stay in the checkout's real `.git`; Heddle stores captures, threads, provenance, discussions, and Git projection metadata in `.heddle`. Use `heddle import git`, `heddle export git`, `heddle sync git`, and `heddle fsck --repair git` for explicit Git projection work; they operate on the checkout's real `.git` and do not create a hidden local mirror.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -46,7 +46,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Semantic diff and compare
 - Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
-- Git adapter/bridge: sidecar overlay, explicit native adoption, import, export, sync
+- Git overlay: direct `.git` integration, explicit native adoption, import, export, sync
 - Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
@@ -54,7 +54,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 
 - Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
 - Verification and verification metadata across the wire protocol
-- Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; the bridge export/checkout gate that withholds non-served commits from a Git mirror is landing; hosted serve-side enforcement is in progress
+- Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; Git projection visibility gating for exports and checkouts is landing; hosted serve-side enforcement is in progress
 
 ### Planned
 
@@ -71,7 +71,7 @@ The 1.0 stability criterion — coverage thresholds, performance budgets, format
 cargo install heddle-cli
 ```
 
-The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git-adapter-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
+The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git projection-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
 
 ### From source
 
@@ -85,26 +85,29 @@ Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
 ## Getting Started
 
-New to Heddle? Initialize once, set attribution if needed, then use
-`heddle commit` as the everyday save boundary:
+New to Heddle? In an existing Git checkout, start with `heddle status` and run the exact `adopt` command it prints:
 
 ```bash
-heddle init
+heddle status
+heddle adopt --ref main
+heddle commit -m "start project"
+```
+
+For a new or unborn repo, initialize once, set attribution if needed, then use `heddle commit` as the everyday save boundary:
+
+```bash
 heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle commit -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates a Heddle sidecar and leaves Git
-history in `.git`. `heddle commit` records the Heddle state and the
-matching Git checkpoint. `heddle status` always prints the next useful
-command when there is an obvious one.
+In a Git checkout, `heddle adopt` creates a Heddle sidecar if needed and maps the selected Git history into Heddle. `heddle init` is the explicit no-import sidecar bootstrap. Git history remains in the checkout's real `.git`; `heddle commit` records the Heddle state and the matching Git checkpoint. `heddle status` always prints the next useful command when there is an obvious one.
 
 ### The verb-by-verb tour
 
 ```bash
-# In an ordinary Git repo: inspect, initialize the sidecar, and verify
+# In an ordinary Git repo: inspect, adopt the current branch, and verify
 heddle status
-heddle init
+heddle adopt --ref main
 heddle verify
 
 # Save work as one verified Heddle change plus a matching Git commit

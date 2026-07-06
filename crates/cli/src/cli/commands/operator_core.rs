@@ -6,7 +6,7 @@ use chrono::Utc;
 use heddle_core::status::next_action::{NextActionInput, effective_next_action};
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
+    GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, shell_quote, update_thread_state_from_state,
 };
@@ -14,7 +14,7 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::{IndexStage, Repository as SleyRepository};
 
 use super::{
-    git_overlay_health::{
+    verification_health::{
         RepositoryVerificationState, action_template, repository_verification_blockers,
         repository_verification_primary_command,
     },
@@ -691,7 +691,7 @@ fn raw_git_operation_handoff(
 }
 
 fn raw_git_preservation_command() -> String {
-    "heddle bridge git status".to_string()
+    "heddle verify".to_string()
 }
 
 fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) -> String {
@@ -703,7 +703,7 @@ fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) 
 pub(crate) fn recommend_next_action(
     operation: Option<&RepositoryOperationStatus>,
     remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitOverlayImportHint>,
+    import_hint: Option<&GitImportGuidance>,
     fallback: Option<&str>,
 ) -> String {
     effective_next_action(NextActionInput::default(
@@ -738,7 +738,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
+    use crate::cli::commands::verification_health::{VerificationCheck, machine_contract_coverage};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
@@ -852,10 +852,7 @@ mod tests {
         let output =
             raw_git_operation_handoff("continue", &operation, vec!["conflict.txt".to_string()]);
         assert_eq!(output.status, "blocked");
-        assert_eq!(
-            output.recommended_action.as_deref(),
-            Some("heddle bridge git status")
-        );
+        assert_eq!(output.recommended_action.as_deref(), Some("heddle verify"));
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
         assert!(
