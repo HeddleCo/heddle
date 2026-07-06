@@ -46,16 +46,16 @@ use cli::{
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
 
-fn ingest_into_bridge(bridge: &mut GitProjection<'_>, source: &Path) -> Result<(), String> {
-    let target = test_support::heddle_repo(bridge).root();
+fn ingest_into_git_projection(git_projection: &mut GitProjection<'_>, source: &Path) -> Result<(), String> {
+    let target = test_support::heddle_repo(git_projection).root();
     ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy: false })
         .map_err(|error| error.to_string())?;
-    test_support::stage_ingest_source_in_mirror(bridge, source, &[])
+    test_support::stage_ingest_source_in_mirror(git_projection, source, &[])
         .map_err(|error| error.to_string())?;
-    test_support::build_existing_mapping(bridge, Some(source))
+    test_support::build_existing_mapping(git_projection, Some(source))
         .map_err(|error| error.to_string())?;
-    let mirror_repo = test_support::open_git_repo(bridge).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_mirror(bridge, &mirror_repo)
+    let mirror_repo = test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
+    test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())
 }
 
@@ -286,19 +286,19 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitProjection::new(&repo);
-    ingest_into_bridge(&mut bridge, source)
+    let mut git_projection = GitProjection::new(&repo);
+    ingest_into_git_projection(&mut git_projection, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
     // A writable odb for tree-OID resolution (git trees are content-addressed,
     // so the OID is independent of which repo it lands in).
-    let recon_repo = bridge
+    let recon_repo = git_projection
         .reconstruction_repo()
         .unwrap_or_else(|e| panic!("[{case}] open reconstruction repo failed: {e}"));
 
     for sha in &shas {
         let golden = cat_commit(source, sha);
-        let reconstructed = bridge
+        let reconstructed = git_projection
             .reconstruct_commit_for_git_sha(&recon_repo, sha)
             .unwrap_or_else(|e| panic!("[{case}] reconstruct {sha} failed: {e}"))
             .unwrap_or_else(|| panic!("[{case}] no Heddle state maps to commit {sha}"));
@@ -341,8 +341,8 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
-    let mut bridge = GitProjection::new(&repo);
-    ingest_into_bridge(&mut bridge, source)
+    let mut git_projection = GitProjection::new(&repo);
+    ingest_into_git_projection(&mut git_projection, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
     // A FRESH bare repo, separate from the legacy Bridge Mirror: it has never held any
@@ -361,7 +361,7 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
              reconstruction — the from-state independence guarantee is void"
         );
 
-        let written = bridge
+        let written = git_projection
             .reconstruct_and_write_commit_for_git_sha(&fresh, sha)
             .unwrap_or_else(|e| panic!("[{case}] reconstruct+write {sha} failed: {e}"))
             .unwrap_or_else(|| panic!("[{case}] no Heddle state maps to commit {sha}"));

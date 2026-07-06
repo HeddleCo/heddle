@@ -169,7 +169,7 @@ pub fn write_note(
         &commit_oid,
         &json,
         "heddle: state metadata",
-        &bridge_notes_identity(),
+        &git_projection_notes_identity(),
         sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
     )
     .map_err(git_err)?;
@@ -207,7 +207,7 @@ pub fn remove_notes(
         &notes_ref,
         &annotated,
         "heddle: retract state metadata",
-        &bridge_notes_identity(),
+        &git_projection_notes_identity(),
         sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
     )
     .map_err(git_err)?;
@@ -257,7 +257,7 @@ pub(crate) fn read_all_notes(
     Ok(out)
 }
 
-fn bridge_notes_identity() -> sley::notes::NotesCommitIdentity {
+fn git_projection_notes_identity() -> sley::notes::NotesCommitIdentity {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

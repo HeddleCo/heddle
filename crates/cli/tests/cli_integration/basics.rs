@@ -1255,9 +1255,9 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_no_legacy_verification_sidecars(&bridge);
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
@@ -1282,9 +1282,9 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
     );
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_no_legacy_verification_sidecars(&bridge);
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]
@@ -1317,9 +1317,9 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     );
 
     // Direct Git-backed refs are readable without a separate import hint.
-    let bridge_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-    let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_no_legacy_verification_sidecars(&bridge);
+    let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let status: Value = serde_json::from_str(&status_output).unwrap();
+    assert_no_legacy_verification_sidecars(&status);
 }
 
 #[test]

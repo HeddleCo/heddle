@@ -7,6 +7,7 @@ use heddle_core::{FsckOptions, FsckRepair, fsck};
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, FsckRepairTarget, execution_context_from_cli, render, should_output_json};
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_fsck(
     cli: &Cli,
     full: bool,

@@ -1513,13 +1513,17 @@ mod tests {
             assert_eq!(reloaded.get_commit(&git_oid), map.get_commit(&git_oid));
         }
 
-        let bridge_mapping_path = gitdir
+        // TODO(git-projection vocab): on-disk filename still "bridge-mapping.json"
+        // (and the ".heddle/git-bridge/" directory). It is a PERSISTED cache read
+        // back on later runs across cli/core/repo/ingest; renaming it would orphan
+        // existing repos. Left as-is pending a coordinated hard-rename or read-fallback.
+        let git_projection_mapping_path = gitdir
             .path()
             .join(".heddle")
             .join("git-bridge")
             .join("bridge-mapping.json");
         assert!(
-            !bridge_mapping_path.exists(),
+            !git_projection_mapping_path.exists(),
             "ingest import must not publish the served Git Projection Mapping cache"
         );
         assert!(

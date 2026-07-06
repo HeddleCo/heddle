@@ -2501,7 +2501,7 @@ pub(crate) fn set_reference(
     let reflog = sley::plumbing::sley_refs::ReflogEntry {
         old_oid,
         new_oid: target,
-        committer: bridge_signature(),
+        committer: git_projection_signature(),
         message: log_message.as_bytes().to_vec(),
     };
     let mut tx = refs.transaction();
@@ -2576,7 +2576,7 @@ fn update_checkout_head_ref(
     let head_reflog = sley::plumbing::sley_refs::ReflogEntry {
         old_oid,
         new_oid: target,
-        committer: bridge_signature(),
+        committer: git_projection_signature(),
         message: log_message.as_bytes().to_vec(),
     };
     set_reference(repo, &ref_name, target, expected, log_message)?;
@@ -2676,7 +2676,7 @@ fn git_config_value(value: &str) -> GitProjectionResult<String> {
     Ok(out)
 }
 
-fn bridge_signature() -> Vec<u8> {
+fn git_projection_signature() -> Vec<u8> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)

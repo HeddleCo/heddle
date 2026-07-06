@@ -403,6 +403,7 @@ fn run_git_export(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_git_import(
     cli: &Cli,
     repo: &Repository,

@@ -236,7 +236,7 @@ fn set_ref(
         Some(sley::plumbing::sley_refs::ReflogEntry {
             old_oid,
             new_oid: oid,
-            committer: bridge_identity(),
+            committer: git_projection_identity(),
             message: message.as_bytes().to_vec(),
         }),
     );
@@ -295,7 +295,7 @@ fn peeled_oid(
     }
 }
 
-fn bridge_identity() -> Vec<u8> {
+fn git_projection_identity() -> Vec<u8> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
