@@ -2929,9 +2929,9 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
             "--preview",
@@ -2941,36 +2941,46 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     .expect("neutral reconcile preview should succeed");
     let neutral_preview: Value =
         serde_json::from_str(&neutral_preview_json).expect("neutral preview JSON parses");
-    assert_eq!(neutral_preview["status"], "preview", "{neutral_preview}");
-    assert_eq!(neutral_preview["prefer"], Value::Null, "{neutral_preview}");
+    assert_eq!(neutral_preview["valid"], true, "{neutral_preview}");
     assert_eq!(
-        neutral_preview["recommended_action"],
-        Value::Null,
-        "neutral local reconcile preview must not bias automation toward one side: {neutral_preview}"
+        neutral_preview["repair_target"], "git",
+        "{neutral_preview}"
+    );
+    assert_eq!(
+        neutral_preview["repaired"], false,
+        "neutral local reconcile preview must not mutate any side: {neutral_preview}"
+    );
+    let neutral_repairs = neutral_preview["repairs"]
+        .as_array()
+        .expect("preview should report repair choices");
+    assert_eq!(
+        neutral_repairs.len(),
+        2,
+        "neutral preview should report both local repair choices without biasing automation: {neutral_preview}"
     );
     assert!(
-        neutral_preview["summary"]
-            .as_str()
-            .is_some_and(|summary| summary.contains("does not push")
-                && summary.contains("move refs")
-                && summary.contains("change worktree files")),
-        "neutral preview should explain that it is inspection-only: {neutral_preview}"
+        neutral_repairs
+            .iter()
+            .all(|repair| repair["repaired"] == false),
+        "neutral preview must leave every repair choice unapplied: {neutral_preview}"
     );
-    assert_eq!(
-        neutral_preview["recovery_commands"],
-        serde_json::json!([
-            "heddle fsck --repair git --prefer heddle --ref main --preview",
-            "heddle fsck --repair git --prefer git --ref main --preview"
-        ]),
-        "{neutral_preview}"
+    let neutral_details = neutral_repairs
+        .iter()
+        .filter_map(|repair| repair["detail"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        neutral_details.contains(&"heddle fsck --repair git --prefer heddle --ref main --preview")
+            && neutral_details
+                .contains(&"heddle fsck --repair git --prefer git --ref main --preview"),
+        "neutral preview should surface both prefer-heddle and prefer-git recovery paths: {neutral_preview}"
     );
     let no_direction = heddle_output(
         &[
             "--output",
             "json",
-            "bridge",
+            "fsck",
+            "--repair",
             "git",
-            "reconcile",
             "--ref",
             "main",
         ],
@@ -2990,7 +3000,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let no_direction_envelope: Value =
         serde_json::from_str(no_direction_stderr).expect("no-direction envelope parses");
     assert_eq!(
-        no_direction_envelope["kind"], "reconcile_direction_required",
+        no_direction_envelope["kind"], "git_repair_direction_required",
         "{no_direction_envelope}"
     );
     assert_eq!(

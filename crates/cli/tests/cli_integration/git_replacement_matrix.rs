@@ -390,7 +390,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
     let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
     assert_eq!(status["operation"]["scope"], "git");
     assert_eq!(status["operation"]["kind"], "merge");
-    assert_eq!(status["recommended_action"], "heddle status");
+    assert_eq!(status["recommended_action"], "heddle verify");
 
     let continued_output =
         heddle_output_without_git(&["--output", "json", "continue"], temp.path());
@@ -415,7 +415,7 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
             .is_some_and(|message| message.contains("no-git runtime")),
         "continue handoff should explain the no-git contract: {continued}"
     );
-    assert_eq!(continued["recommended_action"], "heddle status");
+    assert_eq!(continued["recommended_action"], "heddle verify");
 }
 
 #[test]
