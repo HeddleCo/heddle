@@ -68,7 +68,13 @@ type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
 
 struct GitLanePushPlan {
     local_revision_address: String,
-    pack: GitPackPushPlan,
+    /// `None` when want-only packing found nothing new to send: every object
+    /// reachable from the pushed refs is already present on the server (the
+    /// server's ref tips, learned from `ListRefs`, cover the full closure).
+    /// This is the pure ref-move case (e.g. pushing `pr/N` right after `main`
+    /// when it points at an already-present commit) — the client streams only
+    /// the ref updates below, no pack.
+    pack: Option<GitPackPushPlan>,
     /// The N ref updates streamed after the single multi-root pack, one per
     /// direct git-overlay ref (Branch/Tag/Note/Other). Every entry carries
     /// `checkpoint: None` — the discriminator the weft server uses to admit
@@ -482,14 +488,21 @@ impl HostedGrpcClient {
 
         if let Some(git_lane) = git_lane {
             // One multi-root pack (live "uploading" progress), then N
-            // checkpoint-less ref updates (git-mirror mode).
-            send_git_pack_streaming_messages(
-                &tx,
-                &git_lane.pack,
-                self.transport.chunk_size.max(1),
-                progress,
-            )
-            .await?;
+            // checkpoint-less ref updates (git-mirror mode). When want-only
+            // packing found nothing new (the server already holds every pushed
+            // object), `pack` is `None`: skip the pack stream and send only the
+            // ref updates — the near-empty ref-move fast path (heddle#968).
+            if let Some(pack) = git_lane.pack.as_ref() {
+                send_git_pack_streaming_messages(
+                    &tx,
+                    pack,
+                    self.transport.chunk_size.max(1),
+                    progress,
+                )
+                .await?;
+            } else {
+                progress.set_phase("no new objects to pack");
+            }
             progress.set_phase(format!("writing {} refs", git_lane.ref_updates.len()));
             for ref_update in git_lane.ref_updates {
                 tx.send(ref_update).await.map_err(|_| {
@@ -1867,7 +1880,30 @@ fn build_git_mirror_plan_from_sley(
         ));
     }
 
-    let pack = build_git_lane_multi_root_pack_plan(git_repo, roots, chunk_size)?;
+    // Want-only packing (heddle#968). The server told us, per ref, the git oid
+    // it currently holds (`GitRefRemoteExpectation::Value` == `git:<oid>` from
+    // `ListRefs`). Those oids are a "have" boundary: the server already holds
+    // each one and — because git history is a content-addressed DAG — its
+    // entire closure (ancestor commits, trees, blobs). Feeding them to the
+    // reachable-pack walk as a stop-set packs ONLY the objects reachable from
+    // the new roots but not from anything the server already has, instead of
+    // re-packing (and re-uploading) the full closure on every push. A pure
+    // ref-move whose target the server already holds collapses to an empty
+    // pack — see the `None` short-circuit in `build_git_lane_multi_root_pack_plan`.
+    let format = git_repo.object_format();
+    let mut have_boundary: Vec<GitObjectId> = Vec::new();
+    for expectation in remote_ref_expectations.values() {
+        if let GitRefRemoteExpectation::Value(oid_bytes) = expectation
+            && let Ok(oid) = GitObjectId::from_raw(format, oid_bytes)
+        {
+            // A stop-set entry the local walk never reaches is simply inert, so
+            // it is safe to feed every server-held tip: only the ones that are
+            // genuinely ancestors of a pushed root will actually prune the pack.
+            have_boundary.push(oid);
+        }
+    }
+
+    let pack = build_git_lane_multi_root_pack_plan(git_repo, roots, have_boundary, chunk_size)?;
 
     // `local_revision_address` is advisory in mirror mode (per-ref
     // expectations are already applied); use the first resolved target.
@@ -1891,27 +1927,35 @@ fn grpc_git_ref_kind(kind: ClassifiedGitRefKind) -> GrpcGitRefKind {
     }
 }
 
-/// Plan a single pack over `roots` (N for the git-mirror path).
+/// Plan a single pack over `roots` (N for the git-mirror path), excluding every
+/// object reachable from `excluded` (the server's existing ref tips — the "have"
+/// boundary). Returns `Ok(None)` when the exclusions cover the entire reachable
+/// set, i.e. the server already holds every pushed object: a pure ref-move that
+/// needs no pack, only the ref updates (heddle#968 want-only short-circuit).
 fn build_git_lane_multi_root_pack_plan(
     git_repo: &SleyRepository,
     roots: Vec<GitObjectId>,
+    excluded: Vec<GitObjectId>,
     chunk_size: usize,
-) -> Result<GitPackPushPlan, ProtocolError> {
+) -> Result<Option<GitPackPushPlan>, ProtocolError> {
     if roots.is_empty() {
         return Err(ProtocolError::InvalidState(
             "cannot plan a Git pack with no roots".to_string(),
         ));
     }
-    let plan = git_repo
+    let Some(plan) = git_repo
         .reachable_pack_plan()
         .roots(roots.iter().copied())
+        .exclusions(excluded)
         .build()
         .map_err(|err| {
             ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}"))
         })?
-        .ok_or_else(|| {
-            ProtocolError::InvalidState("roots did not produce a reachable Git pack".to_string())
-        })?;
+    else {
+        // Empty reachable set: every object the refs reach is already on the
+        // server. Skip the pack entirely; only the ref updates ship.
+        return Ok(None);
+    };
     let pack_file = NamedTempFile::new().map_err(|err| {
         ProtocolError::InvalidState(format!("create Git pack tempfile: {err}"))
     })?;
@@ -1936,13 +1980,13 @@ fn build_git_lane_multi_root_pack_plan(
         ));
     }
     let transfer_id = format!("git-pack:{}", checksum.to_hex());
-    Ok(GitPackPushPlan {
+    Ok(Some(GitPackPushPlan {
         transfer_id,
         pack_id: checksum.as_bytes().to_vec(),
         pack_size,
         roots,
         pack_file: Arc::new(Mutex::new(pack_file)),
-    })
+    }))
 }
 
 async fn send_git_pack_streaming_messages(
@@ -2916,8 +2960,9 @@ mod tests {
             .write_raw_object(sley::GitObjectType::Commit, commit.write())
             .expect("write commit");
 
-        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64 * 1024)
-            .expect("build git lane pack plan");
+        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], Vec::new(), 64 * 1024)
+            .expect("build git lane pack plan")
+            .expect("non-empty pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
         stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024, Progress::null())
@@ -3033,6 +3078,114 @@ mod tests {
             .collect()
     }
 
+    /// A commit that reuses `parent`'s tree/blob closure and only adds one new
+    /// blob + tree + commit on top, so a descendant push shares nearly all of
+    /// the parent's objects.
+    fn write_child_commit(
+        git: &sley::Repository,
+        parent: GitObjectId,
+        seed: &str,
+    ) -> GitObjectId {
+        let blob_oid = git
+            .write_blob(format!("content-{seed}\n").as_bytes())
+            .expect("write blob");
+        let tree = sley::TreeObject {
+            entries: vec![sley::plumbing::sley_object::TreeEntry {
+                mode: 0o100644,
+                name: sley::BString::from(format!("{seed}.txt").into_bytes()),
+                oid: blob_oid,
+            }],
+        };
+        let tree_oid = git
+            .write_raw_object(sley::GitObjectType::Tree, tree.write())
+            .expect("write tree");
+        let commit = sley::CommitObject {
+            tree: tree_oid,
+            parents: vec![parent],
+            author: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            committer: b"Tester <test@example.com> 1700000000 +0000".to_vec(),
+            encoding: None,
+            message: format!("commit {seed}\n").into_bytes(),
+        };
+        git.write_raw_object(sley::GitObjectType::Commit, commit.write())
+            .expect("write commit")
+    }
+
+    fn value_expectation(oid: GitObjectId) -> GitRefRemoteExpectation {
+        GitRefRemoteExpectation::Value(oid.as_bytes().to_vec())
+    }
+
+    /// heddle#968: the mirror plan must honor the server's have-boundary
+    /// (`ListRefs` ref tips) and pack ONLY the objects the server is missing,
+    /// instead of re-packing the full closure on every push.
+    ///
+    /// Demonstrates all three regimes on one repo:
+    ///   1. fresh server (no expectations)        → full pack (baseline)
+    ///   2. server already has the base commit     → tiny delta pack
+    ///   3. server already has the exact target    → NO pack (pure ref-move)
+    #[test]
+    fn git_mirror_plan_packs_only_wanted_objects_against_have_boundary() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut git = sley::Repository::init(dir.path()).expect("init git");
+
+        // A base branch with a chunky closure, then a descendant that adds a
+        // single new object on top and shares everything else.
+        let base = write_commit(&git, "base-with-a-reasonably-large-payload");
+        let mut tip = base;
+        for i in 0..8 {
+            tip = write_child_commit(&git, tip, &format!("layer-{i}"));
+        }
+        let descendant = write_child_commit(&git, tip, "descendant-adds-one-object");
+        set_ref(&mut git, "refs/heads/main", descendant);
+
+        // (1) Fresh server: nothing is on the far side, so the full closure
+        //     packs — this is the status-quo "re-pack everything" cost.
+        let full = build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new())
+            .expect("full plan");
+        let full_pack = full.pack.as_ref().expect("fresh server produces a pack");
+        let full_size = full_pack.pack_size;
+        assert!(full_size > 0, "baseline full pack must be non-empty");
+
+        // (2) Server already holds `tip` (e.g. `main` was pushed first). Only
+        //     `descendant`'s single new blob/tree/commit is missing, so the
+        //     want-only pack is DRAMATICALLY smaller than the full closure.
+        let mut have_tip = HashMap::new();
+        have_tip.insert("refs/heads/main".to_string(), value_expectation(tip));
+        let delta = build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_tip)
+            .expect("delta plan");
+        let delta_pack = delta
+            .pack
+            .as_ref()
+            .expect("descendant still has one new object to pack");
+        let delta_size = delta_pack.pack_size;
+        assert!(
+            delta_size * 4 < full_size,
+            "want-only packing must be dramatically smaller than a full re-pack \
+             (delta {delta_size} bytes vs full {full_size} bytes)",
+        );
+
+        // (3) Pure ref-move: the server already holds the EXACT ref target, so
+        //     there is nothing new to pack. The plan short-circuits to `None`
+        //     (only the ref update ships) — the `pr/N`-after-`main` fast path.
+        let mut have_target = HashMap::new();
+        have_target.insert(
+            "refs/heads/main".to_string(),
+            value_expectation(descendant),
+        );
+        let ref_only = build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_target)
+            .expect("ref-only plan");
+        assert!(
+            ref_only.pack.is_none(),
+            "pushing a ref the server already has must send NO pack",
+        );
+        // The ref update itself is still present — correctness preserved.
+        assert_eq!(
+            ref_only.ref_updates.len(),
+            1,
+            "the ref update still ships even with an empty want set",
+        );
+    }
+
     /// `ReachablePackPlan::prepare_to_file` must emit the same pack bytes as the
     /// legacy `write_reachable_pack_to_writer` path (wire checksum + size).
     #[test]
@@ -3041,8 +3194,10 @@ mod tests {
         let git = sley::Repository::init(dir.path()).expect("init git");
         let commit_oid = write_commit(&git, "byte-identity");
 
-        let pack_plan = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64 * 1024)
-            .expect("build pack plan");
+        let pack_plan =
+            build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], Vec::new(), 64 * 1024)
+                .expect("build pack plan")
+                .expect("non-empty pack plan");
 
         let mut legacy_pack = Vec::new();
         let legacy = sley::plumbing::sley_odb::write_reachable_pack_to_writer(
@@ -3141,8 +3296,11 @@ mod tests {
             "annotated tag ref is peeled to its underlying commit",
         );
 
-        // ONE pack, whose root set equals the resolved ref targets.
-        let mut pack_roots: Vec<GitObjectId> = plan.pack.roots.clone();
+        // ONE pack, whose root set equals the resolved ref targets. With no
+        // remote expectations every object is new, so the want-only walk still
+        // produces a full pack.
+        let plan_pack = plan.pack.as_ref().expect("full pack for fresh server");
+        let mut pack_roots: Vec<GitObjectId> = plan_pack.roots.clone();
         pack_roots.sort_by_key(|oid| oid.to_hex());
         let mut expected_roots = vec![main_commit, feature_commit, tag_oid];
         expected_roots.sort_by_key(|oid| oid.to_hex());
@@ -3154,7 +3312,7 @@ mod tests {
         // The single pack must actually contain the whole closure: main,
         // feature, tag object + tagged commit, plus their trees/blobs.
         let (tx, mut rx) = mpsc::channel(64);
-        stream_git_pack_messages_blocking(tx, plan.pack.clone(), 64 * 1024, Progress::null())
+        stream_git_pack_messages_blocking(tx, plan_pack.clone(), 64 * 1024, Progress::null())
             .expect("stream mirror pack");
         let mut pack_bytes = Vec::new();
         while let Some(message) = rx.blocking_recv() {
@@ -3167,7 +3325,7 @@ mod tests {
         }
         assert_eq!(
             pack_bytes.len() as u64,
-            plan.pack.pack_size,
+            plan_pack.pack_size,
             "streamed pack size must match plan",
         );
         let indexed = sley::plumbing::sley_odb::index_raw_pack(&pack_bytes, git.object_format())
@@ -3474,8 +3632,9 @@ mod tests {
         let git = sley::Repository::init(dir.path()).expect("init git");
         let commit_oid = write_commit(&git, "progress");
         // Small chunk size so the pack streams over several chunks.
-        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], 64)
-            .expect("build pack plan");
+        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], Vec::new(), 64)
+            .expect("build pack plan")
+            .expect("non-empty pack plan");
 
         let sink = std::sync::Arc::new(PhaseCapturingSink::default());
         struct Forward(std::sync::Arc<PhaseCapturingSink>);
