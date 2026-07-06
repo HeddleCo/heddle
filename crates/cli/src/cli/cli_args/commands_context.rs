@@ -35,6 +35,7 @@ pub enum ContextCommands {
     Audit(ContextAuditArgs),
 
     /// Mine external sources for context annotations.
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     Reason {
         #[command(subcommand)]
         command: ContextReasonCommands,
@@ -52,13 +53,14 @@ pub struct ContextTargetArgs {
     pub state: Option<String>,
 }
 
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum ContextReasonCommands {
     /// Mine Git-agent transcripts and attach reasoning as context annotations.
     Git(ContextReasonGitArgs),
 }
 
-#[cfg(feature = "ingest")]
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextReasonGitArgs {
     /// Source git repository the transcripts are about.

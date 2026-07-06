@@ -15,6 +15,8 @@ use cli::cli::{
     cli_args::SyncCommands,
     commands::{cmd_export_git, cmd_git_overlay_guide, cmd_import_git, cmd_sync_git},
 };
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+use cli::cli::commands::cmd_context_reason_git;
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
@@ -28,7 +30,7 @@ use cli::{
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
             cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_git_projection,
             cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_reason_git, cmd_context_rm,
+            cmd_context_history, cmd_context_list, cmd_context_rm,
             cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
             cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff,
             cmd_discuss, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck,
@@ -733,7 +735,7 @@ async fn async_main() -> Result<()> {
                 cmd_context_suggest(&cli, args.r#ref.clone(), args.limit).await
             }
             ContextCommands::Audit(args) => cmd_context_audit(&cli, args.r#ref.clone()).await,
-            #[cfg(feature = "ingest")]
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
             ContextCommands::Reason { command } => match command {
                 cli::cli::cli_args::ContextReasonCommands::Git(args) => cmd_context_reason_git(
                     &cli,

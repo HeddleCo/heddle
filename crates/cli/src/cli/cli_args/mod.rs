@@ -59,7 +59,9 @@ pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, Syn
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
 };
-pub use commands_context::{ContextCommands, ContextReasonCommands};
+pub use commands_context::ContextCommands;
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+pub use commands_context::ContextReasonCommands;
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
     DiscussShowArgs, ResolveModeArg,

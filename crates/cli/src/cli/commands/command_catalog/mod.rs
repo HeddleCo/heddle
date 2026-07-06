@@ -1756,9 +1756,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    #[cfg(feature = "ingest")]
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     entry(&["context", "reason"], category(GROUP, "context")),
-    #[cfg(feature = "ingest")]
+    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     entry(
         &["context", "reason", "git"],
         surface(
@@ -4787,7 +4787,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ContextCommands::Check(_) => vec!["context", "check"],
             ContextCommands::Suggest(_) => vec!["context", "suggest"],
             ContextCommands::Audit(_) => vec!["context", "audit"],
-            #[cfg(feature = "ingest")]
+            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
             ContextCommands::Reason { command } => match command {
                 crate::cli::cli_args::ContextReasonCommands::Git(_) => {
                     vec!["context", "reason", "git"]
