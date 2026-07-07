@@ -1848,9 +1848,7 @@ dependencies = [
  "hex",
  "p256 0.14.0",
  "pkcs8 0.11.0",
- "rsa",
  "sec1 0.8.1",
- "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
 ]

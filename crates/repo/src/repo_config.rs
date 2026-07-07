@@ -62,8 +62,8 @@ pub struct RedactConfig {
 }
 
 /// One trusted operator key entry. Algorithm and key strings use the
-/// same wire-format as `StateSignature`: `algorithm` is `ed25519`,
-/// `p256`, or `rsa`; `public_key` is hex-encoded raw key bytes.
+/// same wire-format as `StateSignature`: `algorithm` is `ed25519`
+/// or `p256`; `public_key` is hex-encoded raw key bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrustedKey {
     pub algorithm: String,

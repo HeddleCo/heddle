@@ -61,7 +61,7 @@ pub struct RedactTrustAddArgs {
     /// passed to `heddle redact apply --sign-with`.
     #[arg(long, value_name = "PATH", group = "key_source")]
     pub from_pem: Option<std::path::PathBuf>,
-    /// Algorithm identifier (`ed25519`, `rsa`, `p256`) when supplying
+    /// Algorithm identifier (`ed25519`, `p256`) when supplying
     /// the raw hex-encoded public key directly via `--public-key`.
     #[arg(long, value_name = "ALGO", requires = "public_key")]
     pub algorithm: Option<String>,
@@ -108,7 +108,7 @@ pub struct RedactApplyArgs {
     #[arg(long, value_name = "PATH")]
     pub sign_with: Option<std::path::PathBuf>,
     /// Override the signing algorithm. Defaults to autodetect from the
-    /// key file's PEM header. Accepts `ed25519`, `rsa`, `p256`.
+    /// key file's PEM header. Accepts `ed25519`, `p256`.
     #[arg(long, value_name = "ALGO", requires = "sign_with")]
     pub sign_algo: Option<String>,
 }

@@ -14,7 +14,6 @@ pub enum SignerError {
     Io(std::io::Error),
     Pem(String),
     Ed25519(String),
-    Rsa(String),
     P256(String),
     Pkcs8(String),
     KeyNotFound(PathBuf),
@@ -35,7 +34,6 @@ impl std::fmt::Display for SignerError {
             SignerError::Io(e) => write!(f, "I/O error: {}", e),
             SignerError::Pem(msg) => write!(f, "PEM error: {}", msg),
             SignerError::Ed25519(msg) => write!(f, "Ed25519 error: {}", msg),
-            SignerError::Rsa(msg) => write!(f, "RSA error: {}", msg),
             SignerError::P256(msg) => write!(f, "P256 error: {}", msg),
             SignerError::Pkcs8(msg) => write!(f, "PKCS8 error: {}", msg),
             SignerError::KeyNotFound(path) => write!(f, "key file not found: {}", path.display()),
@@ -69,12 +67,6 @@ impl From<std::io::Error> for SignerError {
 impl From<ed25519_dalek::SignatureError> for SignerError {
     fn from(e: ed25519_dalek::SignatureError) -> Self {
         SignerError::Ed25519(e.to_string())
-    }
-}
-
-impl From<rsa::Error> for SignerError {
-    fn from(e: rsa::Error) -> Self {
-        SignerError::Rsa(e.to_string())
     }
 }
 

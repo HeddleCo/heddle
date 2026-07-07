@@ -7,8 +7,8 @@ use objects::{
 use tempfile::TempDir;
 
 use crate::{
-    Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError, StateSignatureError,
-    StateSigningExt, load_signer, verify_payload_signature,
+    Ed25519Signer, P256Signer, Signer, SignerError, StateSignatureError, StateSigningExt,
+    load_signer, verify_payload_signature,
 };
 
 fn assert_verifies_with_dispatch(signer: &dyn Signer, payload: &[u8]) {
@@ -85,12 +85,10 @@ fn sample_state() -> State {
 #[test]
 fn verify_payload_signature_dispatches_supported_signers() {
     let ed25519 = Ed25519Signer::generate().expect("generate Ed25519 signer");
-    let rsa = RsaSigner::generate(2048).expect("generate RSA signer");
     let p256 = P256Signer::generate().expect("generate P-256 signer");
     let payload = b"dispatch payload";
 
     assert_verifies_with_dispatch(&ed25519, payload);
-    assert_verifies_with_dispatch(&rsa, payload);
     assert_verifies_with_dispatch(&p256, payload);
 }
 
@@ -109,10 +107,6 @@ fn verify_payload_signature_rejects_wrong_payload_key_and_signature() {
     let ed25519 = Ed25519Signer::generate().expect("generate Ed25519 signer");
     let other_ed25519 = Ed25519Signer::generate().expect("generate other Ed25519 signer");
     assert_dispatch_rejects_wrong_payload_key_and_signature(&ed25519, other_ed25519.public_key());
-
-    let rsa = RsaSigner::generate(2048).expect("generate RSA signer");
-    let other_rsa = RsaSigner::generate(2048).expect("generate other RSA signer");
-    assert_dispatch_rejects_wrong_payload_key_and_signature(&rsa, other_rsa.public_key());
 
     let p256 = P256Signer::generate().expect("generate P-256 signer");
     let other_p256 = P256Signer::generate().expect("generate other P-256 signer");
@@ -139,16 +133,6 @@ fn load_signer_reads_generated_pkcs8_keys_explicitly_and_implicitly() {
         &ed25519_pem,
         "ed25519",
         "ed25519.pem",
-    );
-
-    let rsa = RsaSigner::generate(2048).expect("generate RSA signer");
-    let rsa_pem = rsa.to_pem().expect("export RSA PEM");
-    assert_loads_pkcs8_explicitly_and_implicitly(
-        "rsa",
-        rsa.public_key(),
-        &rsa_pem,
-        "rsa",
-        "rsa.pem",
     );
 
     let p256 = P256Signer::generate().expect("generate P-256 signer");
@@ -201,6 +185,12 @@ fn load_signer_rejects_unsupported_algorithm_hint_and_key_formats() {
         matches!(err, SignerError::UnsupportedAlgorithm(algorithm) if algorithm == "ecdsa-p384")
     );
 
+    let err = match load_signer(&path, Some("rsa")) {
+        Ok(_) => panic!("removed RSA hint must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, SignerError::UnsupportedAlgorithm(algorithm) if algorithm == "rsa"));
+
     let unsupported_path = write_key(
         &temp,
         "certificate.pem",
@@ -241,12 +231,6 @@ fn invalid_seed_public_keys_and_signature_shapes_are_rejected() {
     let err = verify_payload_signature(payload, "ed25519", ed25519.public_key(), &[0; 63])
         .expect_err("short Ed25519 signature fails");
     assert!(matches!(err, SignerError::InvalidSignature(message) if message.contains("64 bytes")));
-
-    let rsa = RsaSigner::generate(2048).expect("generate RSA signer");
-    let rsa_signature = rsa.sign(payload).expect("sign payload");
-    let err = verify_payload_signature(payload, "rsa", b"not pem", &rsa_signature)
-        .expect_err("invalid RSA public key fails");
-    assert!(matches!(err, SignerError::InvalidPublicKey(_)));
 
     let p256 = P256Signer::generate().expect("generate P-256 signer");
     let p256_signature = p256.sign(payload).expect("sign payload");

@@ -77,7 +77,6 @@ regex-lite = "0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider"] }
 rmp-serde = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
-rsa = { version = "0.9", features = ["pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 schemars = { version = "1.2", features = ["chrono04"] }
 sec1 = { version = "0.8", features = ["pem"] }

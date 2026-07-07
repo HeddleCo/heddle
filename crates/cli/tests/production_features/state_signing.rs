@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use crypto::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
+use crypto::{Ed25519Signer, P256Signer, Signer, SignerError};
 use objects::store::ObjectStore;
 use serial_test::serial;
 
@@ -178,20 +178,6 @@ fn test_sign_verify_ed25519() {
 }
 
 #[test]
-fn test_sign_verify_rsa() {
-    let signer = RsaSigner::generate(2048).expect("generate RSA key");
-    let data = b"test data for signing";
-
-    let signature = signer.sign(data).expect("sign data");
-    signer.verify(data, &signature).expect("verify signature");
-
-    let err = signer
-        .verify(b"wrong data", &signature)
-        .expect_err("verify should fail");
-    assert!(matches!(err, SignerError::VerificationFailed));
-}
-
-#[test]
 fn test_sign_verify_p256() {
     let signer = P256Signer::generate().expect("generate P256 key");
     let data = b"test data for signing";
@@ -312,20 +298,16 @@ fn test_signature_tampering_detected() {
 #[test]
 fn test_cross_algorithm_verification() {
     let ed_signer = Ed25519Signer::generate().expect("generate Ed25519");
-    let rsa_signer = RsaSigner::generate(2048).expect("generate RSA");
     let p256_signer = P256Signer::generate().expect("generate P256");
 
     let data = b"same data";
 
     let ed_sig = ed_signer.sign(data).expect("Ed25519 sign");
-    let rsa_sig = rsa_signer.sign(data).expect("RSA sign");
     let p256_sig = p256_signer.sign(data).expect("P256 sign");
 
     ed_signer.verify(data, &ed_sig).expect("verify Ed25519");
-    rsa_signer.verify(data, &rsa_sig).expect("verify RSA");
     p256_signer.verify(data, &p256_sig).expect("verify P256");
 
     assert_eq!(ed_sig.len(), 64, "Ed25519 signature is 64 bytes");
-    assert!(rsa_sig.len() > 64, "RSA signature is larger than 64 bytes");
     assert!(!p256_sig.is_empty(), "P256 signature should not be empty");
 }

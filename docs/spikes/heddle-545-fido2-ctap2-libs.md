@@ -67,7 +67,7 @@ WebAuthn relying-party ceremony shape. The only C dependency it pulls is `hidapi
 
 heddle's identity is an **Ed25519** keypair. The signer abstraction
 (`crates/crypto/src/lib.rs:31-36`) backs three software algorithms today —
-`ed25519`, `rsa`, `p256` (`load_signer`, lib.rs:41-60) — and the auto-mint identity
+`ed25519`, `p256` (`load_signer`, lib.rs:41-60) — and the auto-mint identity
 path (#482) loads a software signer from `identity.toml` to sign state objects.
 
 A hardware-key identity wants the **same abstraction**, but with the private key
