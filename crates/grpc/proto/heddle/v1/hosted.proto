@@ -11,19 +11,11 @@ import "heddle/v1/threads.proto";
 service HostedUserService {
   rpc GetCurrentUserNamespace(GetCurrentUserNamespaceRequest) returns (HostedNamespace);
   rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
-  // DEPRECATED: use ListSpools (weft#394)
-  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse) {
-    option deprecated = true;
-  }
   rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
   rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
   rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
   rpc ListSpools(ListSpoolsRequest) returns (ListSpoolsResponse);
-  // DEPRECATED: use ListSpools (weft#394)
-  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse) {
-    option deprecated = true;
-  }
   rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository);
   rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse);
   rpc CreateGrant(CreateGrantRequest) returns (HostedGrant);
@@ -197,8 +189,6 @@ message SpoolSettings {
   string description = 10;
 }
 
-message ListNamespacesRequest {}
-
 message GetCurrentUserNamespaceRequest {}
 
 message CreateNamespaceRequest {
@@ -231,10 +221,6 @@ message DeleteNamespaceRequest {
   string full_path = 1;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
-}
-
-message ListRepositoriesRequest {
-  string namespace_path = 1;
 }
 
 message ListSpoolsRequest {
@@ -470,14 +456,6 @@ message ListMembersRequest {
 
 message ListMembersResponse {
   repeated MemberEntry entries = 1;
-}
-
-message ListNamespacesResponse {
-  repeated HostedNamespace namespaces = 1;
-}
-
-message ListRepositoriesResponse {
-  repeated HostedRepository repositories = 1;
 }
 
 message ListSpoolsResponse {
