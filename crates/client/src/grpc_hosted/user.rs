@@ -5,11 +5,11 @@ use grpc::heddle::v1::{
     DeleteRepositoryRequest, DetachChildRequest, GetCurrentUserNamespaceRequest,
     GetGovernanceHistoryRequest, GetMembershipHistoryRequest, GovernanceHistoryEntry,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation, ListChildrenRequest,
-    ListGrantsRequest, ListNamespacesRequest, ListRepositoriesRequest,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MembershipHistoryEntry,
-    MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
-    UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
+    ListThreadApprovalsRequest, MembershipHistoryEntry, MonorepoNode, ResolveMonorepoRequest,
+    RevokeApprovalRequest, RevokeSupportAccessRequest, SpoolSummary, SupportAccessGrant,
+    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use tonic::Request;
 use wire::ProtocolError;
@@ -149,15 +149,17 @@ impl HostedGrpcClient {
         Ok(to_protocol_namespace(namespace))
     }
 
-    pub async fn list_namespaces(
+    pub async fn list_spools(
         &mut self,
-    ) -> Result<Vec<wire::HostedNamespaceInfo>, ProtocolError> {
-        let response = authed_call!(self, list_namespaces, "ListNamespaces", ListNamespacesRequest {});
-        Ok(response
-            .namespaces
-            .into_iter()
-            .map(to_protocol_namespace)
-            .collect())
+        repos_only: bool,
+    ) -> Result<Vec<SpoolSummary>, ProtocolError> {
+        let response = authed_call!(
+            self,
+            list_spools,
+            "ListSpools",
+            ListSpoolsRequest { repos_only }
+        );
+        Ok(response.spools)
     }
 
     pub async fn create_namespace(
@@ -199,25 +201,6 @@ impl HostedGrpcClient {
             }
         );
         Ok(to_protocol_repository(repo))
-    }
-
-    pub async fn list_repositories(
-        &mut self,
-        namespace_path: Option<&str>,
-    ) -> Result<Vec<wire::HostedRepositoryInfo>, ProtocolError> {
-        let response = authed_call!(
-            self,
-            list_repositories,
-            "ListRepositories",
-            ListRepositoriesRequest {
-                namespace_path: namespace_path.unwrap_or_default().to_string(),
-            }
-        );
-        Ok(response
-            .repositories
-            .into_iter()
-            .map(to_protocol_repository)
-            .collect())
     }
 
     pub async fn update_namespace(
