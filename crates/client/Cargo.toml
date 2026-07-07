@@ -48,3 +48,10 @@ tempfile.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[lints.rust]
+# ListNamespaces/ListRepositories are deprecated in favor of ListSpools
+# (weft#394). This crate still calls them until the ListSpools migration
+# lands; allow deprecated here so the transitional deprecation signal can
+# stay in the proto without failing `-D warnings`. Remove with the old RPCs.
+deprecated = "allow"
