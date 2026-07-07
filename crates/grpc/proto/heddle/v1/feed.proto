@@ -124,8 +124,10 @@ message BreakingChangeSummary {
 message FeedItemAction {
   string action_id = 1; // "review", "dismiss", "pin", "acted_on"
   string label = 2; // "Review", "Dismiss", "Pin"
-  string url = 3; // deep link into the app
+  string url = 3; // url is emitted ONLY for external links (e.g. GitHub); empty for internal actions — clients compose canonical routes from state_id/thread/repo_path.
   bool is_primary = 4;
+  string state_id = 5; // the change/state this action targets
+  string thread = 6; // the thread the action targets
 }
 
 enum FeedItemKind {

@@ -11,12 +11,19 @@ import "heddle/v1/threads.proto";
 service HostedUserService {
   rpc GetCurrentUserNamespace(GetCurrentUserNamespaceRequest) returns (HostedNamespace);
   rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
-  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  // DEPRECATED: use ListSpools (weft#394)
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse) {
+    option deprecated = true;
+  }
   rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
   rpc SetNamespaceVisibility(SetNamespaceVisibilityRequest) returns (HostedNamespace);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
   rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
-  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+  rpc ListSpools(ListSpoolsRequest) returns (ListSpoolsResponse);
+  // DEPRECATED: use ListSpools (weft#394)
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse) {
+    option deprecated = true;
+  }
   rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository);
   rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse);
   rpc CreateGrant(CreateGrantRequest) returns (HostedGrant);
@@ -230,6 +237,10 @@ message ListRepositoriesRequest {
   string namespace_path = 1;
 }
 
+message ListSpoolsRequest {
+  bool repos_only = 1; // when true, return only content-bearing (repo) spools
+}
+
 message CreateRepositoryRequest {
   string namespace_path = 1;
   string slug = 2;
@@ -304,6 +315,13 @@ message HostedRepository {
   // Unset when the serving registry has no activity data; populated by weft
   // from the refs/state tables (weft wiring is a separate weft-side change).
   google.protobuf.Timestamp last_activity_at = 6;
+}
+
+message SpoolSummary {
+  string spool_id = 1;
+  string full_path = 2;
+  string kind = 3; // UX label only: "namespace" | "repository"/"project" — NEVER structural
+  bool is_repo = 4; // capability: content-bearing spool (pushable/pullable)
 }
 
 message Bookmark {
@@ -460,6 +478,10 @@ message ListNamespacesResponse {
 
 message ListRepositoriesResponse {
   repeated HostedRepository repositories = 1;
+}
+
+message ListSpoolsResponse {
+  repeated SpoolSummary spools = 1;
 }
 
 message ListGrantsResponse {
