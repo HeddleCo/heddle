@@ -137,7 +137,10 @@ impl HostedGrpcClient {
             r#ref: r#ref.unwrap_or_default().to_string(),
             limit,
         });
-        self.apply_signed_auth(&mut request, "/heddle.v1.ContentService/ListContextSuggestions")?;
+        self.apply_signed_auth(
+            &mut request,
+            "/heddle.v1.ContentService/ListContextSuggestions",
+        )?;
         self.content
             .list_context_suggestions(request)
             .await

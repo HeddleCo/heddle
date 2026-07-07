@@ -8,9 +8,9 @@ use serde::Serialize;
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},
-    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::{require_resolved_state, resolve_state_id},
     snapshot::ensure_current_state,
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
 };
 use crate::{
     cli::{Cli, should_output_json, style},
@@ -106,14 +106,14 @@ fn cmd_show_with_output_kind(
         output_kind,
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        import_guidance: repo.git_import_guidance()?.map(|hint| {
-            ShowImportGuidanceOutput {
+        import_guidance: repo
+            .git_import_guidance()?
+            .map(|hint| ShowImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
                 recommended_command: hint.recommended_command,
-            }
-        }),
+            }),
         change_id: state.change_id.short(),
         change_id_full: state.change_id.to_string_full(),
         content_hash: state.compute_hash().to_hex(),

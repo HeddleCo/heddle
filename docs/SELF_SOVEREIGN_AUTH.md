@@ -60,10 +60,10 @@ Two surfaces are involved:
 | Attenuate | [`heddle_client::device_flow`](../crates/client/src/device_flow.rs) (re-exported as `heddle_client::auth`) | `attenuate_for_agent`, `time_bounded`, `read_only_repo_agent`. |
 
 [`heddle-crypto`](../crates/crypto/) is a *different* crypto surface:
-it covers the signers (`Ed25519Signer`, `P256Signer`, `RsaSigner`)
-that Heddle uses to sign repository **states**, not Biscuit
-authority blocks. The two crates are intentionally separate — state
-signing and capability tokens are independent concerns.
+it covers the signers (`Ed25519Signer`, `P256Signer`) that Heddle uses
+to sign repository **states**, not Biscuit authority blocks. The two
+crates are intentionally separate — state signing and capability tokens
+are independent concerns.
 
 ## End-to-end example
 

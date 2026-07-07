@@ -2,17 +2,15 @@
 //! PEM-header classification shared across signer backends.
 //!
 //! Every `Signer` impl in this crate had its own ad-hoc header sniff
-//! (Ed25519's tried 4 formats, RSA's tried 2, the top-level
-//! `load_signer` tried 3 — each independently parsing the same
-//! `-----BEGIN ...-----` lines). Centralizing the classification keeps
-//! the "which formats Heddle accepts" question answerable from a
-//! single source.
+//! (Ed25519 and P-256 each parsed the same `-----BEGIN ...-----`
+//! lines). Centralizing the classification keeps the "which formats
+//! Heddle accepts" question answerable from a single source.
 //!
 //! The dispatch helper [`load_signer_from_pem`] mirrors what
 //! `lib.rs::load_signer` used to do inline, but now reads as a
 //! straight match instead of a chain of `contains()` predicates.
 
-use crate::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
+use crate::{Ed25519Signer, P256Signer, Signer, SignerError};
 
 /// The wire format inferred from a PEM blob's BEGIN line, or `Raw*`
 /// when the input is just hex/base64 seed bytes with no PEM wrapper.
@@ -21,8 +19,6 @@ use crate::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
 pub enum PemKind {
     /// `-----BEGIN PRIVATE KEY-----` — RFC 5208 PKCS#8.
     Pkcs8,
-    /// `-----BEGIN RSA PRIVATE KEY-----` — legacy PKCS#1.
-    Pkcs1Rsa,
     /// `-----BEGIN EC PRIVATE KEY-----` — SEC1.
     Sec1Ec,
     /// `-----BEGIN OPENSSH PRIVATE KEY-----` — not yet supported.
@@ -41,9 +37,6 @@ pub fn classify_pem(pem: &str) -> PemKind {
     let trimmed = pem.trim();
     if trimmed.contains("-----BEGIN PRIVATE KEY-----") {
         return PemKind::Pkcs8;
-    }
-    if trimmed.contains("-----BEGIN RSA PRIVATE KEY-----") {
-        return PemKind::Pkcs1Rsa;
     }
     if trimmed.contains("-----BEGIN EC PRIVATE KEY-----") {
         return PemKind::Sec1Ec;
@@ -67,22 +60,19 @@ pub fn classify_pem(pem: &str) -> PemKind {
 ///
 /// Replaces the chain of `if pem_content.contains(...)` blocks that
 /// `load_signer` used to inline. PKCS#8 is ambiguous (the same BEGIN
-/// line wraps Ed25519, RSA, and EC keys), so the PKCS#8 case probes
-/// the backends in order and returns the first one that accepts the
-/// key.
+/// line wraps multiple private-key algorithms), so the PKCS#8 case
+/// probes the supported backends in order and returns the first one
+/// that accepts the key.
 pub fn load_signer_from_pem(pem: &str) -> Result<Box<dyn Signer>, SignerError> {
     match classify_pem(pem) {
         PemKind::Pkcs8 => {
-            // PKCS#8 doesn't expose the algorithm in the BEGIN line, so
-            // try each backend. Ed25519 keys also encode the marker
-            // `MC4CAQ` near the start of the base64 body — checking
-            // that first avoids RSA's heavier parse on Ed25519 input.
+            // PKCS#8 doesn't expose the algorithm in the BEGIN line, so try
+            // each backend. Ed25519 keys also encode the marker `MC4CAQ` near
+            // the start of the base64 body; checking that first avoids
+            // needlessly probing P-256 for common Ed25519 input.
             if pem.contains("MC4CAQ")
                 && let Ok(s) = Ed25519Signer::from_pem(pem)
             {
-                return Ok(Box::new(s) as Box<dyn Signer>);
-            }
-            if let Ok(s) = RsaSigner::from_pem(pem) {
                 return Ok(Box::new(s) as Box<dyn Signer>);
             }
             if let Ok(s) = P256Signer::from_pem(pem) {
@@ -93,7 +83,6 @@ pub fn load_signer_from_pem(pem: &str) -> Result<Box<dyn Signer>, SignerError> {
             }
             Err(SignerError::UnknownKeyFormat)
         }
-        PemKind::Pkcs1Rsa => RsaSigner::from_pem(pem).map(|s| Box::new(s) as Box<dyn Signer>),
         PemKind::Sec1Ec => P256Signer::from_pem(pem).map(|s| Box::new(s) as Box<dyn Signer>),
         PemKind::Ed25519HexSeed | PemKind::Ed25519Base64Seed => {
             Ed25519Signer::from_pem(pem).map(|s| Box::new(s) as Box<dyn Signer>)
@@ -116,9 +105,9 @@ mod tests {
     }
 
     #[test]
-    fn classifies_pkcs1_rsa_header() {
+    fn rejects_pkcs1_rsa_header() {
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOg...\n-----END RSA PRIVATE KEY-----";
-        assert_eq!(classify_pem(pem), PemKind::Pkcs1Rsa);
+        assert_eq!(classify_pem(pem), PemKind::Unknown);
     }
 
     #[test]

@@ -141,11 +141,7 @@ fn push_named_definition(
 /// [`symbol_extraction::find_definitions`]: a recursive walker would recurse
 /// for every child of every non-scope node, so deeply-parseable input drives
 /// call depth proportional to AST depth.
-fn walk_definitions(
-    root: tree_sitter::Node,
-    source: &[u8],
-    out: &mut Vec<Definition>,
-) {
+fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Definition>) {
     let mut stack: Vec<(tree_sitter::Node, Option<Rc<str>>)> = vec![(root, None)];
 
     while let Some((node, parent)) = stack.pop() {
@@ -167,12 +163,20 @@ fn walk_definitions(
             "trait_item" => {
                 push_named_definition(&node, source, DefinitionKind::Trait, current_parent, out)
             }
-            "type_item" => {
-                push_named_definition(&node, source, DefinitionKind::TypeAlias, current_parent, out)
-            }
-            "const_item" | "static_item" => {
-                push_named_definition(&node, source, DefinitionKind::ConstDecl, current_parent, out)
-            }
+            "type_item" => push_named_definition(
+                &node,
+                source,
+                DefinitionKind::TypeAlias,
+                current_parent,
+                out,
+            ),
+            "const_item" | "static_item" => push_named_definition(
+                &node,
+                source,
+                DefinitionKind::ConstDecl,
+                current_parent,
+                out,
+            ),
             "mod_item" => {
                 push_named_definition(&node, source, DefinitionKind::Module, current_parent, out)
             }
@@ -285,12 +289,20 @@ fn walk_definitions(
                 }
                 descended_with_new_parent = true;
             }
-            "interface_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::Interface, current_parent, out)
-            }
-            "type_alias_declaration" => {
-                push_named_definition(&node, source, DefinitionKind::TypeAlias, current_parent, out)
-            }
+            "interface_declaration" => push_named_definition(
+                &node,
+                source,
+                DefinitionKind::Interface,
+                current_parent,
+                out,
+            ),
+            "type_alias_declaration" => push_named_definition(
+                &node,
+                source,
+                DefinitionKind::TypeAlias,
+                current_parent,
+                out,
+            ),
             "enum_declaration" => {
                 push_named_definition(&node, source, DefinitionKind::EnumDef, current_parent, out)
             }

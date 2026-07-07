@@ -5,12 +5,12 @@ mod cli_base;
 mod commands_advanced;
 mod commands_agent;
 mod commands_args;
-#[cfg(feature = "git-overlay")]
-mod commands_git_projection;
 #[cfg(feature = "client")]
 mod commands_client;
 mod commands_context;
 mod commands_discuss;
+#[cfg(feature = "git-overlay")]
+mod commands_git_projection;
 mod commands_hook;
 mod commands_integration;
 mod commands_main;
@@ -53,8 +53,6 @@ pub use commands_args::{
     TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs,
     WorkspaceModeArg,
 };
-#[cfg(feature = "git-overlay")]
-pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, SyncCommands};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AuthCommands, SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs,
@@ -66,6 +64,8 @@ pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussResolveArgs,
     DiscussShowArgs, ResolveModeArg,
 };
+#[cfg(feature = "git-overlay")]
+pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, SyncCommands};
 pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,

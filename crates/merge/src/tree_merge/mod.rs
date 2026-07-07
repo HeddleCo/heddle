@@ -13,10 +13,9 @@ use objects::{
     object::{ContentHash, Tree},
     store::ObjectStore,
 };
+pub use rename_matcher::RenameMatcherStats;
 
 use crate::{ConflictMarkers, MergeOutcome};
-
-pub use rename_matcher::RenameMatcherStats;
 
 /// Optional semantic content merge hook used when [`MergeStrategy::Semantic`]
 /// is selected.
@@ -229,7 +228,8 @@ pub fn detect_renames_between_trees(
             .into_iter()
             .map(|(from, to)| DirectoryRename { from, to })
             .collect();
-    directory_renames.sort_by(|left, right| left.from.cmp(&right.from).then(left.to.cmp(&right.to)));
+    directory_renames
+        .sort_by(|left, right| left.from.cmp(&right.from).then(left.to.cmp(&right.to)));
 
     Ok(RenameDetectionResult {
         renames,

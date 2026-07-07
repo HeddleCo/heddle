@@ -15,11 +15,11 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,
     },
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, should_output_json, style};

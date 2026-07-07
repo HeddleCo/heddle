@@ -45,11 +45,11 @@ use super::{
     advice::RecoveryAdvice,
     child_env::sanitized_child_env,
     command_catalog::{ActionFields, ActionTemplate},
-    verification_health::action_templates,
     merge::merge_thread_into_current,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
     thread_cmd::{DropOutcome, drop_thread_silent},
+    verification_health::action_templates,
 };
 use crate::{
     cli::{Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg, should_output_json, style},

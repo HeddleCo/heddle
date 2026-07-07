@@ -27,8 +27,9 @@
 //! its error branch for the real ceremony; the interceptor contract is
 //! unchanged.
 
-use heddle_client::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 use std::sync::Arc;
+
+use heddle_client::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 use wire::ProtocolError;
 
 /// The default human-signature callback for CLI-opened hosted sessions.
@@ -37,38 +38,40 @@ use wire::ProtocolError;
 /// verification), then returns a typed error directing the user to a surface
 /// that can complete the WebAuthn ceremony. It never fabricates an assertion.
 pub fn cli_human_signature_callback() -> HumanSignatureCallback {
-    Arc::new(|req: HumanSignatureRequest| -> Result<WebAuthnAssertion, ProtocolError> {
-        // Show the consent surface: the user should always learn which action
-        // was gated, even though the CLI can't complete the gesture itself.
-        eprintln!(
-            "⚠ This action requires user verification (WebAuthn), which the CLI can't perform in \
+    Arc::new(
+        |req: HumanSignatureRequest| -> Result<WebAuthnAssertion, ProtocolError> {
+            // Show the consent surface: the user should always learn which action
+            // was gated, even though the CLI can't complete the gesture itself.
+            eprintln!(
+                "⚠ This action requires user verification (WebAuthn), which the CLI can't perform in \
              a headless terminal:\n  {}",
-            req.action_summary
-        );
-        // When the server sent a deep-link (weft#338), point the user straight at the surface
-        // that CAN complete the ceremony; otherwise fall back to generic guidance. Either way
-        // we return a typed error and NEVER fabricate an assertion.
-        match req.action_url.as_deref() {
-            Some(url) => {
-                eprintln!("Complete it in the web app:\n  {url}");
-                Err(ProtocolError::AuthorizationFailed(format!(
-                    "user verification required for {}: complete this action in the web app:\n  {}",
-                    req.method_path, url
-                )))
-            }
-            None => {
-                eprintln!(
-                    "The `heddle` CLI cannot perform the WebAuthn ceremony in a headless terminal."
-                );
-                Err(ProtocolError::AuthorizationFailed(format!(
-                    "user verification required for {}: run this destructive action from a surface \
+                req.action_summary
+            );
+            // When the server sent a deep-link (weft#338), point the user straight at the surface
+            // that CAN complete the ceremony; otherwise fall back to generic guidance. Either way
+            // we return a typed error and NEVER fabricate an assertion.
+            match req.action_url.as_deref() {
+                Some(url) => {
+                    eprintln!("Complete it in the web app:\n  {url}");
+                    Err(ProtocolError::AuthorizationFailed(format!(
+                        "user verification required for {}: complete this action in the web app:\n  {}",
+                        req.method_path, url
+                    )))
+                }
+                None => {
+                    eprintln!(
+                        "The `heddle` CLI cannot perform the WebAuthn ceremony in a headless terminal."
+                    );
+                    Err(ProtocolError::AuthorizationFailed(format!(
+                        "user verification required for {}: run this destructive action from a surface \
                      with a WebAuthn authenticator (the web UI), or re-run once CLI authenticator \
                      support lands",
-                    req.method_path
-                )))
+                        req.method_path
+                    )))
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -114,7 +117,10 @@ mod tests {
             Err(ProtocolError::AuthorizationFailed(msg)) => {
                 assert!(msg.contains("user verification required"));
                 assert!(msg.contains("DeleteRepository"));
-                assert!(msg.contains(url), "message must carry the deep-link URL: {msg}");
+                assert!(
+                    msg.contains(url),
+                    "message must carry the deep-link URL: {msg}"
+                );
                 assert!(msg.contains("web app"));
             }
             other => panic!("expected a typed AuthorizationFailed error, got {other:?}"),

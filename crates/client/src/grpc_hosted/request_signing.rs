@@ -35,8 +35,10 @@
 use base64::Engine as _;
 use crypto::{Ed25519Signer, Signer as _};
 use sha2::{Digest, Sha256};
-use tonic::Request;
-use tonic::metadata::{Ascii, BinaryMetadataValue, MetadataValue};
+use tonic::{
+    Request,
+    metadata::{Ascii, BinaryMetadataValue, MetadataValue},
+};
 use wire::ProtocolError;
 
 /// Domain-separation prefix. MUST match `weft-server`'s `DOMAIN_PREFIX`.
@@ -332,7 +334,10 @@ mod tests {
     #[test]
     fn canonical_bytes_change_any_field_changes_output() {
         let base = canonical_bytes(PINNED_PATH, PINNED_TS, &PINNED_NONCE, b"");
-        assert_ne!(canonical_bytes("/other", PINNED_TS, &PINNED_NONCE, b""), base);
+        assert_ne!(
+            canonical_bytes("/other", PINNED_TS, &PINNED_NONCE, b""),
+            base
+        );
         assert_ne!(
             canonical_bytes(PINNED_PATH, PINNED_TS + 1, &PINNED_NONCE, b""),
             base
@@ -455,7 +460,11 @@ mod tests {
             Some("webauthn")
         );
         assert_eq!(
-            md.get_bin(HDR_SIG_KEY_BIN).unwrap().to_bytes().unwrap().as_ref(),
+            md.get_bin(HDR_SIG_KEY_BIN)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
             &[1, 2, 3]
         );
         assert!(md.get_bin(HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN).is_some());

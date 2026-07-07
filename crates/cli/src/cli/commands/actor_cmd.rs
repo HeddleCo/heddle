@@ -18,10 +18,10 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
+    thread::{find_thread_summary, thread_name_invalid_advice},
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
     },
-    thread::{find_thread_summary, thread_name_invalid_advice},
 };
 use crate::cli::{Cli, should_output_json};
 

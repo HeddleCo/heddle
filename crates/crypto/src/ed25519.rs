@@ -2,7 +2,7 @@
 //! Ed25519 signature implementation.
 
 use ed25519_dalek::{Signature, Signer as EdSigner, SigningKey, Verifier, VerifyingKey};
-use rsa::rand_core::OsRng;
+use getrandom::{SysRng, rand_core::UnwrapErr};
 
 use crate::{Signer, SignerError};
 
@@ -14,7 +14,8 @@ pub struct Ed25519Signer {
 
 impl Ed25519Signer {
     pub fn generate() -> Result<Self, SignerError> {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut rng = UnwrapErr(SysRng);
+        let signing_key = SigningKey::generate(&mut rng);
         let cached_public_key = signing_key.verifying_key().to_bytes();
         Ok(Self {
             signing_key,

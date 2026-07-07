@@ -23,17 +23,17 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    verification_health::{
-        RepositoryVerificationState, action_template, build_repository_verification_state,
-        override_trust_recommended_action, repository_verification_blocked_advice,
-        serialize_empty_action_as_null,
-    },
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     thread_landing::{land_command_for_thread, land_local_command},
+    verification_health::{
+        RepositoryVerificationState, action_template, build_repository_verification_state,
+        override_trust_recommended_action, repository_verification_blocked_advice,
+        serialize_empty_action_as_null,
+    },
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{

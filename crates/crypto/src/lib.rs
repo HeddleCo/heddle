@@ -5,7 +5,6 @@ mod ed25519;
 mod error;
 mod p256;
 mod pem_loader;
-mod rsa;
 mod state_signature;
 mod state_signing;
 
@@ -20,7 +19,6 @@ use objects::object::ContentHash;
 pub use objects::object::SignatureStatus;
 pub use p256::P256Signer;
 pub use pem_loader::{PemKind, classify_pem};
-pub use rsa::RsaSigner;
 pub use state_signature::{
     StateSignatureError, public_key_bytes, signature_bytes, state_signature_from_signer,
     verify_state_signature_bytes,
@@ -48,7 +46,6 @@ pub fn load_signer(path: &Path, algorithm: Option<&str>) -> Result<Box<dyn Signe
             "ed25519" => {
                 Ed25519Signer::from_pem(&pem_content).map(|s| Box::new(s) as Box<dyn Signer>)
             }
-            "rsa" => RsaSigner::from_pem(&pem_content).map(|s| Box::new(s) as Box<dyn Signer>),
             "p256" | "ecdsa-p256" => {
                 P256Signer::from_pem(&pem_content).map(|s| Box::new(s) as Box<dyn Signer>)
             }
@@ -107,7 +104,6 @@ pub fn verify_payload_signature(
 ) -> Result<(), SignerError> {
     match algorithm.to_lowercase().as_str() {
         "ed25519" => Ed25519Signer::verify_with_public_key(payload, public_key, signature),
-        "rsa" => RsaSigner::verify_with_public_key(payload, public_key, signature),
         "p256" | "ecdsa-p256" => P256Signer::verify_with_public_key(payload, public_key, signature),
         _ => Err(SignerError::UnsupportedAlgorithm(algorithm.to_string())),
     }

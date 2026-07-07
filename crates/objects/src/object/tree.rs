@@ -132,10 +132,19 @@ impl EntryType {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeEntryTarget {
-    Blob { hash: ContentHash, executable: bool },
-    Tree { hash: ContentHash },
-    Symlink { hash: ContentHash },
-    Gitlink { target: GitObjectId },
+    Blob {
+        hash: ContentHash,
+        executable: bool,
+    },
+    Tree {
+        hash: ContentHash,
+    },
+    Symlink {
+        hash: ContentHash,
+    },
+    Gitlink {
+        target: GitObjectId,
+    },
     /// Native pointer to a child spool: a spool-id plus an anchored state-id.
     /// Unlike [`Self::Gitlink`], this is NOT a git object OID and cannot
     /// round-trip to a git submodule; git-boundary code must handle it
@@ -845,7 +854,9 @@ mod spoollink_tests {
 
         assert_eq!(decoded, tree, "tree round-trip must be lossless");
 
-        let child = decoded.get("z_child").expect("spoollink survives round-trip");
+        let child = decoded
+            .get("z_child")
+            .expect("spoollink survives round-trip");
         assert_eq!(child.spoollink_target(), Some((spool_id, state_id)));
         assert_eq!(child.entry_type(), EntryType::Spoollink);
 
@@ -859,7 +870,13 @@ mod spoollink_tests {
         // git submodule (160000) or any other real git mode.
         assert_eq!(FileMode::Spoollink.to_unix_mode(), 0);
         assert_ne!(FileMode::Spoollink.to_unix_mode(), 0o160000);
-        assert_eq!(FileMode::from_byte(FileMode::Spoollink.to_byte()), Some(FileMode::Spoollink));
-        assert_eq!(EntryType::from_byte(EntryType::Spoollink.to_byte()), Some(EntryType::Spoollink));
+        assert_eq!(
+            FileMode::from_byte(FileMode::Spoollink.to_byte()),
+            Some(FileMode::Spoollink)
+        );
+        assert_eq!(
+            EntryType::from_byte(EntryType::Spoollink.to_byte()),
+            Some(EntryType::Spoollink)
+        );
     }
 }

@@ -9,8 +9,6 @@ mod agent;
 mod agent_cmd;
 mod auto_capture;
 mod blame;
-#[cfg(feature = "git-overlay")]
-mod git_projection_io;
 mod checkpoint;
 mod cherry_pick;
 mod child_env;
@@ -33,9 +31,10 @@ mod fetch;
 mod ff_record;
 mod fsck;
 mod gc;
-mod git_projection;
-mod verification_health;
 mod git_overlay_txn;
+mod git_projection;
+#[cfg(feature = "git-overlay")]
+mod git_projection_io;
 mod goto;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
@@ -90,6 +89,7 @@ mod transaction;
 mod try_cmd;
 mod undo;
 mod undo_apply;
+mod verification_health;
 mod verify;
 mod visibility;
 mod watch;
@@ -113,10 +113,6 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
-#[cfg(all(feature = "git-overlay", feature = "ingest"))]
-pub use git_projection_io::cmd_context_reason_git;
-#[cfg(feature = "git-overlay")]
-pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
@@ -154,6 +150,10 @@ pub use fetch::cmd_fetch;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
 pub use git_projection::{cmd_commit_git_projection, cmd_switch_git_projection};
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+pub use git_projection_io::cmd_context_reason_git;
+#[cfg(feature = "git-overlay")]
+pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 #[cfg(feature = "client")]

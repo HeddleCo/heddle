@@ -94,8 +94,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
         ["import", "git", "--ref", "feature with spaces"]
     );
 
-    let reconcile =
-        canonical_git_repair_ref_preview_command(Some("heddle"), "feature 'quoted'");
+    let reconcile = canonical_git_repair_ref_preview_command(Some("heddle"), "feature 'quoted'");
     assert_eq!(
         action_template(&reconcile)
             .expect("reconcile command should expose a template")

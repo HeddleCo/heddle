@@ -142,8 +142,9 @@ impl MonorepoClonePlan {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use grpc::heddle::v1::{ChildEdgeStatus, MonorepoEdge};
+
+    use super::*;
 
     fn cid(seed: u8) -> ChangeId {
         ChangeId::from_bytes([seed; 16])
@@ -163,7 +164,12 @@ mod tests {
     }
 
     /// A descended edge onto `subtree`, anchored at `anchor`.
-    fn descended_edge(mount: &str, child_id: &str, anchor: u8, subtree: MonorepoNode) -> MonorepoEdge {
+    fn descended_edge(
+        mount: &str,
+        child_id: &str,
+        anchor: u8,
+        subtree: MonorepoNode,
+    ) -> MonorepoEdge {
         MonorepoEdge {
             mount_name: mount.to_string(),
             child_spool_id: child_id.to_string(),

@@ -17,12 +17,6 @@ use serde::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    verification_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state,
-        build_repository_verification_state_with_worktree_status,
-        override_trust_recommended_action,
-    },
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{NextActionValidationContext, normalized_action, write_command_json},
     operator_core::{
@@ -35,6 +29,12 @@ use super::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
     thread_landing::land_local_command,
+    verification_health::{
+        RepositoryVerificationState, build_plain_git_verification_probe,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
+        override_trust_recommended_action,
+    },
 };
 use crate::{
     cli::{Cli, ReadyArgs, output_is_compact, should_output_json, style, worktree_status_options},
@@ -704,7 +704,9 @@ fn missing_ready_capture_intent_report_for(
             "commit the work with -m/--message/--intent before readiness checks".to_string(),
         ],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::verification_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(
+            recommended_action,
+        ),
         thread_health: "blocked".to_string(),
     }
 }
@@ -869,7 +871,9 @@ fn trust_blocked_report_for(
         conflict_count: 0,
         blockers: vec!["repository verification is blocked".to_string()],
         recommended_action: recommended_action.to_string(),
-        recommended_action_template: super::verification_health::action_template(recommended_action),
+        recommended_action_template: super::verification_health::action_template(
+            recommended_action,
+        ),
         thread_health: "blocked".to_string(),
     }
 }

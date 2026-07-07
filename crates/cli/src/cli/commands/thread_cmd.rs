@@ -26,7 +26,6 @@ use tokio::time::{Duration, sleep};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     marker::cmd_thread_marker,
     mount_lifecycle,
     next_action::normalized_action,
@@ -38,6 +37,7 @@ use super::{
         show_thread_summary,
     },
     thread_shaping::{cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve},
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     worktree_cmd::helpers::{prepare_worktree_target, write_isolated_checkout},
     worktree_safety::ensure_worktree_clean,
 };

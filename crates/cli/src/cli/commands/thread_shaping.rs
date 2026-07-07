@@ -14,7 +14,6 @@ use serde::Serialize;
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::merge_thread_into_current,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
@@ -26,6 +25,7 @@ use super::{
         refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
     },
     thread_landing::{land_command_for_thread, land_command_with_push_target},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
     cli::{

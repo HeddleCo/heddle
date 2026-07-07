@@ -171,7 +171,7 @@ Replace with `std::time::SystemTime` + a ~30 LOC RFC3339 formatter/parser. Alter
 
 | Domain | Current | What we actually use |
 |---|---|---|
-| Crypto | ed25519-dalek (60) + p256 + rsa | Ed25519 only for internal signing; p256/rsa exist for biscuit interop and could move to `server` after the carve-out |
+| Crypto | ed25519-dalek (60) + p256 | Ed25519 only for internal signing; p256 exists for biscuit interop and could move to `server` after the carve-out |
 | Serialization | serde_json + rmp-serde + serde_cbor + toml | Keep serde_json (output contract) + toml (config). Drop rmp/cbor — internal-only formats |
 | Datetime | chrono | std + tiny RFC3339 helper (see Tier 4) |
 | JSON Schema | schemars at runtime | Hand-written schemas (see Tier 3) |

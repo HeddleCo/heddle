@@ -4,8 +4,7 @@
 use std::path::{Component, Path};
 
 use super::{Blob, ContentHash, Tree, TreeEntry};
-use crate::error::HeddleError;
-use crate::store::ObjectSource;
+use crate::{error::HeddleError, store::ObjectSource};
 
 /// How a tree-path walk classifies and materializes the terminal entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,7 +215,13 @@ async fn resolve_from_tree_async<S: crate::store::AsyncObjectSource + ?Sized>(
     let Some(subtree) = load_subtree_async(store, &tree_hash, policy).await? else {
         return Ok(None);
     };
-    Box::pin(resolve_from_tree_async(store, &subtree, &segments[1..], policy)).await
+    Box::pin(resolve_from_tree_async(
+        store,
+        &subtree,
+        &segments[1..],
+        policy,
+    ))
+    .await
 }
 
 fn resolve_leaf<S: ObjectSource>(
@@ -375,8 +380,10 @@ async fn load_subtree_async<S: crate::store::AsyncObjectSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::{EntryType, TreeEntry};
-    use crate::store::{InMemoryStore, ObjectStore};
+    use crate::{
+        object::{EntryType, TreeEntry},
+        store::{InMemoryStore, ObjectStore},
+    };
 
     fn create_blob(store: &InMemoryStore, content: &[u8]) -> ContentHash {
         ObjectStore::put_blob(store, &Blob::from_slice(content)).unwrap()
@@ -518,9 +525,14 @@ mod tests {
     fn entry_policy_returns_terminal_entry_for_any_leaf_type() {
         let fx = fixture();
 
-        let file = resolve_tree_path(&fx.store, &fx.root, Path::new("file.txt"), LeafPolicy::Entry)
-            .unwrap()
-            .unwrap();
+        let file = resolve_tree_path(
+            &fx.store,
+            &fx.root,
+            Path::new("file.txt"),
+            LeafPolicy::Entry,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(file.entry.blob_hash(), Some(fx.blob_hash));
 
         let link = resolve_tree_path(&fx.store, &fx.root, Path::new("link"), LeafPolicy::Entry)
@@ -535,9 +547,14 @@ mod tests {
         assert!(dir.entry.is_tree());
 
         assert!(
-            resolve_tree_path(&fx.store, &fx.root, Path::new("dir/missing"), LeafPolicy::Entry)
-                .unwrap()
-                .is_none()
+            resolve_tree_path(
+                &fx.store,
+                &fx.root,
+                Path::new("dir/missing"),
+                LeafPolicy::Entry
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(
             resolve_tree_path(

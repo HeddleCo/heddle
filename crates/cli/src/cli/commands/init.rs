@@ -13,8 +13,8 @@ use tracing::{debug, info};
 use super::{
     RecoveryAdvice,
     action_line::print_next,
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
+    verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
     cli::{Cli, InitArgs, should_output_json, style},

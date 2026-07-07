@@ -176,13 +176,11 @@ impl<'a> GitRefName<'a> {
             }
             GitRefNamespace::RemoteBranch => {
                 let (remote, name) = self.remote_branch_parts()?;
-                (name != "HEAD" && !is_reserved_git_remote_name(remote)).then_some(
-                    ParsedGitRef {
-                        kind: GitRefKind::Branch,
-                        name,
-                        remote,
-                    },
-                )
+                (name != "HEAD" && !is_reserved_git_remote_name(remote)).then_some(ParsedGitRef {
+                    kind: GitRefKind::Branch,
+                    name,
+                    remote,
+                })
             }
             GitRefNamespace::Tag => self.tag_name().map(|name| ParsedGitRef {
                 kind: GitRefKind::Tag,
@@ -394,9 +392,18 @@ mod tests {
 
     #[test]
     fn rejects_symbolic_head_and_reserved_remote_from_git_projection_parse() {
-        assert_eq!(GitRefName::new("refs/heads/HEAD").git_projection_ref(), None);
-        assert_eq!(GitRefName::new("refs/remotes/origin/HEAD").git_projection_ref(), None);
-        assert_eq!(GitRefName::new("refs/remotes/git/main").git_projection_ref(), None);
+        assert_eq!(
+            GitRefName::new("refs/heads/HEAD").git_projection_ref(),
+            None
+        );
+        assert_eq!(
+            GitRefName::new("refs/remotes/origin/HEAD").git_projection_ref(),
+            None
+        );
+        assert_eq!(
+            GitRefName::new("refs/remotes/git/main").git_projection_ref(),
+            None
+        );
     }
 
     #[test]

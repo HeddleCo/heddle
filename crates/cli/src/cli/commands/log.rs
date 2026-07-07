@@ -25,9 +25,9 @@ use super::{
     action_line::{format_next_step_dim, print_next_step},
     advice::RecoveryAdvice,
     expand::{CollapseAnnotation, collapse_annotations_for_states},
-    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
     snapshot::ensure_current_state,
+    verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
 };
 use crate::{
     cli::{Cli, should_output_json, style},
@@ -330,14 +330,14 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         status: "completed",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
-        import_guidance: repo.git_import_guidance()?.map(|hint| {
-            LogImportGuidanceOutput {
+        import_guidance: repo
+            .git_import_guidance()?
+            .map(|hint| LogImportGuidanceOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
                 missing_branches: hint.missing_branches,
                 recommended_command: hint.recommended_command,
-            }
-        }),
+            }),
         states: visible_states
             .into_iter()
             .map(|state| {

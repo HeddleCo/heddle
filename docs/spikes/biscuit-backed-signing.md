@@ -110,7 +110,7 @@ never invokes it.
 
 | Piece | Where | Notes |
 |---|---|---|
-| `Signer` trait (ed25519/rsa/p256) | `crates/crypto/src/lib.rs:28-33` | `algorithm()`, `public_key()`, `sign()`, `verify()` |
+| `Signer` trait (ed25519/p256) | `crates/crypto/src/lib.rs:28-33` | `algorithm()`, `public_key()`, `sign()`, `verify()` |
 | `Ed25519Signer` | `crates/crypto/src/ed25519.rs:10` | `generate()`, `from_pem()`, `from_seed()`, `to_pem()` — exactly what the device key uses |
 | `State.signature: Option<StateSignature>` | `crates/objects/src/object/state_core.rs:213` | the slot an auto-signature lands in |
 | `StateSignature { algorithm, public_key, signature }` | `state_core.rs:43-47` | algorithm string + hex pubkey + hex sig |

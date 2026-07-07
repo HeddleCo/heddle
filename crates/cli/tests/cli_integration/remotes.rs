@@ -2942,10 +2942,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let neutral_preview: Value =
         serde_json::from_str(&neutral_preview_json).expect("neutral preview JSON parses");
     assert_eq!(neutral_preview["valid"], true, "{neutral_preview}");
-    assert_eq!(
-        neutral_preview["repair_target"], "git",
-        "{neutral_preview}"
-    );
+    assert_eq!(neutral_preview["repair_target"], "git", "{neutral_preview}");
     assert_eq!(
         neutral_preview["repaired"], false,
         "neutral local reconcile preview must not mutate any side: {neutral_preview}"
@@ -2976,13 +2973,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     );
     let no_direction = heddle_output(
         &[
-            "--output",
-            "json",
-            "fsck",
-            "--repair",
-            "git",
-            "--ref",
-            "main",
+            "--output", "json", "fsck", "--repair", "git", "--ref", "main",
         ],
         Some(&local),
     )

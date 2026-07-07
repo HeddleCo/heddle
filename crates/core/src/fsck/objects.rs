@@ -26,35 +26,33 @@ pub(crate) fn check_tree_objects(
 
     let mut blob_hashes = HashSet::new();
 
-    walk_tree_integrity(repo.store(), roots, &mut |event| {
-        match event {
-            TreeIntegrityEvent::EnterTree { .. } => {
-                *objects_checked += 1;
-                Ok(())
-            }
-            TreeIntegrityEvent::BlobLeaf { entry, .. } => {
-                if let Some(hash) = entry.blob_hash() {
-                    if !repo.store().has_blob(&hash)? {
-                        if repo.is_missing_blob(&hash)? {
-                            warnings.push(format!(
+    walk_tree_integrity(repo.store(), roots, &mut |event| match event {
+        TreeIntegrityEvent::EnterTree { .. } => {
+            *objects_checked += 1;
+            Ok(())
+        }
+        TreeIntegrityEvent::BlobLeaf { entry, .. } => {
+            if let Some(hash) = entry.blob_hash() {
+                if !repo.store().has_blob(&hash)? {
+                    if repo.is_missing_blob(&hash)? {
+                        warnings.push(format!(
                                 "Tree entry '{}' references blob {} that is explicitly absent under partial fetch",
                                 entry.name(),
                                 hash.short()
                             ));
-                        } else {
-                            errors.push(make_error(
-                                "missing_blob",
-                                &format!("Tree entry '{}' references missing blob", entry.name()),
-                                Some(hash.short()),
-                            ));
-                        }
+                    } else {
+                        errors.push(make_error(
+                            "missing_blob",
+                            &format!("Tree entry '{}' references missing blob", entry.name()),
+                            Some(hash.short()),
+                        ));
                     }
-                    blob_hashes.insert(hash);
                 }
-                Ok(())
+                blob_hashes.insert(hash);
             }
-            TreeIntegrityEvent::TreeRef { .. } => Ok(()),
+            Ok(())
         }
+        TreeIntegrityEvent::TreeRef { .. } => Ok(()),
     })?;
 
     for blob_hash in blob_hashes {

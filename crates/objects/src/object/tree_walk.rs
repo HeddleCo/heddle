@@ -13,15 +13,9 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeIntegrityEvent<'a> {
     /// A tree was entered for the first time during this walk.
-    EnterTree {
-        hash: ContentHash,
-        tree: &'a Tree,
-    },
+    EnterTree { hash: ContentHash, tree: &'a Tree },
     /// A blob file entry at `path` (symlinks and gitlinks are excluded).
-    BlobLeaf {
-        entry: &'a TreeEntry,
-        path: String,
-    },
+    BlobLeaf { entry: &'a TreeEntry, path: String },
     /// A child tree entry from `parent_hash`.
     TreeRef {
         parent_hash: ContentHash,
@@ -82,7 +76,10 @@ where
         };
 
         if entry.blob_hash().is_some() {
-            visitor(TreeIntegrityEvent::BlobLeaf { entry, path: path.clone() })?;
+            visitor(TreeIntegrityEvent::BlobLeaf {
+                entry,
+                path: path.clone(),
+            })?;
         } else if let Some(child_hash) = entry.tree_hash() {
             visitor(TreeIntegrityEvent::TreeRef {
                 parent_hash: *tree_hash,
@@ -108,9 +105,8 @@ mod tests {
         let store = InMemoryStore::new();
         let blob = Blob::from("shared\n");
         let blob_hash = store.put_blob(&blob).unwrap();
-        let shared = Tree::from_entries(vec![
-            TreeEntry::file("leaf.txt", blob_hash, false).unwrap(),
-        ]);
+        let shared =
+            Tree::from_entries(vec![TreeEntry::file("leaf.txt", blob_hash, false).unwrap()]);
         let shared_hash = store.put_tree(&shared).unwrap();
         let root_a = Tree::from_entries(vec![
             TreeEntry::directory("shared", shared_hash).unwrap(),

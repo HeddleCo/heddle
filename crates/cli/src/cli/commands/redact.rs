@@ -68,11 +68,11 @@ struct RedactApplyOutput {
     redacted_at: String,
     all_states: bool,
     states_redacted: u32,
-    /// `true` iff the redaction carries an Ed25519/P256/RSA signature
+    /// `true` iff the redaction carries an Ed25519/P-256 signature
     /// over `canonical_signing_payload`. Auditors verify via
     /// `heddle redact show`.
     signed: bool,
-    /// Signature algorithm (`ed25519`, `rsa`, `p256`) when `signed`.
+    /// Signature algorithm (`ed25519`, `p256`) when `signed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     signature_algorithm: Option<String>,
     /// Hint to add the redacted path to `.heddleignore` / `.gitignore`

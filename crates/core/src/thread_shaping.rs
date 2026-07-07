@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread capture-split and thread-move repository operations.
 
-use std::{
-    error::Error,
-    fmt,
-    fs,
-    path::Path,
-};
+use std::{error::Error, fmt, fs, path::Path};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -299,8 +294,7 @@ fn collect_worktree_split_paths(
         Some(state) => repo.require_tree(&state.tree)?,
         None => objects::object::Tree::new(),
     };
-    let status =
-        repo.compare_worktree_cached_with_options(&baseline, worktree_status_options)?;
+    let status = repo.compare_worktree_cached_with_options(&baseline, worktree_status_options)?;
     let mut paths = status
         .modified
         .iter()

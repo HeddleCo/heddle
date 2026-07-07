@@ -36,9 +36,8 @@ use sley::{
 
 use self::next_action::{
     NextActionInput, canonical_adopt_ref_command, canonical_git_import_ref_command,
-    canonical_git_repair_ref_preview_command, contextual_thread_action,
-    effective_next_action, heddle_action, non_empty_action, remote_tracking_next_action,
-    remote_tracking_status,
+    canonical_git_repair_ref_preview_command, contextual_thread_action, effective_next_action,
+    heddle_action, non_empty_action, remote_tracking_next_action, remote_tracking_status,
 };
 use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,

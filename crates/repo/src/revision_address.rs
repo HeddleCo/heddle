@@ -149,7 +149,10 @@ mod tests {
         assert_eq!(from_upper_sha1, from_lower_sha1);
         assert_eq!(from_upper_sha256, from_lower_sha256);
         assert_eq!(from_upper_sha1.to_string(), format!("git:{lowercase_sha1}"));
-        assert_eq!(from_upper_sha256.to_string(), format!("git:{lowercase_sha256}"));
+        assert_eq!(
+            from_upper_sha256.to_string(),
+            format!("git:{lowercase_sha256}")
+        );
     }
 
     #[cfg(feature = "git-overlay")]
