@@ -8036,8 +8036,21 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     for verb in [
-        "review", "discuss", "context", "switch", "thread", "git-projection", "push", "pull", "doctor",
-        "verify", "init", "adopt", "clone", "log", "show",
+        "review",
+        "discuss",
+        "context",
+        "switch",
+        "thread",
+        "git-projection",
+        "push",
+        "pull",
+        "doctor",
+        "verify",
+        "init",
+        "adopt",
+        "clone",
+        "log",
+        "show",
     ] {
         assert!(
             !stdout.contains(&format!("\n  {verb}")),

@@ -121,10 +121,7 @@ mod tests {
         let base = "wt-0123456789abcdef";
         assert_eq!(SpoolFacet::Content.scope_token(base), base);
         // A Named("content") normalizes to the same default behavior.
-        assert_eq!(
-            SpoolFacet::Named("content".into()).scope_token(base),
-            base
-        );
+        assert_eq!(SpoolFacet::Named("content".into()).scope_token(base), base);
     }
 
     #[test]

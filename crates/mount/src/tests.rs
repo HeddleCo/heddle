@@ -499,10 +499,7 @@ fn write_rejects_overflowing_offset_plus_length() {
     let (_temp, mount) = mount_with_seed("big.txt", b"x");
     let node = mount.lookup_path("big.txt").unwrap();
     let err = mount.write(node, u64::MAX, &[0u8]).unwrap_err();
-    assert!(
-        matches!(err, MountError::InvalidArgument(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, MountError::InvalidArgument(_)), "got {err:?}");
     assert_eq!(err.to_errno(), libc::EINVAL);
 }
 

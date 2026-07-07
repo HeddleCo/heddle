@@ -34,11 +34,11 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     git_projection::{GitIndexPlan, git_index_plan_for_root},
+    next_action::{NextActionValidationContext, write_command_json},
     verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
-    next_action::{NextActionValidationContext, write_command_json},
 };
 #[cfg(feature = "client")]
 use crate::config::UserConfig;

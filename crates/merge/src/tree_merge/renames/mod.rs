@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 use objects::{object::Tree, store::ObjectStore};
 
-use super::rename_matcher::{
-    DEFAULT_THRESHOLD, RenameMatch, RenameMatcherConfig, detect_renames, flatten_tree,
+use super::{
+    SemanticSimilarityFn,
+    rename_matcher::{
+        DEFAULT_THRESHOLD, RenameMatch, RenameMatcherConfig, detect_renames, flatten_tree,
+    },
 };
-use super::SemanticSimilarityFn;
 
 #[cfg(test)]
 mod tests;

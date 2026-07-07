@@ -217,13 +217,30 @@ enum BlobSource {
 
 #[derive(Debug, Clone, Copy)]
 enum StateClosureEvent<'a> {
-    State { id: ChangeId, state: &'a State },
-    Tree { hash: ContentHash, tree: &'a objects::object::Tree },
-    Blob { hash: ContentHash, source: BlobSource },
-    Redaction { blob: ContentHash },
-    StateVisibility { state: ChangeId },
-    ExcludedState { id: ChangeId },
-    ExcludedHash { hash: ContentHash },
+    State {
+        id: ChangeId,
+        state: &'a State,
+    },
+    Tree {
+        hash: ContentHash,
+        tree: &'a objects::object::Tree,
+    },
+    Blob {
+        hash: ContentHash,
+        source: BlobSource,
+    },
+    Redaction {
+        blob: ContentHash,
+    },
+    StateVisibility {
+        state: ChangeId,
+    },
+    ExcludedState {
+        id: ChangeId,
+    },
+    ExcludedHash {
+        hash: ContentHash,
+    },
 }
 
 fn walk_state_closure(
@@ -330,14 +347,7 @@ fn walk_tree_closure_filtered(
     for entry in tree.entries() {
         match entry.target() {
             TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
-                walk_blob_filtered(
-                    store,
-                    *hash,
-                    BlobSource::Tree,
-                    excluded,
-                    seen,
-                    visit,
-                )?;
+                walk_blob_filtered(store, *hash, BlobSource::Tree, excluded, seen, visit)?;
             }
             TreeEntryTarget::Tree { hash } => {
                 walk_tree_closure_filtered(store, *hash, excluded, seen, visit)?;
@@ -411,14 +421,14 @@ fn object_info_from_event(
                 delta_base: None,
             }))
         }
-        StateClosureEvent::Redaction { blob } => {
-            Ok(store.get_redactions_bytes_for_blob(&blob)?.map(|bytes| ObjectInfo {
+        StateClosureEvent::Redaction { blob } => Ok(store
+            .get_redactions_bytes_for_blob(&blob)?
+            .map(|bytes| ObjectInfo {
                 id: ObjectId::Hash(blob),
                 obj_type: ObjectType::Redaction,
                 size: bytes.len() as u64,
                 delta_base: None,
-            }))
-        }
+            })),
         StateClosureEvent::StateVisibility { state } => Ok(store
             .get_state_visibility_bytes_for_state(&state)?
             .map(|bytes| ObjectInfo {
@@ -649,7 +659,10 @@ pub fn is_ancestor(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{
+        collections::HashSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use chrono::Utc;
     use objects::{
@@ -662,7 +675,6 @@ mod tests {
     };
     use repo::Repository;
     use sley::ObjectId as GitObjectId;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     use super::{
@@ -690,14 +702,7 @@ mod tests {
     ) -> Vec<(ObjectId, ObjectType, u64, Option<ContentHash>)> {
         objects
             .iter()
-            .map(|info| {
-                (
-                    info.id.clone(),
-                    info.obj_type,
-                    info.size,
-                    info.delta_base,
-                )
-            })
+            .map(|info| (info.id.clone(), info.obj_type, info.size, info.delta_base))
             .collect()
     }
 
@@ -989,20 +994,17 @@ mod tests {
         )
         .expect("transfer projection");
 
-        let full = enumerate_state_closure_with_options(
-            repo.store(),
-            state.change_id,
-            options.clone(),
-        )
-        .expect("full closure");
-        let plan = enumerate_state_closure_plan_with_options(
-            repo.store(),
-            state.change_id,
-            options,
-        )
-        .expect("plan closure");
+        let full =
+            enumerate_state_closure_with_options(repo.store(), state.change_id, options.clone())
+                .expect("full closure");
+        let plan =
+            enumerate_state_closure_plan_with_options(repo.store(), state.change_id, options)
+                .expect("plan closure");
         assert_eq!(
-            transfer.full_objects.as_deref().map(object_info_fingerprint),
+            transfer
+                .full_objects
+                .as_deref()
+                .map(object_info_fingerprint),
             Some(object_info_fingerprint(&full))
         );
         assert_eq!(transfer.planned_objects, plan);
@@ -1020,7 +1022,11 @@ mod tests {
             ObjectType::StateVisibility,
         );
         assert_contains_object(&full_pairs, ObjectId::Hash(redacted_blob), ObjectType::Blob);
-        assert_contains_object(&full_pairs, ObjectId::Hash(redacted_blob), ObjectType::Redaction);
+        assert_contains_object(
+            &full_pairs,
+            ObjectId::Hash(redacted_blob),
+            ObjectType::Redaction,
+        );
         for hash in [
             root_tree_hash,
             nested_tree_hash,
@@ -1273,7 +1279,10 @@ mod tests {
             TreeEntry::file("remote.txt", missing_nested, false).unwrap(),
             TreeEntry::symlink("remote-link", missing_symlink).unwrap(),
         ]);
-        let nested_tree_hash = repo.store().put_tree(&nested_tree).expect("put nested tree");
+        let nested_tree_hash = repo
+            .store()
+            .put_tree(&nested_tree)
+            .expect("put nested tree");
         let gitlink_target: GitObjectId = "0404040404040404040404040404040404040404"
             .parse()
             .expect("git oid");

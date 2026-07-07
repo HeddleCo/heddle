@@ -8,16 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tempfile::NamedTempFile;
-
 use grpc::heddle::v1::{
     GetBlobRequest, GitCheckpointTransfer, GitLaneTransfer, GitPackTransfer,
-    GitRefKind as GrpcGitRefKind,
-    GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
-    PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
-    RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
-    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
-    git_lane_transfer, pull_message, push_message,
+    GitRefKind as GrpcGitRefKind, GitRefUpdateTransfer, ListRefsRequest, ObjectAvailabilityStatus,
+    ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus, PullMessage, PullRequest,
+    PushMessage, PushRequest, RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary,
+    ThreadIntegrationPolicy, ThreadMetadata, ThreadVerificationSummary, TransportMode,
+    UpdateRefRequest, WantObjects, git_lane_transfer, pull_message, push_message,
 };
 use objects::{
     Progress,
@@ -26,12 +23,12 @@ use objects::{
 };
 use repo::{
     GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
-    RevisionAddress, SyncedThreadMetadata,
-    ThreadManager,
+    RevisionAddress, SyncedThreadMetadata, ThreadManager,
 };
 use sley::{
     ObjectId as GitObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
+use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -1295,12 +1292,9 @@ fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj
 }
 
 fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> Option<ObjectType> {
-    wanted_types.get(pack_id).and_then(|types| {
-        types
-            .iter()
-            .copied()
-            .find(|obj_type| obj_type.packable())
-    })
+    wanted_types
+        .get(pack_id)
+        .and_then(|types| types.iter().copied().find(|obj_type| obj_type.packable()))
 }
 
 fn sidecar_push_message(
@@ -1956,14 +1950,11 @@ fn build_git_lane_multi_root_pack_plan(
         // server. Skip the pack entirely; only the ref updates ship.
         return Ok(None);
     };
-    let pack_file = NamedTempFile::new().map_err(|err| {
-        ProtocolError::InvalidState(format!("create Git pack tempfile: {err}"))
+    let pack_file = NamedTempFile::new()
+        .map_err(|err| ProtocolError::InvalidState(format!("create Git pack tempfile: {err}")))?;
+    let prepared = plan.prepare_to_file(pack_file.path()).map_err(|err| {
+        ProtocolError::InvalidState(format!("write reachable Git pack tempfile: {err}"))
     })?;
-    let prepared = plan
-        .prepare_to_file(pack_file.path())
-        .map_err(|err| {
-            ProtocolError::InvalidState(format!("write reachable Git pack tempfile: {err}"))
-        })?;
     let pack_size = prepared.summary.pack_size;
     let checksum = prepared.summary.checksum;
     if pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
@@ -2019,15 +2010,15 @@ fn stream_git_pack_messages_blocking(
         chunk_size,
         progress,
     );
-    let mut pack_file = pack.pack_file.lock().map_err(|err| {
-        ProtocolError::InvalidState(format!("lock Git pack tempfile: {err}"))
-    })?;
+    let mut pack_file = pack
+        .pack_file
+        .lock()
+        .map_err(|err| ProtocolError::InvalidState(format!("lock Git pack tempfile: {err}")))?;
     pack_file
         .seek(SeekFrom::Start(0))
         .map_err(|err| ProtocolError::InvalidState(format!("rewind Git pack tempfile: {err}")))?;
-    let streamed = io::copy(&mut pack_file.as_file_mut(), &mut writer).map_err(|err| {
-        ProtocolError::InvalidState(format!("stream Git pack tempfile: {err}"))
-    })?;
+    let streamed = io::copy(&mut pack_file.as_file_mut(), &mut writer)
+        .map_err(|err| ProtocolError::InvalidState(format!("stream Git pack tempfile: {err}")))?;
     if streamed != pack.pack_size {
         return Err(ProtocolError::InvalidState(format!(
             "Git pack stream changed while sending; expected {} bytes/{}, streamed {} bytes",
@@ -2960,9 +2951,10 @@ mod tests {
             .write_raw_object(sley::GitObjectType::Commit, commit.write())
             .expect("write commit");
 
-        let pack = build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], Vec::new(), 64 * 1024)
-            .expect("build git lane pack plan")
-            .expect("non-empty pack plan");
+        let pack =
+            build_git_lane_multi_root_pack_plan(&git, vec![commit_oid], Vec::new(), 64 * 1024)
+                .expect("build git lane pack plan")
+                .expect("non-empty pack plan");
         assert_eq!(pack.pack_id.len(), git.object_format().raw_len());
         let (tx, mut rx) = mpsc::channel(8);
         stream_git_pack_messages_blocking(tx, pack.clone(), 64 * 1024, Progress::null())
@@ -3081,11 +3073,7 @@ mod tests {
     /// A commit that reuses `parent`'s tree/blob closure and only adds one new
     /// blob + tree + commit on top, so a descendant push shares nearly all of
     /// the parent's objects.
-    fn write_child_commit(
-        git: &sley::Repository,
-        parent: GitObjectId,
-        seed: &str,
-    ) -> GitObjectId {
+    fn write_child_commit(git: &sley::Repository, parent: GitObjectId, seed: &str) -> GitObjectId {
         let blob_oid = git
             .write_blob(format!("content-{seed}\n").as_bytes())
             .expect("write blob");
@@ -3140,8 +3128,8 @@ mod tests {
 
         // (1) Fresh server: nothing is on the far side, so the full closure
         //     packs — this is the status-quo "re-pack everything" cost.
-        let full = build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new())
-            .expect("full plan");
+        let full =
+            build_git_mirror_plan_from_sley(&git, 64 * 1024, &HashMap::new()).expect("full plan");
         let full_pack = full.pack.as_ref().expect("fresh server produces a pack");
         let full_size = full_pack.pack_size;
         assert!(full_size > 0, "baseline full pack must be non-empty");
@@ -3151,8 +3139,8 @@ mod tests {
         //     want-only pack is DRAMATICALLY smaller than the full closure.
         let mut have_tip = HashMap::new();
         have_tip.insert("refs/heads/main".to_string(), value_expectation(tip));
-        let delta = build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_tip)
-            .expect("delta plan");
+        let delta =
+            build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_tip).expect("delta plan");
         let delta_pack = delta
             .pack
             .as_ref()
@@ -3168,12 +3156,9 @@ mod tests {
         //     there is nothing new to pack. The plan short-circuits to `None`
         //     (only the ref update ships) — the `pr/N`-after-`main` fast path.
         let mut have_target = HashMap::new();
-        have_target.insert(
-            "refs/heads/main".to_string(),
-            value_expectation(descendant),
-        );
-        let ref_only = build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_target)
-            .expect("ref-only plan");
+        have_target.insert("refs/heads/main".to_string(), value_expectation(descendant));
+        let ref_only =
+            build_git_mirror_plan_from_sley(&git, 64 * 1024, &have_target).expect("ref-only plan");
         assert!(
             ref_only.pack.is_none(),
             "pushing a ref the server already has must send NO pack",
@@ -3492,7 +3477,11 @@ mod tests {
                 "local-only ref {excluded} must NOT be mirrored: {names:?}",
             );
         }
-        assert_eq!(names.len(), 2, "exactly the two content refs ship: {names:?}");
+        assert_eq!(
+            names.len(),
+            2,
+            "exactly the two content refs ship: {names:?}"
+        );
     }
 
     /// A dangling ref in an EXCLUDED namespace (e.g. a stale
@@ -3522,7 +3511,11 @@ mod tests {
             .iter()
             .map(|m| git_ref_update_from_message(m).name.as_str())
             .collect();
-        assert_eq!(names, vec!["refs/heads/main"], "only content ships: {names:?}");
+        assert_eq!(
+            names,
+            vec!["refs/heads/main"],
+            "only content ships: {names:?}"
+        );
     }
 
     #[test]
@@ -5105,8 +5098,7 @@ mod tests {
                             checkpoint: b"heddle-markers-v1\n".to_vec(),
                             is_complete: true,
                         }),
-                        new_revision_address: RevisionAddress::heddle(svc.remote_state)
-                            .to_string(),
+                        new_revision_address: RevisionAddress::heddle(svc.remote_state).to_string(),
                     })),
                 };
                 let _ = tx.send(Ok(complete)).await;

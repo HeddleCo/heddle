@@ -7,9 +7,9 @@ use p256::{
         Signature, SigningKey, VerifyingKey,
         signature::{Signer as SignatureSigner, Verifier as SignatureVerifier},
     },
+    elliptic_curve::Generate,
+    pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding},
 };
-use pkcs8::DecodePrivateKey;
-use rsa::{pkcs1::DecodeRsaPrivateKey, rand_core::OsRng};
 
 use crate::{Signer, SignerError};
 
@@ -23,7 +23,7 @@ impl P256Signer {
     fn from_signing_key(signing_key: SigningKey) -> Self {
         let cached_public_key = signing_key
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec();
         Self {
@@ -33,15 +33,13 @@ impl P256Signer {
     }
 
     pub fn generate() -> Result<Self, SignerError> {
-        Ok(Self::from_signing_key(SigningKey::random(&mut OsRng)))
+        let signing_key =
+            SigningKey::try_generate().map_err(|e| SignerError::P256(e.to_string()))?;
+        Ok(Self::from_signing_key(signing_key))
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
         if let Ok(signing_key) = SigningKey::from_pkcs8_pem(pem) {
-            return Ok(Self::from_signing_key(signing_key));
-        }
-
-        if let Ok(signing_key) = SigningKey::from_pkcs1_pem(pem) {
             return Ok(Self::from_signing_key(signing_key));
         }
 
@@ -53,10 +51,8 @@ impl P256Signer {
     }
 
     pub fn to_pem(&self) -> Result<String, SignerError> {
-        use pkcs8::EncodePrivateKey;
-
         self.signing_key
-            .to_pkcs8_pem(pkcs8::LineEnding::LF)
+            .to_pkcs8_pem(LineEnding::LF)
             .map(|pem| pem.to_string())
             .map_err(|e| SignerError::Pkcs8(e.to_string()))
     }

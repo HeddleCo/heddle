@@ -26,7 +26,6 @@ use super::{
         create_git_checkpoint_with_worktree_status,
     },
     command_catalog::{ActionFields, ActionTemplate},
-    verification_health::RepositoryVerificationState,
     git_overlay_txn,
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
@@ -36,6 +35,7 @@ use super::{
         preflight_large_capture_for_git_projection_commit_with_worktree_status, resolve_principal,
     },
     thread_cmd::cmd_thread,
+    verification_health::RepositoryVerificationState,
 };
 use crate::{
     cli::{

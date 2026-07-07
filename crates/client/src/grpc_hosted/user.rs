@@ -1,6 +1,6 @@
 use grpc::heddle::v1::{
-    ApproveThreadRequest, AttachChildRequest, BeginWebAuthnAuthenticationRequest, ChildEdge,
-    CheckMergeEligibilityRequest, CheckMergeEligibilityResponse, CreateGrantRequest,
+    ApproveThreadRequest, AttachChildRequest, BeginWebAuthnAuthenticationRequest,
+    CheckMergeEligibilityRequest, CheckMergeEligibilityResponse, ChildEdge, CreateGrantRequest,
     CreateInvitationRequest, CreateRepositoryRequest, DeleteGrantRequest, DeleteNamespaceRequest,
     DeleteRepositoryRequest, DetachChildRequest, GetCurrentUserNamespaceRequest,
     GetGovernanceHistoryRequest, GetMembershipHistoryRequest, GovernanceHistoryEntry,
@@ -152,7 +152,12 @@ impl HostedGrpcClient {
     pub async fn list_namespaces(
         &mut self,
     ) -> Result<Vec<wire::HostedNamespaceInfo>, ProtocolError> {
-        let response = authed_call!(self, list_namespaces, "ListNamespaces", ListNamespacesRequest {});
+        let response = authed_call!(
+            self,
+            list_namespaces,
+            "ListNamespaces",
+            ListNamespacesRequest {}
+        );
         Ok(response
             .namespaces
             .into_iter()
@@ -850,29 +855,32 @@ mod human_retry_tests {
     //! signing, the human-required rejection → app callback → single retry with
     //! WebAuthn headers, and the no-callback typed-error (no-loop) case.
 
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use cli_shared::ClientConfig;
     use crypto::Ed25519Signer;
     use grpc::heddle::v1::{
+        DiffForThreadRequest, DiffForThreadResponse, LogForThreadRequest, LogForThreadResponse,
         StatusForThreadRequest, StatusForThreadResponse,
         tree_edit_service_server::{TreeEditService, TreeEditServiceServer},
-        DiffForThreadRequest, DiffForThreadResponse, LogForThreadRequest, LogForThreadResponse,
     };
     use tonic::{Request, Response, Status, transport::Server};
     use wire::ProtocolError;
 
-    use super::super::request_signing::{
-        HDR_SIG_ACTION_URL, HDR_SIG_ALG, HDR_SIG_BIN, HDR_SIG_KEY_BIN, HDR_SIG_REQUIRED,
-        HDR_SIG_WEBAUTHN_AUTH_DATA_BIN, HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN, WebAuthnAssertion,
+    use super::{
+        super::request_signing::{
+            HDR_SIG_ACTION_URL, HDR_SIG_ALG, HDR_SIG_BIN, HDR_SIG_KEY_BIN, HDR_SIG_REQUIRED,
+            HDR_SIG_WEBAUTHN_AUTH_DATA_BIN, HDR_SIG_WEBAUTHN_CLIENT_DATA_BIN, WebAuthnAssertion,
+        },
+        HostedGrpcClient,
     };
-    use super::HostedGrpcClient;
 
     /// The deep-link the human-tier mock returns on its rejection (weft#338), so the retry test
     /// can assert the client threads it into `HumanSignatureRequest.action_url`.
-    const MOCK_ACTION_URL: &str =
-        "https://app.heddle.sh/verify-action?method=%2Fheddle.v1.TreeEditService%2FStatusForThread&challenge=CHAL";
+    const MOCK_ACTION_URL: &str = "https://app.heddle.sh/verify-action?method=%2Fheddle.v1.TreeEditService%2FStatusForThread&challenge=CHAL";
 
     /// A `TreeEditService` mock for `StatusForThread` that models a `human`-tier
     /// endpoint: the first request (no WebAuthn assertion) is rejected with
@@ -906,17 +914,17 @@ mod human_retry_tests {
                         Some("ed25519"),
                         "a signed first attempt must be PoP (ed25519), not webauthn"
                     );
-                    assert!(md.get_bin(HDR_SIG_KEY_BIN).is_some(), "PoP key header present");
+                    assert!(
+                        md.get_bin(HDR_SIG_KEY_BIN).is_some(),
+                        "PoP key header present"
+                    );
                     assert!(md.get_bin(HDR_SIG_BIN).is_some(), "PoP signature present");
                 }
                 let mut trailer = tonic::metadata::MetadataMap::new();
                 trailer.insert(HDR_SIG_REQUIRED, "human".parse().unwrap());
                 // Emit the weft#338 deep-link trailer so the client-side plumbing that reads it
                 // into `HumanSignatureRequest.action_url` is exercised end-to-end.
-                trailer.insert(
-                    HDR_SIG_ACTION_URL,
-                    MOCK_ACTION_URL.parse().unwrap(),
-                );
+                trailer.insert(HDR_SIG_ACTION_URL, MOCK_ACTION_URL.parse().unwrap());
                 return Err(Status::with_metadata(
                     tonic::Code::Unauthenticated,
                     "user verification required",
@@ -968,7 +976,11 @@ mod human_retry_tests {
 
     async fn connect_mock(
         callback: Option<super::super::request_signing::HumanSignatureCallback>,
-    ) -> Option<(HostedGrpcClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+    ) -> Option<(
+        HostedGrpcClient,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    )> {
         let mock = HumanTierMock::default();
         let hits = mock.hits.clone();
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
@@ -1008,12 +1020,11 @@ mod human_retry_tests {
     async fn human_tier_rejection_invokes_callback_and_retries_once() {
         let callback_calls = Arc::new(AtomicUsize::new(0));
         let cc = callback_calls.clone();
-        let callback: super::super::request_signing::HumanSignatureCallback =
-            Arc::new(move |req: super::super::request_signing::HumanSignatureRequest| {
+        let callback: super::super::request_signing::HumanSignatureCallback = Arc::new(
+            move |req: super::super::request_signing::HumanSignatureRequest| {
                 cc.fetch_add(1, Ordering::SeqCst);
                 // The challenge must be the client-derived SHA256(canonical).
-                let expected =
-                    super::super::request_signing::human_challenge(&req.canonical);
+                let expected = super::super::request_signing::human_challenge(&req.canonical);
                 assert_eq!(req.challenge, expected);
                 assert!(req.method_path.ends_with("/StatusForThread"));
                 // The server's deep-link trailer (weft#338) reaches the callback verbatim.
@@ -1025,7 +1036,8 @@ mod human_retry_tests {
                     authenticator_data: vec![0u8; 37],
                     user_handle: None,
                 })
-            });
+            },
+        );
 
         let Some((mut client, hits, server)) = connect_mock(Some(callback)).await else {
             return;
@@ -1037,8 +1049,16 @@ mod human_retry_tests {
         server.abort();
 
         assert_eq!(resp.thread, "feat/x");
-        assert_eq!(callback_calls.load(Ordering::SeqCst), 1, "callback invoked once");
-        assert_eq!(hits.load(Ordering::SeqCst), 2, "server hit exactly twice (reject + retry)");
+        assert_eq!(
+            callback_calls.load(Ordering::SeqCst),
+            1,
+            "callback invoked once"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "server hit exactly twice (reject + retry)"
+        );
     }
 
     #[tokio::test]
@@ -1062,7 +1082,11 @@ mod human_retry_tests {
             other => panic!("expected AuthorizationFailed, got {other:?}"),
         }
         // Exactly one server hit — the rejection — with NO retry loop.
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "no retry without a callback");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "no retry without a callback"
+        );
     }
 
     #[tokio::test]
@@ -1103,6 +1127,9 @@ mod human_retry_tests {
         // point is the client did not crash and sent no signature.
         let result = client.signed_status_for_thread_with_retry("feat/x").await;
         server.abort();
-        assert!(result.is_err(), "keyless client hits the human gate but does not panic");
+        assert!(
+            result.is_err(),
+            "keyless client hits the human gate but does not panic"
+        );
     }
 }

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! RSA signature implementation.
 
-use pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
 use rsa::{
-    Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey, pkcs1::DecodeRsaPrivateKey, rand_core::OsRng,
+    Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
+    pkcs1::DecodeRsaPrivateKey,
+    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
+    rand_core::OsRng,
 };
-use sha2::{Digest, Sha256};
+use sha2_010::{Digest, Sha256};
 
 use crate::{Signer, SignerError};
 
@@ -22,7 +24,7 @@ impl RsaSigner {
         public_key: RsaPublicKey,
     ) -> Result<Self, SignerError> {
         let cached_public_key_pem = public_key
-            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .to_public_key_pem(LineEnding::LF)
             .map_err(|e| SignerError::Pkcs8(e.to_string()))?
             .into_bytes();
         Ok(Self {
@@ -56,17 +58,15 @@ impl RsaSigner {
     }
 
     pub fn to_pem(&self) -> Result<String, SignerError> {
-        use pkcs8::EncodePrivateKey;
-
         self.private_key
-            .to_pkcs8_pem(pkcs8::LineEnding::LF)
+            .to_pkcs8_pem(LineEnding::LF)
             .map(|pem| pem.to_string())
             .map_err(|e| SignerError::Pkcs8(e.to_string()))
     }
 
     pub fn public_key_to_pem(&self) -> Result<String, SignerError> {
         self.public_key
-            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .to_public_key_pem(LineEnding::LF)
             .map_err(|e| SignerError::Pkcs8(e.to_string()))
     }
 

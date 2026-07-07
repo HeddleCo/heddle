@@ -14,16 +14,16 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::{IndexStage, Repository as SleyRepository};
 
 use super::{
-    verification_health::{
-        RepositoryVerificationState, action_template, repository_verification_blockers,
-        repository_verification_primary_command,
-    },
     rebase::{
         OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
         has_persisted_rebase_state,
     },
     resolve::abort_merge_state,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
+    verification_health::{
+        RepositoryVerificationState, action_template, repository_verification_blockers,
+        repository_verification_primary_command,
+    },
 };
 use crate::config::UserConfig;
 

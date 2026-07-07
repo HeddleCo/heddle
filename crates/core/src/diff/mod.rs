@@ -17,8 +17,7 @@ use objects::{
     worktree::{WorktreeStatus, diff_blobs},
 };
 use repo::{
-    ResolvePolicy, Repository, StateResolveError, StateResolveFailure,
-    resolve_state_for_command,
+    Repository, ResolvePolicy, StateResolveError, StateResolveFailure, resolve_state_for_command,
 };
 #[cfg(feature = "semantic")]
 use semantic::diff::{SemanticDiffOptions, WorktreeStatus as SemanticWorktreeStatus};
@@ -401,7 +400,9 @@ fn resolve_state_id(repository: &Repository, spec: &str) -> Result<ChangeId> {
         .map_err(|error| match error {
             StateResolveError::Repository(err) => err.into(),
             StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {
-                anyhow!(HeddleError::recovery(RecoveryDetails::state_not_found(spec)))
+                anyhow!(HeddleError::recovery(RecoveryDetails::state_not_found(
+                    spec
+                )))
             }
             StateResolveError::Failure(other) => anyhow!("{other}"),
         })
@@ -1731,10 +1732,7 @@ fn summarize_context(content: &str) -> String {
     if char_count <= 88 {
         first_line.to_string()
     } else {
-        format!(
-            "{}...",
-            first_line.chars().take(85).collect::<String>()
-        )
+        format!("{}...", first_line.chars().take(85).collect::<String>())
     }
 }
 
@@ -2686,9 +2684,8 @@ mod tests {
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
-        let err =
-            resolve_state_for_command(&repo, "hd-zzzzzzzzzzzz", ResolvePolicy::minimal())
-                .unwrap_err();
+        let err = resolve_state_for_command(&repo, "hd-zzzzzzzzzzzz", ResolvePolicy::minimal())
+            .unwrap_err();
         let mapped = match err {
             StateResolveError::Failure(StateResolveFailure::NotFound { spec }) => {
                 HeddleError::recovery(RecoveryDetails::state_not_found(spec))

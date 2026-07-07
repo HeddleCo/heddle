@@ -26,14 +26,18 @@ pub(crate) fn check_git_projection(
     objects_checked: &mut usize,
 ) -> Result<()> {
     if !mirror_path(repo).exists() {
-        warnings.push("legacy Bridge Mirror is absent; mirror-backed Git projection checks were skipped".to_string());
+        warnings.push(
+            "legacy Bridge Mirror is absent; mirror-backed Git projection checks were skipped"
+                .to_string(),
+        );
         return Ok(());
     }
 
     let mirror = open_git_repo(&mirror_path(repo))
         .map_err(|err| invalid_fsck_config(format!("legacy Bridge Mirror open failed: {err}")))?;
-    let mapping = build_existing_mapping(repo, &mirror)
-        .map_err(|err| invalid_fsck_config(format!("Git Projection Mapping check failed: {err}")))?;
+    let mapping = build_existing_mapping(repo, &mirror).map_err(|err| {
+        invalid_fsck_config(format!("Git Projection Mapping check failed: {err}"))
+    })?;
 
     for (change_id, git_oid) in mapping.iter() {
         *objects_checked += 1;
@@ -447,11 +451,15 @@ mod tests {
         assert!(warnings.is_empty());
         let expected_objects_checked = repo.refs().list_threads().expect("list threads").len() + 2;
         assert!(
-            !errors.iter().any(|error| error.kind == "git-projection-notes"),
+            !errors
+                .iter()
+                .any(|error| error.kind == "git-projection-notes"),
             "unexpected git-projection-notes errors: {errors:?}",
         );
         assert!(
-            !errors.iter().any(|error| error.kind == "git-projection-mapping"),
+            !errors
+                .iter()
+                .any(|error| error.kind == "git-projection-mapping"),
             "unexpected git-projection-mapping errors: {errors:?}",
         );
         assert_eq!(

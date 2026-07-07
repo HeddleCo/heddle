@@ -23,11 +23,11 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
+    thread::thread_name_invalid_advice,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
     },
-    thread::thread_name_invalid_advice,
     worktree_cmd::helpers::plan_worktree_target,
     worktree_safety::ensure_worktree_clean,
 };

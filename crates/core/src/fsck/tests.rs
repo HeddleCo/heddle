@@ -11,10 +11,7 @@ use repo::Repository;
 use sley::ObjectId as GitObjectId;
 use tempfile::TempDir;
 
-use super::{
-    objects::check_tree_objects,
-    state::check_states,
-};
+use super::{objects::check_tree_objects, state::check_states};
 
 fn setup_repo() -> (TempDir, Repository) {
     let temp = TempDir::new().expect("create temp dir");
@@ -218,11 +215,17 @@ fn test_tree_blob_checks_characterization() {
 
     // Shared subtree reused by two states.
     let shared_blob = Blob::from("shared-leaf\n");
-    let shared_blob_hash = repo.store().put_blob(&shared_blob).expect("put shared blob");
+    let shared_blob_hash = repo
+        .store()
+        .put_blob(&shared_blob)
+        .expect("put shared blob");
     let shared_tree = Tree::from_entries(vec![
         objects::object::TreeEntry::file("shared.txt", shared_blob_hash, false).unwrap(),
     ]);
-    let shared_tree_hash = repo.store().put_tree(&shared_tree).expect("put shared tree");
+    let shared_tree_hash = repo
+        .store()
+        .put_tree(&shared_tree)
+        .expect("put shared tree");
 
     // Dangling subtree ref (missing child tree — fsck stays silent).
     let dangling_tree_hash = ContentHash::compute(b"missing-subtree");
@@ -239,9 +242,15 @@ fn test_tree_blob_checks_characterization() {
     let state_shared_a = State::new(shared_tree_hash, vec![], sample_attribution());
     let state_shared_b = State::new(shared_tree_hash, vec![], sample_attribution());
     let state_dangling = State::new(dangling_parent_hash, vec![], sample_attribution());
-    repo.store().put_state(&state_shared_a).expect("put state a");
-    repo.store().put_state(&state_shared_b).expect("put state b");
-    repo.store().put_state(&state_dangling).expect("put state dangling");
+    repo.store()
+        .put_state(&state_shared_a)
+        .expect("put state a");
+    repo.store()
+        .put_state(&state_shared_b)
+        .expect("put state b");
+    repo.store()
+        .put_state(&state_dangling)
+        .expect("put state dangling");
     repo.record_missing_blob(partial_hash)
         .expect("record partial-fetch blob");
 

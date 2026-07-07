@@ -46,7 +46,10 @@ use cli::{
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
 
-fn ingest_into_git_projection(git_projection: &mut GitProjection<'_>, source: &Path) -> Result<(), String> {
+fn ingest_into_git_projection(
+    git_projection: &mut GitProjection<'_>,
+    source: &Path,
+) -> Result<(), String> {
     let target = test_support::heddle_repo(git_projection).root();
     ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy: false })
         .map_err(|error| error.to_string())?;
@@ -54,7 +57,8 @@ fn ingest_into_git_projection(git_projection: &mut GitProjection<'_>, source: &P
         .map_err(|error| error.to_string())?;
     test_support::build_existing_mapping(git_projection, Some(source))
         .map_err(|error| error.to_string())?;
-    let mirror_repo = test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
+    let mirror_repo =
+        test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
     test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())
 }

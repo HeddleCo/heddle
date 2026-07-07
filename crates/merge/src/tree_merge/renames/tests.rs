@@ -268,9 +268,15 @@ fn bidirectional_rename_detection() {
         &[("widget.rs", content_a), ("settings/config.rs", content_b)],
     );
 
-    let rename_map =
-        detect_merge_renames(&store, &base, &ours, &theirs, DEFAULT_RENAME_THRESHOLD, None)
-            .unwrap();
+    let rename_map = detect_merge_renames(
+        &store,
+        &base,
+        &ours,
+        &theirs,
+        DEFAULT_RENAME_THRESHOLD,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(rename_map.our_renames.len(), 1);
     assert_eq!(

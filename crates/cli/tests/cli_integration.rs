@@ -262,8 +262,6 @@ impl<'a> TestReferenceTarget<'a> {
 
 #[path = "cli_integration/basics.rs"]
 mod basics;
-#[path = "cli_integration/git_projection_commands.rs"]
-mod git_projection_commands;
 #[path = "cli_integration/cli_help_consistency.rs"]
 mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]
@@ -296,6 +294,8 @@ mod git_overlay_matrix;
 mod git_overlay_remote_ref_import;
 #[path = "cli_integration/git_overlay_sync_adoption.rs"]
 mod git_overlay_sync_adoption;
+#[path = "cli_integration/git_projection_commands.rs"]
+mod git_projection_commands;
 #[path = "cli_integration/git_replacement_matrix.rs"]
 mod git_replacement_matrix;
 #[path = "cli_integration/harness_error_surface.rs"]

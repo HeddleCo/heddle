@@ -6,6 +6,8 @@
 
 use std::{collections::HashMap, path::Path};
 
+#[cfg(feature = "async-source")]
+use objects::object::resolve_tree_path_async;
 pub use objects::object::{
     StalenessStatus, annotation_status_for_source, extract_line_range, resolve_current_symbol,
 };
@@ -18,8 +20,6 @@ use objects::{
     },
     store::ObjectSource,
 };
-#[cfg(feature = "async-source")]
-use objects::object::resolve_tree_path_async;
 
 use crate::Repository;
 

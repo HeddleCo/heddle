@@ -137,9 +137,7 @@ fn resolve_missing_state(
             && !tip.history_imported
         {
             return Err(StateResolveError::Failure(
-                StateResolveFailure::GitBranchHistoryNotImported {
-                    branch: tip.branch,
-                },
+                StateResolveFailure::GitBranchHistoryNotImported { branch: tip.branch },
             ));
         }
         if let Some(tip) = repo.git_overlay_tag_tip(spec)?

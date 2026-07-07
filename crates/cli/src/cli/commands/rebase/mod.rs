@@ -14,11 +14,11 @@ use super::{
     advice::RecoveryAdvice,
     command_runtime_contract,
     ff_record::record_ff_advance,
+    snapshot::ensure_current_state,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         repository_verification_primary_command,
     },
-    snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{

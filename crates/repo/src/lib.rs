@@ -25,9 +25,9 @@ pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
+mod repository_redaction;
 #[path = "repository_resolve_for_command.rs"]
 mod repository_resolve_for_command;
-mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
@@ -94,30 +94,28 @@ pub use objects::{
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
-pub use repository_resolve_for_command::{
-    EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
-    resolve_state_for_command,
-};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitOverlayBranchTip,
-    GitImportGuidance, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
-    HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT,
-    MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
-    PackFilesInspection, PartialFetchInspection, PullPlannerCacheInspection, RedactConfig,
-    RefCountsInspection, RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
-    RepositoryMaintenanceRunReport, RepositoryOperationStatus,
-    RepositoryPerformanceInspectionReport, ResignOutcome, SUGGESTION_WINDOW, SnapshotExecution,
-    SpoolFacet,
-    SnapshotProfile, ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet,
-    UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
-    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
-    is_synthetic_root,
+    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitImportGuidance, GitOverlayBranchTip,
+    GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD, HistoryQuery,
+    HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, MissingBlob,
+    OperationKind, OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
+    PullPlannerCacheInspection, RedactConfig, RefCountsInspection, RefSummaryIndexInspection,
+    RepoConfig, Repository, RepositoryCapability, RepositoryMaintenanceRunReport,
+    RepositoryOperationStatus, RepositoryPerformanceInspectionReport, ResignOutcome,
+    SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome,
+    TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
+    WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
+    find_merge_base, is_major_rewrite, is_synthetic_root,
 };
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
+pub use repository_resolve_for_command::{
+    EmptyHeadBootstrap, ResolvePolicy, ResolvedState, StateResolveError, StateResolveFailure,
+    resolve_state_for_command,
+};
 pub use revision_address::{RevisionAddress, RevisionAddressParseError};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{

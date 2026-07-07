@@ -2,8 +2,7 @@
 //! Shared status and command next-action selection.
 
 use repo::{
-    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
-    shell_quote,
+    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, shell_quote,
 };
 
 use crate::RepositoryVerificationState;
@@ -184,10 +183,7 @@ pub fn canonical_git_import_ref_command(ref_name: &str) -> String {
     heddle_action(["import", "git", "--ref", ref_name])
 }
 
-pub fn canonical_git_repair_ref_preview_command(
-    prefer: Option<&str>,
-    ref_name: &str,
-) -> String {
+pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: &str) -> String {
     match prefer {
         Some(prefer) => heddle_action([
             "fsck",

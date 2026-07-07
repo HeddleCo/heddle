@@ -15,8 +15,7 @@ use objects::{
 
 use super::{
     ConflictLabels, MergeBlobSource, MergeError, RenameMatch, SemanticMergeFn,
-    rename_matcher::flatten_tree,
-    renames::MergeRenameMap,
+    rename_matcher::flatten_tree, renames::MergeRenameMap,
 };
 
 pub(super) fn merge_with_renames(
@@ -211,29 +210,27 @@ fn merge_remaining_paths(
             (Some(_), None, None) | (None, None, None) => {}
             (Some((base_hash, _)), Some((our_hash, _)), None) => {
                 if our_hash != base_hash {
-                    let merged_hash =
-                        modify_delete_conflict_merge(
-                            store,
-                            blob_source,
-                            our_hash,
-                            path,
-                            conflicts,
-                            labels,
-                        )?;
+                    let merged_hash = modify_delete_conflict_merge(
+                        store,
+                        blob_source,
+                        our_hash,
+                        path,
+                        conflicts,
+                        labels,
+                    )?;
                     merged_flat.insert(path.clone(), merged_hash);
                 }
             }
             (Some((base_hash, _)), None, Some((their_hash, _))) => {
                 if their_hash != base_hash {
-                    let merged_hash =
-                        modify_delete_conflict_merge(
-                            store,
-                            blob_source,
-                            their_hash,
-                            path,
-                            conflicts,
-                            labels,
-                        )?;
+                    let merged_hash = modify_delete_conflict_merge(
+                        store,
+                        blob_source,
+                        their_hash,
+                        path,
+                        conflicts,
+                        labels,
+                    )?;
                     merged_flat.insert(path.clone(), merged_hash);
                 }
             }
@@ -360,17 +357,15 @@ fn text_hunk_merge_blobs(
         // git's `binary file changed in both` shape. DeleteVsModify is
         // never produced by text_hunk_merge (its signature has all three
         // inputs present; deletion is detected at the tree layer).
-        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
-            content_conflict_merge(
-                store,
-                blob_source,
-                our_hash,
-                their_hash,
-                path,
-                conflicts,
-                labels,
-            )
-        }
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => content_conflict_merge(
+            store,
+            blob_source,
+            our_hash,
+            their_hash,
+            path,
+            conflicts,
+            labels,
+        ),
     }
 }
 
@@ -713,16 +708,14 @@ fn merge_changed_entries(
             let Some(hash) = base_entry.tree_hash() else {
                 return Err(anyhow!(merge_integrity_refusal(
                     format!("merge base entry at {conflict_path:?} has tree type but no tree hash"),
-                    format!("merge base path {conflict_path:?} records a tree entry without a tree object hash"),
+                    format!(
+                        "merge base path {conflict_path:?} records a tree entry without a tree object hash"
+                    ),
                     "the recursive merge cannot load a trustworthy base subtree and could silently erase or mis-merge descendants",
                     "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed subtree",
                 )));
             };
-            require_subtree(
-                store,
-                &hash,
-                &format!("base subtree at {conflict_path:?}"),
-            )?
+            require_subtree(store, &hash, &format!("base subtree at {conflict_path:?}"))?
         } else {
             Tree::new()
         };
@@ -746,7 +739,9 @@ fn merge_changed_entries(
         ) else {
             return Err(anyhow!(merge_integrity_refusal(
                 format!("blob merge entry at {conflict_path:?} did not carry blob hashes"),
-                format!("merge path {conflict_path:?} records blob entries without all required blob object hashes"),
+                format!(
+                    "merge path {conflict_path:?} records blob entries without all required blob object hashes"
+                ),
                 "the content merge cannot load all three inputs and could otherwise merge against empty bytes",
                 "HEAD, refs, and worktree were left unchanged; merge stopped before applying the malformed blob entries",
             )));
@@ -1007,12 +1002,12 @@ mod tests {
         let base_tree = Tree::from_entries(vec![
             TreeEntry::file("file.txt".to_string(), missing_base_hash, false).unwrap(),
         ]);
-        let our_tree =
-            Tree::from_entries(vec![TreeEntry::file("file.txt".to_string(), our_hash, false)
-                .unwrap()]);
-        let their_tree =
-            Tree::from_entries(vec![TreeEntry::file("file.txt".to_string(), their_hash, false)
-                .unwrap()]);
+        let our_tree = Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), our_hash, false).unwrap(),
+        ]);
+        let their_tree = Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), their_hash, false).unwrap(),
+        ]);
 
         let blob_source = &store;
         let err = match crate::merge_trees(

@@ -464,7 +464,11 @@ fn test_cli_export_git_and_clone_roundtrip() {
 
     heddle(&["init"], Some(source.path())).unwrap();
     std::fs::write(source.path().join("file.txt"), "git projection export").unwrap();
-    heddle(&["capture", "-m", "Git projection source"], Some(source.path())).unwrap();
+    heddle(
+        &["capture", "-m", "Git projection source"],
+        Some(source.path()),
+    )
+    .unwrap();
 
     // Phase A: `export git` requires `--destination`. Pre-Phase-A
     // it silently no-op'd if no flag was given (writing only the sidecar

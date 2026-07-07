@@ -85,7 +85,12 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
     refs::check_refs(repo, &mut errors, &mut warnings)?;
     refs::check_merge_state(repo, &mut warnings)?;
     if opts.git_projection {
-        git_projection::check_git_projection(repo, &mut errors, &mut warnings, &mut objects_checked)?;
+        git_projection::check_git_projection(
+            repo,
+            &mut errors,
+            &mut warnings,
+            &mut objects_checked,
+        )?;
     }
 
     let valid = errors.is_empty();

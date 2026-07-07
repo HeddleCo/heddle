@@ -82,7 +82,8 @@ fn import_all_with_options(
         .map_err(|error| error.to_string())?;
     test_support::build_existing_mapping(git_projection, Some(source))
         .map_err(|error| error.to_string())?;
-    let mirror_repo = test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
+    let mirror_repo =
+        test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
     test_support::seed_ingest_identity_mappings_from_mirror(git_projection, &mirror_repo)
         .map_err(|error| error.to_string())?;
     Ok(import_stats_from_ingest(stats))
@@ -1067,8 +1068,11 @@ fn import_all_reuses_shared_gitlink_subtree_without_lossy_entries() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let mut git_projection = GitProjection::new(&repo);
-    let stats = import_all(&mut git_projection, Some(&git_repo.workdir().expect("workdir")))
-        .expect("default import accepts shared gitlink subtree");
+    let stats = import_all(
+        &mut git_projection,
+        Some(&git_repo.workdir().expect("workdir")),
+    )
+    .expect("default import accepts shared gitlink subtree");
 
     assert_eq!(stats.states_created, 2);
     assert!(stats.lossy_entries.is_empty());
@@ -1755,7 +1759,8 @@ fn maintenance_gc_consolidates_mirror_loose_objects_losslessly() {
     );
 
     // The consolidation under test.
-    let consolidated = test_support::consolidate_mirror(&git_projection).expect("consolidate mirror");
+    let consolidated =
+        test_support::consolidate_mirror(&git_projection).expect("consolidate mirror");
     assert!(
         consolidated >= loose_before,
         "consolidation must report packing at least every loose object \
@@ -2230,7 +2235,9 @@ fn pull_imports_remote_branches_and_tags_from_git_daemon() {
     };
 
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.pull(&daemon.url("remote.git")).expect("pull remote");
+    git_projection
+        .pull(&daemon.url("remote.git"))
+        .expect("pull remote");
 
     assert!(
         repo.refs()
@@ -2389,10 +2396,26 @@ fn import_handles_merge_history_without_missing_parent_mappings() {
         repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
         test_support::mapping(&git_projection).get_heddle(merge)
     );
-    assert!(test_support::mapping(&git_projection).get_heddle(base).is_some());
-    assert!(test_support::mapping(&git_projection).get_heddle(left).is_some());
-    assert!(test_support::mapping(&git_projection).get_heddle(right).is_some());
-    assert!(test_support::mapping(&git_projection).get_heddle(merge).is_some());
+    assert!(
+        test_support::mapping(&git_projection)
+            .get_heddle(base)
+            .is_some()
+    );
+    assert!(
+        test_support::mapping(&git_projection)
+            .get_heddle(left)
+            .is_some()
+    );
+    assert!(
+        test_support::mapping(&git_projection)
+            .get_heddle(right)
+            .is_some()
+    );
+    assert!(
+        test_support::mapping(&git_projection)
+            .get_heddle(merge)
+            .is_some()
+    );
 }
 
 // heddle#464 close-the-class (import boundary): a git branch name becomes a
@@ -2455,8 +2478,11 @@ fn failed_import_restores_mapping_and_overrides() {
     let pre_mapping = test_support::mapping(&git_projection).clone();
     let pre_overrides = test_support::commit_message_overrides(&git_projection).clone();
 
-    import_all(&mut git_projection, Some(&git_repo.workdir().expect("workdir")))
-        .expect_err("invalid branch name must fail after commits are mapped");
+    import_all(
+        &mut git_projection,
+        Some(&git_repo.workdir().expect("workdir")),
+    )
+    .expect_err("invalid branch name must fail after commits are mapped");
 
     assert_eq!(
         test_support::mapping(&git_projection),
@@ -2469,8 +2495,11 @@ fn failed_import_restores_mapping_and_overrides() {
         "failed import must restore pre-call commit message overrides"
     );
 
-    test_support::build_existing_mapping(&mut git_projection, Some(&git_repo.workdir().expect("workdir")))
-        .expect("mapping rebuild after failed import");
+    test_support::build_existing_mapping(
+        &mut git_projection,
+        Some(&git_repo.workdir().expect("workdir")),
+    )
+    .expect("mapping rebuild after failed import");
     assert_eq!(
         test_support::mapping(&git_projection),
         &pre_mapping,
@@ -3208,7 +3237,9 @@ fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
 
     let dest_temp = TempDir::new().expect("dest temp");
     let dest_path = dest_temp.path().join("dest.git");
-    let stats = git_projection.export_to_path(&dest_path).expect("export to path");
+    let stats = git_projection
+        .export_to_path(&dest_path)
+        .expect("export to path");
 
     // The total counts every commit that lands in the destination: main's
     // two plus the stale feature ref's one. "What we report" == "what we
@@ -3319,7 +3350,9 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
 
     let dest_temp = TempDir::new().expect("dest temp");
     let dest_path = dest_temp.path().join("dest.git");
-    let stats = git_projection.export_to_path(&dest_path).expect("export to path");
+    let stats = git_projection
+        .export_to_path(&dest_path)
+        .expect("export to path");
 
     // Both summary counts are partitions of the copied ref set: total =
     // main's two commits; newly = the same two (freshly minted this run).
@@ -3569,7 +3602,9 @@ fn round_trip_preserves_change_ids_via_notes() {
     // Step 2: export A to a fresh git destination.
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export");
-    git_projection_a.export_to_path(&dest_path).expect("export from A");
+    git_projection_a
+        .export_to_path(&dest_path)
+        .expect("export from A");
 
     // Step 3: import the exported repo into heddle B (fresh repo, no
     // sidecar carryover). The note attached to the commit must let B
@@ -3577,7 +3612,9 @@ fn round_trip_preserves_change_ids_via_notes() {
     let heddle_b_temp = TempDir::new().expect("heddle B temp");
     let repo_b = Repository::init(heddle_b_temp.path()).expect("init heddle B");
     let mut git_projection_b = GitProjection::new(&repo_b);
-    git_projection_b.import(Some(&dest_path)).expect("import into B");
+    git_projection_b
+        .import(Some(&dest_path))
+        .expect("import into B");
 
     let change_id_in_b = test_support::mapping(&git_projection_b)
         .get_heddle(commit_oid)
@@ -3931,7 +3968,9 @@ fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
 
     // The embargoed tip is never minted into the public mirror (absence) ...
     assert!(
-        test_support::mapping(&git_projection).get_git(&state_b).is_none(),
+        test_support::mapping(&git_projection)
+            .get_git(&state_b)
+            .is_none(),
         "embargoed tip must not be minted into the public mirror"
     );
     let oid_a = test_support::mapping(&git_projection)
@@ -4032,7 +4071,9 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
         "run 2 must lag the public branch to A, retracting the now-embargoed B"
     );
     assert!(
-        test_support::mapping(&git_projection).get_git(&state_b).is_none(),
+        test_support::mapping(&git_projection)
+            .get_git(&state_b)
+            .is_none(),
         "the now-Private B must be purged from the served mapping"
     );
     let mapping_cache = std::fs::read_to_string(test_support::mapping_path(&git_projection))
@@ -4772,7 +4813,9 @@ fn export_deletes_branch_when_whole_line_is_later_embargoed() {
     let mut git_projection = GitProjection::new(&repo);
     export_all(&mut git_projection).expect("first export");
     assert!(
-        test_support::mapping(&git_projection).get_git(&state_a).is_some(),
+        test_support::mapping(&git_projection)
+            .get_git(&state_a)
+            .is_some(),
         "A minted while public"
     );
 
@@ -5244,7 +5287,9 @@ fn matrix_plant_foreign_branch(git_projection: &GitProjection, name: &str, targe
 /// #316 / PR #528 — the mirror's name-keyed managed-refs record (full ref name →
 /// last-published tip), the ownership boundary the reconcile and the push frontier
 /// both read.
-fn matrix_managed_record(git_projection: &GitProjection) -> std::collections::HashMap<String, ObjectId> {
+fn matrix_managed_record(
+    git_projection: &GitProjection,
+) -> std::collections::HashMap<String, ObjectId> {
     let mirror = test_support::open_git_repo(git_projection).expect("open mirror");
     read_mirror_managed_refs(&mirror).expect("read mirror managed record")
 }
@@ -5252,7 +5297,11 @@ fn matrix_managed_record(git_projection: &GitProjection) -> std::collections::Ha
 /// #316 / PR #528 — whether `collect_managed_ref_updates` (the managed-filtered
 /// push frontier) carries a ref of `name`+`namespace`. A foreign ref must be
 /// ABSENT here even though it survives in the mirror.
-fn matrix_in_managed_frontier(git_projection: &GitProjection, name: &str, namespace: RefNamespace) -> bool {
+fn matrix_in_managed_frontier(
+    git_projection: &GitProjection,
+    name: &str,
+    namespace: RefNamespace,
+) -> bool {
     let mirror = test_support::open_git_repo(git_projection).expect("open mirror");
     let record = read_mirror_managed_refs(&mirror).expect("read record");
     collect_managed_ref_updates(&mirror, &record)
@@ -5893,7 +5942,11 @@ fn head_reconcile_conformance_matrix() {
                 matrix_plant_foreign_branch(&git_projection, "user-feature", oid_a);
                 export_all(&mut git_projection).unwrap();
                 assert!(
-                    !matrix_in_managed_frontier(&git_projection, "user-feature", RefNamespace::Branch),
+                    !matrix_in_managed_frontier(
+                        &git_projection,
+                        "user-feature",
+                        RefNamespace::Branch
+                    ),
                     "a foreign branch at a heddle OID must be EXCLUDED from the managed push frontier"
                 );
                 HeadOutcome {
@@ -6070,7 +6123,9 @@ fn export_propagates_branch_deletion_to_destination() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let dest = open_git(&dest_path).expect("open dest");
     assert!(
         find_reference(&dest, "refs/heads/main").is_ok(),
@@ -6098,7 +6153,9 @@ fn export_propagates_branch_deletion_to_destination() {
     }
 
     // Re-export to the SAME destination: the stale branch must be DELETED there.
-    git_projection.export_to_path(&dest_path).expect("second export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("second export");
     let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
         find_reference(&dest, "refs/heads/main").is_err(),
@@ -6158,7 +6215,9 @@ fn export_propagates_tag_and_note_deletion() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let oid_r = test_support::mapping(&git_projection)
         .get_git(&r.change_id)
         .expect("R minted");
@@ -6213,7 +6272,9 @@ fn export_propagates_tag_and_note_deletion() {
     })
     .unwrap();
 
-    git_projection.export_to_path(&dest_path).expect("second export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("second export");
 
     let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
@@ -6262,7 +6323,9 @@ fn export_does_not_delete_foreign_refs() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let oid_a = test_support::mapping(&git_projection)
         .get_git(&state_a)
         .expect("A minted");
@@ -6281,7 +6344,9 @@ fn export_does_not_delete_foreign_refs() {
     }
 
     // Re-export with nothing retracted (main still public).
-    git_projection.export_to_path(&dest_path).expect("second export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("second export");
 
     let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
@@ -6322,7 +6387,9 @@ fn export_does_not_delete_foreign_managed_ref() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let oid_a = test_support::mapping(&git_projection)
         .get_git(&state_a)
         .expect("A minted");
@@ -6342,7 +6409,9 @@ fn export_does_not_delete_foreign_managed_ref() {
     }
 
     // Re-export with nothing retracted (main still public).
-    git_projection.export_to_path(&dest_path).expect("second export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("second export");
 
     let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
@@ -6382,7 +6451,9 @@ fn export_still_deletes_previously_exported_then_retracted_ref() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let dest = open_git(&dest_path).expect("open dest");
     assert!(
         find_reference(&dest, "refs/heads/main").is_ok(),
@@ -6409,7 +6480,9 @@ fn export_still_deletes_previously_exported_then_retracted_ref() {
     }
 
     // Re-export: main was heddle-exported AND is no longer served → DELETED.
-    git_projection.export_to_path(&dest_path).expect("second export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("second export");
     let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
         find_reference(&dest, "refs/heads/main").is_err(),
@@ -6535,7 +6608,9 @@ fn embargo_rewind_forced_through_destination_push() {
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export-target");
     let mut git_projection = GitProjection::new(&repo);
-    git_projection.export_to_path(&dest_path).expect("first export");
+    git_projection
+        .export_to_path(&dest_path)
+        .expect("first export");
     let oid_a = test_support::mapping(&git_projection)
         .get_git(&state_a)
         .expect("A minted");
@@ -6771,7 +6846,9 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
     };
     let url = daemon.url("remote.git");
 
-    git_projection.push(&url).expect("first network push publishes B");
+    git_projection
+        .push(&url)
+        .expect("first network push publishes B");
     {
         let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         let tip = find_reference(&remote, "refs/heads/main")
@@ -6869,7 +6946,9 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
         return;
     };
     let url = daemon.url("remote.git");
-    git_projection.push(&url).expect("first network push publishes B");
+    git_projection
+        .push(&url)
+        .expect("first network push publishes B");
 
     let oid_a = test_support::mapping(&git_projection)
         .get_git(&state_a)
@@ -7012,7 +7091,9 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         return;
     };
     let url = daemon.url("remote.git");
-    git_projection.push(&url).expect("first network push publishes B");
+    git_projection
+        .push(&url)
+        .expect("first network push publishes B");
 
     // Out-of-band advance: a NEW commit C on top of B, written to the mirror (a
     // resolvable descendant of the served frontier), the local destination, AND
@@ -8139,7 +8220,8 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
 
     // ── path 1: Git import ──
     let git_projection_heddle = TempDir::new().expect("git_projection heddle temp");
-    let git_projection_repo = Repository::init(git_projection_heddle.path()).expect("init git_projection heddle");
+    let git_projection_repo =
+        Repository::init(git_projection_heddle.path()).expect("init git_projection heddle");
     let mut git_projection = GitProjection::new(&git_projection_repo);
     import_all(&mut git_projection, Some(git_workdir.as_path())).expect("Git import");
     let git_projection_cid = test_support::mapping(&git_projection)

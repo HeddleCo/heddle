@@ -28,8 +28,8 @@ use sley::Repository as SleyRepository;
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
-    verification_health::{MachineContractCoverage, machine_contract_coverage},
     schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
+    verification_health::{MachineContractCoverage, machine_contract_coverage},
 };
 use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};
 

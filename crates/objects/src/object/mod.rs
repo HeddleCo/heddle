@@ -28,8 +28,8 @@ mod structured_conflict;
 mod suggestion_core;
 mod timeline;
 mod tree;
-mod tree_path;
 mod tree_diff;
+mod tree_path;
 pub mod tree_walk;
 mod visibility_tier;
 
@@ -95,13 +95,13 @@ pub use tree::{
     EntryType, FileMode, Tree, TreeEntry, TreeEntryTarget, TreeError,
     validate_name as validate_tree_entry_name,
 };
-pub use tree_path::{
-    LeafPolicy, ResolvedTreeTarget, TreePathResolveError, resolve_tree_path, split_path,
-};
-#[cfg(feature = "async-source")]
-pub use tree_path::resolve_tree_path_async;
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
 pub use tree_diff::{diff_trees, diff_trees_visit};
+#[cfg(feature = "async-source")]
+pub use tree_path::resolve_tree_path_async;
+pub use tree_path::{
+    LeafPolicy, ResolvedTreeTarget, TreePathResolveError, resolve_tree_path, split_path,
+};
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
