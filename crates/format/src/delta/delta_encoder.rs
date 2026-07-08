@@ -18,6 +18,8 @@ use std::collections::HashMap;
 const MIN_MATCH_LENGTH_LARGE: usize = 16;
 /// Minimum match length for small targets (< 1024 bytes).
 const MIN_MATCH_LENGTH_SMALL: usize = 8;
+/// Maximum offsets to inspect for a single 4-byte key.
+const MAX_MATCH_CANDIDATES: usize = 1024;
 
 /// Delta encoder.
 #[derive(Debug)]
@@ -275,11 +277,33 @@ impl DeltaEncoder {
         let mut best_offset = 0;
         let mut best_length = 0;
 
-        for &offset in offsets {
+        let target_remaining = target.len() - pos;
+        let recent_start = offsets.len().saturating_sub(MAX_MATCH_CANDIDATES);
+        let mut examined = 0usize;
+
+        if recent_start > 0 {
+            let offset = offsets[0];
             let length = Self::match_length(base, offset, target, pos);
             if length > best_length {
                 best_length = length;
                 best_offset = offset;
+            }
+            if length == target_remaining {
+                return Some((best_offset, best_length));
+            }
+            examined += 1;
+        }
+
+        let remaining_budget = MAX_MATCH_CANDIDATES - examined;
+        let start = offsets.len().saturating_sub(remaining_budget);
+        for &offset in &offsets[start..] {
+            let length = Self::match_length(base, offset, target, pos);
+            if length > best_length {
+                best_length = length;
+                best_offset = offset;
+            }
+            if length == target_remaining {
+                break;
             }
         }
 

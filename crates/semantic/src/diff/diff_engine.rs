@@ -11,9 +11,9 @@ use objects::object::{DiffKind, FileChangeSet};
 use super::{
     diff_options::SemanticDiffOptions,
     diff_support::{
-        EngineOutput, LoadedChange, ParsedChangeSet, apply_renames, build_file_level_changes,
-        detect_renames, fallback_file_changes, function_and_import_changes, load_manifest,
-        suppress_redundant_file_modified,
+        apply_renames, build_file_level_changes, detect_renames, fallback_file_changes,
+        function_and_import_changes, load_manifest, suppress_redundant_file_modified, EngineOutput,
+        LoadedChange, ParsedChangeSet,
     },
     diff_types::{
         SemanticCheckOnlyResult, SemanticCheckStatus, SemanticDiffResult, SemanticFallbackReason,
@@ -133,14 +133,20 @@ where
         }
 
         let LoadOutcome { loaded, overflow } = self.load_changes(&mut output.fallback_reasons)?;
-        output.changes = build_file_level_changes(&loaded);
+        let parsed = self
+            .options
+            .analyze_functions
+            .then(|| self.parse_files(&loaded, &mut output.fallback_reasons));
+        output.changes = build_file_level_changes(&loaded, parsed.as_ref());
         output.file_renames = detect_renames(&loaded, self.options);
         apply_renames(&mut output.changes, &output.file_renames);
 
         if self.options.analyze_functions {
-            let parsed = self.parse_files(&loaded, &mut output.fallback_reasons);
+            let parsed = parsed
+                .as_ref()
+                .expect("parsed changes should be available when function analysis is enabled");
             let manifest = if self.options.analyze_dependencies
-                && super::diff_support::dependency_manifest_may_be_needed(&loaded, &parsed)
+                && super::diff_support::dependency_manifest_may_be_needed(&loaded, parsed)
             {
                 load_manifest(&loaded, &mut self.load_new, self.options)?
             } else {
@@ -148,7 +154,7 @@ where
             };
             output.changes.extend(function_and_import_changes(
                 &loaded,
-                &parsed,
+                parsed,
                 self.options,
                 manifest.as_deref(),
                 &output.file_renames,
@@ -519,6 +525,42 @@ mod tests {
             "byte-budget fallback reason must still be recorded: {:?}",
             result.fallback_reasons
         );
+    }
+
+    #[test]
+    fn file_level_classification_reuses_cached_parse_result() {
+        let old = "use std::io;\n\nfn compute() -> i32 {\n    1\n}\n";
+        let new = "use std::io;\nuse std::fs;\n\nfn compute() -> i32 {\n    1\n}\n";
+        let file_changes = FileChangeSet::from(vec![("lib.rs".to_string(), DiffKind::Modified)]);
+        let cache = SemanticParseCache::default();
+        cache.clear();
+        let options = SemanticDiffOptions::default();
+
+        let engine = SemanticEngine::new(
+            file_changes,
+            |_path| Ok(Some(old.to_string())),
+            |_path| Ok(Some(new.to_string())),
+            &options,
+            &cache,
+        );
+
+        let result = engine.full().expect("semantic diff should succeed");
+        let expected =
+            crate::analysis::classify_modification_with_confidence(Path::new("lib.rs"), old, new);
+
+        assert!(result.changes.iter().any(|change| matches!(
+            change,
+            objects::object::SemanticChange::FileModified {
+                path,
+                classification,
+                importance,
+                confidence
+            } if path == Path::new("lib.rs")
+                && classification == &Some(expected.0)
+                && importance == &Some(expected.1)
+                && confidence == &Some(expected.2)
+        )));
+        assert_eq!(cache.stats().stores, 2);
     }
 
     #[test]
