@@ -18,7 +18,10 @@ pub struct OperationId(pub Uuid);
 
 impl OperationId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        // v7 (time-ordered): OperationId is an idempotency/dedup key, never a
+        // secret, so a leaked creation-time is harmless and the ordering gives
+        // better index locality wherever these keys are persisted/indexed.
+        Self(Uuid::now_v7())
     }
 
     pub fn from_uuid(uuid: Uuid) -> Self {
