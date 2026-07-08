@@ -51,7 +51,7 @@ ed25519-dalek = { version = "3", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
 futures = "0.3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-sley = { version = "0.4.0", features = ["mmap", "fast-sha1"] }
+sley = { version = "0.4.2", features = ["mmap", "fast-sha1"] }
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"

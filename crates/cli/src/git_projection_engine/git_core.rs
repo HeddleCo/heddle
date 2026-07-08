@@ -2084,6 +2084,11 @@ fn fetch_heddle_notes_into_repo(
         url,
         &[refspec],
         FetchOptions {
+            // sley 0.4.2 negotiation/shallow controls — heddle uses defaults
+            // (no CLI override; use remote config), matching git's defaults.
+            negotiation_include: None,
+            negotiation_restrict: None,
+            reject_shallow: false,
             quiet: true,
             auto_follow_tags: false,
             fetch_all_tags: false,
@@ -3740,6 +3745,9 @@ fn clone_url_to_bare_via_sley(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
+                negotiation_include: None,
+                negotiation_restrict: None,
+                reject_shallow: false,
                 quiet: true,
                 auto_follow_tags: true,
                 fetch_all_tags: true,
@@ -3978,6 +3986,9 @@ fn fetch_network_remote(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
+                negotiation_include: None,
+                negotiation_restrict: None,
+                reject_shallow: false,
                 quiet: true,
                 auto_follow_tags: matches!(scope, GitFetchScope::AllRefs),
                 fetch_all_tags: matches!(scope, GitFetchScope::AllRefs),
