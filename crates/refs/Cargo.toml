@@ -12,15 +12,15 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
-heddle-schema = { path = "../schema", version = "0.8" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.8" }
+heddle-schema = { path = "../schema", version = "0.9" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.9" }
 rand.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.8", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.9", optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
