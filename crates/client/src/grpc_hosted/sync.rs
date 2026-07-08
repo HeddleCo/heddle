@@ -408,7 +408,7 @@ impl HostedGrpcClient {
             ProtocolError::InvalidState("failed to initialize push stream".to_string())
         })?;
         let mut request = Request::new(ReceiverStream::new(rx));
-        self.apply_auth(&mut request)?;
+        self.apply_auth(&mut request, "/heddle.v1.RepoSyncService/Push")?;
         let mut response = self
             .inner
             .push(request)
@@ -857,7 +857,7 @@ impl HostedGrpcClient {
             ProtocolError::InvalidState("failed to initialize pull stream".to_string())
         })?;
         let mut request = Request::new(ReceiverStream::new(rx));
-        self.apply_auth(&mut request)?;
+        self.apply_auth(&mut request, "/heddle.v1.RepoSyncService/Pull")?;
         let mut response = self
             .inner
             .pull(request)

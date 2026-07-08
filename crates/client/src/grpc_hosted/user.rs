@@ -56,7 +56,7 @@ macro_rules! signed_call {
                     $crate::grpc_hosted::request_signing::action_url_from_status(&status);
                 let assertion = $self.request_human_signature(path, &ctx, action_url)?;
                 let mut retry = Request::new(message);
-                $self.apply_auth(&mut retry)?;
+                $self.apply_auth(&mut retry, path)?;
                 $crate::grpc_hosted::request_signing::attach_human(&mut retry, &ctx, &assertion)?;
                 $self
                     .$client

@@ -144,7 +144,7 @@ impl HostedGrpcClient {
         request: &mut Request<T>,
         method_path: &str,
     ) -> Result<Option<request_signing::SignedRequestContext>, ProtocolError> {
-        self.apply_auth(request)?;
+        self.apply_auth(request, method_path)?;
         let Some(signer) = self.device_signer()? else {
             return Ok(None);
         };
@@ -199,7 +199,11 @@ impl HostedGrpcClient {
         callback(req)
     }
 
-    pub(super) fn apply_auth<T>(&self, request: &mut Request<T>) -> Result<(), ProtocolError> {
+    pub(super) fn apply_auth<T>(
+        &self,
+        request: &mut Request<T>,
+        method_path: &str,
+    ) -> Result<(), ProtocolError> {
         if let Some(token) = &self.token_header {
             request
                 .metadata_mut()
@@ -219,17 +223,27 @@ impl HostedGrpcClient {
                     .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?
                     .as_secs()
                     .to_string();
-                let signature = signer
-                    .sign(format!("{bearer}|{proof_ts}").as_bytes())
-                    .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
+                let mut nonce_bytes = [0u8; 16];
+                rand::fill(&mut nonce_bytes);
+                let nonce = hex::encode(nonce_bytes);
+                let signature =
+                    crypto::pop::sign_pop(&signer, bearer, &proof_ts, "POST", method_path, &nonce)
+                        .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
                 use base64::Engine;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(signature);
                 let proof = MetadataValue::try_from(encoded)
                     .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
-                request.metadata_mut().insert("x-heddle-proof", proof);
+                request.metadata_mut().insert(crypto::pop::HDR_PROOF, proof);
                 let proof_ts = MetadataValue::try_from(proof_ts)
                     .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
-                request.metadata_mut().insert("x-heddle-proof-ts", proof_ts);
+                request
+                    .metadata_mut()
+                    .insert(crypto::pop::HDR_PROOF_TS, proof_ts);
+                let nonce = MetadataValue::try_from(nonce)
+                    .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
+                request
+                    .metadata_mut()
+                    .insert(crypto::pop::HDR_PROOF_NONCE, nonce);
             }
         }
         Ok(())
@@ -463,3 +477,65 @@ pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_fac
 pub use monorepo::{MonorepoCloneOp, MonorepoClonePlan, SkippedChild};
 pub use session::{HostedAuthMode, HostedSession};
 pub use sync::HostedRefEntry;
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine as _;
+
+    use super::*;
+
+    fn test_client(auth_proof_key_pem: String, token: &str) -> HostedGrpcClient {
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let config = ClientConfig::default();
+        HostedGrpcClient {
+            inner: RepoSyncServiceClient::new(channel.clone())
+                .max_decoding_message_size(wire::MAX_PULL_DECODE_MESSAGE_SIZE),
+            user: HostedUserServiceClient::new(channel.clone()),
+            auth: AuthServiceClient::new(channel.clone()),
+            content: ContentServiceClient::new(channel.clone()),
+            tree_edit: TreeEditServiceClient::new(channel),
+            token_header: Some(
+                MetadataValue::try_from(format!("Bearer {token}")).expect("valid bearer header"),
+            ),
+            transport: helpers::HostedTransportPolicy::from_client_config(&config),
+            auth_proof_key_pem: Some(auth_proof_key_pem),
+            server_key: None,
+            on_human_signature: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_auth_attaches_verifiable_v2_pop_proof() {
+        let signer = Ed25519Signer::generate().expect("generate signer");
+        let pem = signer.to_pem().expect("export signer pem");
+        let token = "test-token";
+        let path = "/heddle.v1.AuthService/WhoAmI";
+        let client = test_client(pem, token);
+        let mut request = Request::new(());
+
+        client.apply_auth(&mut request, path).expect("apply auth");
+
+        let md = request.metadata();
+        let proof_ts = md
+            .get(crypto::pop::HDR_PROOF_TS)
+            .and_then(|v| v.to_str().ok())
+            .expect("proof timestamp header");
+        let nonce = md
+            .get(crypto::pop::HDR_PROOF_NONCE)
+            .and_then(|v| v.to_str().ok())
+            .expect("proof nonce header");
+        assert!(!nonce.is_empty());
+        assert!(nonce.len() <= 256);
+
+        let proof = md
+            .get(crypto::pop::HDR_PROOF)
+            .and_then(|v| v.to_str().ok())
+            .expect("proof header");
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(proof)
+            .expect("proof decodes");
+        let canonical = crypto::pop::pop_canonical_payload(token, proof_ts, "POST", path, nonce);
+        crypto::verify_payload_signature(&canonical, "ed25519", signer.public_key(), &sig)
+            .expect("proof verifies against device public key");
+    }
+}
