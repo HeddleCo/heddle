@@ -4304,13 +4304,12 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sley"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "751e5dfb5540857ea21ea49445a713ee704204860bb93cabdf930accdd0a12cc"
+checksum = "9a1e920f9abd5089609cdda0554dd19fe5f919380fe4db83eb2fafa716ec5dc0"
 dependencies = [
  "sley-config",
  "sley-core",
- "sley-diff-format",
  "sley-diff-merge",
  "sley-formats",
  "sley-grep",
@@ -4329,66 +4328,44 @@ dependencies = [
 
 [[package]]
 name = "sley-config"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abc5f4991a73047c939972061d8d1e272f79fafd4bd72615b8ed2eeeaa39c96e"
+checksum = "6863ac3547f6cd2e5644c725d51b0cb24c993240bcefdd264411dce0b5ecd3f0"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-core"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1798829d5393e5726fbfd453c74fb3187023e61bfe2d8184b9e654e530605a42"
+checksum = "e1839ec62c5bb7f7bd4492fffa2a8f5c06d4960c9756386fe1300a7b0f7221d9"
 dependencies = [
  "sha1 0.10.6",
 ]
 
 [[package]]
-name = "sley-diff-format"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0892de38e594012d916e153937c577c41ced0cfe088e8b17d4a8bcc7188c5fd8"
-dependencies = [
- "sley-config",
- "sley-core",
- "sley-diff-merge",
- "sley-grep",
-]
-
-[[package]]
 name = "sley-diff-merge"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc5a5018ae395ea9e99b13ebe72914b06c402b21659a38fa19165dc95ac5031d"
+checksum = "a194051cfedd5b767f6225b6a4435ffef62b5358c5aa32387f8db6458845c211"
 dependencies = [
  "sley-config",
  "sley-core",
  "sley-formats",
+ "sley-grep",
  "sley-index",
  "sley-object",
  "sley-odb",
+ "sley-pack",
  "sley-refs",
 ]
 
 [[package]]
-name = "sley-fetch"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d543547a4bca62e89e5ab9bf7c5f3f21012f77618ec2b909f45fa1e09ecb55be"
-dependencies = [
- "sley-core",
- "sley-odb",
- "sley-protocol",
- "sley-transport",
-]
-
-[[package]]
 name = "sley-formats"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8936cb8acddf151ddb516a1efd02bf07c82323a9547301d72b991d356f4fba4"
+checksum = "b09c9bc6f850c1d9373a3b67499f89306253b0ef3183c67b06f4769b2a357189"
 dependencies = [
  "flate2",
  "sley-config",
@@ -4399,9 +4376,9 @@ dependencies = [
 
 [[package]]
 name = "sley-fsck"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "377505c6f934a047a589c48b59880cd60a0c1d5697453d2acbce2685378bbb4b"
+checksum = "5395af31e3e52ca34c24cf1166c3ccde7e6dd65ce9bc86372b7dfecd7b8d298e"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -4413,61 +4390,64 @@ dependencies = [
 
 [[package]]
 name = "sley-grep"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1d238531cf5ec5b2b4d0ce69f1d14cb8a5cba6b04484f6ebc7863b447e8b486"
+checksum = "6244732ff5719cabec18450c5e3381642c5fa7894705b377a6a619a35a031e36"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-index"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da1af696e2bc81c92966a88e1e1bf20306b261c5719ccd17ddf09113cee6f6db"
+checksum = "706a7a018b058914e174fa0711d5705a0a705f837dd5b9ec827e4ac96f25decc"
 dependencies = [
  "sley-core",
+ "sley-mmap",
 ]
 
 [[package]]
 name = "sley-mmap"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12130563149f518aed2cd8dcf856ed0a38d5b6fedf7e768e86fea9ce7b7f9f8c"
+checksum = "2f13c9e0ed603144b0780bc7c77f94700533cd551f8726cc9891e900bdd8b606"
 dependencies = [
  "memmap2",
 ]
 
 [[package]]
 name = "sley-notes"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fea827cfb302709f2b3ceef75425b953430a4f06cd49e3fde37a5bdd05b1560"
+checksum = "a5a133c65a8572ca88f83b77778d73548cc141521d5c04c8545e2267aec50282"
 dependencies = [
  "sley-config",
  "sley-core",
  "sley-object",
  "sley-odb",
  "sley-refs",
+ "sley-rev",
  "sley-sequencer",
 ]
 
 [[package]]
 name = "sley-object"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28510de0b80971e5f1f8c7a43fd017abd0cd4e2a626f5736b2bc4e7172d4f8a5"
+checksum = "3e44912d38ea716fff413613196a3e5fccb2e43a1496a80cbeb4e864220e5c85"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-odb"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e42b1141894f2b5a7bedc090ea4d340566f9ee1281e25ed31b0b2ac2082d290"
+checksum = "4bc6a18e1c41bf0bb2c2eaccec3a27e9f401405ac5501217ca79dcebe87ac51c"
 dependencies = [
  "flate2",
+ "parking_lot",
  "sley-core",
  "sley-formats",
  "sley-mmap",
@@ -4476,10 +4456,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "sley-pack"
-version = "0.4.0"
+name = "sley-options"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec22353f7ffb96d309200c5a7c002bb99632a938e85e1b1f20a2127bb1c9d021"
+checksum = "03b97bfcda678b1d9163d6f5c7a6ea967cd5ad4f3b7f917a431f11420c349469"
+dependencies = [
+ "sley-core",
+]
+
+[[package]]
+name = "sley-pack"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dac8569698a6337cfe0a32351388f49d790feb63bc01ba712c70cd54c39bf1aa"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -4490,37 +4479,54 @@ dependencies = [
 
 [[package]]
 name = "sley-pathspec"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "791ce05ddf1d1150e67b841e0a217796fb94a6143d35a5f0b008a15f3dfb4451"
+checksum = "1b4d54aee1d435fe2cf6322bc70df3e7cb0167ba6dc032f988b102a4e6b63818"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-pretty"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67cd7edddaaf2fcd3e3bea53965c4ee6c4f17d0944042a5592d0461bb5ec7208"
+checksum = "b7de52cf53ea3066a05fc0bf4d1d53cfcf50bde23e77f3c2ba45ee87174089bc"
+dependencies = [
+ "encoding_rs",
+ "sley-config",
+ "sley-core",
+ "sley-object",
+ "sley-odb",
+ "sley-ref-filter",
+ "sley-refs",
+ "sley-rev",
+ "sley-strbuf-expand",
+]
+
+[[package]]
+name = "sley-protocol"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab62968c42efd180b3f04f2e639aa305212048d8ef2d6c5bad6c383c7d027ac"
+dependencies = [
+ "sley-core",
+]
+
+[[package]]
+name = "sley-ref-filter"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b06e6fa4093382994927311623de75f9b788fb11b15c3f625e2ad32c2e19694"
 dependencies = [
  "sley-core",
  "sley-strbuf-expand",
 ]
 
 [[package]]
-name = "sley-protocol"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16373a036549cb19b543919fcb14372992390faa39b3f64267b608106b630d5f"
-dependencies = [
- "sley-core",
-]
-
-[[package]]
 name = "sley-refs"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f62546457cb578bc8b205f4afa955908c98abcfb359ea656d93987561024164"
+checksum = "47185792bc28d102149a36e0699268319a4863ac1996770b536cc124c5a686a0"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -4529,13 +4535,12 @@ dependencies = [
 
 [[package]]
 name = "sley-remote"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1edbd4b49ee8fad778c61fe2309fbd4b0a071556bfa4a117c782522203f3cadc"
+checksum = "d34a3848edb219ebf99ca1f41aca4d50c7322deeb12245a3c027eb99ea9d3f92"
 dependencies = [
  "sley-config",
  "sley-core",
- "sley-fetch",
  "sley-formats",
  "sley-fsck",
  "sley-object",
@@ -4550,9 +4555,9 @@ dependencies = [
 
 [[package]]
 name = "sley-rev"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e71780ea57a5a0dd5ddbf36a9a28217eca16c7d090d1a93e24fc50cbca6f4294"
+checksum = "19cafc5ff337e2fc9ddcab84a4f3c8e61e0ca071416c1ccd8cb997e3559a9d62"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -4562,15 +4567,16 @@ dependencies = [
  "sley-mmap",
  "sley-object",
  "sley-odb",
+ "sley-options",
  "sley-pathspec",
  "sley-refs",
 ]
 
 [[package]]
 name = "sley-sequencer"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9263517a01ecd4a90294b00598e09792dc192afd6536851e169a26d9e8ef6ee3"
+checksum = "453de2c95c84c7ab9b79851558affcaf15fe5745b4d380bd0f1ab239833a54ab"
 dependencies = [
  "sley-core",
  "sley-formats",
@@ -4582,18 +4588,18 @@ dependencies = [
 
 [[package]]
 name = "sley-strbuf-expand"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "171ee5775823f19d5d2436213b1bdf3c0ebb168fef0836ab5185aceb8ffe198b"
+checksum = "4ce5dbae03a054a2d72a806a7503bd2b1699bee22f4c7bf2d08d591def846838"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-submodule"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91f464c5bb84373ead03875b7438c9aab1f8aaa099d2baa759a994b4288b675"
+checksum = "8cdbad8a2563530c4ac0f2cb46d2a4ae041cbe7d9e8adbffeee6df30e53695f0"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -4601,10 +4607,11 @@ dependencies = [
 
 [[package]]
 name = "sley-transport"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caf389ebe65186247411ab15f14adbbe5185f60572fce3f8c87ee6ddee052302"
+checksum = "f177605f1d55d0356c2cdc937abcdd5b05a6e74dad067273d13f4c34a9023107"
 dependencies = [
+ "sley-config",
  "sley-core",
  "sley-protocol",
  "ureq",
@@ -4612,9 +4619,9 @@ dependencies = [
 
 [[package]]
 name = "sley-worktree"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a73c0c0b56e0181ac40133c93634cc733a23ea785ac00457d17692bd31cc544"
+checksum = "d92ea7beac585898008eca3c9df6cc05277cf90d14d6685781eb6bbe965db418"
 dependencies = [
  "encoding_rs",
  "sley-config",
@@ -5000,7 +5007,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
