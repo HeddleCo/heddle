@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared protocol/auth transport types.
+//! Live authorization scope rules are owned by weft-server/src/access/scope.rs.
 
-mod auth_context;
 #[cfg(test)]
 mod auth_tests;
 mod auth_token;
 mod capabilities;
-mod message_auth;
 mod message_delta;
 mod message_hosted;
 mod message_objects;
@@ -17,16 +16,13 @@ mod native_pack;
 mod object_availability;
 mod object_graph;
 mod object_transfer;
-mod scope_match;
 mod transfer_plan;
 
-pub use auth_context::AuthContext;
-pub use auth_token::{AuthToken, TokenScope};
+pub use auth_token::AuthToken;
 pub use capabilities::{
     CAPABILITY_CHUNKED_TRANSFER, CAPABILITY_PACK_TRANSFER, CAPABILITY_PARTIAL_FETCH,
     CAPABILITY_RESUMABLE_TRANSFER, Capabilities, CapabilitySet,
 };
-pub use message_auth::{AuthMethod, Permission};
 pub use message_delta::{DeltaData, RequestDelta};
 pub use message_hosted::{
     CreateHostedGrant, CreateHostedRepository, CreateNamespace, DeleteHostedGrant,
@@ -60,7 +56,6 @@ pub use object_transfer::{
     MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, check_received_transfer_blob_size, chunk_bounds,
     chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
-pub use scope_match::scope_contains;
 pub use transfer_plan::{
     GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,
 };
