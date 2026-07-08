@@ -2084,7 +2084,7 @@ fn fetch_heddle_notes_into_repo(
         url,
         &[refspec],
         FetchOptions {
-            // sley 0.4.1 negotiation/shallow controls — heddle uses defaults
+            // sley 0.4.2 negotiation/shallow controls — heddle uses defaults
             // (no CLI override; use remote config), matching git's defaults.
             negotiation_include: None,
             negotiation_restrict: None,
