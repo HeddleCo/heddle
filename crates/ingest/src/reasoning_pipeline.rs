@@ -31,7 +31,7 @@
 //! etc.) without the pipeline caring.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -238,6 +238,7 @@ impl<'a> ReasoningPipeline<'a> {
             .emit_annotations
             .then(|| ReasoningEmitter::new(self.repo, self.sha_map));
         let mut preview = Vec::new();
+        let mut seen_commits: HashMap<String, crate::git_walk::CommitEntry> = HashMap::new();
 
         let mut last_progress = 0usize;
         for (idx, sha) in git_shas.iter().enumerate() {
@@ -252,7 +253,11 @@ impl<'a> ReasoningPipeline<'a> {
                 }
             };
 
-            let changed = match self.changed_files(&commit) {
+            let parent_commit = commit
+                .parents
+                .first()
+                .and_then(|parent| seen_commits.get(parent));
+            let changed = match self.changed_files(&commit, parent_commit) {
                 Ok(v) => v,
                 Err(PipelineFileError::UntranslatedTree(_)) => {
                     debug!(sha, "commit tree not in sha_map — skipping");
@@ -265,6 +270,7 @@ impl<'a> ReasoningPipeline<'a> {
                     continue;
                 }
             };
+            seen_commits.insert(commit.sha.clone(), commit.clone());
 
             let ranked = matcher.score_commit(&commit, &changed);
             let eligible: Vec<_> = ranked
@@ -454,55 +460,54 @@ impl<'a> ReasoningPipeline<'a> {
     /// it would surface `"src"` instead of `"src/auth.rs"` — wrong for
     /// our transcript matcher, which keys on file paths).
     ///
-    /// Strategy: walk both trees fully into `(path → blob_hash)` maps
-    /// and compare. Any path present on only one side, or with a
-    /// different hash, is "changed". Root commits go through the same
-    /// path with an empty `from` map.
+    /// Strategy: compare trees recursively and skip any subtree whose
+    /// content hash is identical on both sides. Any leaf path present
+    /// on only one side, or with a different hash, is "changed". Root
+    /// commits go through the same path with an empty `from` side.
     ///
     /// Assumes `Importer` already translated the commit tree and (if
     /// present) the parent tree into the Heddle store.
     fn changed_files(
         &self,
         commit: &crate::git_walk::CommitEntry,
+        parsed_parent: Option<&crate::git_walk::CommitEntry>,
     ) -> Result<Vec<String>, PipelineFileError> {
         let to_hash = self
             .sha_map
             .get_tree(&commit.tree_sha)
             .ok_or_else(|| PipelineFileError::UntranslatedTree(commit.tree_sha.clone()))?;
 
-        let from_files = if let Some(parent) = commit.parents.first() {
-            let parent_commit = self
-                .git
-                .read_commit(parent)
-                .map_err(|e| PipelineFileError::Other(e.to_string()))?;
+        let from_hash = if let Some(parent) = commit.parents.first() {
+            let fallback_parent;
+            let parent_commit = if let Some(parsed_parent) = parsed_parent {
+                parsed_parent
+            } else {
+                fallback_parent = self
+                    .git
+                    .read_commit(parent)
+                    .map_err(|e| PipelineFileError::Other(e.to_string()))?;
+                &fallback_parent
+            };
             let from_hash = self
                 .sha_map
                 .get_tree(&parent_commit.tree_sha)
                 .ok_or_else(|| {
                     PipelineFileError::UntranslatedTree(parent_commit.tree_sha.clone())
                 })?;
-            collect_tree_files(self.repo.store(), &from_hash)
-                .map_err(|e| PipelineFileError::Other(e.to_string()))?
+            Some(from_hash)
         } else {
-            BTreeMap::new()
+            None
         };
 
-        let to_files = collect_tree_files(self.repo.store(), &to_hash)
-            .map_err(|e| PipelineFileError::Other(e.to_string()))?;
-
         let mut changed: Vec<String> = Vec::new();
-        for (path, to_blob) in &to_files {
-            match from_files.get(path) {
-                None => changed.push(path.clone()),
-                Some(from_blob) if from_blob != to_blob => changed.push(path.clone()),
-                _ => {}
-            }
-        }
-        for path in from_files.keys() {
-            if !to_files.contains_key(path) {
-                changed.push(path.clone());
-            }
-        }
+        diff_tree_files(
+            self.repo.store(),
+            from_hash.as_ref(),
+            Some(&to_hash),
+            "",
+            &mut changed,
+        )
+        .map_err(|e| PipelineFileError::Other(e.to_string()))?;
         changed.sort();
         changed.dedup();
         Ok(changed)
@@ -802,24 +807,152 @@ fn has_durable_language(lower: &str) -> bool {
     DURABLE.iter().any(|needle| lower.contains(needle))
 }
 
+/// Diff two trees recursively, skipping equal subtree hashes.
+fn diff_tree_files<S: ObjectStore + ?Sized>(
+    store: &S,
+    from_hash: Option<&ContentHash>,
+    to_hash: Option<&ContentHash>,
+    prefix: &str,
+    changed: &mut Vec<String>,
+) -> Result<(), anyhow::Error> {
+    if from_hash.is_some() && from_hash == to_hash {
+        return Ok(());
+    }
+
+    let from_tree = match from_hash {
+        Some(hash) => store.get_tree(hash)?,
+        None => None,
+    };
+    let to_tree = match to_hash {
+        Some(hash) => store.get_tree(hash)?,
+        None => None,
+    };
+
+    let from_entries = from_tree.as_ref().map_or(&[][..], |tree| tree.entries());
+    let to_entries = to_tree.as_ref().map_or(&[][..], |tree| tree.entries());
+    let mut from_idx = 0usize;
+    let mut to_idx = 0usize;
+
+    while from_idx < from_entries.len() || to_idx < to_entries.len() {
+        match (from_entries.get(from_idx), to_entries.get(to_idx)) {
+            (Some(from), Some(to)) if from.name() == to.name() => {
+                diff_matching_entries(store, from, to, prefix, changed)?;
+                from_idx += 1;
+                to_idx += 1;
+            }
+            (Some(from), Some(to)) if from.name() < to.name() => {
+                collect_entry_files(store, from, prefix, changed)?;
+                from_idx += 1;
+            }
+            (Some(_), Some(to)) => {
+                collect_entry_files(store, to, prefix, changed)?;
+                to_idx += 1;
+            }
+            (Some(from), None) => {
+                collect_entry_files(store, from, prefix, changed)?;
+                from_idx += 1;
+            }
+            (None, Some(to)) => {
+                collect_entry_files(store, to, prefix, changed)?;
+                to_idx += 1;
+            }
+            (None, None) => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn diff_matching_entries<S: ObjectStore + ?Sized>(
+    store: &S,
+    from: &objects::object::TreeEntry,
+    to: &objects::object::TreeEntry,
+    prefix: &str,
+    changed: &mut Vec<String>,
+) -> Result<(), anyhow::Error> {
+    let path = join_diff_path(prefix, from.name());
+    match (from.entry_type(), to.entry_type()) {
+        (EntryType::Tree, EntryType::Tree) => {
+            let from_hash = from.tree_hash();
+            let to_hash = to.tree_hash();
+            diff_tree_files(store, from_hash.as_ref(), to_hash.as_ref(), &path, changed)?;
+        }
+        (EntryType::Blob | EntryType::Symlink, EntryType::Blob | EntryType::Symlink) => {
+            if from.leaf_content_hash() != to.leaf_content_hash() {
+                changed.push(path);
+            }
+        }
+        (EntryType::Gitlink | EntryType::Spoollink, EntryType::Gitlink | EntryType::Spoollink) => {}
+        _ => {
+            collect_entry_files(store, from, prefix, changed)?;
+            collect_entry_files(store, to, prefix, changed)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_entry_files<S: ObjectStore + ?Sized>(
+    store: &S,
+    entry: &objects::object::TreeEntry,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<(), anyhow::Error> {
+    let path = join_diff_path(prefix, entry.name());
+    match entry.entry_type() {
+        EntryType::Blob | EntryType::Symlink => out.push(path),
+        EntryType::Tree => {
+            if let Some(hash) = entry.tree_hash() {
+                collect_tree_file_paths(store, &hash, &path, out)?;
+            }
+        }
+        EntryType::Gitlink | EntryType::Spoollink => {}
+    }
+    Ok(())
+}
+
+fn collect_tree_file_paths<S: ObjectStore + ?Sized>(
+    store: &S,
+    root: &ContentHash,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<(), anyhow::Error> {
+    let Some(tree) = store.get_tree(root)? else {
+        return Ok(());
+    };
+    for entry in tree.entries() {
+        collect_entry_files(store, entry, prefix, out)?;
+    }
+    Ok(())
+}
+
+fn join_diff_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
 /// Walk a tree recursively, returning every leaf file with its blob
 /// hash. Directory entries expand; the returned map is keyed on the
 /// slash-joined repo-relative path. Missing tree objects (shouldn't
 /// happen if `Importer` succeeded) propagate as store errors.
+#[cfg(test)]
 fn collect_tree_files<S: ObjectStore + ?Sized>(
     store: &S,
     root: &ContentHash,
-) -> Result<BTreeMap<String, ContentHash>, anyhow::Error> {
-    let mut out = BTreeMap::new();
+) -> Result<std::collections::BTreeMap<String, ContentHash>, anyhow::Error> {
+    let mut out = std::collections::BTreeMap::new();
     walk_tree(store, root, "", &mut out)?;
     Ok(out)
 }
 
+#[cfg(test)]
 fn walk_tree<S: ObjectStore + ?Sized>(
     store: &S,
     hash: &ContentHash,
     prefix: &str,
-    out: &mut BTreeMap<String, ContentHash>,
+    out: &mut std::collections::BTreeMap<String, ContentHash>,
 ) -> Result<(), anyhow::Error> {
     let Some(tree) = store.get_tree(hash)? else {
         // Empty tree hash resolves to None; that's fine — nothing to
@@ -899,6 +1032,10 @@ mod tests {
     use std::{fs, path::PathBuf, process::Command};
 
     use chrono::{Duration as ChronoDuration, Utc};
+    use objects::{
+        object::{Blob, Tree, TreeEntry},
+        store::InMemoryStore,
+    };
     use repo::Repository;
     use tempfile::TempDir;
 
@@ -997,6 +1134,64 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn put_test_blob(store: &InMemoryStore, content: &str) -> ContentHash {
+        store
+            .put_blob(&Blob::from_slice(content.as_bytes()))
+            .expect("put test blob")
+    }
+
+    fn put_test_tree(store: &InMemoryStore, entries: Vec<TreeEntry>) -> ContentHash {
+        store
+            .put_tree(&Tree::from_entries(entries))
+            .expect("put test tree")
+    }
+
+    fn test_file(name: &str, hash: ContentHash) -> TreeEntry {
+        TreeEntry::file(name.to_string(), hash, false).expect("valid file entry")
+    }
+
+    fn test_dir(name: &str, hash: ContentHash) -> TreeEntry {
+        TreeEntry::directory(name.to_string(), hash).expect("valid directory entry")
+    }
+
+    fn old_full_walk_changed_files(
+        store: &InMemoryStore,
+        from_hash: &ContentHash,
+        to_hash: &ContentHash,
+    ) -> Vec<String> {
+        let from_files = collect_tree_files(store, from_hash).expect("collect from tree");
+        let to_files = collect_tree_files(store, to_hash).expect("collect to tree");
+        let mut changed = Vec::new();
+        for (path, to_blob) in &to_files {
+            match from_files.get(path) {
+                None => changed.push(path.clone()),
+                Some(from_blob) if from_blob != to_blob => changed.push(path.clone()),
+                _ => {}
+            }
+        }
+        for path in from_files.keys() {
+            if !to_files.contains_key(path) {
+                changed.push(path.clone());
+            }
+        }
+        changed.sort();
+        changed.dedup();
+        changed
+    }
+
+    fn incremental_changed_files(
+        store: &InMemoryStore,
+        from_hash: &ContentHash,
+        to_hash: &ContentHash,
+    ) -> Vec<String> {
+        let mut changed = Vec::new();
+        diff_tree_files(store, Some(from_hash), Some(to_hash), "", &mut changed)
+            .expect("diff test trees");
+        changed.sort();
+        changed.dedup();
+        changed
     }
 
     /// Load transcripts from a test-local `.claude/projects/<slug>/*.jsonl`
@@ -1118,6 +1313,87 @@ mod tests {
         assert_eq!(stats.commits_with_matches, 0);
         assert_eq!(stats.points_extracted, 0);
         assert_eq!(stats.emit.annotations_written, 0);
+    }
+
+    #[test]
+    fn incremental_tree_diff_reports_only_deep_changed_file() {
+        let store = InMemoryStore::new();
+        let stable = put_test_blob(&store, "stable\n");
+        let old_leaf = put_test_blob(&store, "old\n");
+        let new_leaf = put_test_blob(&store, "new\n");
+
+        let old_deep = put_test_tree(
+            &store,
+            vec![test_file("target.rs", old_leaf), test_file("stable.rs", stable)],
+        );
+        let new_deep = put_test_tree(
+            &store,
+            vec![test_file("target.rs", new_leaf), test_file("stable.rs", stable)],
+        );
+        let old_mid = put_test_tree(&store, vec![test_dir("deep", old_deep)]);
+        let new_mid = put_test_tree(&store, vec![test_dir("deep", new_deep)]);
+        let old_src = put_test_tree(&store, vec![test_dir("mid", old_mid)]);
+        let new_src = put_test_tree(&store, vec![test_dir("mid", new_mid)]);
+        let docs = put_test_tree(&store, vec![test_file("guide.md", stable)]);
+        let old_root = put_test_tree(
+            &store,
+            vec![test_dir("docs", docs), test_dir("src", old_src)],
+        );
+        let new_root = put_test_tree(
+            &store,
+            vec![test_dir("docs", docs), test_dir("src", new_src)],
+        );
+
+        let changed = incremental_changed_files(&store, &old_root, &new_root);
+
+        assert_eq!(changed, vec!["src/mid/deep/target.rs"]);
+    }
+
+    #[test]
+    fn incremental_tree_diff_matches_old_full_walk_fixture() {
+        let store = InMemoryStore::new();
+        let same = put_test_blob(&store, "same\n");
+        let old_a = put_test_blob(&store, "old a\n");
+        let new_a = put_test_blob(&store, "new a\n");
+        let deleted = put_test_blob(&store, "deleted\n");
+        let added = put_test_blob(&store, "added\n");
+        let link_old = put_test_blob(&store, "old target\n");
+        let link_new = put_test_blob(&store, "new target\n");
+
+        let old_lib = put_test_tree(
+            &store,
+            vec![
+                test_file("a.rs", old_a),
+                test_file("deleted.rs", deleted),
+                TreeEntry::symlink("link".to_string(), link_old).expect("valid symlink"),
+            ],
+        );
+        let new_lib = put_test_tree(
+            &store,
+            vec![
+                test_file("a.rs", new_a),
+                test_file("added.rs", added),
+                TreeEntry::symlink("link".to_string(), link_new).expect("valid symlink"),
+            ],
+        );
+        let unchanged_dir = put_test_tree(&store, vec![test_file("same.rs", same)]);
+        let old_root = put_test_tree(
+            &store,
+            vec![test_dir("lib", old_lib), test_dir("unchanged", unchanged_dir)],
+        );
+        let new_root = put_test_tree(
+            &store,
+            vec![test_dir("lib", new_lib), test_dir("unchanged", unchanged_dir)],
+        );
+
+        let incremental = incremental_changed_files(&store, &old_root, &new_root);
+        let full_walk = old_full_walk_changed_files(&store, &old_root, &new_root);
+
+        assert_eq!(incremental, full_walk);
+        assert_eq!(
+            incremental,
+            vec!["lib/a.rs", "lib/added.rs", "lib/deleted.rs", "lib/link"]
+        );
     }
 
     #[test]

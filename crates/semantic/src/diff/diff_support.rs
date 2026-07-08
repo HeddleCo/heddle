@@ -12,8 +12,9 @@ use objects::object::{DiffKind, FileChange, FileChangeSet, SemanticChange};
 use super::{diff_options::SemanticDiffOptions, diff_types::SemanticFallbackReason};
 use crate::{
     analysis::{
-        AggregationResult, classify_modification_with_confidence, detect_file_renames,
-        detect_function_changes_with_parsed, detect_import_changes_with_parsed,
+        classify_modification_with_confidence, classify_modification_with_parsed,
+        detect_file_renames, detect_function_changes_with_parsed,
+        detect_import_changes_with_parsed, AggregationResult,
     },
     parser::ParsedFile,
 };
@@ -87,7 +88,10 @@ pub(super) fn fallback_file_changes(file_changes: &FileChangeSet) -> Vec<Semanti
         .collect()
 }
 
-pub(super) fn build_file_level_changes(loaded: &[LoadedChange]) -> Vec<SemanticChange> {
+pub(super) fn build_file_level_changes(
+    loaded: &[LoadedChange],
+    parsed: Option<&ParsedChangeSet>,
+) -> Vec<SemanticChange> {
     let mut changes = Vec::with_capacity(loaded.len());
     for change in loaded {
         match change.change.kind {
@@ -97,7 +101,7 @@ pub(super) fn build_file_level_changes(loaded: &[LoadedChange]) -> Vec<SemanticC
             DiffKind::Added => changes.push(SemanticChange::FileAdded {
                 path: change.path.clone(),
             }),
-            DiffKind::Modified => push_modified_change(&mut changes, change),
+            DiffKind::Modified => push_modified_change(&mut changes, change, parsed),
             DiffKind::Unchanged => {}
         }
     }
@@ -264,13 +268,38 @@ fn import_dependency_names(parsed: &ParsedFile) -> HashSet<String> {
         .collect()
 }
 
-fn push_modified_change(changes: &mut Vec<SemanticChange>, change: &LoadedChange) {
+fn push_modified_change(
+    changes: &mut Vec<SemanticChange>,
+    change: &LoadedChange,
+    parsed: Option<&ParsedChangeSet>,
+) {
     let metadata = change
         .old_content
         .as_deref()
         .zip(change.new_content.as_deref())
         .map(|(old_content, new_content)| {
-            classify_modification_with_confidence(&change.path, old_content, new_content)
+            match parsed.and_then(|parsed| {
+                parsed
+                    .old
+                    .get(&change.path)
+                    .and_then(|value| value.as_deref())
+                    .zip(
+                        parsed
+                            .new
+                            .get(&change.path)
+                            .and_then(|value| value.as_deref()),
+                    )
+            }) {
+                Some((old_parsed, new_parsed)) => classify_modification_with_parsed(
+                    old_content,
+                    new_content,
+                    old_parsed,
+                    new_parsed,
+                ),
+                None => {
+                    classify_modification_with_confidence(&change.path, old_content, new_content)
+                }
+            }
         });
     changes.push(SemanticChange::FileModified {
         path: change.path.clone(),

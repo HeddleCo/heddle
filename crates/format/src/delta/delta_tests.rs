@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::{DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE, compute_delta};
+use super::{compute_delta, DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE};
 
 #[test]
 fn test_delta_roundtrip() {
@@ -43,6 +43,24 @@ fn test_delta_no_match() {
     let decoded = DeltaDecoder::decode(base, &delta, MAX_DELTA_OUTPUT_SIZE).unwrap();
 
     assert_eq!(decoded, target);
+}
+
+#[test]
+fn test_delta_repeated_key_adversarial_roundtrip() {
+    let base = vec![0u8; 2 * 1024 * 1024];
+    let mut target = base.clone();
+    target.extend_from_slice(b"tail");
+
+    let delta = DeltaEncoder::encode(&base, &target);
+    let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE)
+        .expect("adversarial repeated-key delta should decode");
+
+    assert_eq!(decoded, target);
+    assert!(
+        delta.len() < 64,
+        "all-zero prefix should encode as a compact copy plus tail literal, got {} bytes",
+        delta.len()
+    );
 }
 
 #[test]

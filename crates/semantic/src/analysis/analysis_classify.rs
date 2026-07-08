@@ -6,7 +6,7 @@ use std::path::Path;
 
 use objects::object::{ChangeImportance, ModificationKind};
 
-use super::analysis_similarity::{SimilarityMethod, compute_similarity};
+use super::analysis_similarity::{compute_similarity, SimilarityMethod};
 use crate::parser::{Language, ParsedFile};
 
 /// Classification result: kind, importance, and confidence.
@@ -35,25 +35,9 @@ pub fn classify_modification_with_confidence(
     old_content: &str,
     new_content: &str,
 ) -> ClassificationResult {
-    // Identical content should not reach here, but handle it gracefully.
-    if old_content == new_content {
-        return (
-            ModificationKind::WhitespaceOnly,
-            ChangeImportance::Noise,
-            1.0,
-        );
-    }
-
-    // --- Check 1: Token-identical means formatting/whitespace only ---
-    let token_sim = compute_similarity(old_content, new_content, SimilarityMethod::Tokens);
-    if token_sim >= 1.0 {
-        // Tokens are identical but raw text differs → pure formatting/whitespace.
-        // High confidence: token identity is a strong signal.
-        return (
-            ModificationKind::FormattingOnly,
-            ChangeImportance::Noise,
-            0.95,
-        );
+    let token_sim = classify_common_prefix(old_content, new_content);
+    if let Some(result) = token_sim.result {
+        return result;
     }
 
     let language = Language::from_path(path);
@@ -62,7 +46,76 @@ pub fn classify_modification_with_confidence(
     let old_parsed = ParsedFile::parse(old_content, language);
     let new_parsed = ParsedFile::parse(new_content, language);
 
-    match (&old_parsed, &new_parsed) {
+    classify_parse_result(
+        old_content,
+        new_content,
+        old_parsed.as_ref(),
+        new_parsed.as_ref(),
+        token_sim.value,
+    )
+}
+
+pub(crate) fn classify_modification_with_parsed(
+    old_content: &str,
+    new_content: &str,
+    old_ast: &ParsedFile,
+    new_ast: &ParsedFile,
+) -> ClassificationResult {
+    let token_sim = classify_common_prefix(old_content, new_content);
+    if let Some(result) = token_sim.result {
+        return result;
+    }
+
+    classify_with_ast(old_content, new_content, old_ast, new_ast)
+}
+
+struct TokenSimilarityCheck {
+    value: f64,
+    result: Option<ClassificationResult>,
+}
+
+fn classify_common_prefix(old_content: &str, new_content: &str) -> TokenSimilarityCheck {
+    // Identical content should not reach here, but handle it gracefully.
+    if old_content == new_content {
+        return TokenSimilarityCheck {
+            value: 1.0,
+            result: Some((
+                ModificationKind::WhitespaceOnly,
+                ChangeImportance::Noise,
+                1.0,
+            )),
+        };
+    }
+
+    // --- Check 1: Token-identical means formatting/whitespace only ---
+    let token_sim = compute_similarity(old_content, new_content, SimilarityMethod::Tokens);
+    if token_sim >= 1.0 {
+        // Tokens are identical but raw text differs → pure formatting/whitespace.
+        // High confidence: token identity is a strong signal.
+        return TokenSimilarityCheck {
+            value: token_sim,
+            result: Some((
+                ModificationKind::FormattingOnly,
+                ChangeImportance::Noise,
+                0.95,
+            )),
+        };
+    }
+
+    TokenSimilarityCheck {
+        value: token_sim,
+        result: None,
+    }
+}
+
+fn classify_parse_result(
+    old_content: &str,
+    new_content: &str,
+    old_parsed: Option<&ParsedFile>,
+    new_parsed: Option<&ParsedFile>,
+    token_sim: f64,
+) -> ClassificationResult {
+    match (old_parsed, new_parsed) {
         (Some(old_ast), Some(new_ast)) => {
             classify_with_ast(old_content, new_content, old_ast, new_ast)
         }
@@ -311,5 +364,18 @@ mod tests {
         let (kind, importance) = classify_modification(Path::new("test.xyz"), old, new);
         assert_eq!(kind, ModificationKind::FormattingOnly);
         assert_eq!(importance, ChangeImportance::Noise);
+    }
+
+    #[test]
+    fn test_classify_with_parsed_matches_direct_classifier() {
+        let old = "use std::io;\n\nfn compute() -> i32 {\n    1\n}\n";
+        let new = "use std::io;\nuse std::fs;\n\nfn compute() -> i32 {\n    1\n}\n";
+        let old_ast = ParsedFile::parse(old, Language::Rust).expect("old Rust should parse");
+        let new_ast = ParsedFile::parse(new, Language::Rust).expect("new Rust should parse");
+
+        let direct = classify_modification_with_confidence(Path::new("test.rs"), old, new);
+        let cached = classify_modification_with_parsed(old, new, &old_ast, &new_ast);
+
+        assert_eq!(cached, direct);
     }
 }
