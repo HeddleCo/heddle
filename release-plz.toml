@@ -80,10 +80,6 @@ name = "heddle-devtools"
 release = true
 
 [[package]]
-name = "heddle-review"
-release = true
-
-[[package]]
 name = "heddle-state-review"
 release = true
 

@@ -96,7 +96,6 @@ env:
     heddle-mount
     heddle-cli
     heddle-devtools
-    heddle-review
 
 jobs:
   validate-publish:
