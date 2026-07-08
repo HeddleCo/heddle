@@ -119,7 +119,7 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.9", optional
 # workflow. Heavier import/hosted surfaces are opt-in for release
 # builds that need them. `semantic` is included in defaults because
 # `heddle diff --semantic` and the
-# agent-loop self-review (`/heddle-review`) all reach for it; gating
+# agent-loop self-review all reach for it; gating
 # the default install behind an extra `--features semantic` flag
 # turns these documented commands into an opaque error for first-run
 # users. The binary cost is the four `tree-sitter-*` parsers
@@ -201,7 +201,6 @@ mount = [
 [dev-dependencies]
 criterion = "0.8"
 hyper-util.workspace = true
-review = { path = "../review", package = "heddle-review" }
 ntest.workspace = true
 proptest.workspace = true
 tokio-tungstenite.workspace = true
