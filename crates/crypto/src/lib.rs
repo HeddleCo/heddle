@@ -5,6 +5,7 @@ mod ed25519;
 mod error;
 mod p256;
 mod pem_loader;
+pub mod pop;
 mod state_signature;
 mod state_signing;
 

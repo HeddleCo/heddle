@@ -16,16 +16,16 @@ chrono.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.9" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.9" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.9" }
-wire = { path = "../wire", package = "heddle-wire", version = "0.9", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.9" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.10" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.10" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.10" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
 notify.workspace = true
 rmp-serde.workspace = true
 rusqlite.workspace = true
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.9", optional = true }
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.9", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.10", optional = true }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.10", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
@@ -75,7 +75,7 @@ async-source = ["objects/async-source"]
 
 [dev-dependencies]
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.9", features = ["async-source", "memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.10", features = ["async-source", "memory-backend"] }
 tempfile.workspace = true
 
 [lib]
