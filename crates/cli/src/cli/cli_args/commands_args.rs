@@ -990,6 +990,12 @@ pub struct LandArgs {
     #[arg(long = "thread")]
     pub thread: Option<String>,
 
+    /// Additional peer threads to land in order after `--thread` (or current).
+    /// Comma-separated, e.g. `--threads alpha,beta,gamma`. Each peer is
+    /// refreshed/landed against the live target tip (R3 multi-peer fan-in).
+    #[arg(long = "threads", value_delimiter = ',')]
+    pub threads: Vec<String>,
+
     /// Intent/message to use if land needs to capture outstanding work first.
     #[arg(short = 'm', long)]
     pub message: Option<String>,

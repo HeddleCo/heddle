@@ -1,6 +1,6 @@
 # Agent DX Friction: Git-overlay multi-thread + PR workflows
 
-Status: **IMPLEMENTED** (dogfood slices; full IntegrationTxn journal + `land --threads` still residual)
+Status: **IMPLEMENTED** (R1 multi-peer Git FF + R2 incomplete-land journal + R3 `land --threads` landed on follow-up commits)
 Date: 2026-07-09
 Source: Dogfood of multi-agent review remediation (heddle threads + staging PR to GitHub)
 
@@ -199,11 +199,13 @@ Fixture: ephemeral git-overlay Rust repo under `/tmp/heddle-agent-dx-dogfood-run
 | **P2-A** sibling restack | **PASS (with notes)** | Land `dog/agent-b` → `siblings_restacked: ["dog/agent-c","dog/agent-noshare"]`; `dog/agent-c` showed `Sync: current`. **Land of second peer** then hit local Git non-FF on export and **auto-rolled back** (P0-B working). Restack of `agent-a` **failed** because untracked `.cargo/config.toml` dirtied the worktree — fixed in follow-up by ignoring `.cargo/` in local exclude. |
 | **P2-B** materialize fidelity | **PASS** | New thread checkout: `main_link.rs` is symlink → `../src/main.rs`; `run.sh` mode `755`. |
 
-### Residual product issues found while dogfooding
+### Residual product issues found while dogfooding (status after R1–R3)
 
-1. **Second peer land after first peer’s Git checkpoint** can still non-FF the export commit graph (`ref update would rewrite refs/heads/main … Heddle export commit`) even when Heddle restack made the peer current. Auto-undo keeps tips consistent, but multi-peer land-to-Git still needs export/parent planning work (IntegrationTxn / projected parents).
-2. **Shared-target `.cargo/config.toml` was untracked dirt** and blocked restack of that thread. Mitigation: write `.cargo/` into `.heddle/info/exclude` when installing the redirect (landed as dogfood follow-up on this branch).
-3. **`start --path` inside the repo root is refused** — correct safety; dogfood must use external paths or `.heddle/threads/…`.
+1. ~~**Second peer land after first peer’s Git checkpoint** non-FF~~ → **fixed (R1):** write-through forces unmapped tip parents = current checkout HEAD so Git FF holds. Test: `git_overlay_matrix_multi_peer_land_fast_forwards_git_tip`.
+2. **Shared-target `.cargo/config.toml` was untracked dirt** → **fixed** via `.heddle/info/exclude`.
+3. **`start --path` inside the repo root is refused** — correct safety; use external paths or `.heddle/threads/…`.
+4. ~~**`land --threads`**~~ → **shipped (R3):** `heddle land --threads a,b,c` serial multi-peer fan-in.
+5. ~~**Crash between integrate and checkpoint**~~ → **shipped (R2 dogfood journal):** `.heddle/incomplete-land.json` written after Heddle integrate; cleared on success; recovered (auto-undo) on next `land`. Not a full crash-injected matrix yet.
 
 ## Changelog notes (draft)
 
@@ -235,3 +237,4 @@ When shipping:
 | 2026-07-09 | P1-B done: single Sley short-status for status+index; agent JSON DefaultText; honest not_checked. |
 | 2026-07-09 | P1-A done: default shared cargo target for Rust solid/materialized; `--no-shared-target` opt-out; try/fanout inherit; loud blocked-config warn. |
 | 2026-07-09 | Manual dogfood of all shipped items (temp overlay repo). P0-A/B, P1-A/B, P2-B pass; P2-A restack pass; second-peer Git export non-FF remains residual; shared-target `.cargo/` ignore follow-up. |
+| 2026-07-09 | **R1** write-through tip FF parent policy + multi-peer land matrix test. **R2** incomplete-land journal + recover on next land. **R3** `land --threads a,b,c`. |

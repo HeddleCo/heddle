@@ -7149,6 +7149,184 @@ fn git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration() {
     );
 }
 
+/// R1: two disjoint peers landed sequentially must each write a Git
+/// checkpoint that fast-forwards the previous tip (no non-FF rewrite /
+/// auto-undo on the second land).
+#[test]
+fn git_overlay_matrix_multi_peer_land_fast_forwards_git_tip() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    heddle_adopt(temp.path());
+
+    // Checkouts must be *outside* the repo worktree (start refuses nested paths).
+    let alpha = temp.path().with_extension("alpha");
+    let beta = temp.path().with_extension("beta");
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "alpha",
+            "--path",
+            alpha.to_str().unwrap(),
+        ],
+    );
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "beta",
+            "--path",
+            beta.to_str().unwrap(),
+        ],
+    );
+
+    std::fs::write(alpha.join("alpha.txt"), "alpha\n").unwrap();
+    json(
+        &alpha,
+        &["--output", "json", "capture", "-m", "alpha edit"],
+    );
+    std::fs::write(beta.join("beta.txt"), "beta\n").unwrap();
+    json(&beta, &["--output", "json", "capture", "-m", "beta edit"]);
+
+    let land_alpha = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "alpha",
+            "--no-push",
+        ],
+    );
+    assert_eq!(
+        land_alpha["status"].as_str(),
+        Some("landed"),
+        "alpha land: {land_alpha}"
+    );
+    assert_eq!(land_alpha["checkpointed"], true, "{land_alpha}");
+    let after_alpha = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    assert!(
+        !after_alpha.is_empty(),
+        "alpha land must advance Git HEAD"
+    );
+
+    let land_beta = json(
+        temp.path(),
+        &["--output", "json", "land", "--thread", "beta", "--no-push"],
+    );
+    assert_eq!(
+        land_beta["status"].as_str(),
+        Some("landed"),
+        "beta land after alpha must succeed without Git non-FF: {land_beta}"
+    );
+    assert_eq!(land_beta["checkpointed"], true, "{land_beta}");
+    assert_eq!(land_beta["integrated"], true, "{land_beta}");
+
+    let after_beta = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(
+        after_beta, after_alpha,
+        "beta land must create a new Git tip"
+    );
+    // after_alpha must be a first-parent ancestor of after_beta (FF).
+    let is_ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &after_alpha, &after_beta])
+        .current_dir(temp.path())
+        .status()
+        .expect("git merge-base --is-ancestor");
+    assert!(
+        is_ancestor.success(),
+        "beta Git tip must fast-forward alpha tip: alpha={after_alpha} beta={after_beta}"
+    );
+    // Disjoint file content from both peers should be on main.
+    let tree = git_stdout(temp.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(
+        tree.lines().any(|l| l == "alpha.txt"),
+        "alpha.txt missing after multi-peer land: {tree}"
+    );
+    assert!(
+        tree.lines().any(|l| l == "beta.txt"),
+        "beta.txt missing after multi-peer land: {tree}"
+    );
+}
+
+/// R3: `land --threads a,b` lands both peers in one invocation with Git FF.
+#[test]
+fn git_overlay_matrix_land_threads_flag_lands_peers_in_order() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    heddle_adopt(temp.path());
+
+    let alpha = temp.path().with_extension("alpha-mt");
+    let beta = temp.path().with_extension("beta-mt");
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "alpha",
+            "--path",
+            alpha.to_str().unwrap(),
+        ],
+    );
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "beta",
+            "--path",
+            beta.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(alpha.join("a.txt"), "a\n").unwrap();
+    json(&alpha, &["--output", "json", "capture", "-m", "a"]);
+    std::fs::write(beta.join("b.txt"), "b\n").unwrap();
+    json(&beta, &["--output", "json", "capture", "-m", "b"]);
+
+    // One command lands both peers (each land emits its own JSON line).
+    let out = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--threads",
+            "alpha,beta",
+            "--no-push",
+        ],
+        Some(temp.path()),
+    )
+    .expect("land --threads alpha,beta");
+    let landed_count = out
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|v| v["status"].as_str().map(|s| s == "landed"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        landed_count, 2,
+        "expected two landed JSON objects, got {landed_count}: {out}"
+    );
+    let tree = git_stdout(temp.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(
+        tree.lines().any(|l| l == "a.txt") && tree.lines().any(|l| l == "b.txt"),
+        "both peer files must land: {tree}"
+    );
+}
+
 #[test]
 fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
     let temp = TempDir::new().unwrap();

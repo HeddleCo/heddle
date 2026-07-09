@@ -1363,6 +1363,14 @@ impl<'a> GitProjection<'a> {
             ));
         };
 
+        // Multi-peer land / sequential checkpoint: the exported tip must
+        // fast-forward the current user-visible branch tip. Heddle parent
+        // mapping alone can mint a sibling commit (e.g. restacked peer tip
+        // whose mapped parents do not include the Git oid from the previous
+        // land). Force the unmapped tip's Git parents so the branch always
+        // advances: sole parent = current checkout HEAD when set.
+        self.ensure_write_through_tip_fast_forwards(&thread)?;
+
         let mirror_guard = self.init_mirror_with_guard()?;
         // First export against a freshly-initialized mirror runs while
         // the guard is still armed; if export fails we want the
@@ -1380,6 +1388,52 @@ impl<'a> GitProjection<'a> {
         // and have their own per-file rollback below.
         mirror_guard.commit();
         self.write_thread_checkout_from_existing_mirror(&thread)
+    }
+
+    /// Ensure the thread tip, when minted for write-through, parents onto
+    /// the current checkout branch tip so Git ref update is a fast-forward.
+    ///
+    /// Already-mapped tips are left alone (export will not re-mint them).
+    /// Empty / unborn checkout heads skip the override (first commit).
+    fn ensure_write_through_tip_fast_forwards(
+        &mut self,
+        thread: &str,
+    ) -> GitProjectionResult<()> {
+        let Some(tip) = self
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(thread))?
+        else {
+            return Ok(());
+        };
+        // Prefer an already-known mapping: no remint, no override needed.
+        // Mapping file may not be loaded yet; read from disk if present.
+        if self.mapping.get_git(&tip).is_some() {
+            return Ok(());
+        }
+        // Also skip when a caller already set an explicit override (tests /
+        // specialized checkpoint paths).
+        if self.commit_parent_overrides.contains_key(&tip) {
+            return Ok(());
+        }
+
+        let checkout_repo =
+            SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let Ok(head) = checkout_repo.head() else {
+            return Ok(());
+        };
+        let Some(head_oid) = head.oid else {
+            // Unborn branch — first commit has no parent.
+            return Ok(());
+        };
+
+        // Sole parent = current Git tip. This is the land/checkpoint
+        // projection contract: each write-through is one linear Git step
+        // from the previous user-visible tip, even when Heddle history is
+        // multi-parent or restacked onto a tip whose mapped parents lag
+        // the Git branch (dogfood residual R1).
+        self.set_commit_parent_override(tip, vec![head_oid]);
+        Ok(())
     }
 
     pub fn write_through_current_checkout_with_message(

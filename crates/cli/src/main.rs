@@ -377,6 +377,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Land(LandArgs {
             thread,
+            threads,
             message,
             no_squash,
             push,
@@ -387,6 +388,7 @@ async fn async_main() -> Result<()> {
                 &cli,
                 LandArgs {
                     thread: thread.clone(),
+                    threads: threads.clone(),
                     message: message.clone(),
                     no_squash: *no_squash,
                     push: *push,

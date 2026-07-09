@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::collections::HashSet;
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -8,7 +8,7 @@ use objects::{
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     action_line::print_next,
@@ -265,6 +265,12 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
 }
 
 pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
+    // Multi-peer fan-in: land each listed thread in order against the live
+    // target tip (post-land restack of siblings still runs inside each land).
+    if !args.threads.is_empty() {
+        return cmd_land_many(cli, args).await;
+    }
+
     // Open at CWD only to discover the active thread, then re-open at
     // its metadata-recorded worktree. This makes `heddle land` work
     // from anywhere — operators don't need to `cd` into a lightweight
@@ -278,6 +284,9 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         Repository::open(&target_path)?
     };
+    // Crash recovery: if a previous land integrated Heddle then died before
+    // Git checkpoint, roll that incomplete integration back now.
+    recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let thread = resolve_thread(
         &repo,
@@ -539,6 +548,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "accepted manually resolved integration state",
         )?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay {
+            write_incomplete_land_marker(
+                &repo,
+                &merge_thread.id,
+                Some(merge_state.as_str()),
+                land_collapse_state.as_ref(),
+            )?;
             let checkpoint_message = land_checkpoint_message(
                 &repo,
                 &merge_thread,
@@ -551,15 +566,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 worktree_status_options(Some(repo.config())),
             )
             .map_err(|error| {
-                land_checkpoint_failure_after_heddle(
+                let err = land_checkpoint_failure_after_heddle(
                     &repo,
                     &merge_thread.id,
                     error,
                     Some(&merge_state),
                     land_collapse_state.as_ref(),
                     land_performed_steps(captured, synced, true, false, false),
-                )
+                );
+                clear_incomplete_land_marker(&repo);
+                err
             })?;
+            clear_incomplete_land_marker(&repo);
             checkpointed = true;
             git_commit = Some(record.git_commit);
         }
@@ -798,6 +816,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     )?;
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
+        // Durable journal: Heddle has advanced; if we crash before checkpoint
+        // clears this, next land recovers via auto-undo (R2).
+        write_incomplete_land_marker(
+            &repo,
+            &merge_thread.id,
+            merge_output.merge_state.as_deref(),
+            land_collapse_state.as_ref(),
+        )?;
         let checkpoint_message = land_checkpoint_message(
             &repo,
             &merge_thread,
@@ -810,15 +836,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             worktree_status_options(Some(repo.config())),
         )
         .map_err(|error| {
-            land_checkpoint_failure_after_heddle(
+            let err = land_checkpoint_failure_after_heddle(
                 &repo,
                 &merge_thread.id,
                 error,
                 merge_output.merge_state.as_deref(),
                 land_collapse_state.as_ref(),
                 land_performed_steps(captured, synced, integrated, false, false),
-            )
+            );
+            clear_incomplete_land_marker(&repo);
+            err
         })?;
+        clear_incomplete_land_marker(&repo);
         checkpointed = true;
         git_commit = Some(record.git_commit);
     }
@@ -1915,6 +1944,147 @@ fn land_text_step(step: &str) -> String {
         "push(not reached)" => "push not reached".to_string(),
         other => other.to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// R2: incomplete-land journal (crash between Heddle integrate and Git write)
+// ---------------------------------------------------------------------------
+
+const INCOMPLETE_LAND_MARKER: &str = "incomplete-land.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IncompleteLandMarker {
+    thread_id: String,
+    merge_state: Option<String>,
+    collapse_state: Option<String>,
+}
+
+fn incomplete_land_marker_path(repo: &Repository) -> PathBuf {
+    repo.heddle_dir().join(INCOMPLETE_LAND_MARKER)
+}
+
+fn write_incomplete_land_marker(
+    repo: &Repository,
+    thread_id: &str,
+    merge_state: Option<&str>,
+    collapse_state: Option<&ChangeId>,
+) -> Result<()> {
+    let marker = IncompleteLandMarker {
+        thread_id: thread_id.to_string(),
+        merge_state: merge_state.map(str::to_string),
+        collapse_state: collapse_state.map(|id| id.to_string()),
+    };
+    let path = incomplete_land_marker_path(repo);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let body = serde_json::to_vec_pretty(&marker).context("serialize incomplete-land marker")?;
+    fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn clear_incomplete_land_marker(repo: &Repository) {
+    let path = incomplete_land_marker_path(repo);
+    let _ = fs::remove_file(path);
+}
+
+fn load_incomplete_land_marker(repo: &Repository) -> Result<Option<IncompleteLandMarker>> {
+    let path = incomplete_land_marker_path(repo);
+    match fs::read_to_string(&path) {
+        Ok(raw) => {
+            let marker: IncompleteLandMarker =
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("parse incomplete-land marker at {}", path.display())
+                })?;
+            Ok(Some(marker))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// If a prior land integrated Heddle then crashed before clearing the
+/// journal, roll back that integration so the next land starts clean.
+fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
+    let Some(marker) = load_incomplete_land_marker(repo)? else {
+        return Ok(());
+    };
+    let collapse = marker
+        .collapse_state
+        .as_deref()
+        .and_then(|s| ChangeId::parse(s).ok());
+    match auto_undo_land_integration(
+        repo,
+        &marker.thread_id,
+        marker.merge_state.as_deref(),
+        collapse.as_ref(),
+    ) {
+        Ok(()) => {
+            clear_incomplete_land_marker(repo);
+            eprintln!(
+                "note: recovered incomplete land of '{}': rolled back Heddle integration left without a Git checkpoint",
+                marker.thread_id
+            );
+            Ok(())
+        }
+        Err(err) => {
+            // Leave the marker so the operator can inspect / undo manually.
+            Err(anyhow!(
+                "incomplete land of '{}' needs recovery but auto-undo failed: {err:#}. \
+                 Inspect `.heddle/{INCOMPLETE_LAND_MARKER}` and run `heddle undo` if the tip is still advanced.",
+                marker.thread_id
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R3: land --threads a,b,c (serial multi-peer fan-in)
+// ---------------------------------------------------------------------------
+
+async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
+    let mut ordered: Vec<String> = Vec::new();
+    if let Some(primary) = args.thread.clone() {
+        ordered.push(primary);
+    }
+    for t in &args.threads {
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !ordered.iter().any(|existing| existing == t) {
+            ordered.push(t.to_string());
+        }
+    }
+    if ordered.is_empty() {
+        return Err(anyhow!("--threads requires at least one thread name"));
+    }
+
+    let mut landed: Vec<String> = Vec::new();
+    for (idx, thread_name) in ordered.iter().enumerate() {
+        let mut one = args.clone();
+        one.thread = Some(thread_name.clone());
+        one.threads = Vec::new();
+        // Only the last peer inherits push (if requested); intermediate lands
+        // stay local so a mid-list failure does not half-push.
+        if idx + 1 < ordered.len() {
+            one.push = false;
+            one.no_push = true;
+        }
+        // Box the recursive async call to avoid infinitely sized futures.
+        match Box::pin(cmd_land(cli, one)).await {
+            Ok(()) => landed.push(thread_name.clone()),
+            Err(err) => {
+                return Err(anyhow!(
+                    "multi-land stopped at '{}' after successfully landing [{}]: {err:#}",
+                    thread_name,
+                    landed.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
