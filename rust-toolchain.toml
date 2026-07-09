@@ -1,0 +1,8 @@
+# Pin the toolchain so CI and local/agent builds are deterministic.
+# CI previously used `dtolnay/rust-toolchain@stable`, which floats to the
+# latest stable on every run — each Rust release silently surfaced new
+# clippy lints and reddened `-D warnings` on unrelated PRs. Bump this
+# channel deliberately (and fix any new lints) rather than drifting.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

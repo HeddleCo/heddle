@@ -99,7 +99,7 @@ fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
                 "{}: stdout under --output json is neither one JSON \
                  document nor NDJSON.\nfirst 400 chars: {}",
                 entry.display,
-                &stdout.chars().take(400).collect::<String>()
+                stdout.chars().take(400).collect::<String>()
             ));
         }
     }
