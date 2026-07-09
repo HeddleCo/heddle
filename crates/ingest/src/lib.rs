@@ -51,7 +51,7 @@ pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
 pub use importer::{
     ImportProgressEvent, ImportScope, ImportStats, Importer, import_git_into,
     import_git_into_scoped_with_options, import_git_into_scoped_with_options_and_progress,
-    import_git_into_with_options,
+    import_git_into_with_options, import_single_git_commit_into,
 };
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};

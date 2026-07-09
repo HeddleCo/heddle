@@ -182,6 +182,85 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     );
 }
 
+/// P0-A: `heddle init` on an existing Git repo + `start` must bind the active
+/// Git tip instead of inventing a parentless "Bootstrap git-overlay…" root.
+/// The first export/write-through must share a merge-base with the base tip.
+#[test]
+fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    let _root_tip = commit_file(&work, "story.txt", "one\n", "seed main");
+    let main_tip = commit_file(&work, "story.txt", "one\ntwo\n", "advance main");
+
+    heddle(&["init"], Some(&work)).unwrap();
+
+    // start triggers ensure_current_state → lazy tip bind (not orphan bootstrap).
+    heddle(
+        &["start", "feature/agent-x", "--workspace", "solid"],
+        Some(&work),
+    )
+    .unwrap();
+
+    let mapped = ingest_mapped_change(&work, &main_tip)
+        .expect("active Git tip must be mapped into the ingest SHA map");
+    assert!(
+        !mapped.is_empty(),
+        "lazy tip bind should map the active Git tip"
+    );
+
+    let log_json = heddle(&["log", "--output", "json"], Some(&work)).unwrap();
+    let log: Value = serde_json::from_str(&log_json).expect("log json");
+    let intents = log["states"]
+        .as_array()
+        .expect("log states array")
+        .iter()
+        .filter_map(|s| s.get("intent").and_then(|i| i.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        intents
+            .iter()
+            .all(|intent| !intent.contains("Bootstrap git-overlay")),
+        "must not invent a synthetic Bootstrap git-overlay root when a Git tip exists; intents={intents:?}"
+    );
+
+    // Capture + checkpoint on main: write-through must parent onto the real Git tip.
+    std::fs::write(work.join("story.txt"), "one\ntwo\nmain-work\n").unwrap();
+    heddle(&["capture", "-m", "main agent work"], Some(&work)).unwrap();
+    let show: Value = serde_json::from_str(
+        &heddle(&["show", "--output", "json"], Some(&work)).unwrap(),
+    )
+    .expect("show json");
+    let parents = show["parents"].as_array().expect("parents array");
+    assert!(
+        !parents.is_empty(),
+        "first capture after bind must parent the mapped Git tip, not be a parentless root: {show}"
+    );
+    assert!(
+        parents.iter().any(|p| {
+            p.as_str()
+                .is_some_and(|id| mapped.starts_with(id) || id.starts_with(&mapped[..12.min(mapped.len())]))
+        }),
+        "parent should be the mapped tip {mapped}; parents={parents:?}"
+    );
+
+    heddle(&["checkpoint", "-m", "main checkpoint"], Some(&work)).unwrap();
+    let new_git_tip = git(&work, &["rev-parse", "HEAD"]);
+    let parent_of_new = git(&work, &["rev-parse", "HEAD^"]);
+    assert_eq!(
+        parent_of_new, main_tip,
+        "write-through commit must parent the pre-bind Git tip (merge-base with main history); \
+         new={new_git_tip} parent={parent_of_new} expected={main_tip}"
+    );
+    let merge_base = git(&work, &["merge-base", &main_tip, &new_git_tip]);
+    assert_eq!(
+        merge_base, main_tip,
+        "exported tip must share merge-base with the original main tip"
+    );
+}
+
 #[test]
 fn adopt_emits_no_terminal_control_codes_in_piped_output() {
     let temp = TempDir::new().unwrap();

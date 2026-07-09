@@ -5,12 +5,14 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use objects::{
-    object::{Agent, Attribution, ChangeId, Principal, Tree},
+    object::{Agent, Attribution, ChangeId, Principal, ThreadName, Tree},
+    store::ObjectStore,
     worktree::WorktreeStatus,
 };
+use refs::Head;
 use repo::{
-    Hook, HookContext, HookManager, Repository, SessionManager, SnapshotProfile, format_confidence,
-    refresh_active_thread_metadata,
+    Hook, HookContext, HookManager, Repository, RepositoryCapability, SessionManager,
+    SnapshotProfile, format_confidence, refresh_active_thread_metadata,
 };
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
@@ -594,6 +596,20 @@ pub(crate) fn ensure_current_state(
         return Ok(state.change_id);
     }
 
+    // Git-overlay: bind the active Git tip instead of inventing a parentless
+    // "Bootstrap git-overlay…" worktree snapshot. A synthetic orphan root has
+    // no Git mapping, so the first export/write-through of agent threads lands
+    // as an orphan Git branch with no merge-base against main (P0-A).
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        match bind_git_overlay_active_tip(repo)? {
+            Some(change_id) => return Ok(change_id),
+            None => {
+                // No commit-pointing Git tip (empty/unborn repo): fall through
+                // to a worktree bootstrap snapshot so first capture still works.
+            }
+        }
+    }
+
     create_snapshot(
         repo,
         user_config,
@@ -612,6 +628,145 @@ pub(crate) fn ensure_current_state(
 
     repo.head()?
         .ok_or_else(|| anyhow::anyhow!("Failed to establish initial current state"))
+}
+
+/// Lazy single-tip bind for Git-overlay checkouts with no Heddle current state.
+///
+/// Returns:
+/// - `Ok(Some(id))` when a Git HEAD commit was mapped (or already mapped) and
+///   the attached thread/HEAD points at it
+/// - `Ok(None)` when there is no commit-pointing Git tip (unborn/empty)
+/// - `Err` when a tip exists but bind failed — never invents an orphan root
+fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<ChangeId>> {
+    let tip_sha = match resolve_active_git_tip_sha(repo)? {
+        Some(sha) => sha,
+        None => return Ok(None),
+    };
+
+    if let Some(existing) = repo.git_overlay_mapped_change_for_git_commit(&tip_sha)? {
+        // Ensure export can parent onto the real tip OID (checkpoint seed
+        // copies objects into the projection mirror).
+        if repo.latest_git_checkpoint_for_change(&existing)?.is_none() {
+            repo.record_git_checkpoint(
+                &existing,
+                tip_sha.clone(),
+                format!("Bound active Git tip {}", &tip_sha[..tip_sha.len().min(12)]),
+            )?;
+        }
+        point_overlay_head_at_mapped_tip(repo, &existing)?;
+        return Ok(Some(existing));
+    }
+
+    // Hydrate Heddle notes so re-imports of previously exported commits keep
+    // stable change ids (same preflight adopt uses).
+    crate::git_projection_engine::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
+        repo.root(),
+    );
+
+    let change_id = ingest::import_single_git_commit_into(
+        repo.root(),
+        repo.root(),
+        &tip_sha,
+        ingest::ImportOptions::default(),
+    )
+    .map_err(|error| {
+        anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(format!(
+            "failed to map Git tip {tip_sha}: {error}"
+        )))
+    })?;
+
+    // Confirm the state is readable through this process's store handle
+    // (pack install on the importer's handle is visible via pack reload).
+    if repo.store().get_state(&change_id)?.is_none() {
+        return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+            format!(
+                "mapped Git tip {tip_sha} to {} but the state object is not readable; \
+                 run `heddle adopt` to repair the ingest mapping",
+                change_id.short()
+            )
+        )));
+    }
+
+    // Record a checkpoint mapping to the *existing* Git tip (no new commit).
+    // Export's `seed_git_checkpoint_mappings_from_checkout` copies the tip into
+    // the projection mirror and keeps parent OIDs on the real Git tip — without
+    // this, ingest-only mapping is skipped when the mirror lacks the OID and
+    // export re-mints an orphan reconstruction of the tip.
+    if repo.latest_git_checkpoint_for_change(&change_id)?.is_none() {
+        repo.record_git_checkpoint(
+            &change_id,
+            tip_sha.clone(),
+            format!("Bound active Git tip {}", &tip_sha[..tip_sha.len().min(12)]),
+        )?;
+    }
+
+    point_overlay_head_at_mapped_tip(repo, &change_id)?;
+    info!(
+        git_tip = %tip_sha,
+        change_id = %change_id.short(),
+        "bound active Git tip as first Heddle state"
+    );
+    Ok(Some(change_id))
+}
+
+fn resolve_active_git_tip_sha(repo: &Repository) -> Result<Option<String>> {
+    let git = match repo.git_overlay_sley_repository() {
+        Ok(Some(git)) => git,
+        Ok(None) => {
+            return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+                "repository is marked git-overlay but no Git worktree was found"
+            )));
+        }
+        Err(error) => {
+            return Err(anyhow!(RecoveryAdvice::git_overlay_tip_bind_failed(
+                format!("failed to open Git repository: {error}")
+            )));
+        }
+    };
+
+    let head = match git.head() {
+        Ok(head) => head,
+        Err(error) => {
+            // Unborn HEAD / empty repo: treat as no tip.
+            debug!(error = %error, "Git HEAD not resolvable; no tip to bind");
+            return Ok(None);
+        }
+    };
+    Ok(head.oid.map(|oid| oid.to_string()))
+}
+
+/// Ensure the attached branch thread (or detached HEAD) points at the mapped tip
+/// so `current_state()` / `head()` resolve without re-walking git mappings only.
+fn point_overlay_head_at_mapped_tip(repo: &Repository, change_id: &ChangeId) -> Result<()> {
+    // Prefer git's current branch so the first state lands on the same tip
+    // the user/agent is looking at in Git, not a stale Heddle HEAD.
+    if let Some(branch) = repo.git_overlay_current_branch()? {
+        let thread = ThreadName::from(branch.as_str());
+        if repo.refs().get_thread(&thread)?.as_ref() != Some(change_id) {
+            repo.refs().set_thread(&thread, change_id)?;
+        }
+        let expected = Head::Attached {
+            thread: thread.clone(),
+        };
+        if repo.refs().read_head()? != expected {
+            repo.refs().write_head(&expected)?;
+        }
+        return Ok(());
+    }
+
+    match repo.head_ref()? {
+        Head::Attached { thread } => {
+            if repo.refs().get_thread(&thread)?.as_ref() != Some(change_id) {
+                repo.refs().set_thread(&thread, change_id)?;
+            }
+        }
+        Head::Detached { state } if state == *change_id => {}
+        Head::Detached { .. } => {
+            repo.refs()
+                .write_head(&Head::Detached { state: *change_id })?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn create_snapshot_profiled(
@@ -921,7 +1076,7 @@ fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
 
 fn default_bootstrap_intent(repo: &Repository) -> String {
     match repo.head_ref() {
-        Ok(refs::Head::Attached { thread }) => format!("Bootstrap git-overlay on {}", thread),
+        Ok(Head::Attached { thread }) => format!("Bootstrap git-overlay on {}", thread),
         _ => "Bootstrap git-overlay state".to_string(),
     }
 }

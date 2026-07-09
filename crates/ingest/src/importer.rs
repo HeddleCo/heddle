@@ -408,7 +408,12 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 let lossy_before = packed.stats.lossy_entries.len();
                 let tree_hash = packed.translate_tree(&commit.tree_sha)?;
                 let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
-                packed.write_commit(commit, tree_hash, git_lossy)?;
+                packed.write_commit_with_parent_policy(
+                    commit,
+                    tree_hash,
+                    git_lossy,
+                    ParentMapPolicy::RequireMapped,
+                )?;
                 if let Some(progress) = self.progress.as_deref_mut() {
                     progress(ImportProgressEvent {
                         commits_imported: idx + 1,
@@ -689,28 +694,36 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         Ok(hash)
     }
 
-    fn write_commit(
+    /// Write a commit state and return its Heddle change id (existing or new).
+    fn write_commit_with_parent_policy(
         &mut self,
         commit: &CommitEntry,
         tree: ContentHash,
         git_lossy: bool,
-    ) -> crate::Result<bool> {
+        parent_policy: ParentMapPolicy,
+    ) -> crate::Result<objects::object::ChangeId> {
         if let Some(cid) = self.map.get_commit(&commit.sha) {
-            let _ = cid;
-            return Ok(false);
+            return Ok(cid);
         }
 
         let mut parents = Vec::with_capacity(commit.parents.len());
         for p in &commit.parents {
             match self.map.get_commit(p) {
                 Some(cid) => parents.push(cid),
-                None => {
-                    return Err(IngestError::Other(format!(
-                        "commit {} has parent {} that hasn't been translated yet — \
-                         feed commits in topological order",
-                        commit.sha, p
-                    )));
-                }
+                None => match parent_policy {
+                    ParentMapPolicy::RequireMapped => {
+                        return Err(IngestError::Other(format!(
+                            "commit {} has parent {} that hasn't been translated yet — \
+                             feed commits in topological order",
+                            commit.sha, p
+                        )));
+                    }
+                    // Single-tip bind: treat unmapped git parents as absent so
+                    // the tip becomes a Heddle root while remaining mapped to
+                    // the real git OID (export of children still parents onto
+                    // that OID).
+                    ParentMapPolicy::OrphanUnmapped => {}
+                },
             }
         }
 
@@ -730,8 +743,17 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.map
             .insert_commit(&commit.sha, state.change_id)
             .map_err(IngestError::from)?;
-        Ok(true)
+        Ok(state.change_id)
     }
+}
+
+/// How [`PackedImport::write_commit_with_parent_policy`] resolves git parents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParentMapPolicy {
+    /// Full history import: every parent must already be in the sha map.
+    RequireMapped,
+    /// Single-tip lazy bind: drop unmapped parents (tip becomes a Heddle root).
+    OrphanUnmapped,
 }
 
 /// Strip a trailing `.heddle` component if present, otherwise return
@@ -834,6 +856,118 @@ pub fn import_git_into_scoped_with_options_and_progress(
         pollster::block_on(importer.run())?
     };
     Ok((stats, map))
+}
+
+/// Lazily bind a single Git commit tip into Heddle without walking ancestors.
+///
+/// The tip is translated as a Heddle root (unmapped git parents are dropped)
+/// and recorded in the ingest SHA map so subsequent exports parent onto the
+/// real Git OID. Use full [`import_git_into`] / `heddle adopt` when the full
+/// history is needed.
+///
+/// Returns the mapped Heddle change id for `git_sha`. Idempotent when the tip
+/// is already mapped.
+pub fn import_single_git_commit_into(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    git_sha: &str,
+    options: ImportOptions,
+) -> crate::Result<objects::object::ChangeId> {
+    let git = GitSource::open(git_path)?;
+    let heddle_path = heddle_path.as_ref();
+    let root = strip_trailing_heddle(heddle_path);
+
+    let repo = match repo::Repository::init(root) {
+        Ok(r) => r,
+        Err(objects::error::HeddleError::RepositoryExists(_)) => repo::Repository::open(root)?,
+        Err(e) => return Err(e.into()),
+    };
+
+    let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
+    let mut map = ShaMap::open(&map_path)?;
+    if let Some(existing) = map.get_commit(git_sha) {
+        // Already bound — still verify the state object is present.
+        if repo.store().get_state(&existing)?.is_some() {
+            return Ok(existing);
+        }
+    }
+
+    let commit = git.read_commit(git_sha)?;
+    let staging_dir = repo.heddle_dir().join("ingest").join("staging");
+    std::fs::create_dir_all(&staging_dir).map_err(|e| {
+        IngestError::Other(format!(
+            "creating pack staging dir {}: {e}",
+            staging_dir.display()
+        ))
+    })?;
+    let run_id = format!(
+        "tip-{}-{}-{}",
+        std::process::id(),
+        IMPORT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let pack_path = staging_dir.join(format!("{run_id}.pack"));
+    let index_path = staging_dir.join(format!("{run_id}.idx"));
+    let bucket_dir = staging_dir.join(format!("{run_id}-buckets"));
+
+    map.begin_append_batch()?;
+    let write_result = (|| -> crate::Result<objects::object::ChangeId> {
+        let pack_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&pack_path)
+            .map_err(|e| {
+                IngestError::Other(format!(
+                    "opening pack staging file {}: {e}",
+                    pack_path.display()
+                ))
+            })?;
+        let compression = CompressionConfig {
+            max_delta_size: 0,
+            ..CompressionConfig::default()
+        };
+        let builder = StreamingPackBuilder::new(
+            pack_file,
+            index_path.clone(),
+            compression,
+            bucket_dir.clone(),
+        )
+        .map_err(IngestError::from)?;
+        let mut packed = PackedImport::new(&git, &mut map, builder, options);
+        let lossy_before = packed.stats.lossy_entries.len();
+        let tree_hash = packed.translate_tree(&commit.tree_sha)?;
+        let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
+        let change_id = packed.write_commit_with_parent_policy(
+            &commit,
+            tree_hash,
+            git_lossy,
+            ParentMapPolicy::OrphanUnmapped,
+        )?;
+        if packed.stats.object_count > 0 {
+            let (_file, _) = packed.builder.finalize()?;
+            repo.store()
+                .install_pack_streaming(&pack_path, &index_path)?;
+        } else {
+            let _ = std::fs::remove_file(&pack_path);
+            let _ = std::fs::remove_dir_all(&bucket_dir);
+        }
+        Ok(change_id)
+    })();
+
+    match write_result {
+        Ok(change_id) => {
+            map.flush_append_batch()?;
+            Ok(change_id)
+        }
+        Err(error) => {
+            map.abort_append_batch();
+            let _ = std::fs::remove_file(&pack_path);
+            let _ = std::fs::remove_dir_all(&bucket_dir);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1525,6 +1659,74 @@ mod tests {
         assert!(
             !gitdir.path().join(".heddle").join("git").exists(),
             "ingest-backed import must not create the legacy Bridge Mirror"
+        );
+    }
+
+    #[test]
+    fn import_single_git_commit_binds_tip_without_ancestors() {
+        let gitdir = TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git cmd");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(gitdir.path().join("a.txt"), "one").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "first"]);
+        std::fs::write(gitdir.path().join("a.txt"), "two").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "second"]);
+        let tip = git_output(gitdir.path(), &["rev-parse", "HEAD"], None);
+
+        let change_id = import_single_git_commit_into(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("single-tip import");
+
+        let map = ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite")).unwrap();
+        assert_eq!(map.get_commit(&tip), Some(change_id));
+        // Only the tip — not the parent commit.
+        assert_eq!(map.commit_shas().len(), 1);
+
+        let repo = repo::Repository::open(gitdir.path()).unwrap();
+        let state = repo
+            .store()
+            .get_state(&change_id)
+            .unwrap()
+            .expect("tip state present");
+        assert!(
+            state.parents.is_empty(),
+            "single-tip bind is a Heddle root mapped to the git tip"
+        );
+
+        // Idempotent re-bind.
+        let again = import_single_git_commit_into(
+            gitdir.path(),
+            gitdir.path(),
+            &tip,
+            ImportOptions::default(),
+        )
+        .expect("re-bind");
+        assert_eq!(again, change_id);
+        assert_eq!(
+            ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite"))
+                .unwrap()
+                .commit_shas()
+                .len(),
+            1
         );
     }
 
