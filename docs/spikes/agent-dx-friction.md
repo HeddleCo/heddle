@@ -1,6 +1,6 @@
 # Agent DX Friction: Git-overlay multi-thread + PR workflows
 
-Status: **IN PROGRESS** (implementation ordered by what blocks dogfooding)
+Status: **IMPLEMENTED** (dogfood slices; full IntegrationTxn journal + `land --threads` still residual)
 Date: 2026-07-09
 Source: Dogfood of multi-agent review remediation (heddle threads + staging PR to GitHub)
 
