@@ -489,6 +489,29 @@ message ResolvedPrincipal {
   string handle = 3;
   // False when the subject couldn't be resolved (display_name + handle empty).
   bool resolved = 4;
+
+  // ---- Handle system (F0a foundation, weft#438) ----------------------------
+  // ADDITIVE. Defined here in F0a; POPULATED by the weft resolve handler in
+  // F0b. Until F0b lands these carry proto3 defaults (empty / false), so a
+  // consumer that reads them before F0b sees the same "unset" it would for any
+  // new field. Every display surface renders from these fields via the single
+  // resolveSubjects choke point.
+
+  // The primary handle's canonical textual form — the single token that is
+  // BOTH the authoritative text AND the URL path segment: `gh:torvalds`
+  // (GitHub), `gitlab.example.com:torvalds` (host-qualified GitLab), or the
+  // bare native name `torvalds`. Empty when unresolved.
+  string primary_handle = 5;
+  // Handle kind for the primary handle: "native" | "github" | "gitlab".
+  // Mirrors the weft `handles.kind` column. Empty when unresolved.
+  string kind = 6;
+  // True when the primary handle is provider-verified (OAuth-verified, or a
+  // future git proof). Native self-asserted handles are false.
+  bool verified = 7;
+  // Short subject-derived discriminator for an UNVERIFIED native handle,
+  // rendered Signal-style as `torvalds·a3f9` in trust-sensitive contexts.
+  // Empty for verified identities (they render bare). F0b computes it.
+  string discriminator = 8;
 }
 
 // ============================================================================
