@@ -2217,13 +2217,7 @@ fn resolve_start_actor_identity(
 }
 
 fn non_empty_identity_value(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> RecoveryAdvice {
@@ -3377,13 +3371,7 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
 }
 
 fn non_empty_string(value: Option<&str>) -> Option<&str> {
-    value.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
+    value.filter(|value| !value.trim().is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]

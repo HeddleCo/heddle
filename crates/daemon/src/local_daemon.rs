@@ -242,9 +242,39 @@ fn process_uid_matches_self(pid: i32) -> bool {
     metadata.uid() == unsafe { libc::geteuid() }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Compare the target process's real UID to this process's euid via
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` (libproc). Returns `false` if the
+/// process cannot be inspected — refuse rather than SIGTERM a process
+/// we cannot attribute.
+#[cfg(target_os = "macos")]
+fn process_uid_matches_self(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: `info` is a valid, zeroed `proc_bsdinfo` and `size` matches
+    // the PROC_PIDTBSDINFO buffer contract from libproc.
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret <= 0 || ret < size {
+        return false;
+    }
+    // SAFETY: geteuid() never fails.
+    info.pbi_uid == unsafe { libc::geteuid() }
+}
+
+/// Platforms without a reliable process-UID API refuse the match.
+/// Combined with `process_exe_path` returning `None` on these targets,
+/// `is_heddle_process` already fails closed; do not claim a UID match
+/// we cannot verify.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_uid_matches_self(_pid: i32) -> bool {
-    true
+    false
 }
 
 fn process_exe_matches_current(pid: i32) -> bool {

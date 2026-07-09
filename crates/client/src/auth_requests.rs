@@ -16,5 +16,9 @@ pub enum AuthCommand {
         name: String,
         namespace: String,
         server: Option<String>,
+        /// Optional path for the private-key PEM (default: under heddle home).
+        key_out: Option<String>,
+        /// Include private key material in stdout / JSON.
+        show_secrets: bool,
     },
 }

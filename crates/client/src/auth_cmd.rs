@@ -1,6 +1,6 @@
 //! `heddle auth` command implementations.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
@@ -53,7 +53,11 @@ struct ServiceTokenOutput {
     namespace: String,
     scope: String,
     token: String,
-    private_key_pem: String,
+    /// Absolute path of the private-key PEM file written with mode 0600.
+    private_key_path: String,
+    /// Only populated when `--show-secrets` is passed; omitted from JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_pem: Option<String>,
     expires_in_days: u32,
 }
 
@@ -72,7 +76,19 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             name,
             namespace,
             server,
-        } => cmd_create_service_token(ctx, server.as_deref(), name, namespace).await,
+            key_out,
+            show_secrets,
+        } => {
+            cmd_create_service_token(
+                ctx,
+                server.as_deref(),
+                name,
+                namespace,
+                key_out,
+                show_secrets,
+            )
+            .await
+        }
     }
 }
 
@@ -119,11 +135,25 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
     println!("Enter code: {user_code}");
     println!();
 
-    // 5. Attempt to open browser.
+    // 5. Attempt to open browser. The verification URI is server-controlled,
+    // so validate scheme/host (and reject shell metacharacters) before
+    // spawning a browser helper — especially on Windows where `cmd /C start`
+    // would otherwise interpret the URL.
     if !no_browser {
-        let url = format!("{verification_uri}?code={user_code}");
-        if let Err(_e) = open_url(&url) {
-            eprintln!("Could not open browser automatically. Please open the URL above.");
+        let encoded_code = percent_encode_query_component(user_code);
+        let url = format!("{verification_uri}?code={encoded_code}");
+        match validate_browser_url(&url) {
+            Ok(()) => {
+                if let Err(_e) = open_url(&url) {
+                    eprintln!(
+                        "Could not open browser automatically. Please open the URL above."
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!("Refusing to open browser URL: {err}");
+                eprintln!("Please open the URL printed above in your browser.");
+            }
         }
     }
 
@@ -271,6 +301,8 @@ async fn cmd_create_service_token(
     server: Option<&str>,
     name: String,
     namespace: String,
+    key_out: Option<String>,
+    show_secrets: bool,
 ) -> Result<()> {
     let server = resolve_server(server)?;
     let scope = format!("repo:{namespace}/*");
@@ -286,6 +318,19 @@ async fn cmd_create_service_token(
     let private_key_pem = signer
         .to_pem()
         .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
+
+    // Always persist the private key to a 0600 file; never dump PEM to stdout
+    // by default (shell history / CI logs). `--show-secrets` opts into printing
+    // the PEM (and including it in JSON).
+    let key_path = resolve_service_account_key_path(&name, key_out.as_deref())?;
+    if let Some(parent) = key_path.parent() {
+        objects::fs_atomic::create_private_dir_all(parent).with_context(|| {
+            format!("creating private key directory {}", parent.display())
+        })?;
+    }
+    objects::fs_atomic::write_file_atomic_secret(&key_path, private_key_pem.as_bytes())
+        .with_context(|| format!("writing private key to {}", key_path.display()))?;
+    let key_path_display = key_path.display().to_string();
 
     let channel = connect_channel(&server).await?;
 
@@ -352,7 +397,8 @@ async fn cmd_create_service_token(
             namespace,
             scope,
             token: issued.token,
-            private_key_pem,
+            private_key_path: key_path_display,
+            private_key_pem: show_secrets.then_some(private_key_pem),
             expires_in_days: SERVICE_TOKEN_TTL_DAYS,
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -362,15 +408,47 @@ async fn cmd_create_service_token(
         println!();
         println!("Token: {}", issued.token);
         println!();
-        println!("Private key PEM:");
-        println!("{private_key_pem}");
-        println!("This token is proof-of-possession bound to the private key above.");
+        println!("Private key written to: {key_path_display}");
+        if show_secrets {
+            println!();
+            println!("Private key PEM:");
+            println!("{private_key_pem}");
+        }
+        println!("This token is proof-of-possession bound to the private key file above.");
         println!("Set the token as HEDDLE_REMOTE_TOKEN in your CI environment.");
-        println!("Configure remote.auth_proof_key_pem_path to a file containing the private key.");
+        println!(
+            "Configure remote.auth_proof_key_pem_path to {key_path_display} (or copy the key securely)."
+        );
         println!("This token is scoped to the {namespace} namespace.");
     }
 
     Ok(())
+}
+
+/// Resolve where to write the service-account private key.
+///
+/// Prefers an explicit `--key-out` path; otherwise writes under
+/// `<heddle_home>/service-accounts/<sanitized-name>.pem`.
+fn resolve_service_account_key_path(name: &str, key_out: Option<&str>) -> Result<std::path::PathBuf> {
+    if let Some(path) = key_out {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let mut safe: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        safe = "service-account".to_string();
+    }
+    Ok(repo::identity::heddle_home_dir()
+        .join("service-accounts")
+        .join(format!("{safe}.pem")))
 }
 
 fn issue_service_account_credential_request(
@@ -465,12 +543,97 @@ fn resolve_server(explicit: Option<&str>) -> Result<String> {
 /// Connect a raw gRPC channel to the given server.
 async fn connect_channel(server: &str) -> Result<Channel> {
     let uri = infer_server_uri(server);
+    // F2: the auth-login / service-token connect path sends the device key and
+    // receives the bearer biscuit. Refuse cleartext (`http://`) to a
+    // non-loopback address unless the operator explicitly opts in, mirroring
+    // the remote paths' `cleartext_connect_allowed` gate. Loopback stays free.
+    enforce_auth_cleartext_gate(&uri)?;
     let endpoint = Endpoint::from_shared(uri.clone())
         .map_err(|e| anyhow::anyhow!("invalid server address '{server}': {e}"))?;
     endpoint
         .connect()
         .await
         .map_err(|e| anyhow::anyhow!("failed to connect to {server}: {e}"))
+}
+
+/// Refuse a cleartext (`http://`) auth connection to a non-loopback address
+/// unless the operator has opted in via `HEDDLE_REMOTE_INSECURE`.
+///
+/// This routes the auth-login / service-token connect path through the same
+/// `cleartext_connect_allowed` semantics the remote paths use: TLS is always
+/// allowed, cleartext to loopback is allowed, cleartext to a non-loopback
+/// address is rejected unless the insecure opt-in is set. Fail-closed: an
+/// `http://` URI whose host is not a parseable loopback IP literal is treated
+/// as non-loopback and refused without the opt-in.
+fn enforce_auth_cleartext_gate(uri: &str) -> Result<()> {
+    // Only cleartext connections are gated; `https://` is always permitted.
+    let Some(rest) = uri.strip_prefix("http://") else {
+        return Ok(());
+    };
+
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Drop userinfo if present, then split host[:port].
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        // IPv6 literal: [::1]:port
+        inner.split(']').next().unwrap_or(inner)
+    } else {
+        hostport
+            .rsplit_once(':')
+            .map(|(host, _port)| host)
+            .unwrap_or(hostport)
+    };
+
+    // `localhost` resolves to loopback but is not an `IpAddr`; treat it as
+    // allowed. Any host that does not parse as a loopback IP literal is
+    // fail-closed non-loopback.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if cli_shared::is_loopback_ip(ip) {
+            return Ok(());
+        }
+        // Non-loopback cleartext: honor the insecure opt-in and reuse the
+        // remote gate's error message verbatim.
+        let allow_insecure = auth_cleartext_insecure_opt_in()?;
+        let addr = std::net::SocketAddr::new(ip, 0);
+        if cli_shared::cleartext_connect_allowed(addr, false, allow_insecure) {
+            return Ok(());
+        }
+        bail!(cli_shared::cleartext_refused_message(addr));
+    }
+
+    // Non-IP-literal cleartext host (e.g. `localhost`-alias or bare name that
+    // `infer_server_uri` chose `http://` for): fail-closed unless opted in.
+    if auth_cleartext_insecure_opt_in()? {
+        return Ok(());
+    }
+    bail!(
+        "refusing cleartext connection to non-loopback host {host:?}; \
+enable TLS or set HEDDLE_REMOTE_INSECURE=1 for intentional cleartext"
+    );
+}
+
+/// Whether the operator opted in to non-loopback cleartext for the auth path.
+///
+/// There is no `--insecure` flag on the auth subcommands, so this honors the
+/// same `HEDDLE_REMOTE_INSECURE` environment opt-in the remote paths accept.
+fn auth_cleartext_insecure_opt_in() -> Result<bool> {
+    match std::env::var("HEDDLE_REMOTE_INSECURE") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" | "" => Ok(false),
+            other => bail!(
+                "invalid HEDDLE_REMOTE_INSECURE value {other:?}; \
+expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(err @ std::env::VarError::NotUnicode(_)) => {
+            bail!("failed to read HEDDLE_REMOTE_INSECURE: {err}")
+        }
+    }
 }
 
 /// Connect an unauthenticated `AuthServiceClient` to the given server.
@@ -670,8 +833,118 @@ struct AccessToken {
     credential_id: String,
 }
 
-/// Best-effort browser open.
+/// Validate a URL before handing it to a browser helper.
+///
+/// Accepts only `https://` URLs, or `http://` when the host is loopback
+/// (`localhost`, `127.0.0.1`, `::1`). Rejects empty strings, control
+/// characters, and shell metacharacters that are unsafe for Windows
+/// `cmd /C start` even when passed as separate argv elements (including `%`
+/// env-var expansion and `<`/`>` redirection).
+///
+/// Validation is the primary control; Windows still uses the safer
+/// `start "" <url>` form after this check passes.
+pub(crate) fn validate_browser_url(url: &str) -> Result<()> {
+    if url.is_empty() {
+        bail!("browser URL is empty");
+    }
+    for ch in url.chars() {
+        // Fail-closed: reject control chars and every shell/`cmd` metacharacter
+        // unsafe for `cmd /C start`. `%` enables env-var expansion (`%VAR%`),
+        // and `<`/`>` enable redirection — a hostile auth server could use any
+        // of these to inject via the Windows browser launcher.
+        if ch.is_control()
+            || matches!(
+                ch,
+                '"' | '\'' | '|' | '&' | '^' | '`' | '%' | '<' | '>' | ' ' | '\n' | '\r' | '\t'
+            )
+        {
+            bail!("browser URL contains forbidden character {ch:?}");
+        }
+    }
+
+    let Some((scheme, rest)) = url.split_once("://") else {
+        bail!("browser URL must include a scheme (https://…)");
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        bail!("browser URL scheme must be https (or http for localhost only)");
+    }
+    if rest.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+
+    // Authority ends at the first path/query/fragment delimiter.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest);
+    if authority.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+    // Drop userinfo if present.
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = extract_url_host(hostport);
+    if host.is_empty() {
+        bail!("browser URL is missing a host");
+    }
+    // Spaces already rejected above; also refuse empty host labels.
+    if host.chars().any(|ch| ch.is_whitespace()) {
+        bail!("browser URL host must not contain whitespace");
+    }
+
+    if scheme == "http" && !is_loopback_browser_host(host) {
+        bail!("http browser URLs are only allowed for localhost/127.0.0.1/::1");
+    }
+    Ok(())
+}
+
+fn extract_url_host(hostport: &str) -> &str {
+    if let Some(inner) = hostport.strip_prefix('[') {
+        // IPv6 literal: [::1]:port
+        return inner.split(']').next().unwrap_or(inner);
+    }
+    hostport
+        .rsplit_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(hostport)
+}
+
+fn is_loopback_browser_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// Percent-encode a query component using the unreserved set (RFC 3986).
+fn percent_encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Best-effort browser open. Caller MUST pass a URL that already passed
+/// [`validate_browser_url`]. On Windows, validation is the primary control
+/// against command injection via `cmd /C start`.
 fn open_url(url: &str) -> Result<()> {
+    // Defense in depth: refuse to open unvalidated URLs even if a caller
+    // forgets the pre-check.
+    validate_browser_url(url)?;
+
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open").arg(url).spawn()?;
@@ -682,8 +955,10 @@ fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        // Empty title argument prevents `start` from treating a quoted URL
+        // as a window title. Only invoked after validate_browser_url.
         std::process::Command::new("cmd")
-            .args(["/C", "start", url])
+            .args(["/C", "start", "", url])
             .spawn()?;
     }
     Ok(())
@@ -692,6 +967,121 @@ fn open_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_browser_url_accepts_https() {
+        validate_browser_url("https://auth.heddle.sh/device").expect("https ok");
+        validate_browser_url("https://auth.heddle.sh/device?code=ABCD-1234").expect("https+query");
+    }
+
+    #[test]
+    fn validate_browser_url_accepts_loopback_http() {
+        validate_browser_url("http://127.0.0.1:8421/path").expect("loopback http");
+        validate_browser_url("http://localhost:8421/device").expect("localhost http");
+        validate_browser_url("http://[::1]:8421/path").expect("ipv6 loopback http");
+    }
+
+    #[test]
+    fn validate_browser_url_rejects_injection_and_dangerous_schemes() {
+        assert!(
+            validate_browser_url("https://x.com & calc").is_err(),
+            "shell metacharacters must be rejected"
+        );
+        assert!(validate_browser_url("file:///etc/passwd").is_err());
+        assert!(validate_browser_url("javascript:alert(1)").is_err());
+        assert!(validate_browser_url("").is_err());
+        assert!(validate_browser_url("http://example.com/device").is_err());
+        assert!(validate_browser_url("https://evil.com\"&calc").is_err());
+    }
+
+    #[test]
+    fn validate_browser_url_rejects_percent_and_redirection() {
+        // `%` enables Windows env-var expansion (`%VAR%`) via `cmd /C start`.
+        assert!(
+            validate_browser_url("https://evil.com/%USERPROFILE%").is_err(),
+            "percent (env-var expansion) must be rejected"
+        );
+        // `<` / `>` enable redirection.
+        assert!(
+            validate_browser_url("https://evil.com/a<b").is_err(),
+            "< (redirection) must be rejected"
+        );
+        assert!(
+            validate_browser_url("https://evil.com/a>b").is_err(),
+            "> (redirection) must be rejected"
+        );
+        // A crafted device/auth URL combining them must not slip through.
+        assert!(validate_browser_url("https://evil.com/?x=%TEMP%>out").is_err());
+    }
+
+    /// Serializes tests that mutate `HEDDLE_REMOTE_INSECURE`.
+    static INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_insecure_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = INSECURE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HEDDLE_REMOTE_INSECURE").ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
+            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
+        }
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HEDDLE_REMOTE_INSECURE", v) },
+            None => unsafe { std::env::remove_var("HEDDLE_REMOTE_INSECURE") },
+        }
+        out
+    }
+
+    #[test]
+    fn cleartext_gate_allows_https_and_loopback() {
+        with_insecure_env(None, || {
+            enforce_auth_cleartext_gate("https://grpc.heddle.sh").expect("https always allowed");
+            enforce_auth_cleartext_gate("http://127.0.0.1:8421").expect("loopback v4 allowed");
+            enforce_auth_cleartext_gate("http://[::1]:8421").expect("loopback v6 allowed");
+            enforce_auth_cleartext_gate("http://localhost:8421").expect("localhost allowed");
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_rejects_nonloopback_without_insecure() {
+        with_insecure_env(None, || {
+            let err = enforce_auth_cleartext_gate("http://192.168.1.44:8421")
+                .expect_err("non-loopback cleartext must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("refusing cleartext connection to non-loopback"),
+                "unexpected message: {msg}"
+            );
+            // Fail-closed: a bare non-loopback host that inferred http:// is also
+            // refused.
+            assert!(enforce_auth_cleartext_gate("http://server.internal:8421").is_err());
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_allows_nonloopback_with_insecure_opt_in() {
+        with_insecure_env(Some("1"), || {
+            enforce_auth_cleartext_gate("http://192.168.1.44:8421")
+                .expect("insecure opt-in permits non-loopback cleartext");
+        });
+    }
+
+    #[test]
+    fn cleartext_gate_rejects_invalid_insecure_value() {
+        with_insecure_env(Some("maybe"), || {
+            assert!(
+                enforce_auth_cleartext_gate("http://192.168.1.44:8421").is_err(),
+                "an ambiguous opt-in value must fail closed"
+            );
+        });
+    }
+
+    #[test]
+    fn percent_encode_query_component_encodes_reserved() {
+        assert_eq!(percent_encode_query_component("ABCD-1234"), "ABCD-1234");
+        assert_eq!(percent_encode_query_component("a b"), "a%20b");
+        assert_eq!(percent_encode_query_component("x&y"), "x%26y");
+    }
 
     #[test]
     fn infers_http_for_plain_ip_targets() {
