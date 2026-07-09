@@ -180,8 +180,30 @@ Wave 3  P2-A + P2-B
 - [x] P1-B: one Sley walk; default JSON not Full; honest not_checked
 - [x] P2-A: post-land auto-restack of same-target siblings (multi-`land --threads` deferred)
 - [x] P2-B: executable + symlink fidelity (merge unit tests; flat rebuild + recursive)
-- [ ] `cargo install --path crates/cli` smoke after P0
-- [ ] Manual: start two agents, land both to staging, `gh pr create` works
+- [x] `cargo install --path crates/cli` smoke after P0 (and again after P1/P2)
+- [x] Manual dogfood 2026-07-09 (see **Dogfood report** below)
+- [ ] Full IntegrationTxn journal (crash mid land) — residual product work
+- [ ] `land --threads a,b,c` — residual product work
+- [ ] Multi-peer sequential land always Git-FF after first peer checkpoint — residual (see dogfood)
+
+## Dogfood report (2026-07-09)
+
+Fixture: ephemeral git-overlay Rust repo under `/tmp/heddle-agent-dx-dogfood-run` with isolated threads under `/tmp/heddle-dx-threads-run` (paths **outside** the repo root; in-repo `--path` is refused). Binary: `~/.cargo/bin/heddle` installed from `work/agent-dx-friction`.
+
+| Item | Result | Evidence |
+|------|--------|----------|
+| **P0-A** tip bind | **PASS** | `heddle init` + `start` → log shows only real commit intent, **no** `Bootstrap git-overlay`. First `heddle commit` Git tip is child of original MAIN (`merge-base --is-ancestor` true; parent list includes original oid). |
+| **P0-B** land auto-undo | **PASS** | `HEDDLE_FAULT_INJECT=git_checkpoint_before_write_through heddle land …` → *failed at Git checkpoint and was rolled back*; no *Remote branch does not fast-forward* title. Real second-peer land non-FF also returned `kind: land_checkpoint_rolled_back` and undid Heddle merge. |
+| **P1-A** shared-target | **PASS** | Three agent checkouts wrote the **same** `target-dir = …/.heddle/targets/<fp>`. `--no-shared-target` wrote no config and emitted advisory. |
+| **P1-B** status | **PASS** | Profile: `git_index_ms: 0`, `git_overlay_status_ms: 1`, `total_ms: 16`. Single-walk claim held on this fixture. |
+| **P2-A** sibling restack | **PASS (with notes)** | Land `dog/agent-b` → `siblings_restacked: ["dog/agent-c","dog/agent-noshare"]`; `dog/agent-c` showed `Sync: current`. **Land of second peer** then hit local Git non-FF on export and **auto-rolled back** (P0-B working). Restack of `agent-a` **failed** because untracked `.cargo/config.toml` dirtied the worktree — fixed in follow-up by ignoring `.cargo/` in local exclude. |
+| **P2-B** materialize fidelity | **PASS** | New thread checkout: `main_link.rs` is symlink → `../src/main.rs`; `run.sh` mode `755`. |
+
+### Residual product issues found while dogfooding
+
+1. **Second peer land after first peer’s Git checkpoint** can still non-FF the export commit graph (`ref update would rewrite refs/heads/main … Heddle export commit`) even when Heddle restack made the peer current. Auto-undo keeps tips consistent, but multi-peer land-to-Git still needs export/parent planning work (IntegrationTxn / projected parents).
+2. **Shared-target `.cargo/config.toml` was untracked dirt** and blocked restack of that thread. Mitigation: write `.cargo/` into `.heddle/info/exclude` when installing the redirect (landed as dogfood follow-up on this branch).
+3. **`start --path` inside the repo root is refused** — correct safety; dogfood must use external paths or `.heddle/threads/…`.
 
 ## Changelog notes (draft)
 
@@ -212,3 +234,4 @@ When shipping:
 | 2026-07-09 | P2-B done: merge preserves +x (union) and symlink kind through recursive and rename/flat rebuild paths; unit tests in heddle-merge. |
 | 2026-07-09 | P1-B done: single Sley short-status for status+index; agent JSON DefaultText; honest not_checked. |
 | 2026-07-09 | P1-A done: default shared cargo target for Rust solid/materialized; `--no-shared-target` opt-out; try/fanout inherit; loud blocked-config warn. |
+| 2026-07-09 | Manual dogfood of all shipped items (temp overlay repo). P0-A/B, P1-A/B, P2-B pass; P2-A restack pass; second-peer Git export non-FF remains residual; shared-target `.cargo/` ignore follow-up. |

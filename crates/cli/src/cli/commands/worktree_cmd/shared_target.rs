@@ -213,7 +213,54 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
         let _ = std::fs::remove_file(&config_path);
         return Err(err).with_context(|| format!("sync '{}'", config_path.display()));
     }
+    // Isolated checkouts are reopened as native Heddle worktrees. Without
+    // an ignore rule, `.cargo/config.toml` surfaces as untracked dirt and
+    // blocks post-land sibling restack (full rematerialize refuses dirty
+    // trees). Mirror hydrate's local-exclude pattern — never captured.
+    preserve_shared_cargo_ignores(checkout)?;
     Ok(true)
+}
+
+/// Ensure `.cargo/` stays ignored in the isolated checkout so the
+/// heddle-written redirect never dirties capture/restack.
+fn preserve_shared_cargo_ignores(checkout: &Path) -> Result<()> {
+    // Reuse hydrate's worktree-local exclude path (`.heddle/info/exclude`).
+    let exclude_path = super::hydrate::hydrate_exclude_path(checkout);
+    let existing = match std::fs::read_to_string(&exclude_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("read '{}'", exclude_path.display()));
+        }
+    };
+    // Dir-only rule covers the config file and any cargo-created siblings.
+    let rule = ".cargo/";
+    let already = existing.lines().any(|l| {
+        let t = l.trim();
+        t == rule || t == ".cargo" || t == "/.cargo/" || t == "/.cargo"
+    });
+    if already {
+        return Ok(());
+    }
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create '{}'", parent.display()))?;
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if out.is_empty() {
+        out.push_str(
+            "# Written by `heddle start` (shared cargo target).\n\
+             # Keeps the redirect config out of capture/restack dirt.\n",
+        );
+    }
+    out.push_str(rule);
+    out.push('\n');
+    std::fs::write(&exclude_path, out)
+        .with_context(|| format!("write '{}'", exclude_path.display()))?;
+    Ok(())
 }
 
 /// Write `body` to `writer`; on failure drop the writer (closing any
@@ -348,6 +395,16 @@ mod tests {
             std::fs::read_to_string(temp.path().join(".cargo").join("config.toml")).unwrap();
         assert!(written.contains("[build]"));
         assert!(written.contains(&format!("target-dir = \"{}\"", target.display(),)));
+
+        // Redirect must not dirt capture/restack: local exclude covers .cargo/.
+        let exclude = std::fs::read_to_string(crate::cli::commands::worktree_cmd::hydrate::hydrate_exclude_path(
+            temp.path(),
+        ))
+            .expect("local exclude written for shared-target .cargo/");
+        assert!(
+            exclude.lines().any(|l| l.trim() == ".cargo/"),
+            "expected .cargo/ ignore rule, got:\n{exclude}"
+        );
     }
 
     #[test]
