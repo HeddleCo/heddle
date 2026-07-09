@@ -355,25 +355,24 @@ pub fn resolve_lossy_object(
         return Ok(residual);
     }
 
-    if let Some(mirror) = mirror_repo {
-        if mirror.object_format() == target_format
-            && let Ok(object) = mirror.read_object(oid)
-        {
-            if migrate_from_mirror {
-                residual_store.put_residual_verified(
-                    *oid,
-                    target_format,
-                    object.object_type,
-                    object.body.clone(),
-                )?;
-            }
-            return Ok(ResidualObject {
-                oid: *oid,
-                object_format: target_format,
-                object_type: object.object_type,
-                body: object.body.clone(),
-            });
+    if let Some(mirror) = mirror_repo
+        && mirror.object_format() == target_format
+        && let Ok(object) = mirror.read_object(oid)
+    {
+        if migrate_from_mirror {
+            residual_store.put_residual_verified(
+                *oid,
+                target_format,
+                object.object_type,
+                object.body.clone(),
+            )?;
         }
+        return Ok(ResidualObject {
+            oid: *oid,
+            object_format: target_format,
+            object_type: object.object_type,
+            body: object.body.clone(),
+        });
     }
 
     Err(GitProjectionError::Git(format!(

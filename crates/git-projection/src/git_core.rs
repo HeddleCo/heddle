@@ -3967,28 +3967,115 @@ fn materialize_lossy_roots_from_residual_or_mirror(
     }
 
     if !mirror_needed.is_empty() {
-        // Best-effort closure fill from the Bridge Mirror. If the mirror lacks
-        // an object that residual already supplied as a root, copy is a no-op
-        // for present oids; missing dependents only surface when the checkout
-        // later needs them. When the mirror itself is empty/absent for these
-        // roots and residual supplied only the root commit, dependent trees may
-        // still be missing — that is a known residual-closure completeness gap
-        // tracked for full residual capture of tree/blob graphs.
+        // Closure fill from the Bridge Mirror. If the mirror lacks an object
+        // that residual already supplied as a root, copy is a no-op for present
+        // oids; missing dependents (trees/blobs the residual root did not carry)
+        // must be pulled from the mirror here or the checkout `.git` is silently
+        // corrupt — commit present, closure absent.
         if let Err(error) =
             copy_reachable_objects_excluding(mirror_repo, object_repo, mirror_needed.iter().copied(), excluded)
         {
-            // If every root is already readable in the target (residual-only
-            // path without a usable mirror), tolerate mirror copy failure only
-            // when all roots are present.
-            let all_roots_present = mirror_needed
-                .iter()
-                .all(|oid| object_repo.read_object(oid).is_ok());
-            if !all_roots_present {
-                return Err(error);
+            // Do NOT tolerate the copy error merely because the ROOT commits are
+            // readable — a readable commit whose tree/blob closure is missing is
+            // exactly the silent-corruption case. Only tolerate the mirror being
+            // absent when the residual already supplied the FULL object closure
+            // reachable from every root. Otherwise propagate the copy error.
+            match verify_closure_present(object_repo, &mirror_needed, excluded) {
+                Ok(()) => {
+                    // Full closure already materialized from residual; the mirror
+                    // was genuinely unnecessary. Tolerate its absence.
+                }
+                Err(ClosureCheck::Incomplete { missing }) => {
+                    // Partial closure: the mirror copy failed AND residual did
+                    // not carry the full graph. Hard-error rather than emit a
+                    // corrupt checkout; surface the copy error and the first
+                    // missing object for diagnosis.
+                    return Err(GitProjectionError::Git(format!(
+                        "checkout object closure incomplete after mirror copy failure: \
+missing reachable object {missing} (mirror error: {error})"
+                    )));
+                }
+                Err(ClosureCheck::Walk(walk_error)) => {
+                    // The closure walk itself failed (e.g. a malformed object).
+                    // Prefer surfacing the original mirror copy error, chained.
+                    return Err(GitProjectionError::Git(format!(
+                        "mirror copy failed ({error}); closure verification also failed: {walk_error}"
+                    )));
+                }
             }
         }
     }
 
+    Ok(())
+}
+
+/// Outcome of a failed closure check in [`verify_closure_present`].
+enum ClosureCheck {
+    /// The reachable closure is missing at least one object; `missing` is the
+    /// first such object encountered.
+    Incomplete { missing: ObjectId },
+    /// The walk could not complete (a readable object failed to parse, etc.).
+    Walk(GitProjectionError),
+}
+
+/// Verify that the FULL object closure reachable from each root in `roots` is
+/// present and readable in `object_repo`, honoring `excluded` (objects the
+/// caller has intentionally kept out of the checkout store).
+///
+/// Walks commits → their trees → subtrees/blobs, and tags → their targets.
+/// Gitlink (submodule) entries are not part of this repository's closure and
+/// are skipped. Returns `Ok(())` only when every reachable object is present;
+/// otherwise the first missing object (or a walk failure) is reported so the
+/// caller can hard-error instead of emitting a corrupt checkout.
+fn verify_closure_present(
+    object_repo: &SleyRepository,
+    roots: &[ObjectId],
+    excluded: &HashSet<ObjectId>,
+) -> Result<(), ClosureCheck> {
+    const GITLINK_MODE: u32 = 0o160000;
+
+    let mut stack: Vec<ObjectId> = roots.to_vec();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    while let Some(oid) = stack.pop() {
+        if excluded.contains(&oid) || !seen.insert(oid) {
+            continue;
+        }
+        let object = match object_repo.read_object(&oid) {
+            Ok(object) => object,
+            Err(_) => return Err(ClosureCheck::Incomplete { missing: oid }),
+        };
+        match object.object_type {
+            GitObjectType::Commit => {
+                let commit = object_repo
+                    .read_commit(&oid)
+                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
+                stack.push(commit.tree);
+                for parent in commit.parents {
+                    stack.push(parent);
+                }
+            }
+            GitObjectType::Tree => {
+                let tree = object_repo
+                    .read_tree(&oid)
+                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
+                for entry in tree.entries {
+                    // Submodule pointers reference commits in a foreign repo;
+                    // they are not part of this repo's object closure.
+                    if entry.mode == GITLINK_MODE {
+                        continue;
+                    }
+                    stack.push(entry.oid);
+                }
+            }
+            GitObjectType::Tag => {
+                let tag = object_repo
+                    .read_tag(&oid)
+                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
+                stack.push(tag.object);
+            }
+            GitObjectType::Blob => {}
+        }
+    }
     Ok(())
 }
 
