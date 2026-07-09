@@ -93,6 +93,30 @@ struct UndoRedoOutput {
     trust: Option<RepositoryVerificationState>,
 }
 
+/// Undo the given oplog batches in-process without printing command output.
+/// Used by `land` to auto-rollback integration when Git checkpoint fails.
+///
+/// Batches must be newest-first (the same order `undo_batches_scoped` returns).
+pub(crate) fn undo_batches_quiet(repo: &Repository, batches: Vec<OpBatch>) -> Result<()> {
+    if batches.is_empty() {
+        return Ok(());
+    }
+    let _undo_redo_lock = acquire_undo_redo_lock(repo)?;
+    // Land auto-undo is only for land-owned integration/collapse batches, which
+    // are never redaction records. Thread-worktree and redaction preflights still
+    // run so we refuse instead of half-rewinding when undo is unsafe.
+    ensure_redaction_undo_safe(repo, &batches, false)?;
+    ensure_thread_worktree_undo_safe(repo, &batches)?;
+    preflight_undo_execution(repo, &batches)?;
+    let recovery_state = repo.head()?;
+    let scope = repo.op_scope();
+    let generation = repo.oplog().head_id()?;
+    let transaction_id = undo_redo_transaction_id("undo", &scope, generation, &batches);
+    repo::atomic::execute(repo, UndoOp::new(batches, recovery_state, transaction_id))
+        .map_err(|e| anyhow!(e))?;
+    Ok(())
+}
+
 pub fn cmd_undo(
     cli: &Cli,
     steps: usize,

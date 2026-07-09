@@ -30,6 +30,7 @@ use super::{
         thread_not_found_advice,
     },
     thread_landing::{land_local_command, switch_thread_command},
+    undo::undo_batches_quiet,
     verification_health::{
         RepositoryVerificationState, build_repository_verification_state, remote_drift_decision,
     },
@@ -524,11 +525,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 worktree_status_options(Some(repo.config())),
             )
             .map_err(|error| {
-                anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
+                land_checkpoint_failure_after_heddle(
+                    &repo,
                     &merge_thread.id,
                     error,
+                    Some(&merge_state),
+                    land_collapse_state.as_ref(),
                     land_performed_steps(captured, synced, true, false, false),
-                ))
+                )
             })?;
             checkpointed = true;
             git_commit = Some(record.git_commit);
@@ -772,11 +776,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             worktree_status_options(Some(repo.config())),
         )
         .map_err(|error| {
-            anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
+            land_checkpoint_failure_after_heddle(
+                &repo,
                 &merge_thread.id,
                 error,
+                merge_output.merge_state.as_deref(),
+                land_collapse_state.as_ref(),
                 land_performed_steps(captured, synced, integrated, false, false),
-            ))
+            )
         })?;
         checkpointed = true;
         git_commit = Some(record.git_commit);
@@ -1231,6 +1238,79 @@ fn coalesce_land_integration_and_checkpoint(
         repo.oplog()
             .coalesce_batches(integration_batch.id, collapse_batch.id)?;
     }
+    Ok(())
+}
+
+/// After Heddle land steps succeeded and Git checkpoint failed, auto-undo the
+/// land-owned integration (and squash collapse if any) so we do not leave a
+/// durable Heddle tip ahead of Git. Capture/sync on the source thread are left
+/// alone — they are not the dual-write tip consistency problem.
+fn land_checkpoint_failure_after_heddle(
+    repo: &Repository,
+    thread_id: &str,
+    checkpoint_error: anyhow::Error,
+    merge_state: Option<&str>,
+    collapse_state: Option<&ChangeId>,
+    performed_steps: Vec<String>,
+) -> anyhow::Error {
+    if merge_state.is_none() && collapse_state.is_none() {
+        // Nothing land-owned to roll back (should be rare); surface the legacy
+        // partial-failure advice that points at manual `heddle undo`.
+        return anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
+            thread_id,
+            &checkpoint_error,
+            performed_steps,
+        ));
+    }
+    match auto_undo_land_integration(repo, thread_id, merge_state, collapse_state) {
+        Ok(()) => anyhow!(RecoveryAdvice::land_checkpoint_rolled_back(
+            thread_id,
+            &checkpoint_error,
+            performed_steps,
+        )),
+        Err(undo_error) => anyhow!(RecoveryAdvice::land_checkpoint_partial_failure_undo_failed(
+            thread_id,
+            &checkpoint_error,
+            undo_error,
+            performed_steps,
+        )),
+    }
+}
+
+fn auto_undo_land_integration(
+    repo: &Repository,
+    thread_id: &str,
+    merge_state: Option<&str>,
+    collapse_state: Option<&ChangeId>,
+) -> Result<()> {
+    let mut batches = Vec::new();
+    // Newest-first: integration (merge/adopt) then collapse, matching
+    // `undo_batches_scoped` order (collapse runs before merge during land).
+    if let Some(merge_state) = merge_state
+        && let Ok(batch) = find_recent_land_integration_batch(repo, merge_state)
+    {
+        batches.push(batch);
+    }
+    if let Some(collapse_state) = collapse_state
+        && let Ok(batch) = find_recent_land_collapse_batch(repo, collapse_state)
+        && batches.iter().all(|existing| existing.id != batch.id)
+    {
+        batches.push(batch);
+    }
+    if batches.is_empty() {
+        return Err(anyhow!(
+            "no land integration oplog batch was found to roll back"
+        ));
+    }
+    undo_batches_quiet(repo, batches)?;
+    // Policy was set to auto_integrated before checkpoint; clear that claim
+    // now that the merge is undone so status/ready do not lie.
+    let _ = update_integration_policy(
+        repo,
+        thread_id,
+        "blocked",
+        "land rolled back after Git checkpoint failure",
+    );
     Ok(())
 }
 

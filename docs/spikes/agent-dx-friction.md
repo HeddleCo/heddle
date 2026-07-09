@@ -46,26 +46,26 @@ These are mostly **composition and defaults**, not missing engines.
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** |
 | Owner | agent wave 1 |
 | Root cause | `ensure_current_state` invents parentless snapshot when `current_state()==None` while Git HEAD is a real commit; `git_import_guidance` always returns `None` so unimported preflight is a no-op; export mints Git commits with no parents. |
 | Ideal fix | Lazy-map active Git tip into Heddle as first state; never create user-facing `parents=[]` roots when a Git tip exists; start base prefers mapped tip / default base. |
 | Key files | `cli/.../snapshot.rs` (`ensure_current_state`), `repo/repository.rs` (`git_import_guidance`, `head`, `bootstrap_git_overlay`), `repo/repository_snapshot.rs` (parents), `git-projection/git_export.rs` (parent OIDs) |
 | Acceptance | (1) Fresh `heddle init` on existing git repo + `start feature/x` does not create bootstrap root with empty parents when Git tip exists. (2) First export/write-through of that thread has merge-base with `main`/base tip. (3) Regression test. (4) No “Bootstrap git-overlay before starting …” as synthetic root in that path. |
-| Progress | |
+| Progress | Single-tip lazy bind via `ingest::import_single_git_commit_into`; `ensure_current_state` binds active Git tip before inventing worktree roots; fails closed with `heddle adopt` recovery when tip exists but bind fails; regression `init_then_start_binds_git_tip_not_orphan_bootstrap`. |
 
 #### P0-B. Land / Git tip consistency (atomic integrate slice)
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** (dogfood slice; full IntegrationTxn journal deferred) |
 | Owner | agent wave 1 |
 | Root cause | Land: Heddle merge first, then separate checkpoint; failure → `land_checkpoint_partial_failure` without auto-undo. Local `NonFastForwardRef` mis-mapped to remote FF advice. |
 | Ideal fix (full) | `IntegrationTxn` in core: preflight projected FF → apply Heddle → write-through → coalesce; auto-undo on Git failure; journal for crash. |
 | Slice for dogfood (this pass) | (1) Fix advice: local write-through non-FF ≠ remote push rejection. (2) On land checkpoint failure, **auto-undo** the land integration batch (or fail closed before Heddle moves when dry-run proves non-FF). (3) Tests for advice mapping + partial-failure rollback. |
 | Key files | `cli/.../workflow.rs` (`cmd_land`), `cli/.../advice.rs`, `cli/.../git_overlay_txn/mod.rs`, `core/save.rs`, `git-projection/git_core.rs`, `git-projection/git_sync.rs` |
 | Acceptance | (1) Land Git failure does not leave durable Heddle tip advanced without Git (or auto-undo restores). (2) Local non-FF error text does not claim “remote branch”. (3) Unit/integration coverage. |
-| Progress | |
+| Progress | (1) `NonFastForwardRef.remote_destination` splits local write-through vs push destination; local maps to `git_overlay_local_non_fast_forward` (no “Remote branch” title). (2) Land checkpoint failure auto-undos land-owned integration (+ squash collapse) via `undo_batches_quiet`; success → `land_checkpoint_rolled_back`. (3) Unit advice tests + `git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration` (fault inject `git_checkpoint_before_write_through`). Residual: crash between Heddle integrate and Git write-through still needs IntegrationTxn journal; source-thread capture/sync not auto-undone. |
 
 ### P1 — Unblocks agent throughput after reinstall
 
@@ -173,9 +173,9 @@ Wave 3  P2-A + P2-B
 
 ## Test plan (overall)
 
-- [ ] P0-A: overlay init + start + export has merge-base with base branch
-- [ ] P0-B: inject Git checkpoint failure on land → no durable Heddle-only advance (or auto-undo)
-- [ ] P0-B: local NonFastForwardRef message is not remote-titled
+- [x] P0-A: overlay init + start + export has merge-base with base branch
+- [x] P0-B: inject Git checkpoint failure on land → no durable Heddle-only advance (or auto-undo)
+- [x] P0-B: local NonFastForwardRef message is not remote-titled
 - [ ] P1-A: default share + opt-out
 - [ ] P1-B: one Sley walk; probe shape
 - [ ] P2-A: multi-peer land path
@@ -203,3 +203,5 @@ When shipping:
 | Date | Note |
 |------|------|
 | 2026-07-09 | Spike opened from multi-agent dogfood investigation. P0 next. |
+| 2026-07-09 | P0-A done: lazy single-tip bind in `ensure_current_state`; no orphan Bootstrap root when Git tip exists. |
+| 2026-07-09 | P0-B done (dogfood slice): local vs remote non-FF advice; land auto-undo on checkpoint failure. Full IntegrationTxn journal still residual. |

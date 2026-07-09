@@ -7074,6 +7074,81 @@ fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
     assert_eq!(git_ref_snapshot(fixture.path()), before_refs);
 }
 
+/// P0-B: when land integrates Heddle then Git checkpoint fails, land must
+/// auto-undo the integration so the durable tip is not left Heddle-ahead-of-Git.
+#[test]
+fn git_overlay_matrix_land_checkpoint_failure_auto_undoes_heddle_integration() {
+    let fixture =
+        GitOverlayFixture::adopted_main().with_ready_materialized_thread("feature/land-rollback");
+    let before_state =
+        json(fixture.path(), &["--output", "json", "status"])["current_state"].clone();
+    let before_git = fixture.git_stdout(&["rev-parse", "HEAD"]);
+    let before_refs = git_ref_snapshot(fixture.path());
+
+    let land = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/land-rollback",
+            "--no-push",
+        ],
+        Some(fixture.path()),
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "git_checkpoint_before_write_through",
+        )],
+    )
+    .expect("invoke land with checkpoint fault injection");
+    assert!(
+        !land.status.success(),
+        "land should fail when Git checkpoint is fault-injected: stdout={} stderr={}",
+        String::from_utf8_lossy(&land.stdout),
+        String::from_utf8_lossy(&land.stderr)
+    );
+    assert!(
+        land.stdout.is_empty(),
+        "JSON refusal should keep stdout quiet: {}",
+        String::from_utf8_lossy(&land.stdout)
+    );
+    let stderr = std::str::from_utf8(&land.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
+    assert_eq!(
+        envelope["kind"], "land_checkpoint_rolled_back",
+        "checkpoint failure after Heddle integrate should auto-undo: {envelope}"
+    );
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("rolled back")),
+        "error should report the auto-undo: {envelope}"
+    );
+    assert!(
+        !envelope["primary_command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("undo"),
+        "after auto-undo, recovery should retry land rather than require manual undo: {envelope}"
+    );
+    assert_eq!(
+        json(fixture.path(), &["--output", "json", "status"])["current_state"],
+        before_state,
+        "auto-undo must restore the pre-land Heddle tip"
+    );
+    assert_eq!(
+        fixture.git_stdout(&["rev-parse", "HEAD"]),
+        before_git,
+        "failed land must not leave a Git checkpoint tip"
+    );
+    assert_eq!(
+        git_ref_snapshot(fixture.path()),
+        before_refs,
+        "failed land must not move visible Git refs"
+    );
+}
+
 #[test]
 fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
     let temp = TempDir::new().unwrap();

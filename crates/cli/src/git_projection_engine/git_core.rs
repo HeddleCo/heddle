@@ -99,6 +99,10 @@ pub enum GitProjectionError {
         name: String,
         old: ObjectId,
         new: ObjectId,
+        /// When true, this refusal is a remote/destination push rejection.
+        /// When false, it is a local write-through / mirror-branch FF failure
+        /// (checkpoint, export, or sync of a local `refs/heads/*` tip).
+        remote_destination: bool,
     },
 
     #[error(
@@ -2880,6 +2884,7 @@ pub(crate) fn ensure_commit_update_fast_forward(
             name: name.to_string(),
             old,
             new,
+            remote_destination: false,
         }),
         Err(err) => Err(GitProjectionError::Git(format!(
             "ref update would move {name}: {old} -> {new}, but Heddle could not verify it as a fast-forward ({err}); fetch/import first or inspect the refs explicitly"
@@ -3494,6 +3499,7 @@ pub(crate) fn plan_destination_reconcile(
                             name: full.clone(),
                             old: old.unwrap_or_else(|| ObjectId::null(mirror_repo.object_format())),
                             new: update.target,
+                            remote_destination: true,
                         });
                     }
                 }

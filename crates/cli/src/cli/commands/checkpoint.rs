@@ -221,6 +221,15 @@ fn create_git_checkpoint_inner(
         .map(ToOwned::to_owned)
         .or_else(|| state.intent.clone())
         .unwrap_or_else(|| format!("Checkpoint {}", state.change_id.short()));
+    // Fault-injection seam for land/checkpoint partial-failure tests: after
+    // Heddle preflight and state selection succeed, fail before write-through
+    // so callers exercise post-Heddle rollback without needing a real Git
+    // non-FF. Production is a no-op unless `HEDDLE_FAULT_INJECT` lists the name.
+    objects::fault_inject::maybe_fail_at("git_checkpoint_before_write_through").map_err(|err| {
+        anyhow!(crate::cli::commands::git_overlay_txn::checkpoint_git_write_skipped_advice(
+            err.to_string()
+        ))
+    })?;
     let branch = repo
         .git_overlay_current_branch()?
         .unwrap_or_else(|| "HEAD".to_string());
