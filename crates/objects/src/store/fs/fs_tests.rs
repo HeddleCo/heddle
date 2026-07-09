@@ -874,23 +874,71 @@ fn test_large_blob() {
     assert_eq!(retrieved.content(), large_content.as_slice());
 }
 
+/// SECURITY regression: a purged blob must be gone from the in-process
+/// cache too, not just from disk. `purge` (redaction) deletes the loose
+/// bytes and then drops the cache; after that sequence a long-lived
+/// process must neither serve the content nor report it present. This
+/// mirrors the store-level half of the redaction `purge_blob` path
+/// (delete loose bytes + `clear_recent_caches`).
 #[test]
-fn test_recent_blob_cache_does_not_hide_deleted_loose_object() {
+fn test_recent_blob_cache_evicted_on_purge_neither_served_nor_present() {
     let (_temp, store) = create_test_store();
 
     let blob = Blob::from("cached content");
     let hash = store.put_blob(&blob).unwrap();
 
-    let path = hash_path(&blobs_dir(store.root()), &hash);
-    std::fs::remove_file(path).unwrap();
-
-    // Cache-first hot path keeps the put-time entry until the process
-    // cache is cleared (or capacity-evicted). External deletes are
-    // visible after `clear_recent_caches`.
+    // Sanity: the blob is cached (put-time populate) and present.
     assert!(store.get_blob(&hash).unwrap().is_some());
+    assert!(store.has_blob(&hash).unwrap());
+
+    // Purge sequence: delete the loose bytes, then drop the cache the
+    // way `remove_loose_blob_bytes` does. Deleting the file alone is
+    // NOT enough — the cache would keep serving the destroyed content.
+    let path = hash_path(&blobs_dir(store.root()), &hash);
+    std::fs::remove_file(&path).unwrap();
     store.clear_recent_caches();
-    let retrieved = store.get_blob(&hash).unwrap();
-    assert!(retrieved.is_none());
+
+    // Post-purge the blob must be neither served nor reported present.
+    assert!(
+        store.get_blob(&hash).unwrap().is_none(),
+        "purged blob must not be served from cache after its bytes are deleted"
+    );
+    assert!(
+        !store.has_blob(&hash).unwrap(),
+        "purged blob must not be reported present after its bytes are deleted"
+    );
+}
+
+/// The targeted single-hash eviction (`evict_recent_blob`) must also
+/// stop a purged blob from being served/reported present, without
+/// requiring a full cache flush. Other cached blobs must survive.
+#[test]
+fn test_evict_recent_blob_removes_only_target() {
+    let (_temp, store) = create_test_store();
+
+    let purged = Blob::from("secret to destroy");
+    let kept = Blob::from("innocent bystander");
+    let purged_hash = store.put_blob(&purged).unwrap();
+    let kept_hash = store.put_blob(&kept).unwrap();
+
+    // Delete the purged blob's loose bytes and evict just that hash.
+    let path = hash_path(&blobs_dir(store.root()), &purged_hash);
+    std::fs::remove_file(&path).unwrap();
+    store.evict_recent_blob(&purged_hash);
+
+    assert!(
+        store.get_blob(&purged_hash).unwrap().is_none(),
+        "evicted+deleted blob must not be served from cache"
+    );
+    assert!(
+        !store.has_blob(&purged_hash).unwrap(),
+        "evicted+deleted blob must not be reported present"
+    );
+    // The unrelated blob is still cached and served.
+    assert!(
+        store.get_blob(&kept_hash).unwrap().is_some(),
+        "single-hash eviction must not drop unrelated cached blobs"
+    );
 }
 
 #[test]
@@ -1065,5 +1113,50 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     assert!(
         probed.is_none(),
         "corrupted loose blob must not be served as canonical bytes"
+    );
+}
+
+/// The byte budget must evict LRU entries once cumulative cached bytes
+/// exceed the cap, so a read-only workload streaming many blobs can't
+/// retain `capacity × max-entry-bytes` of deep-cloned Vecs.
+#[test]
+fn test_recent_object_cache_byte_budget_evicts_lru() {
+    // Large per-entry count cap, tiny byte budget: eviction is driven
+    // purely by bytes. Each value is `len` bytes.
+    let mut cache = super::fs_store::RecentObjectCache::<u32, Vec<u8>>::with_byte_budget(
+        1_000,
+        100,
+        |v: &Vec<u8>| v.len(),
+    );
+
+    cache.insert(1, vec![0u8; 40]); // total 40
+    cache.insert(2, vec![0u8; 40]); // total 80
+    // Touch key 1 so it becomes MRU; key 2 is now the LRU victim.
+    assert!(cache.contains(&1));
+    cache.get(&1);
+    cache.insert(3, vec![0u8; 40]); // total would be 120 > 100 → evict LRU (key 2)
+
+    assert!(cache.contains(&1), "recently-touched entry must survive");
+    assert!(
+        !cache.contains(&2),
+        "LRU entry must be evicted when the byte budget is exceeded"
+    );
+    assert!(cache.contains(&3), "freshly inserted entry must be retained");
+}
+
+/// A single entry larger than the whole budget is kept (soft cap): the
+/// budget bounds aggregate retention, and the per-entry size gate is
+/// enforced upstream, not here.
+#[test]
+fn test_recent_object_cache_byte_budget_keeps_single_oversize_entry() {
+    let mut cache = super::fs_store::RecentObjectCache::<u32, Vec<u8>>::with_byte_budget(
+        1_000,
+        100,
+        |v: &Vec<u8>| v.len(),
+    );
+    cache.insert(1, vec![0u8; 500]);
+    assert!(
+        cache.contains(&1),
+        "a lone oversize entry is retained; the budget is a soft aggregate cap"
     );
 }

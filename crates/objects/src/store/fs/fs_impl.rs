@@ -246,9 +246,12 @@ impl FsStore {
     }
 
     fn try_has_blob_once(&self, hash: &ContentHash) -> Result<bool> {
-        // Keep `has_blob` coherent with cache-first `get_blob`.
-        if let Ok(mut cache) = self.recent_blobs.write()
-            && cache.get(hash).is_some()
+        // Keep `has_blob` coherent with cache-first `get_blob`. A pure
+        // existence check needs no LRU promotion, so take the *read*
+        // lock and use `contains` — concurrent `has_blob` calls in
+        // heddled/mount don't serialize on the exclusive write lock.
+        if let Ok(cache) = self.recent_blobs.read()
+            && cache.contains(hash)
         {
             return Ok(true);
         }
@@ -366,8 +369,10 @@ impl FsStore {
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
-        if let Ok(mut cache) = self.recent_trees.write()
-            && cache.get(hash).is_some()
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_trees.read()
+            && cache.contains(hash)
         {
             return Ok(true);
         }
@@ -424,8 +429,10 @@ impl FsStore {
     }
 
     fn try_has_state_once(&self, id: &ChangeId) -> Result<bool> {
-        if let Ok(mut cache) = self.recent_states.write()
-            && cache.get(id).is_some()
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_states.read()
+            && cache.contains(id)
         {
             return Ok(true);
         }

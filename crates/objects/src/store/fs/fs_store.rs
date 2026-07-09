@@ -36,6 +36,13 @@ const VERIFIED_LOOSE_BLOB_CACHE_CAPACITY: usize = 65_536;
 /// multi-MB read cannot thrash the hot working set. 4 MiB matches the
 /// typical "large file" boundary used elsewhere in the object path.
 pub(super) const RECENT_BLOB_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Total-byte budget for `recent_blobs`. Without it, populate-on-read
+/// could retain `RECENT_BLOB_CACHE_CAPACITY` (2048) × the 4 MiB
+/// per-entry gate ≈ 8 GiB of deep-cloned blob bytes for a read-only
+/// workload (mount / `heddled`) that streams many cold blobs. 256 MiB
+/// caps the resident blob-cache footprint while still holding a deep
+/// hot working set of small objects (the common case).
+pub(super) const RECENT_BLOB_CACHE_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LooseObjectWriteMode {
@@ -45,25 +52,70 @@ pub enum LooseObjectWriteMode {
 
 /// Bounded in-process object cache with true LRU eviction.
 ///
+/// Two independent caps are enforced on every [`insert`](Self::insert):
+///
+/// * `capacity` — the maximum entry *count*.
+/// * `byte_budget` — a soft cap on the cumulative *bytes* of the
+///   cached values, sized by the per-entry `sizer` closure. `None`
+///   disables the byte cap (caches whose values are effectively
+///   fixed-size, e.g. the `()`-valued verified-loose cache).
+///
+/// The byte budget is what keeps populate-on-read bounded: a read-only
+/// workload (mount / `heddled`) that streams many multi-MB blobs
+/// through `get_blob` can otherwise retain `capacity × max-entry-bytes`
+/// of deep-cloned `Vec`s. With the budget, inserting a new large blob
+/// evicts LRU entries until the total fits.
+///
 /// [`get`](Self::get) promotes the key to MRU; [`insert`](Self::insert)
 /// treats re-insert as a touch. Evicts from the front of `order` when
-/// over capacity.
+/// over either cap.
 #[derive(Debug)]
 pub(super) struct RecentObjectCache<K, V> {
     entries: HashMap<K, V>,
     order: VecDeque<K>,
     capacity: usize,
+    /// Soft cap on cumulative cached bytes; `None` = count-only.
+    byte_budget: Option<usize>,
+    /// `sizer(value)` in bytes. Only consulted when `byte_budget`
+    /// is `Some`.
+    sizer: fn(&V) -> usize,
+    /// Running sum of `sizer(v)` over all `entries`.
+    cached_bytes: usize,
 }
 
 impl<K, V> RecentObjectCache<K, V>
 where
     K: Copy + Eq + Hash,
 {
+    /// Count-capped cache with no byte budget. Used for caches whose
+    /// values are effectively fixed-size (e.g. the verified-loose
+    /// marker cache).
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
             capacity,
+            byte_budget: None,
+            sizer: |_| 0,
+            cached_bytes: 0,
+        }
+    }
+
+    /// Cache capped by *both* entry count and cumulative bytes.
+    /// `sizer` reports each value's heap-ish footprint; the cache
+    /// evicts LRU entries until both caps hold.
+    pub(super) fn with_byte_budget(
+        capacity: usize,
+        byte_budget: usize,
+        sizer: fn(&V) -> usize,
+    ) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+            byte_budget: Some(byte_budget),
+            sizer,
+            cached_bytes: 0,
         }
     }
 
@@ -78,29 +130,73 @@ where
         self.entries.get(key)
     }
 
-    /// Presence check without promotion (used by verified-loose probes
-    /// that only care whether a hash was previously trusted).
+    /// Presence check without promotion. Cheap enough to run under a
+    /// read lock — used both by verified-loose probes and by `has_*`
+    /// existence checks that must not serialize concurrent readers on
+    /// the exclusive write lock a promoting `get` would need.
     pub(super) fn contains(&self, key: &K) -> bool {
         self.entries.contains_key(key)
+    }
+
+    /// Drop `key` from the cache entirely. Returns the evicted value if
+    /// present. Targeted counterpart to the redaction-`purge` cache
+    /// drop: a purged blob's bytes must not linger in `recent_blobs`
+    /// where a long-lived process would keep serving (or reporting
+    /// present) the destroyed content. The production purge path drops
+    /// the whole cache via `clear_recent_caches` (it crosses the
+    /// generic `ObjectStore` seam); this per-key variant backs the
+    /// store-level `evict_recent_blob` used in tests.
+    #[cfg(test)]
+    pub(super) fn remove(&mut self, key: &K) -> Option<V> {
+        let removed = self.entries.remove(key)?;
+        if let Some(position) = self.order.iter().position(|existing| existing == key) {
+            self.order.remove(position);
+        }
+        self.cached_bytes = self.cached_bytes.saturating_sub((self.sizer)(&removed));
+        Some(removed)
     }
 
     pub(super) fn insert(&mut self, key: K, value: V) {
         if self.capacity == 0 {
             return;
         }
-        if self.entries.insert(key, value).is_some() {
+        let new_bytes = self.byte_budget.map(|_| (self.sizer)(&value)).unwrap_or(0);
+        if let Some(old) = self.entries.insert(key, value) {
+            self.cached_bytes = self
+                .cached_bytes
+                .saturating_sub(self.byte_budget.map(|_| (self.sizer)(&old)).unwrap_or(0));
             self.promote(&key);
         } else {
             self.order.push_back(key);
         }
-        while self.entries.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                // A key may appear only once in `order`; if it was
-                // already removed by a concurrent logical path we just
-                // skip.
-                self.entries.remove(&oldest);
-            } else {
+        self.cached_bytes += new_bytes;
+        self.evict_to_fit();
+    }
+
+    /// Evict from the LRU front until both the count cap and the byte
+    /// budget hold. The freshly-inserted entry is at the MRU back, so
+    /// it is never the eviction target (a single entry larger than the
+    /// whole budget is kept — the budget is a soft cap, not a hard
+    /// per-entry gate; the per-entry `RECENT_BLOB_CACHE_MAX_BYTES` gate
+    /// already bounds the largest thing that reaches here).
+    fn evict_to_fit(&mut self) {
+        loop {
+            let over_count = self.entries.len() > self.capacity;
+            let over_bytes = self
+                .byte_budget
+                .is_some_and(|budget| self.cached_bytes > budget && self.entries.len() > 1);
+            if !over_count && !over_bytes {
                 break;
+            }
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            // A key appears at most once in `order`; if it was already
+            // removed by a concurrent logical path we just skip.
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.cached_bytes = self
+                    .cached_bytes
+                    .saturating_sub(self.byte_budget.map(|_| (self.sizer)(&evicted)).unwrap_or(0));
             }
         }
     }
@@ -185,7 +281,11 @@ impl FsStore {
             root,
             compression: CompressionConfig::default(),
             pack_manager: RwLock::new(pack_manager),
-            recent_blobs: RwLock::new(RecentObjectCache::with_capacity(RECENT_BLOB_CACHE_CAPACITY)),
+            recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
+                RECENT_BLOB_CACHE_CAPACITY,
+                RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
+                |blob: &Blob| blob.content().len(),
+            )),
             recent_trees: RwLock::new(RecentObjectCache::with_capacity(RECENT_TREE_CACHE_CAPACITY)),
             recent_states: RwLock::new(RecentObjectCache::with_capacity(
                 RECENT_TREE_CACHE_CAPACITY,
@@ -207,7 +307,11 @@ impl FsStore {
             root,
             compression,
             pack_manager: RwLock::new(pack_manager),
-            recent_blobs: RwLock::new(RecentObjectCache::with_capacity(RECENT_BLOB_CACHE_CAPACITY)),
+            recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
+                RECENT_BLOB_CACHE_CAPACITY,
+                RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
+                |blob: &Blob| blob.content().len(),
+            )),
             recent_trees: RwLock::new(RecentObjectCache::with_capacity(RECENT_TREE_CACHE_CAPACITY)),
             recent_states: RwLock::new(RecentObjectCache::with_capacity(
                 RECENT_TREE_CACHE_CAPACITY,
@@ -329,13 +433,31 @@ impl FsStore {
 
     pub fn clear_recent_object_caches(&self) {
         if let Ok(mut blobs) = self.recent_blobs.write() {
-            *blobs = RecentObjectCache::with_capacity(RECENT_BLOB_CACHE_CAPACITY);
+            *blobs = RecentObjectCache::with_byte_budget(
+                RECENT_BLOB_CACHE_CAPACITY,
+                RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
+                |blob: &Blob| blob.content().len(),
+            );
         }
         if let Ok(mut trees) = self.recent_trees.write() {
             *trees = RecentObjectCache::with_capacity(RECENT_TREE_CACHE_CAPACITY);
         }
         if let Ok(mut states) = self.recent_states.write() {
             *states = RecentObjectCache::with_capacity(RECENT_TREE_CACHE_CAPACITY);
+        }
+    }
+
+    /// Drop a single blob hash from the in-process `recent_blobs`
+    /// cache. Targeted counterpart to the redaction-`purge` cache drop:
+    /// after the loose bytes are physically deleted, a long-lived
+    /// process must not keep serving (or reporting present) the purged
+    /// content from cache. Idempotent — a miss is a no-op. Test-only:
+    /// the production purge path crosses the generic `ObjectStore` seam
+    /// and drops the whole cache via `clear_recent_caches`.
+    #[cfg(test)]
+    pub(super) fn evict_recent_blob(&self, hash: &ContentHash) {
+        if let Ok(mut cache) = self.recent_blobs.write() {
+            cache.remove(hash);
         }
     }
 
