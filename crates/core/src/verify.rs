@@ -836,6 +836,7 @@ pub fn build_repository_verification_state_with_worktree_status_and_machine_cont
         is_git_overlay,
         &workflow_status,
         &workflow_summary,
+        workflow_action.as_deref(),
     );
     RepositoryVerificationState {
         verified: health.clean && machine_contract_clean,
@@ -889,6 +890,7 @@ fn verification_checks_from_health(
     is_git_overlay: bool,
     workflow_status: &str,
     workflow_summary: &str,
+    workflow_action: Option<&str>,
 ) -> Vec<VerificationCheck> {
     let mut checks = vec![
         git_verification_check(is_git_overlay),
@@ -904,7 +906,7 @@ fn verification_checks_from_health(
         worktree_verification_check(health),
         remote_verification_check(health),
         operation_verification_check(health),
-        workflow_verification_check(health, workflow_status, workflow_summary),
+        workflow_verification_check(health, workflow_status, workflow_summary, workflow_action),
     ];
     checks.push(machine_contract_verification_check(coverage));
     checks.push(clone_verification_check(health, is_git_overlay));
@@ -1119,6 +1121,7 @@ fn workflow_verification_check(
     health: &RepositoryVerificationHealth,
     workflow_status: &str,
     workflow_summary: &str,
+    workflow_action: Option<&str>,
 ) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "thread_integration_metadata")
         && check.status != "clean"
@@ -1135,12 +1138,20 @@ fn workflow_verification_check(
             health.recovery_commands.clone(),
         );
     }
+    // When ready work is actionable ("ready"), surface the concrete land
+    // command on the Workflow check itself so agents inspecting the
+    // verification proof get the same runnable next action the top-level
+    // recommendation carries (dropped when the check moved cli->core, which
+    // passed `None`).
+    let recommended_action = (workflow_status == "ready")
+        .then(|| workflow_action.map(str::to_string))
+        .flatten();
     verification_check(
         "Workflow",
         true,
         workflow_status,
         workflow_summary,
-        None,
+        recommended_action,
         Vec::new(),
     )
 }
@@ -1257,13 +1268,28 @@ fn workflow_status(repo: &Repository, current_thread: Option<&str>) -> (String, 
             "no ready thread actions require attention".to_string(),
         );
     }
-    if ready_threads.iter().all(|thread| {
-        thread
+    // A dedicated checkout can safely print a parent-repo land command for a
+    // ready thread even when its recorded `target_thread` differs from the
+    // checkout's current lane: the merge runs against the parent repo. The
+    // MAIN checkout, by contrast, must be on the thread's recorded target
+    // before the ready work becomes the primary next action. This mirrors
+    // `workflow_primary_action` / the pre-facade `actionable_from_current_thread`
+    // classification — without the dedicated-checkout allowance, `ready`/`status`
+    // from an isolated checkout wrongly report `workflow_status = "clean"` for a
+    // thread that is in fact ready to land.
+    let opened_from_dedicated_checkout = repo
+        .heddle_dir()
+        .parent()
+        .is_some_and(|main_root| main_root != repo.root());
+    let all_target_another_thread = ready_threads.iter().all(|thread| {
+        let actionable = thread
             .target_thread
             .as_deref()
-            .zip(current_thread)
-            .is_some_and(|(target, current)| target != current)
-    }) {
+            .map(|target| current_thread == Some(target) || opened_from_dedicated_checkout)
+            .unwrap_or(true);
+        !actionable
+    });
+    if all_target_another_thread {
         return (
             "clean".to_string(),
             "ready thread actions target another thread".to_string(),

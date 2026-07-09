@@ -141,14 +141,19 @@ fn merge_output_exit_code(output: &MergeOutput) -> Option<i32> {
 }
 
 /// Core builds `heddle land ... --no-push` recommendations because it can't
-/// resolve remotes through the CLI remote helpers. When a default push remote
-/// exists, rewrite those to `--push` so the recommended land command matches
-/// what `main` produced (a repo with a remote should default to pushing).
+/// resolve remotes through the CLI remote helpers. When a repo has a genuine
+/// DEFAULT push remote, rewrite those to `--push` so the recommended land
+/// command matches what `main` produced (a repo with a configured default
+/// remote should push on land).
+///
+/// This uses the same "default remote" notion as the status/verification
+/// surface (`heddle_core::status::default_remote_name`), NOT
+/// `resolved_default_remote_name`: the latter treats a lone, incidental git
+/// remote (e.g. a `backup` remote added with `git remote add`) as the default
+/// and would wrongly flip a no-remote-default land to `--push`, regressing the
+/// established `merge --preview` guidance for such repos.
 fn rewrite_land_recommendations_for_remote(repo: &Repository, output: &mut MergeOutput) {
-    let has_push_target = super::remote::resolved_default_remote_name(repo)
-        .ok()
-        .flatten()
-        .is_some();
+    let has_push_target = heddle_core::status::default_remote_name(repo).is_some();
     if !has_push_target {
         return;
     }

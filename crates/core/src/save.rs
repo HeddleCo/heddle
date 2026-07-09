@@ -418,12 +418,13 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
             return Err(anyhow!(HeddleError::recovery(
                 RecoveryDetails::safety_refusal(
                     "hook_veto",
-                    format!("pre_capture hook aborted capture: {}", resp.abort),
-                    "Address the hook veto reason, then retry the save.",
-                    "a repository hook refused the capture",
-                    "capture would have written a new Heddle state",
-                    "repository state, refs, metadata, and worktree files were left unchanged",
-                ),
+                    format!("pre_capture hook vetoed: {}", resp.abort),
+                    "Inspect `pre_capture` with `heddle hook list`, update the hook policy or inputs, then retry.",
+                    format!("pre_capture hook vetoed capture: {}", resp.abort),
+                    "capture would continue after repository policy explicitly aborted the operation",
+                    "the operation stopped at the hook boundary before the protected action ran",
+                )
+                .with_recovery_commands(vec!["heddle hook list".to_string()]),
             )));
         }
     }
