@@ -24,7 +24,7 @@ These are mostly **composition and defaults**, not missing engines.
 |------|--------|--------|
 | Land + Git checkpoint | Dual durable steps; partial failure leaves gap | One integration txn (or auto-undo) |
 | Overlay first state | `ensure_current_state` may invent `parents=[]` | Lazy bind active Git tip; never orphan when Git tip exists |
-| Peer fan-in | Manual serial refresh+land | Productized multi-land / post-land sibling restack |
+| Peer fan-in | Manual serial refresh+land | **Shipped:** post-land auto-restack of same-target siblings; multi-`land --threads` still planned |
 | Mode/symlink fidelity | Materialize OK if tree right; merge often wrong | Merge preserves FileMode/kind; e2e gates |
 | Shared cargo target | Opt-in hidden flag | Default-on for Rust solid/materialized |
 | Status shapes | Full JSON by default for agents | Probe/short shapes; one worktree walk |
@@ -99,13 +99,13 @@ These are mostly **composition and defaults**, not missing engines.
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** (auto-sibling restack; multi-`land --threads` deferred) |
 | Owner | agent wave 2/3 |
 | Root cause | Pairwise FF previews; no multi-source integrate; freshness is target-tip only. |
 | Fix | Productize serial fan-in loop and/or post-land auto-refresh of siblings with same `target_thread`. Optional `land --threads a,b,c`. |
 | Key files | `workflow.rs`, `thread_cmd.rs` (`refresh_thread`), `merge/plan.rs`, `snapshot_metadata.rs` |
 | Acceptance | Documented command path lands N disjoint peers without manual refresh order; or auto-restack siblings after land. |
-| Progress | |
+| Progress | After successful land into target `T`, best-effort `refresh_thread` of other Active/Ready/Blocked/Draft threads with `target_thread=T` that are now Stale. Failures go to `siblings_restack_failed` + operator warnings; land is not undone. JSON/text: `siblings_restacked`. No new CRDT merge. Regression: `test_land_auto_restacks_stale_sibling_peers`. Optional `land --threads a,b,c` still deferred. |
 
 #### P2-B. Merge mode / symlink fidelity
 
@@ -178,7 +178,7 @@ Wave 3  P2-A + P2-B
 - [x] P0-B: local NonFastForwardRef message is not remote-titled
 - [ ] P1-A: default share + opt-out
 - [ ] P1-B: one Sley walk; probe shape
-- [ ] P2-A: multi-peer land path
+- [x] P2-A: post-land auto-restack of same-target siblings (multi-`land --threads` deferred)
 - [ ] P2-B: executable + symlink e2e
 - [ ] `cargo install --path crates/cli` smoke after P0
 - [ ] Manual: start two agents, land both to staging, `gh pr create` works
@@ -189,6 +189,7 @@ When shipping:
 
 - fix(overlay): bind active Git tip instead of inventing orphan bootstrap roots
 - fix(land): do not leave Heddle ahead of Git on checkpoint failure; clarify local vs remote non-FF
+- feat(land): auto-restack same-target sibling threads after successful land
 - (later) feat(start): default shared cargo target for Rust workspaces
 - (later) perf(status): single worktree walk + agent probe shape
 

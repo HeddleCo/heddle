@@ -1470,6 +1470,144 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
     );
 }
 
+/// P2-A peer fan-in: after landing one sibling, land auto-restacks
+/// other active threads that share the same `target_thread` so the
+/// next peer can land without a manual `thread refresh` first.
+#[test]
+fn test_land_auto_restacks_stale_sibling_peers() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("base.txt"), "shared base\n").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    let alpha_path = temp.path().join("threads/alpha");
+    let beta_path = temp.path().join("threads/beta");
+
+    heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "alpha",
+            "--workspace",
+            "materialized",
+            "--path",
+            alpha_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start alpha");
+    heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "beta",
+            "--workspace",
+            "materialized",
+            "--path",
+            beta_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start beta");
+
+    let Some(alpha_target) = thread_target(temp.path(), "alpha") else {
+        eprintln!("alpha has no target_thread; skipping land sibling restack test");
+        return;
+    };
+    let Some(beta_target) = thread_target(temp.path(), "beta") else {
+        eprintln!("beta has no target_thread; skipping land sibling restack test");
+        return;
+    };
+    assert_eq!(
+        alpha_target, beta_target,
+        "peers must share the same target for restack"
+    );
+
+    fs::write(alpha_path.join("alpha.txt"), "alpha content\n").unwrap();
+    heddle(&["capture", "-m", "Alpha edit"], Some(&alpha_path)).unwrap();
+    fs::write(beta_path.join("beta.txt"), "beta content\n").unwrap();
+    heddle(&["capture", "-m", "Beta edit"], Some(&beta_path)).unwrap();
+
+    // Land alpha from the shared parent. Post-land, beta is stale against
+    // the advanced target tip and must be auto-restacked.
+    let land_out = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "alpha",
+            "--no-push",
+        ],
+        Some(temp.path()),
+    )
+    .expect("land alpha");
+    let land: Value = serde_json::from_str(&land_out).expect("land json");
+    assert_eq!(
+        land["status"].as_str(),
+        Some("landed"),
+        "alpha land must succeed: {land}"
+    );
+    assert_eq!(land["integrated"], true, "alpha must integrate: {land}");
+
+    let restacked = land["siblings_restacked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let restacked_ids: Vec<&str> = restacked.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        restacked_ids.iter().any(|id| *id == "beta"),
+        "land must auto-restack sibling beta; got siblings_restacked={restacked_ids:?} full={land}"
+    );
+    assert!(
+        land["siblings_restack_failed"]
+            .as_array()
+            .map(|arr| arr.is_empty())
+            .unwrap_or(true),
+        "disjoint beta restack must not fail: {land}"
+    );
+
+    // Beta should now be current against the post-land tip.
+    let beta_show = heddle(
+        &["--output", "json", "thread", "show", "beta"],
+        Some(temp.path()),
+    )
+    .expect("thread show beta");
+    let beta: Value = serde_json::from_str(&beta_show).unwrap();
+    assert_eq!(
+        beta["freshness"].as_str(),
+        Some("current"),
+        "beta must be current after post-land restack: {beta}"
+    );
+
+    // Second peer lands without a manual refresh first — the whole point
+    // of auto-sibling restack for multi-agent fan-in.
+    let land_beta = heddle(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "beta",
+            "--no-push",
+        ],
+        Some(temp.path()),
+    )
+    .expect("land beta after auto-restack");
+    let land_beta: Value = serde_json::from_str(&land_beta).expect("land beta json");
+    assert_eq!(
+        land_beta["status"].as_str(),
+        Some("landed"),
+        "beta land without manual refresh must succeed: {land_beta}"
+    );
+    assert_eq!(
+        land_beta["integrated"], true,
+        "beta must integrate: {land_beta}"
+    );
+}
+
 /// When refresh can't be done cleanly (real conflict on the same
 /// path), the error must name the conflicting paths instead of the
 /// historical misleading "rebase conflicts" message. Same scaffolding

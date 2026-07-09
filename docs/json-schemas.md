@@ -557,9 +557,17 @@ saves a Heddle state without recommending a Git checkpoint.
   "performed_steps": ["merge", "checkpoint"],
   "skipped_steps": ["capture(no changes)", "sync(current)", "push(not requested)"],
   "merge_state": "hd-land123",
-  "chosen_path": "capture_sync_merge_checkpoint"
+  "chosen_path": "capture_sync_merge_checkpoint",
+  "siblings_restacked": ["feature/peer-b"],
+  "siblings_restack_failed": []
 }
 ```
+
+When no peers share the landed thread's `target_thread` (or none needed a
+restack), `siblings_restacked` / `siblings_restack_failed` are omitted
+(`skip_serializing_if` empty). Failed peer restacks do not undo the land;
+entries look like `{ "thread": "feature/peer-c", "message": "..." }` and are
+also mirrored into operator `warnings`.
 
 ### Fields
 
@@ -583,6 +591,8 @@ saves a Heddle state without recommending a Git checkpoint.
 | `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
 | `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
+| `siblings_restacked` | array<string> | optional for `land` | Peer threads with the same `target_thread` that were auto-refreshed onto the post-land tip. Omitted when empty. |
+| `siblings_restack_failed` | array<object> | optional for `land` | Best-effort peer restacks that failed after a successful land (`thread` + `message`). Omitted when empty; land is not rolled back. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
 
 ---

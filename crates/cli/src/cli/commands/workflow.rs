@@ -58,6 +58,20 @@ struct SyncOutput {
     chosen_path: String,
 }
 
+/// Best-effort post-land restack of a peer that shares the landed
+/// thread's `target_thread`. Failures never undo the land.
+#[derive(Debug, Clone, Serialize)]
+struct SiblingRestackFailure {
+    thread: String,
+    message: String,
+}
+
+#[derive(Debug, Default)]
+struct SiblingRestackReport {
+    restacked: Vec<String>,
+    failed: Vec<SiblingRestackFailure>,
+}
+
 #[derive(Serialize)]
 struct LandOutput {
     #[serde(flatten)]
@@ -73,6 +87,14 @@ struct LandOutput {
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
+    /// Peer threads with the same `target_thread` that were auto-refreshed
+    /// onto the post-land tip (best-effort; empty when none or not integrated).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    siblings_restacked: Vec<String>,
+    /// Peer restacks that failed after a successful land. Land itself is
+    /// not rolled back; operators refresh the named threads manually.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    siblings_restack_failed: Vec<SiblingRestackFailure>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -409,6 +431,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     pushed: false,
                     pushed_remote: None,
                     merge_state: None,
+                    siblings_restacked: Vec::new(),
+                    siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
                     performed_steps: land_performed_steps(captured, false, false, false, false),
@@ -464,6 +488,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         pushed: false,
                         pushed_remote: None,
                         merge_state: None,
+                        siblings_restacked: Vec::new(),
+                        siblings_restack_failed: Vec::new(),
                         trust: build_repository_verification_state(&repo),
                         chosen_path: "blocked".to_string(),
                         performed_steps: land_performed_steps(
@@ -605,6 +631,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "land",
             VerificationClaimPolicy::strict().allow_land_publish_followup(),
         );
+        let sibling_restack =
+            apply_sibling_restack_after_land(&repo, &merge_thread, cli, true, &mut operator);
         return write_land_output(
             cli,
             &repo,
@@ -619,6 +647,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 pushed,
                 pushed_remote,
                 merge_state: Some(merge_state),
+                siblings_restacked: sibling_restack.restacked,
+                siblings_restack_failed: sibling_restack.failed,
                 trust,
                 performed_steps: land_performed_steps(captured, synced, true, checkpointed, pushed),
                 skipped_steps: land_skipped_steps(captured, synced, true, checkpointed, pushed),
@@ -675,6 +705,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     pushed: false,
                     pushed_remote: None,
                     merge_state: None,
+                    siblings_restacked: Vec::new(),
+                    siblings_restack_failed: Vec::new(),
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
                     performed_steps: land_performed_steps(captured, synced, false, false, false),
@@ -712,6 +744,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 pushed: false,
                 pushed_remote: None,
                 merge_state: None,
+                siblings_restacked: Vec::new(),
+                siblings_restack_failed: Vec::new(),
                 trust: build_repository_verification_state(&repo),
                 chosen_path: "blocked".to_string(),
                 performed_steps: land_performed_steps(captured, synced, false, false, false),
@@ -851,6 +885,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         "land",
         VerificationClaimPolicy::strict().allow_land_publish_followup(),
     );
+    let sibling_restack =
+        apply_sibling_restack_after_land(&repo, &merge_thread, cli, integrated, &mut operator);
 
     write_land_output(
         cli,
@@ -866,6 +902,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             pushed,
             pushed_remote,
             merge_state: merge_output.merge_state.clone(),
+            siblings_restacked: sibling_restack.restacked,
+            siblings_restack_failed: sibling_restack.failed,
             trust,
             performed_steps: land_performed_steps(
                 captured,
@@ -1059,6 +1097,103 @@ async fn push_after_land(
         super::remote::cmd_push(cli, remote, None, state, false, false, None).await?;
         Ok(pushed_remote)
     }
+}
+
+/// After a successful land into target `T`, best-effort restack other
+/// active threads that also target `T` and are now stale. Uses existing
+/// `refresh_thread` (no multi-parent CRDT merge). Failures are reported
+/// but never undo the land.
+fn restack_sibling_threads_after_land(
+    repo: &Repository,
+    landed: &Thread,
+    cli: &Cli,
+) -> SiblingRestackReport {
+    let Some(target) = landed.target_thread.as_deref() else {
+        return SiblingRestackReport::default();
+    };
+
+    let manager = thread_manager(repo);
+    let Ok(threads) = manager.list() else {
+        return SiblingRestackReport::default();
+    };
+
+    let mut candidates: Vec<Thread> = threads
+        .into_iter()
+        .filter(|thread| {
+            thread.id != landed.id
+                && thread.thread != landed.thread
+                && thread.target_thread.as_deref() == Some(target)
+                && matches!(
+                    thread.state,
+                    repo::ThreadState::Draft
+                        | repo::ThreadState::Active
+                        | repo::ThreadState::Ready
+                        | repo::ThreadState::Blocked
+                )
+        })
+        .collect();
+    // Deterministic agent-facing output order.
+    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut report = SiblingRestackReport::default();
+    for mut sibling in candidates {
+        if let Err(error) = refresh_thread_freshness(repo, &mut sibling) {
+            report.failed.push(SiblingRestackFailure {
+                thread: sibling.id.clone(),
+                message: format!("could not evaluate freshness: {error}"),
+            });
+            continue;
+        }
+        if sibling.freshness != repo::ThreadFreshness::Stale {
+            continue;
+        }
+        match refresh_thread(repo, &sibling.id, cli) {
+            Ok(_) => report.restacked.push(sibling.id),
+            Err(error) => report.failed.push(SiblingRestackFailure {
+                thread: sibling.id.clone(),
+                message: sibling_restack_error_message(&error),
+            }),
+        }
+    }
+    report
+}
+
+fn sibling_restack_error_message(error: &anyhow::Error) -> String {
+    // Prefer the recovery-advice error string when present; fall back to
+    // the chain root so agent JSON stays readable without a full dump.
+    if let Some(advice) = error.downcast_ref::<RecoveryAdvice>()
+        && !advice.error.is_empty()
+    {
+        return advice.error.clone();
+    }
+    let rendered = format!("{error:#}");
+    rendered
+        .lines()
+        .next()
+        .unwrap_or("refresh failed")
+        .to_string()
+}
+
+/// Run post-land sibling restack when integration succeeded, folding
+/// failures into operator warnings (land itself is not rolled back).
+fn apply_sibling_restack_after_land(
+    repo: &Repository,
+    landed: &Thread,
+    cli: &Cli,
+    integrated: bool,
+    operator: &mut OperatorCommandOutput,
+) -> SiblingRestackReport {
+    if !integrated {
+        return SiblingRestackReport::default();
+    }
+    let report = restack_sibling_threads_after_land(repo, landed, cli);
+    for failure in &report.failed {
+        operator.warnings.push(format!(
+            "sibling '{}' could not be restacked after land: {}",
+            failure.thread, failure.message
+        ));
+    }
+    report
 }
 
 fn land_performed_steps(
@@ -1727,6 +1862,15 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         }
         if output.checkpointed {
             println!("  {}", style::field("saved", "local Git commit recorded"));
+        }
+        if !output.siblings_restacked.is_empty() {
+            println!(
+                "  {}",
+                style::field(
+                    "siblings restacked",
+                    &output.siblings_restacked.join(", ")
+                )
+            );
         }
         for blocker in &output.operator.blockers {
             println!("  blocker: {}", style::warn(blocker));
