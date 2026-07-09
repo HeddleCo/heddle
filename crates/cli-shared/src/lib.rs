@@ -14,10 +14,15 @@ pub mod logging;
 pub mod output;
 pub mod remote;
 
-pub use client_config::ClientConfig;
+pub use client_config::{
+    ClientConfig, cleartext_connect_allowed, cleartext_refused_message, is_loopback_ip,
+};
 pub use config::UserConfig;
 pub use logging::{
     LogFormat, LoggingConfig, LoggingGuard, init_logging, init_logging_default, is_enabled,
 };
 pub use output::OutputMode;
-pub use remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key};
+pub use remote::{
+    Remote, RemoteConfig, RemoteTarget, remote_allows_insecure, resolve_remote_with_key,
+    resolve_remote_with_key_and_insecure,
+};

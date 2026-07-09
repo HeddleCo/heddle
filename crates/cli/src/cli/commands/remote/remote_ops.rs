@@ -206,6 +206,7 @@ pub async fn cmd_pull(
     thread: Option<String>,
     local_thread: Option<String>,
     lazy: bool,
+    insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
@@ -342,12 +343,14 @@ pub async fn cmd_pull(
                     remote_thread: &remote_thread,
                     local_thread: local_thread_name,
                     lazy,
+                    insecure: insecure
+                        || cli_shared::remote_allows_insecure(&repo, remote.as_deref()),
                     cli,
                 },
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token);
+            let _ = (addr, repo_path, token, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("pull"));
         }
@@ -513,11 +516,12 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     let repo_path = options
         .repo_path
         .context("network remotes must include a hosted repository path")?;
-    let mut client = HostedGrpcClient::open_session(
+    let mut client = HostedGrpcClient::open_session_with_insecure(
         options.addr,
         options.user_config,
         options.server_key,
         HostedAuthMode::CredentialFallback,
+        options.insecure,
     )
     .await?
     .with_human_signature_callback(crate::client::cli_human_signature_callback());
@@ -703,8 +707,14 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             sync_git_overlay_remote_add(&repo, &name, &url)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             let default_was_empty = cfg.default_name().is_none();
-            cfg.add(&name, Remote { url: url.clone() })
-                .map_err(anyhow::Error::new)?;
+            cfg.add(
+                &name,
+                Remote {
+                    url: url.clone(),
+                    insecure: false,
+                },
+            )
+            .map_err(anyhow::Error::new)?;
             if default_was_empty
                 && git_overlay_default_before
                     .as_deref()
@@ -773,7 +783,14 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             // readers (including `resolve_remote_with_key`) can resolve
             // it, then set the default explicitly.
             if cfg.get(&name).is_err() {
-                cfg.add(&name, Remote { url }).map_err(anyhow::Error::new)?;
+                cfg.add(
+                    &name,
+                    Remote {
+                        url,
+                        insecure: false,
+                    },
+                )
+                .map_err(anyhow::Error::new)?;
             }
             cfg.set_default(&name).map_err(anyhow::Error::new)?;
             render_remote_mutation(
@@ -1295,6 +1312,7 @@ struct PullNetworkOptions<'a> {
     remote_thread: &'a str,
     local_thread: Option<&'a str>,
     lazy: bool,
+    insecure: bool,
     cli: &'a Cli,
 }
 

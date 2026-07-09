@@ -40,6 +40,12 @@ pub enum AuthCommands {
         /// Heddle server address
         #[arg(long)]
         server: Option<String>,
+        /// Write the private-key PEM to this path (default: under ~/.heddle/service-accounts/)
+        #[arg(long)]
+        key_out: Option<String>,
+        /// Include the private key PEM in stdout / JSON (default: write file only)
+        #[arg(long)]
+        show_secrets: bool,
     },
 }
 
@@ -55,10 +61,14 @@ impl From<AuthCommands> for heddle_client::AuthCommand {
                 name,
                 namespace,
                 server,
+                key_out,
+                show_secrets,
             } => heddle_client::AuthCommand::CreateServiceToken {
                 name,
                 namespace,
                 server,
+                key_out,
+                show_secrets,
             },
         }
     }

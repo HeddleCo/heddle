@@ -10,7 +10,7 @@ mod sync;
 mod tree_edit;
 mod user;
 
-use cli_shared::ClientConfig;
+use cli_shared::{ClientConfig, cleartext_connect_allowed, cleartext_refused_message};
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     KeypairProof, MintBiscuitRequest, auth_service_client::AuthServiceClient,
@@ -55,6 +55,12 @@ impl HostedGrpcClient {
         addr: std::net::SocketAddr,
         config: &ClientConfig,
     ) -> Result<Self, ProtocolError> {
+        // Production remotes require TLS. Cleartext is allowed only for
+        // loopback or when the user explicitly opts in (`allow_insecure` /
+        // `--insecure` / remote.insecure / HEDDLE_REMOTE_INSECURE).
+        if !cleartext_connect_allowed(addr, config.tls_enabled, config.allow_insecure) {
+            return Err(ProtocolError::InvalidState(cleartext_refused_message(addr)));
+        }
         let scheme = if config.tls_enabled { "https" } else { "http" };
         let mut endpoint = Endpoint::from_shared(format!("{scheme}://{addr}"))
             .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;

@@ -1237,6 +1237,11 @@ pub struct RemoteOperationArgs {
     /// Thread to act on.
     #[arg(short, long)]
     pub thread: Option<String>,
+
+    /// Allow cleartext (non-TLS) connections to non-loopback hosts.
+    /// Prefer enabling TLS; use this only for intentional lab/VPN testing.
+    #[arg(long)]
+    pub insecure: bool,
 }
 
 /// Arguments for the `push` command.
@@ -1287,6 +1292,11 @@ pub struct PushArgs {
     /// refs/notes/heddle and skips Git tags.
     #[arg(long)]
     pub all_threads: bool,
+
+    /// Allow cleartext (non-TLS) connections to non-loopback hosts.
+    /// Prefer enabling TLS; use this only for intentional lab/VPN testing.
+    #[arg(long)]
+    pub insecure: bool,
 }
 
 impl PushArgs {
@@ -1354,6 +1364,10 @@ pub struct CloneArgs {
     /// Leave blob content absent by design and hydrate it explicitly later.
     #[arg(long, hide = true)]
     pub lazy: bool,
+
+    /// Allow cleartext (non-TLS) connections to non-loopback hosts.
+    #[arg(long)]
+    pub insecure: bool,
 
     // Only `blob:none` is accepted (a synonym for --lazy on hosted
     // remotes); git-style filters such as `tree:0` or `blob:limit=…` are

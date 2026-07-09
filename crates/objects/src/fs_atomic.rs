@@ -465,6 +465,31 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Normal, |_, _| Ok(()))
 }
 
+/// Create a directory tree with owner-only permissions on Unix (`0o700`).
+///
+/// Used for `.heddle` / `~/.heddle` trees that hold credentials, keys, and
+/// repository secrets. On non-Unix platforms this falls back to
+/// [`fs::create_dir_all`]. Existing directories are left as-is (creation-time
+/// privacy; callers that need to tighten existing modes should do so
+/// explicitly).
+pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        match builder.create(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
+
 /// Atomically write secret material without ever creating a group/world
 /// readable temporary file.
 ///
@@ -772,6 +797,18 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let files = vec![(dir.path().join("does/not/exist/ref.tmp"), b"x".to_vec())];
         assert!(stage_temp_files_durable(&files).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_sets_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("nested/private");
+        create_private_dir_all(&target).expect("create private dir");
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "new private dir must be 0700, got {mode:o}");
     }
 
     #[cfg(unix)]

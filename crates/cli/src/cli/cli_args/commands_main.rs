@@ -437,6 +437,10 @@ Examples:
         /// Fetch from all remotes.
         #[arg(long)]
         all: bool,
+
+        /// Allow cleartext (non-TLS) connections to non-loopback hosts.
+        #[arg(long)]
+        insecure: bool,
     },
 
     /// Push to a remote repository.
