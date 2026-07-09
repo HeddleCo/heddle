@@ -20,6 +20,14 @@ pub(crate) struct RenameMatch {
     pub score: f64,
     pub from_hash: ContentHash,
     pub to_hash: ContentHash,
+    /// Executable bit of the renamed-from entry (base side).
+    /// Retained for callers that need base mode during rename+content merge.
+    #[allow(dead_code)]
+    pub from_executable: bool,
+    /// Executable bit of the renamed-to entry (branch side).
+    pub to_executable: bool,
+    /// Leaf kind of the renamed-to entry (Blob vs Symlink).
+    pub to_entry_type: EntryType,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,7 +53,37 @@ pub(crate) struct RenameDetection {
     pub stats: RenameMatcherStats,
 }
 
-pub(crate) type FlatTree = HashMap<String, (ContentHash, EntryType)>;
+/// Flattened leaf with content hash plus mode/kind fidelity.
+///
+/// Rename-path rebuilds must not invent `executable: false` / file-only
+/// leaves — that dropped +x and flattened symlinks on refresh/land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlatLeaf {
+    pub hash: ContentHash,
+    pub entry_type: EntryType,
+    /// Meaningful for [`EntryType::Blob`] only; always `false` for symlinks.
+    pub executable: bool,
+}
+
+impl FlatLeaf {
+    pub fn blob(hash: ContentHash, executable: bool) -> Self {
+        Self {
+            hash,
+            entry_type: EntryType::Blob,
+            executable,
+        }
+    }
+
+    pub fn symlink(hash: ContentHash) -> Self {
+        Self {
+            hash,
+            entry_type: EntryType::Symlink,
+            executable: false,
+        }
+    }
+}
+
+pub(crate) type FlatTree = HashMap<String, FlatLeaf>;
 
 pub(crate) const DEFAULT_THRESHOLD: f64 = 0.55;
 
@@ -111,9 +149,14 @@ pub(crate) fn flatten_tree(
         };
 
         match entry.entry_type() {
-            EntryType::Blob | EntryType::Symlink => {
+            EntryType::Blob => {
                 if let Some(hash) = entry.leaf_content_hash() {
-                    result.insert(path, (hash, entry.entry_type()));
+                    result.insert(path, FlatLeaf::blob(hash, entry.is_executable()));
+                }
+            }
+            EntryType::Symlink => {
+                if let Some(hash) = entry.leaf_content_hash() {
+                    result.insert(path, FlatLeaf::symlink(hash));
                 }
             }
             EntryType::Tree => {
@@ -147,15 +190,15 @@ pub(crate) fn detect_renames_with_stats(
     branch: &FlatTree,
     config: RenameMatcherConfig,
 ) -> Result<RenameDetection> {
-    let deleted: Vec<(&String, &ContentHash)> = base
+    let deleted: Vec<(&String, &FlatLeaf)> = base
         .iter()
-        .filter(|(path, (_, et))| *et == EntryType::Blob && !branch.contains_key(*path))
-        .map(|(path, (hash, _))| (path, hash))
+        .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !branch.contains_key(*path))
+        .map(|(path, leaf)| (path, leaf))
         .collect();
-    let added: Vec<(&String, &ContentHash)> = branch
+    let added: Vec<(&String, &FlatLeaf)> = branch
         .iter()
-        .filter(|(path, (_, et))| *et == EntryType::Blob && !base.contains_key(*path))
-        .map(|(path, (hash, _))| (path, hash))
+        .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !base.contains_key(*path))
+        .map(|(path, leaf)| (path, leaf))
         .collect();
 
     let mut stats = RenameMatcherStats {
@@ -190,13 +233,13 @@ pub(crate) fn detect_renames_with_stats(
         .iter()
         .enumerate()
         .filter(|(index, _)| !used_deleted[*index])
-        .map(|(index, (path, hash))| (index, path.as_str(), *hash))
+        .map(|(index, (path, leaf))| (index, path.as_str(), &leaf.hash))
         .collect();
     let remaining_added: Vec<(usize, &str, &ContentHash)> = added
         .iter()
         .enumerate()
         .filter(|(index, _)| !used_added[*index])
-        .map(|(index, (path, hash))| (index, path.as_str(), *hash))
+        .map(|(index, (path, leaf))| (index, path.as_str(), &leaf.hash))
         .collect();
 
     if remaining_deleted.is_empty() || remaining_added.is_empty() {
@@ -266,14 +309,19 @@ pub(crate) fn detect_renames_with_stats(
 
         let deleted_path = deleted[deleted_index].0;
         let added_path = added[added_index].0;
+        let from_leaf = deleted[deleted_index].1;
+        let to_leaf = added[added_index].1;
         matches.insert(
             deleted_path.clone(),
             RenameMatch {
                 from_path: deleted_path.clone(),
                 to_path: added_path.clone(),
                 score,
-                from_hash: *deleted[deleted_index].1,
-                to_hash: *added[added_index].1,
+                from_hash: from_leaf.hash,
+                to_hash: to_leaf.hash,
+                from_executable: from_leaf.executable,
+                to_executable: to_leaf.executable,
+                to_entry_type: to_leaf.entry_type,
             },
         );
     }
@@ -303,20 +351,20 @@ fn trace_matcher_stats(stats: &RenameMatcherStats) {
 }
 
 fn match_exact_hashes(
-    deleted: &[(&String, &ContentHash)],
-    added: &[(&String, &ContentHash)],
+    deleted: &[(&String, &FlatLeaf)],
+    added: &[(&String, &FlatLeaf)],
     used_deleted: &mut [bool],
     used_added: &mut [bool],
     matches: &mut HashMap<String, RenameMatch>,
     stats: &mut RenameMatcherStats,
 ) {
-    let mut added_by_hash: HashMap<&ContentHash, Vec<usize>> = HashMap::new();
-    for (index, (_, hash)) in added.iter().enumerate() {
-        added_by_hash.entry(hash).or_default().push(index);
+    let mut added_by_hash: HashMap<ContentHash, Vec<usize>> = HashMap::new();
+    for (index, (_, leaf)) in added.iter().enumerate() {
+        added_by_hash.entry(leaf.hash).or_default().push(index);
     }
 
-    for (deleted_index, (deleted_path, deleted_hash)) in deleted.iter().enumerate() {
-        let Some(indices) = added_by_hash.get(deleted_hash) else {
+    for (deleted_index, (deleted_path, deleted_leaf)) in deleted.iter().enumerate() {
+        let Some(indices) = added_by_hash.get(&deleted_leaf.hash) else {
             continue;
         };
 
@@ -339,14 +387,18 @@ fn match_exact_hashes(
         used_deleted[deleted_index] = true;
         used_added[added_index] = true;
         stats.exact_hash_matches += 1;
+        let to_leaf = added[added_index].1;
         matches.insert(
             (*deleted_path).clone(),
             RenameMatch {
                 from_path: (*deleted_path).clone(),
                 to_path: added[added_index].0.clone(),
                 score: 1.0,
-                from_hash: **deleted_hash,
-                to_hash: *added[added_index].1,
+                from_hash: deleted_leaf.hash,
+                to_hash: to_leaf.hash,
+                from_executable: deleted_leaf.executable,
+                to_executable: to_leaf.executable,
+                to_entry_type: to_leaf.entry_type,
             },
         );
     }

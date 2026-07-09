@@ -111,13 +111,13 @@ These are mostly **composition and defaults**, not missing engines.
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** |
 | Owner | agent wave 2/3 |
 | Root cause | Merge executor invents `executable: false` / file-only trees on conflict/content/rename paths; materialize then honest. |
 | Fix | Preserve FileMode/kind through merge; e2e start --path + refresh fidelity tests. |
 | Key files | `merge/src/tree_merge/executor.rs`, `repository_materialization.rs`, e2e tests |
 | Acceptance | Executable + relative symlink round-trip through start --path and refresh that only touches another file. |
-| Progress | |
+| Progress | FlatLeaf carries hash+EntryType+executable through rename/flat rebuild; `build_nested_tree` emits Blob(+x) and Symlink correctly; recursive content/conflict paths use union-of-+x policy. Unit tests cover no-rename preserve, content-merge union, conflict +x, rename rebuild, and nested rebuild. |
 
 ## Implementation order
 
@@ -179,7 +179,7 @@ Wave 3  P2-A + P2-B
 - [ ] P1-A: default share + opt-out
 - [ ] P1-B: one Sley walk; probe shape
 - [x] P2-A: post-land auto-restack of same-target siblings (multi-`land --threads` deferred)
-- [ ] P2-B: executable + symlink e2e
+- [x] P2-B: executable + symlink fidelity (merge unit tests; flat rebuild + recursive)
 - [ ] `cargo install --path crates/cli` smoke after P0
 - [ ] Manual: start two agents, land both to staging, `gh pr create` works
 
@@ -209,3 +209,4 @@ When shipping:
 | 2026-07-09 | `cargo install --path crates/cli --force --locked` — heddle replaced in `~/.cargo/bin`. Wave 2 (P1/P2) next. |
 | 2026-07-09 | P0-A done: lazy single-tip bind in `ensure_current_state`; no orphan Bootstrap root when Git tip exists. |
 | 2026-07-09 | P0-B done (dogfood slice): local vs remote non-FF advice; land auto-undo on checkpoint failure. Full IntegrationTxn journal still residual. |
+| 2026-07-09 | P2-B done: merge preserves +x (union) and symlink kind through recursive and rename/flat rebuild paths; unit tests in heddle-merge. |
