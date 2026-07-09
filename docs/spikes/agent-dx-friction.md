@@ -203,5 +203,8 @@ When shipping:
 | Date | Note |
 |------|------|
 | 2026-07-09 | Spike opened from multi-agent dogfood investigation. P0 next. |
+| 2026-07-09 | P0-B landed (`e33e5577`): land auto-undo + local vs remote non-FF advice. |
+| 2026-07-09 | P0-A landed (`8af3b876`): lazy tip bind; no orphan bootstrap when Git tip exists. |
+| 2026-07-09 | `cargo install --path crates/cli --force --locked` — heddle replaced in `~/.cargo/bin`. Wave 2 (P1/P2) next. |
 | 2026-07-09 | P0-A done: lazy single-tip bind in `ensure_current_state`; no orphan Bootstrap root when Git tip exists. |
 | 2026-07-09 | P0-B done (dogfood slice): local vs remote non-FF advice; land auto-undo on checkpoint failure. Full IntegrationTxn journal still residual. |
