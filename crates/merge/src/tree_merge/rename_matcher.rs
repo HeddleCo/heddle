@@ -193,12 +193,10 @@ pub(crate) fn detect_renames_with_stats(
     let deleted: Vec<(&String, &FlatLeaf)> = base
         .iter()
         .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !branch.contains_key(*path))
-        .map(|(path, leaf)| (path, leaf))
         .collect();
     let added: Vec<(&String, &FlatLeaf)> = branch
         .iter()
         .filter(|(path, leaf)| leaf.entry_type == EntryType::Blob && !base.contains_key(*path))
-        .map(|(path, leaf)| (path, leaf))
         .collect();
 
     let mut stats = RenameMatcherStats {
