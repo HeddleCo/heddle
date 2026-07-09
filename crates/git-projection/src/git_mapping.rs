@@ -59,14 +59,14 @@ impl GitIdentityIndex {
 }
 
 impl<'a> GitProjection<'a> {
-    pub(crate) fn mapping_path(&self) -> PathBuf {
+    pub fn mapping_path(&self) -> PathBuf {
         self.heddle_repo
             .heddle_dir()
             .join("git-projection")
             .join("git-projection-mapping.json")
     }
 
-    pub(crate) fn mapping_tmp_path(&self) -> PathBuf {
+    pub fn mapping_tmp_path(&self) -> PathBuf {
         self.mapping_path().with_extension("json.tmp")
     }
 
@@ -119,7 +119,7 @@ impl<'a> GitProjection<'a> {
             .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))
     }
 
-    pub(crate) fn write_mapping_tmp_to_disk(&self) -> GitProjectionResult<PathBuf> {
+    pub fn write_mapping_tmp_to_disk(&self) -> GitProjectionResult<PathBuf> {
         self.write_mapping_tmp_value_to_disk(&self.mapping)
     }
 
@@ -142,7 +142,7 @@ impl<'a> GitProjection<'a> {
         Ok(tmp_path)
     }
 
-    pub(crate) fn commit_mapping_tmp_to_disk(&self) -> GitProjectionResult<()> {
+    pub fn commit_mapping_tmp_to_disk(&self) -> GitProjectionResult<()> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if !tmp_path.exists() {
@@ -159,7 +159,7 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    pub(crate) fn save_mapping_to_disk(&self) -> GitProjectionResult<()> {
+    pub fn save_mapping_to_disk(&self) -> GitProjectionResult<()> {
         self.write_mapping_tmp_to_disk()?;
         // Fault-injection checkpoint: a crash here leaves the
         // sidecar in tmp form (`git-projection-mapping.json.tmp`) without a
@@ -175,7 +175,7 @@ impl<'a> GitProjection<'a> {
     /// with Git history; `git-projection-mapping.json` is the local served/export cache
     /// after visibility filtering. Ingest identity lives separately at
     /// `.heddle/ingest/sha_map.sqlite` and is intentionally not folded in here.
-    pub(crate) fn build_existing_mapping(
+    pub fn build_existing_mapping(
         &mut self,
         git_repo_path: Option<&Path>,
     ) -> GitProjectionResult<()> {
@@ -193,7 +193,7 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    pub(crate) fn seed_ingest_identity_mappings_from_mirror(
+    pub fn seed_ingest_identity_mappings_from_mirror(
         &mut self,
         repo: &SleyRepository,
     ) -> GitProjectionResult<()> {
@@ -216,7 +216,7 @@ impl<'a> GitProjection<'a> {
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitProjectionResult<usize> {
+    pub fn prune_unreachable_mapping_entries(&mut self) -> GitProjectionResult<usize> {
         let repo = self.open_git_repo()?;
         self.mapping = self.read_mapping_cache_from_disk()?;
         let reachable: HashSet<_> = collect_commit_oids(&repo)?.into_iter().collect();
@@ -254,7 +254,7 @@ impl<'a> GitProjection<'a> {
     /// Returns the number of loose objects consolidated into the pack (and thus
     /// removed from disk). `Ok(0)` when the mirror has no objects to pack.
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn consolidate_mirror(&self) -> GitProjectionResult<usize> {
+    pub fn consolidate_mirror(&self) -> GitProjectionResult<usize> {
         use sley::plumbing::sley_odb::{install_repack_result, repack_all_objects};
 
         let repo = self.open_git_repo()?;

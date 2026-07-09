@@ -51,9 +51,12 @@ pub struct ServerCredential {
     pub expires_at: Option<String>,
 }
 
-/// Path to the global credentials file: `~/.heddle/credentials.toml`.
+/// Path to the global credentials file: `<heddle_home>/credentials.toml`.
+///
+/// Uses the same home resolution as device identity (`$HEDDLE_HOME` if set,
+/// else `$HOME/.heddle`), so credentials and device keys stay co-located.
 pub fn credentials_path() -> PathBuf {
-    dirs_or_home().join("credentials.toml")
+    repo::identity::heddle_home_dir().join("credentials.toml")
 }
 
 /// Load the credential store from disk. Returns an empty store if the file
@@ -73,7 +76,7 @@ pub fn load_credentials() -> Result<CredentialStore> {
 pub fn save_credentials(store: &CredentialStore) -> Result<()> {
     let path = credentials_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        objects::fs_atomic::create_private_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
     let contents = toml::to_string_pretty(store).context("serializing credentials")?;
@@ -175,14 +178,6 @@ pub fn token_needs_rotation(cred: &ServerCredential) -> bool {
     exp.saturating_sub(now) <= ROTATION_WINDOW_SECS as i64
 }
 
-/// Returns `~/.heddle/`, using `$HOME` as the base.
-fn dirs_or_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".heddle")
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -212,8 +207,11 @@ mod tests {
     fn with_home_dir<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
         let _guard = lock_test_env();
         let original_home = std::env::var_os("HOME");
+        let original_heddle_home = std::env::var_os("HEDDLE_HOME");
         unsafe {
             std::env::set_var("HOME", &home);
+            // Prefer HOME-derived path in these tests unless a case sets HEDDLE_HOME.
+            std::env::remove_var("HEDDLE_HOME");
         }
         let result = catch_unwind(AssertUnwindSafe(f));
         match original_home {
@@ -222,6 +220,14 @@ mod tests {
             },
             None => unsafe {
                 std::env::remove_var("HOME");
+            },
+        }
+        match original_heddle_home {
+            Some(value) => unsafe {
+                std::env::set_var("HEDDLE_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HEDDLE_HOME");
             },
         }
         match result {
@@ -367,6 +373,41 @@ mod tests {
             assert_eq!(resolved.subject, "dev");
         });
 
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn credentials_path_honors_heddle_home() {
+        let home = unique_temp_dir("heddle-credentials-heddle-home");
+        fs::create_dir_all(&home).expect("create temp home");
+        let heddle_home = home.join("custom-heddle");
+
+        let _guard = lock_test_env();
+        let original_home = std::env::var_os("HOME");
+        let original_heddle_home = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("HEDDLE_HOME", &heddle_home);
+        }
+        let path = credentials_path();
+        match original_home {
+            Some(value) => unsafe {
+                std::env::set_var("HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+        match original_heddle_home {
+            Some(value) => unsafe {
+                std::env::set_var("HEDDLE_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("HEDDLE_HOME");
+            },
+        }
+
+        assert_eq!(path, heddle_home.join("credentials.toml"));
         let _ = fs::remove_dir_all(home);
     }
 }

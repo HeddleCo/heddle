@@ -19,13 +19,14 @@ The wire protocol is fully implemented and tested. All core VCS commands are ope
 - Wire format: client sends an opaque token id (bytes) in `Auth`.
 - Server authority: the server assigns identity/permissions based on its configured token database. Clients cannot self-assign permissions.
 - `AuthAck` now includes the server-authoritative token scope so clients can introspect effective hosted visibility after connect.
-- TLS: deferred for MVP. `heddle` client configuration and `hosted` server configuration both keep TLS-related fields so the design can be extended without changing the core message framing.
+- TLS: client configuration and hosted server configuration both keep TLS-related fields. **Production / non-loopback remotes require TLS** (or an explicit insecure opt-in). Cleartext is allowed automatically only for loopback (`127.0.0.1`, `::1`, `localhost`). For intentional cleartext to a non-loopback host (e.g. VPN → VPS testing), pass `--insecure`, set `insecure = true` on the remote in `.heddle/remotes.toml`, set `remote.insecure = true` in user config, or export `HEDDLE_REMOTE_INSECURE=1`.
 
 Environment-based local testing:
 
 - `hosted` owns the server runtime and reads server config from its server config file or `HEDDLE_SERVER_*` overrides.
 - `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for remote auth and TLS profiles.
 - `HEDDLE_REMOTE_TOKEN=<token-id>` provides the token id used by `heddle push`/`heddle pull`.
+- `HEDDLE_REMOTE_TLS=1` enables TLS; `HEDDLE_REMOTE_INSECURE=1` allows cleartext to non-loopback hosts.
 
 ## Hosted Admin Operations
 

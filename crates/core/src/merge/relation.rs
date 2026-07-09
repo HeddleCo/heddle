@@ -4,7 +4,7 @@
 use objects::object::ChangeId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MergeRelationKind {
+pub enum MergeRelationKind {
     AlreadyUpToDate,
     FastForward,
     AlreadyIntegrated,
@@ -13,14 +13,14 @@ pub(crate) enum MergeRelationKind {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MergeRelation {
+pub struct MergeRelation {
     kind: MergeRelationKind,
     merge_base_id: Option<ChangeId>,
     conflict_count: usize,
 }
 
 impl MergeRelation {
-    pub(crate) fn new(
+    pub fn new(
         kind: MergeRelationKind,
         _current_change_id: ChangeId,
         _target_change_id: ChangeId,
@@ -34,19 +34,19 @@ impl MergeRelation {
         }
     }
 
-    pub(crate) fn kind(&self) -> MergeRelationKind {
+    pub fn kind(&self) -> MergeRelationKind {
         self.kind
     }
 
-    pub(crate) fn merge_base_id(&self) -> Option<ChangeId> {
+    pub fn merge_base_id(&self) -> Option<ChangeId> {
         self.merge_base_id
     }
 
-    pub(crate) fn conflict_count(&self) -> usize {
+    pub fn conflict_count(&self) -> usize {
         self.conflict_count
     }
 
-    pub(crate) fn as_json_value(&self) -> &'static str {
+    pub fn as_json_value(&self) -> &'static str {
         match self.kind {
             MergeRelationKind::AlreadyUpToDate => "already_up_to_date",
             MergeRelationKind::FastForward => "fast_forward",

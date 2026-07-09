@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared merge planning seam for preview and apply flows.
 
-use ::merge::{ConflictLabels, TreeMergeResult, merge_trees};
 use anyhow::{Result, anyhow};
+use merge::{ConflictLabels, TreeMergeResult, merge_trees};
 use objects::{object::ChangeId, store::ObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{
-    RepositoryMergeBlobSource, map_tree_merge_error,
-    merge_relation::{MergeRelation, MergeRelationKind},
+    RepositoryMergeBlobSource, advice, map_tree_merge_error,
+    relation::{MergeRelation, MergeRelationKind},
     tree_merge_options,
 };
-use crate::cli::commands::RecoveryAdvice;
 
-pub(crate) struct MergePlan {
+/// Planned merge relationship plus optional 3-way tree merge result.
+pub struct MergePlan {
     relation: MergeRelation,
     merge_result: Option<TreeMergeResult>,
 }
 
 impl MergePlan {
-    pub(crate) fn for_merge_command(
+    pub fn for_merge_command(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
         current_change_id: &ChangeId,
@@ -36,7 +36,7 @@ impl MergePlan {
         )
     }
 
-    pub(crate) fn for_thread_preview(
+    pub fn for_thread_preview(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
         target_change_id: &ChangeId,
@@ -53,11 +53,11 @@ impl MergePlan {
         )
     }
 
-    pub(crate) fn relation(&self) -> &MergeRelation {
+    pub fn relation(&self) -> &MergeRelation {
         &self.relation
     }
 
-    pub(crate) fn merge_result(&self) -> Option<&TreeMergeResult> {
+    pub fn merge_result(&self) -> Option<&TreeMergeResult> {
         self.merge_result.as_ref()
     }
 
@@ -98,7 +98,7 @@ impl MergePlan {
         let merge_base_id = graph
             .find_merge_base(current_change_id, target_change_id)?
             .ok_or_else(|| {
-                anyhow!(RecoveryAdvice::merge_no_common_ancestor(
+                anyhow!(advice::merge_no_common_ancestor(
                     &current_change_id.short(),
                     &target_change_id.short(),
                 ))
@@ -140,13 +140,10 @@ fn load_tree(repo: &Repository, change_id: &ChangeId) -> Result<objects::object:
         .store()
         .get_state(change_id)?
         .ok_or_else(|| anyhow!("State '{}' not found", change_id.short()))?;
-    // `state.tree` is recorded by the state object — the tree MUST be
-    // present in the store for that state to be meaningful. Coercing
-    // `Ok(None)` to `Tree::default()` here meant a corrupt store
-    // produced a clean merge against an empty side, silently erasing
-    // every tracked file. Surface the corruption instead.
+    // Surface missing trees as integrity refusals instead of silently treating
+    // a corrupt store as an empty side.
     repo.store().get_tree(&state.tree)?.ok_or_else(|| {
-        anyhow!(RecoveryAdvice::merge_integrity_refusal(
+        anyhow!(advice::merge_integrity_refusal(
             format!(
                 "State {} references missing tree {}",
                 change_id.short(),

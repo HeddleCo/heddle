@@ -4,9 +4,10 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::SystemTime,
 };
 
 use objects::{
@@ -60,6 +61,16 @@ const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
 /// [`validate_ref_name`]: super::name::validate_ref_name
 pub const UNDO_RECOVERY_HANDLE: &str = ".undo-recovery";
 
+/// Process-local packed-refs snapshot keyed by on-disk identity.
+///
+/// Avoids re-`read_to_string` + parse on every cold `get_thread` /
+/// `get_marker` when the file has not changed. Invalidated on write and
+/// revalidated via `(mtime, len)` when another process rewrites the file.
+struct CachedPackedRefs {
+    stamp: Option<(SystemTime, u64)>,
+    packed: PackedRefs,
+}
+
 /// Manager for references (threads, markers, HEAD).
 pub struct RefManager {
     pub(crate) root: PathBuf,
@@ -78,6 +89,8 @@ pub struct RefManager {
     /// Watermark of fully-materialized **shared**-class batches (thread, marker,
     /// remote-thread) — global across lanes.
     cached_shared_generation: AtomicU64,
+    /// In-process packed-refs cache (see [`CachedPackedRefs`]).
+    packed_refs_cache: Mutex<Option<CachedPackedRefs>>,
 }
 
 impl RefManager {
@@ -89,6 +102,7 @@ impl RefManager {
             committer: None,
             cached_local_generation: AtomicU64::new(WATERMARK_UNSET),
             cached_shared_generation: AtomicU64::new(WATERMARK_UNSET),
+            packed_refs_cache: Mutex::new(None),
         }
     }
 
@@ -604,7 +618,7 @@ impl RefManager {
         if let Some(id) = self.read_change_id_at(&path, "thread", name)? {
             return Ok(Some(id));
         }
-        Ok(PackedRefs::load(&self.packed_refs_path())?.get_thread(name))
+        Ok(self.load_packed_refs_cached()?.get_thread(name))
     }
 
     fn raw_get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
@@ -612,7 +626,46 @@ impl RefManager {
         if let Some(id) = self.read_change_id_at(&path, "marker", name)? {
             return Ok(Some(id));
         }
-        Ok(PackedRefs::load(&self.packed_refs_path())?.get_marker(name))
+        Ok(self.load_packed_refs_cached()?.get_marker(name))
+    }
+
+    /// On-disk identity for the packed-refs file: `(mtime, len)`, or `None`
+    /// when the file is absent. Used to detect external rewrites without
+    /// re-reading the body on every lookup.
+    fn packed_refs_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta.modified().ok()?;
+        Some((modified, meta.len()))
+    }
+
+    /// Load packed-refs with a process-local cache. Safe under concurrent
+    /// readers in this process; writers call [`invalidate_packed_refs_cache`]
+    /// after mutating the file.
+    pub(super) fn load_packed_refs_cached(&self) -> Result<PackedRefs> {
+        let path = self.packed_refs_path();
+        let stamp = Self::packed_refs_stamp(&path);
+        let mut guard = self.packed_refs_cache.lock().map_err(|_| {
+            HeddleError::Config("Failed to acquire packed-refs cache lock".to_string())
+        })?;
+        if let Some(cached) = guard.as_ref()
+            && cached.stamp == stamp
+        {
+            return Ok(cached.packed.clone());
+        }
+        let packed = PackedRefs::load(&path)?;
+        *guard = Some(CachedPackedRefs {
+            stamp,
+            packed: packed.clone(),
+        });
+        Ok(packed)
+    }
+
+    /// Drop the process-local packed-refs cache after a write so the next
+    /// read reloads from disk.
+    pub(super) fn invalidate_packed_refs_cache(&self) {
+        if let Ok(mut guard) = self.packed_refs_cache.lock() {
+            *guard = None;
+        }
     }
 
     fn raw_get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
@@ -994,7 +1047,7 @@ impl RefManager {
     pub fn pack_refs(&self) -> Result<()> {
         let lock = self.lock_refs()?;
         let packed_path = self.packed_refs_path();
-        let mut packed = PackedRefs::load(&packed_path)?;
+        let mut packed = self.load_packed_refs_cached()?;
 
         let threads = self.list_threads_from_storage()?;
         for name in &threads {
@@ -1012,6 +1065,7 @@ impl RefManager {
         }
         if !packed.is_empty() {
             packed.save(&packed_path)?;
+            self.invalidate_packed_refs_cache();
             let packed_parent = packed_path
                 .parent()
                 .ok_or_else(|| HeddleError::Config("invalid packed-refs path".to_string()))?;

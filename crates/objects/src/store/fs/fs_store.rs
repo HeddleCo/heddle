@@ -27,11 +27,15 @@ const RECENT_BLOB_CACHE_CAPACITY: usize = 2_048;
 const RECENT_TREE_CACHE_CAPACITY: usize = 1_024;
 /// Soft cap on the in-process loose-blob verification cache. Each
 /// entry is one `ContentHash` (~32 bytes) so this is ≈2 MB of memory
-/// for the upper bound, and the FIFO eviction is bounded by hash
+/// for the upper bound, and the LRU eviction is bounded by hash
 /// hits rather than store size. 65k entries covers the typical hot
 /// working set for million-blob monorepos; a daemon that materialises
 /// dozens of unrelated trees won't drift toward unbounded growth.
 const VERIFIED_LOOSE_BLOB_CACHE_CAPACITY: usize = 65_536;
+/// Blobs larger than this are not stored in `recent_blobs` so a single
+/// multi-MB read cannot thrash the hot working set. 4 MiB matches the
+/// typical "large file" boundary used elsewhere in the object path.
+pub(super) const RECENT_BLOB_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LooseObjectWriteMode {
@@ -39,6 +43,11 @@ pub enum LooseObjectWriteMode {
     BatchDirectorySync,
 }
 
+/// Bounded in-process object cache with true LRU eviction.
+///
+/// [`get`](Self::get) promotes the key to MRU; [`insert`](Self::insert)
+/// treats re-insert as a touch. Evicts from the front of `order` when
+/// over capacity.
 #[derive(Debug)]
 pub(super) struct RecentObjectCache<K, V> {
     entries: HashMap<K, V>,
@@ -58,21 +67,48 @@ where
         }
     }
 
-    pub(super) fn get(&self, key: &K) -> Option<&V> {
+    /// Lookup with LRU promotion. Callers that hold only a read lock must
+    /// upgrade to a write lock before calling this (promotion mutates
+    /// `order`).
+    pub(super) fn get(&mut self, key: &K) -> Option<&V> {
+        if !self.entries.contains_key(key) {
+            return None;
+        }
+        self.promote(key);
         self.entries.get(key)
+    }
+
+    /// Presence check without promotion (used by verified-loose probes
+    /// that only care whether a hash was previously trusted).
+    pub(super) fn contains(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
     }
 
     pub(super) fn insert(&mut self, key: K, value: V) {
         if self.capacity == 0 {
             return;
         }
-        if self.entries.insert(key, value).is_none() {
+        if self.entries.insert(key, value).is_some() {
+            self.promote(&key);
+        } else {
             self.order.push_back(key);
         }
         while self.entries.len() > self.capacity {
             if let Some(oldest) = self.order.pop_front() {
+                // A key may appear only once in `order`; if it was
+                // already removed by a concurrent logical path we just
+                // skip.
                 self.entries.remove(&oldest);
+            } else {
+                break;
             }
+        }
+    }
+
+    fn promote(&mut self, key: &K) {
+        if let Some(position) = self.order.iter().position(|existing| existing == key) {
+            let key = self.order.remove(position).expect("position in range");
+            self.order.push_back(key);
         }
     }
 }
@@ -116,10 +152,10 @@ pub struct FsStore {
     ///
     /// Capped at [`VERIFIED_LOOSE_BLOB_CACHE_CAPACITY`] entries so a
     /// long-lived process (`heddled`) materialising many unrelated
-    /// trees doesn't drift into unbounded memory growth. FIFO
+    /// trees doesn't drift into unbounded memory growth. LRU
     /// eviction; an evicted hash pays one extra BLAKE3 on its next
     /// read (cost-of-evict ≈ working-set-size BLAKE3 ops). Stored as
-    /// `RecentObjectCache<…, ()>` to share the FIFO-eviction
+    /// `RecentObjectCache<…, ()>` to share the LRU-eviction
     /// machinery with the other on-store caches; the unit value is
     /// a marker that the corresponding loose mirror was verified.
     ///

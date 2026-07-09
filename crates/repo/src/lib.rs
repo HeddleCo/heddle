@@ -97,10 +97,10 @@ pub use repository::query_history_async;
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitImportGuidance, GitOverlayBranchTip,
-    GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD, HistoryQuery,
-    HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, MissingBlob,
-    OperationKind, OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
+    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitImportGuidance,
+    GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig,
+    MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind,
+    OperationScope, OutputFormat, PackFilesInspection, PartialFetchInspection,
     PullPlannerCacheInspection, RedactConfig, RefCountsInspection, RefSummaryIndexInspection,
     RepoConfig, Repository, RepositoryCapability, RepositoryMaintenanceRunReport,
     RepositoryOperationStatus, RepositoryPerformanceInspectionReport, ResignOutcome,
@@ -109,6 +109,8 @@ pub use repository::{
     WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
     find_merge_base, is_major_rewrite, is_synthetic_root,
 };
+#[cfg(feature = "git-overlay")]
+pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};

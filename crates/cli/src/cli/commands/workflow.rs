@@ -1049,7 +1049,7 @@ async fn push_after_land(
             .clone()
             .or(super::remote::resolved_default_remote_name(repo)?)
             .unwrap_or_else(|| "default".to_string());
-        super::remote::cmd_push(cli, remote, None, state, false, false, None).await?;
+        super::remote::cmd_push(cli, remote, None, state, false, false, None, false).await?;
         Ok(pushed_remote)
     }
 }

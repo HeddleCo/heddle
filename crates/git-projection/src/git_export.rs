@@ -15,7 +15,7 @@ use sley::{
 };
 use tracing::debug;
 
-use crate::git_projection_engine::{
+use crate::{
     git_core::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, SyncMapping,
         copy_reachable_objects, count_exported_commits, delete_reference_if_present,
@@ -24,6 +24,7 @@ use crate::git_projection_engine::{
     },
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
+    git_residual::ResidualStore,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef},
 };
@@ -67,17 +68,17 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 /// relying on Git Projection Mapping sidecar state. The state flag closes the whole
 /// class, including any future lossy entry point.
 ///
-/// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
-/// OID (or fall through to the native mint) rather than mint a wrong-SHA
-/// reconstructed object.
+/// When false the caller MUST keep the verbatim residual / Bridge Mirror bytes
+/// / preserved mapped OID (or fall through to the native mint) rather than mint
+/// a wrong-SHA reconstructed object.
 ///
-/// `pub(crate)` so the checkout write-through path (#568 P1,
+/// `pub` so the checkout write-through path (#568 P1,
 /// `git_core::write_thread_state_checkout_from_existing_mirror`) reads the SAME
 /// single faithful-or-lossy discriminator the export path does — reconstruct
-/// faithful commits from state, mirror-backstop the lossy residual. Keeping ONE
-/// chokepoint for the decision means a new consumer cannot drift to a different
-/// (wrong-SHA) rule.
-pub(crate) fn commit_is_byte_faithful(state: &State) -> bool {
+/// faithful commits from state, residual-then-mirror backstop the lossy residual.
+/// Keeping ONE chokepoint for the decision means a new consumer cannot drift to a
+/// different (wrong-SHA) rule.
+pub fn commit_is_byte_faithful(state: &State) -> bool {
     has_git_fidelity(state)
         && !state.git_lossy
         && identity_is_byte_faithful(&state.attribution.principal)
@@ -88,11 +89,11 @@ pub(crate) fn commit_is_byte_faithful(state: &State) -> bool {
             .unwrap_or(true)
 }
 
-pub(crate) struct ExportStateOptions<'a> {
-    pub(crate) identity: Option<&'a LocalGitIdentity>,
-    pub(crate) message_override: Option<&'a str>,
-    pub(crate) parent_override: Option<&'a [ObjectId]>,
-    pub(crate) audience: &'a AudienceTier,
+pub struct ExportStateOptions<'a> {
+    pub identity: Option<&'a LocalGitIdentity>,
+    pub message_override: Option<&'a str>,
+    pub parent_override: Option<&'a [ObjectId]>,
+    pub audience: &'a AudienceTier,
 }
 
 /// Export a single state to Git for `audience`.
@@ -103,7 +104,7 @@ pub(crate) struct ExportStateOptions<'a> {
 /// The caller realizes downward-closure by also withholding any state whose
 /// parent was withheld, so an embargoed commit *and its descendants* stay
 /// absent from the mirror.
-pub(crate) fn export_state(
+pub fn export_state(
     mapping: &mut SyncMapping,
     heddle_repo: &HeddleRepository,
     repo: &SleyRepository,
@@ -497,8 +498,9 @@ fn export_scoped(
                 // non-byte-faithful commit (non-UTF8 identity, or a `--lossy`
                 // import — both import-lossy and ingest-lossy carry the canonical
                 // `git_lossy` flag) would reconstruct to a WRONG SHA, so leave it
-                // on the preserved mapped OID — the verbatim mirror bytes stay the
-                // served object (the pre-#567 behavior for that commit).
+                // on the preserved mapped OID — Raw Git Object Residual bytes
+                // (preferred) or Bridge Mirror verbatim bytes stay the served
+                // object.
                 if commit_is_byte_faithful(&state) {
                     let content = reconstruct_commit_bytes(
                         bridge.heddle_repo,
@@ -509,12 +511,19 @@ fn export_scoped(
                     // Safety net: the regenerated object MUST hash to the mapped
                     // OID. A mismatch means reconstruction diverged from the
                     // imported bytes (an undetected fidelity gap), so fall back to
-                    // the verbatim mirror / mapped OID rather than write a
+                    // residual / Bridge Mirror / mapped OID rather than write a
                     // wrong-SHA object.
                     let reconstructed = commit_object_id(&content);
                     if mapped.map(|m| m == reconstructed).unwrap_or(true) {
                         write_commit_object(&repo, &content)?;
                     }
+                } else if let Some(mapped_oid) = mapped {
+                    // Lossy path: prefer residual, else leave mirror bytes as the
+                    // served object (pre-#567). Foundation: install residual when
+                    // present so export no longer *requires* the mirror for that
+                    // root when residual capture has already run.
+                    let residual_store = ResidualStore::open(bridge.heddle_repo.heddle_dir());
+                    let _ = residual_store.install_into(&repo, &mapped_oid)?;
                 }
             }
             continue;
@@ -960,7 +969,7 @@ fn reconcile_ref(
     }
 }
 
-pub(crate) fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
+pub fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
     let Ok(repo) = SleyRepository::discover(heddle_repo.root()) else {
         return HashSet::new();
     };
@@ -971,7 +980,7 @@ pub(crate) fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String
         .collect()
 }
 
-pub(crate) fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
+pub fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
     let Some((remote, branch)) = thread.split_once('/') else {
         return false;
     };

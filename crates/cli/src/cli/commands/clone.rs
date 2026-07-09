@@ -72,6 +72,8 @@ struct CloneOptions {
     /// Recursive monorepo clone: resolve the hosted root spool's child tree and
     /// clone every child at its anchored state into its mount path.
     recursive: bool,
+    /// Allow cleartext to non-loopback hosts for this clone.
+    insecure: bool,
 }
 
 #[derive(Serialize)]
@@ -168,6 +170,7 @@ pub async fn cmd_clone(
     lazy: bool,
     filter: Option<String>,
     recursive: bool,
+    insecure: bool,
 ) -> Result<()> {
     let local_path = Path::new(&local);
     let options = CloneOptions {
@@ -176,6 +179,7 @@ pub async fn cmd_clone(
         lazy,
         filter,
         recursive,
+        insecure,
     };
 
     if local_path.exists() {
@@ -960,6 +964,7 @@ async fn clone_local(
         lazy,
         filter,
         recursive: _,
+        insecure: _,
     } = options;
     let depth = *depth;
     if let Some(filter) = filter.as_deref() {
@@ -1066,6 +1071,7 @@ fn configure_local_clone_origin(repo: &Repository, remote_path: &Path) -> Result
         "origin",
         Remote {
             url: origin_url.clone(),
+            insecure: false,
         },
     )
     .map_err(|err| {
@@ -1214,6 +1220,7 @@ async fn clone_network(
         lazy,
         filter,
         recursive: _,
+        insecure,
     } = options;
     let depth = *depth;
     // `--filter blob:none` is a synonym for `--lazy` on hosted/network
@@ -1226,8 +1233,12 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session =
-        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
+    let session = HostedSession::build(
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )?
+    .with_allow_insecure(*insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let json_output = should_output_json(cli, None);
@@ -1410,8 +1421,12 @@ async fn clone_monorepo(
     let user_config = UserConfig::load_default()?;
     // Security config validation must pass before any irreversible filesystem
     // mutation, exactly as `clone_network` does.
-    let session =
-        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
+    let session = HostedSession::build(
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )?
+    .with_allow_insecure(options.insecure);
 
     let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
@@ -1713,6 +1728,7 @@ fn configure_hosted_clone_origin(
         "origin",
         Remote {
             url: origin_url.clone(),
+            insecure: false,
         },
     )
     .map_err(|err| {
@@ -1939,6 +1955,7 @@ mod tests {
             lazy,
             filter: filter.map(str::to_string),
             recursive: false,
+            insecure: false,
         }
     }
 

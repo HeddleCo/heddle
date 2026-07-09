@@ -187,6 +187,7 @@ pub async fn cmd_push(
     force: bool,
     all_threads: bool,
     mirror: Option<String>,
+    insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
@@ -366,11 +367,16 @@ pub async fn cmd_push(
     // config must leave no partial state behind.
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
-        Some(HostedSession::build(
-            &user_config,
-            server_key,
-            HostedAuthMode::CredentialFallback,
-        )?)
+        let allow_insecure = insecure
+            || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
+        Some(
+            HostedSession::build(
+                &user_config,
+                server_key,
+                HostedAuthMode::CredentialFallback,
+            )?
+            .with_allow_insecure(allow_insecure),
+        )
     } else {
         None
     };
@@ -1692,6 +1698,7 @@ fn persist_auto_provisioned_remote(
         &remote_name,
         Remote {
             url: format!("heddle://{addr}/{full_path}"),
+            insecure: false,
         },
     )
     .map_err(anyhow::Error::new)?;
@@ -1842,6 +1849,7 @@ mod git_overlay_config_atomic_tests {
             "weft",
             Remote {
                 url: "heddle://127.0.0.1:8421".to_string(),
+                insecure: false,
             },
         )
         .unwrap();

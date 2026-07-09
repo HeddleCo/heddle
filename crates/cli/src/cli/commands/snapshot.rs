@@ -8,10 +8,8 @@ use objects::{
     object::{Agent, Attribution, ChangeId, Principal, Tree},
     worktree::WorktreeStatus,
 };
-use repo::{
-    Hook, HookContext, HookManager, Repository, SessionManager, SnapshotProfile, format_confidence,
-    refresh_active_thread_metadata,
-};
+use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
+use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
@@ -459,17 +457,6 @@ fn missing_capture_identity_advice() -> RecoveryAdvice {
     )
 }
 
-/// Resolve the current thread name for hook payloads. Returns `""`
-/// when HEAD is detached (no thread context); the hook protocol uses
-/// the same empty-string sentinel.
-fn current_thread_name(repo: &Repository) -> String {
-    use refs::Head;
-    match repo.head_ref() {
-        Ok(Head::Attached { thread }) => thread.to_string(),
-        _ => String::new(),
-    }
-}
-
 /// Large-capture safety preflight for `commit`'s dirty path, reusing an
 /// already-computed Git-overlay worktree status instead of re-walking the
 /// worktree. The Git Projection commit path has already computed the same
@@ -573,6 +560,10 @@ pub(crate) fn create_snapshot(
     create_snapshot_profiled(repo, user_config, intent, confidence, agent).map(|(output, _)| output)
 }
 
+/// Shared entry for staged-tree captures that still want CLI-shaped
+/// [`SnapshotOutput`] (hooks + attribution + execute_save). Kept for
+/// non-commit callers; commit now builds a [`SavePlan`] directly.
+#[allow(dead_code)]
 pub(crate) fn create_snapshot_from_tree(
     repo: &Repository,
     user_config: &UserConfig,
@@ -673,117 +664,37 @@ fn create_snapshot_profiled_inner(
         return Err(anyhow!(advice));
     }
 
-    let hook_manager = HookManager::new(repo);
-    let hook_ctx = HookContext::new(repo);
-
-    hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
-
-    // JSON-protocol `pre_capture` invocation. Same hook
-    // file as the legacy env-var path; the new protocol opts in via
-    // `HEDDLE_HOOK_PROTOCOL=json` and gives the hook a chance to
-    // veto. A non-empty `abort` aborts the snapshot.
-    let pre_capture_payload = serde_json::json!({
-        "thread": current_thread_name(repo),
-        "intent": intent.clone().unwrap_or_default(),
-    });
-    let pre_capture_response = hook_manager.run_with_payload(
-        Hook::PreSnapshot,
-        &hook_ctx,
-        &pre_capture_payload,
-        std::time::Duration::from_secs(5),
-    )?;
-    if let Some(resp) = pre_capture_response
-        && !resp.abort.is_empty()
-    {
-        return Err(anyhow!(RecoveryAdvice::hook_veto(
-            "pre_capture",
-            "capture",
-            resp.abort
-        )));
-    }
-
     let attribution = build_attribution(repo, user_config, &agent)?;
-
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
 
-    // Invariant A (heddle#317, spike #266 §5.4): the inherited default
-    // visibility tier is bound to the freshly created state inside the snapshot
-    // chokepoint (`snapshot_with_attribution_profiled`), so every creator —
-    // capture, cherry-pick, revert, daemon/mount — inherits it by construction.
-    // No per-call-site bind here.
-    let mut execution =
-        repo.snapshot_with_attribution_profiled(intent.clone(), confidence, attribution)?;
-
-    let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
-    let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
-
-    let trust = build_repository_verification_state(repo);
-    let recommended_action =
-        (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
-    let recommended_action_template = recommended_action
-        .as_deref()
-        .and_then(action_template)
-        .or_else(|| trust.recommended_action_template.clone());
-    let task_assignment_id = active_task_assignment_id(repo)?;
-
-    let output = SnapshotOutput {
-        output_kind: "capture",
-        status: "captured",
-        action: "capture",
-        change_id: execution.state.change_id.short(),
-        content_hash: execution.state.hash().short(),
-        intent: execution.state.intent.clone(),
-        confidence: execution.state.confidence,
-        task_assignment_id,
-        principal: (&execution.state.attribution.principal).into(),
-        agent: execution
-            .state
-            .attribution
-            .agent
-            .as_ref()
-            .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
-        signed: execution.state.signature.is_some(),
-        message: format!(
-            "Captured state {} ({})",
-            execution.state.change_id.short(),
-            execution.state.hash().short()
-        ),
-        next_action: recommended_action.clone(),
-        next_action_template: recommended_action_template.clone(),
-        recommended_action,
-        recommended_action_template,
-        trust,
+    // Shared save pipeline: hooks + repo snapshot + thread metadata + verify.
+    let mut plan = SavePlan {
+        verb: SaveVerb::Capture,
+        intent,
+        confidence,
+        attribution,
+        git_scope: GitScope::None,
+        supplied_tree: None,
+        reuse_current_state: false,
+        require_clean_worktree: false,
+        worktree_status_options: worktree_status_options(Some(repo.config())),
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        precomputed_worktree_status: None,
     };
-
-    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
-
-    // `post_capture` JSON-protocol fire. Best-effort: a
-    // post-capture hook can't veto the snapshot (already persisted).
-    // A timeout/error is tracing-warned and swallowed.
-    let post_capture_payload = serde_json::json!({
-        "state_id": execution.state.change_id.to_string_full(),
-    });
-    if let Err(err) = hook_manager.run_with_payload(
-        Hook::PostSnapshot,
-        &hook_ctx,
-        &post_capture_payload,
-        std::time::Duration::from_secs(5),
-    ) {
-        tracing::warn!(error = %err, "post_capture hook error swallowed");
+    if let Some(status) = worktree_status {
+        // Owned copy so SavePlan can take the Result; re-walk is avoided on the
+        // success path because execute_save recomputes post-mutation verification.
+        plan.precomputed_worktree_status = Some(clone_worktree_status_result(status));
     }
-
-    Ok((
-        output,
-        snapshot_command_profile(execution.profile, thread_metadata_ms),
-    ))
+    let report = execute_save(repo, plan)?;
+    Ok(snapshot_output_from_save_report(repo, report)?)
 }
 
+#[allow(dead_code)]
 pub(crate) fn create_snapshot_from_tree_profiled(
     repo: &Repository,
     user_config: &UserConfig,
@@ -802,47 +713,51 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         return Err(anyhow!(advice));
     }
 
-    let hook_manager = HookManager::new(repo);
-    let hook_ctx = HookContext::new(repo);
-
-    hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
-
-    let pre_capture_payload = serde_json::json!({
-        "thread": current_thread_name(repo),
-        "intent": intent.clone().unwrap_or_default(),
-    });
-    let pre_capture_response = hook_manager.run_with_payload(
-        Hook::PreSnapshot,
-        &hook_ctx,
-        &pre_capture_payload,
-        std::time::Duration::from_secs(5),
-    )?;
-    if let Some(resp) = pre_capture_response
-        && !resp.abort.is_empty()
-    {
-        return Err(anyhow!(RecoveryAdvice::hook_veto(
-            "pre_capture",
-            "capture",
-            resp.abort
-        )));
-    }
-
     let attribution = build_attribution(repo, user_config, &agent)?;
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
 
-    let mut execution = repo.snapshot_tree_with_attribution_profiled(
-        tree,
-        intent.clone(),
+    let plan = SavePlan {
+        verb: SaveVerb::Capture,
+        intent,
         confidence,
         attribution,
-    )?;
-    let thread_metadata_start = Instant::now();
-    let (promotion_suggested, heavy_impact_paths) =
-        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
-    let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
+        git_scope: GitScope::None,
+        supplied_tree: Some(tree),
+        reuse_current_state: false,
+        require_clean_worktree: false,
+        worktree_status_options: worktree_status_options(Some(repo.config())),
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        precomputed_worktree_status: None,
+    };
+    let report = execute_save(repo, plan)?;
+    Ok(snapshot_output_from_save_report(repo, report)?)
+}
 
+fn clone_worktree_status_result(
+    status: &repo::Result<Option<WorktreeStatus>>,
+) -> repo::Result<Option<WorktreeStatus>> {
+    match status {
+        Ok(Some(s)) => Ok(Some(WorktreeStatus {
+            modified: s.modified.clone(),
+            added: s.added.clone(),
+            deleted: s.deleted.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(objects::HeddleError::Config(err.to_string())),
+    }
+}
+
+fn snapshot_output_from_save_report(
+    repo: &Repository,
+    report: heddle_core::SaveReport,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    // Public capture JSON still uses the CLI verification adapter so
+    // Machine-Contract Proof is injected from the command catalog. Core
+    // `execute_save` already computed proof for the embedder path.
     let trust = build_repository_verification_state(repo);
     let recommended_action =
         (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
@@ -851,65 +766,31 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
     let task_assignment_id = active_task_assignment_id(repo)?;
-
     let output = SnapshotOutput {
         output_kind: "capture",
         status: "captured",
         action: "capture",
-        change_id: execution.state.change_id.short(),
-        content_hash: execution.state.hash().short(),
-        intent: execution.state.intent.clone(),
-        confidence: execution.state.confidence,
+        change_id: report.change_id.short(),
+        content_hash: report.content_hash.short(),
+        intent: report.intent,
+        confidence: report.confidence,
         task_assignment_id,
-        principal: (&execution.state.attribution.principal).into(),
-        agent: execution
-            .state
-            .attribution
-            .agent
-            .as_ref()
-            .map(SnapshotAgentOutput::from),
-        promotion_suggested,
-        heavy_impact_paths: heavy_impact_paths.clone(),
-        signed: execution.state.signature.is_some(),
-        message: format!(
-            "Captured state {} ({})",
-            execution.state.change_id.short(),
-            execution.state.hash().short()
-        ),
+        principal: (&report.principal).into(),
+        agent: report.agent.as_ref().map(SnapshotAgentOutput::from),
+        promotion_suggested: report.promotion_suggested,
+        heavy_impact_paths: report.heavy_impact_paths.clone(),
+        signed: report.signed,
+        message: report.summary,
         next_action: recommended_action.clone(),
         next_action_template: recommended_action_template.clone(),
         recommended_action,
         recommended_action_template,
         trust,
     };
-
-    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
-
-    let post_capture_payload = serde_json::json!({
-        "state_id": execution.state.change_id.to_string_full(),
-    });
-    if let Err(err) = hook_manager.run_with_payload(
-        Hook::PostSnapshot,
-        &hook_ctx,
-        &post_capture_payload,
-        std::time::Duration::from_secs(5),
-    ) {
-        tracing::warn!(error = %err, "post_capture hook error swallowed");
-    }
-
     Ok((
         output,
-        snapshot_command_profile(execution.profile, thread_metadata_ms),
+        snapshot_command_profile(report.snapshot_profile, report.thread_metadata_ms),
     ))
-}
-
-fn update_active_thread_metadata(
-    repo: &Repository,
-    state: &objects::object::State,
-    tree: &Tree,
-) -> Result<(bool, Vec<String>)> {
-    let refresh = refresh_active_thread_metadata(repo, state, tree)?;
-    Ok((refresh.promotion_suggested, refresh.heavy_impact_paths))
 }
 
 fn active_task_assignment_id(repo: &Repository) -> Result<Option<String>> {
@@ -940,7 +821,7 @@ fn snapshot_command_profile(
     }
 }
 
-fn build_attribution(
+pub(crate) fn build_attribution(
     repo: &Repository,
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,

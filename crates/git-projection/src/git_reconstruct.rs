@@ -27,7 +27,7 @@ use sley::{
     plumbing::sley_object::EncodedObject,
 };
 
-use crate::git_projection_engine::{
+use crate::{
     git_core::{GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, git_err},
     git_export::export_tree,
 };

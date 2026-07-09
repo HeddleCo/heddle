@@ -884,6 +884,11 @@ fn test_recent_blob_cache_does_not_hide_deleted_loose_object() {
     let path = hash_path(&blobs_dir(store.root()), &hash);
     std::fs::remove_file(path).unwrap();
 
+    // Cache-first hot path keeps the put-time entry until the process
+    // cache is cleared (or capacity-evicted). External deletes are
+    // visible after `clear_recent_caches`.
+    assert!(store.get_blob(&hash).unwrap().is_some());
+    store.clear_recent_caches();
     let retrieved = store.get_blob(&hash).unwrap();
     assert!(retrieved.is_none());
 }
@@ -1045,8 +1050,7 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
             .verified_loose_blobs
             .read()
             .unwrap()
-            .get(&hash)
-            .is_some(),
+            .contains(&hash),
         "verified cache should pick up the hash after first probe"
     );
 

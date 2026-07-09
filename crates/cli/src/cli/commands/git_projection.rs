@@ -9,7 +9,6 @@ use objects::{
     store::ObjectStore,
     worktree::{WorktreeIgnoreMatcher, build_worktree_ignore},
 };
-use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::{
@@ -18,19 +17,17 @@ use sley::{
     StreamControl,
 };
 
+use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
+
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    checkpoint::{
-        create_git_checkpoint_from_index_snapshot_with_worktree_status,
-        create_git_checkpoint_with_worktree_status,
-    },
+    checkpoint::create_git_checkpoint_with_worktree_status,
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_txn,
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
-        SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
-        create_snapshot_profiled_with_worktree_status, is_placeholder_principal,
+        SnapshotAgentOverrides, build_attribution, is_placeholder_principal,
         placeholder_principal_warning,
         preflight_large_capture_for_git_projection_commit_with_worktree_status, resolve_principal,
     },
@@ -242,12 +239,10 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
         }
     }
     if repo.capability() != RepositoryCapability::GitOverlay {
-        let snapshot = create_snapshot(
+        let attribution = build_attribution(
             &repo,
             &user_config,
-            Some(message.clone()),
-            args.confidence,
-            SnapshotAgentOverrides {
+            &SnapshotAgentOverrides {
                 provider: None,
                 model: None,
                 session: None,
@@ -257,26 +252,28 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
                 no_agent: false,
             },
         )?;
-        let captured_state = repo
-            .current_state()?
-            .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
+        let plan = SavePlan::commit(message.clone(), attribution, GitScope::None)
+            .with_confidence(args.confidence)
+            .with_worktree_status_options(worktree_status_options(Some(repo.config())));
+        debug_assert_eq!(
+            plan_git_scope(SaveVerb::Commit, repo.capability(), false, true),
+            GitScope::None
+        );
+        let report = execute_save(&repo, plan)?;
         let trust = git_overlay_txn::post_verify_commit(&repo);
         let output = GitProjectionCommitOutput {
             output_kind: "commit",
             status: "committed",
             action: "commit",
-            change_id: snapshot.change_id,
+            change_id: report.change_id.short(),
             git_commit: None,
             git_previous_commit: None,
-            summary: snapshot.message,
-            confidence: captured_state.confidence,
+            summary: report.summary,
+            confidence: report.confidence,
             git_index: None,
             included_pending_capture: None,
-            principal: captured_state.attribution.principal.into(),
-            agent: captured_state
-                .attribution
-                .agent
-                .map(CommitAgentOutput::from),
+            principal: report.principal.into(),
+            agent: report.agent.map(CommitAgentOutput::from),
             placeholder_principal_warning: placeholder_principal_warning.clone(),
             next_action: commit_next_action(&trust),
             next_action_template: None,
@@ -353,13 +350,12 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
         git_overlay_facts.worktree_status(),
     )?;
     let large_capture_preflight_ms = large_capture_start.elapsed().as_millis();
-    let snapshot_start = Instant::now();
-    let (snapshot, _snapshot_profile) = create_snapshot_profiled_with_worktree_status(
+
+    // Shared save pipeline: Heddle capture + Git checkpoint + oplog coalesce.
+    let attribution = build_attribution(
         &repo,
         &user_config,
-        Some(message.clone()),
-        args.confidence,
-        SnapshotAgentOverrides {
+        &SnapshotAgentOverrides {
             provider: None,
             model: None,
             session: None,
@@ -368,39 +364,37 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
             no_policy: false,
             no_agent: false,
         },
-        git_overlay_facts.worktree_status(),
     )?;
-    let snapshot_ms = snapshot_start.elapsed().as_millis();
-    let captured_state = repo
-        .current_state()?
-        .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
-    let snapshot_batch = find_recent_snapshot_batch(&repo, &captured_state.change_id)?;
-    let checkpoint_start = Instant::now();
-    let record = create_git_checkpoint_with_worktree_status(
-        &repo,
-        Some(message.as_str()),
-        worktree_status_options(Some(repo.config())),
-        git_overlay_facts.worktree_status(),
-    )
-    .map_err(|err| {
-        anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
-            &snapshot.change_id,
-            Some(message.as_str()),
-            &err,
-            false,
-        ))
-    })?;
-    let checkpoint_ms = checkpoint_start.elapsed().as_millis();
-    let checkpoint_batch = find_recent_git_checkpoint_batch(&repo, &record.git_commit)?;
-    repo.oplog()
-        .coalesce_batches(snapshot_batch.id, checkpoint_batch.id)
-        .context(
-            "commit completed but failed to record capture and Git checkpoint as one undo batch",
-        )?;
+    debug_assert_eq!(
+        plan_git_scope(SaveVerb::Commit, repo.capability(), false, true),
+        GitScope::WorktreeAll
+    );
+    let mut plan = SavePlan::commit(message.clone(), attribution, GitScope::WorktreeAll)
+        .with_confidence(args.confidence)
+        .with_worktree_status_options(worktree_status_options(Some(repo.config())));
+    plan.require_clean_worktree = false; // dirty worktree is the input being saved
+    plan.precomputed_worktree_status =
+        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
 
-    let verify_start = Instant::now();
-    let trust = git_overlay_txn::post_verify_commit(&repo);
-    let verify_ms = verify_start.elapsed().as_millis();
+    let head_before = repo.head().ok().flatten();
+    let save_start = Instant::now();
+    let report = execute_save(&repo, plan).map_err(|err| {
+        // Only remap when a new capture landed and the Git checkpoint step
+        // failed after it — otherwise surface the original save error.
+        match (head_before.as_ref(), repo.head().ok().flatten()) {
+            (before, Some(after)) if before != Some(&after) => {
+                anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
+                    &after.short(),
+                    Some(message.as_str()),
+                    &err,
+                    false,
+                ))
+            }
+            _ => err,
+        }
+    })?;
+    let save_ms = save_start.elapsed().as_millis();
+
     if profile_enabled() {
         emit_profile(
             "commit phases",
@@ -408,28 +402,37 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
                 ProfileField::millis("preflight_worktree_status_ms", preflight_worktree_status_ms),
                 ProfileField::millis("clean_check_status_ms", clean_check_status_ms),
                 ProfileField::millis("large_capture_preflight_ms", large_capture_preflight_ms),
-                ProfileField::millis("snapshot_ms", snapshot_ms),
-                ProfileField::millis("checkpoint_ms", checkpoint_ms),
-                ProfileField::millis("verify_ms", verify_ms),
+                ProfileField::millis("save_ms", save_ms),
+                ProfileField::millis("snapshot_tree_walk_ms", report.snapshot_profile.tree_walk_ms),
+                ProfileField::millis(
+                    "snapshot_state_ref_oplog_ms",
+                    report.snapshot_profile.state_ref_oplog_ms,
+                ),
             ],
         );
     }
+    let git_commit = report
+        .git_commit
+        .clone()
+        .or_else(|| report.git_checkpoint.as_ref().map(|r| r.git_commit.clone()));
+    let trust = git_overlay_txn::post_verify_commit(&repo);
     let output = GitProjectionCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
-        change_id: snapshot.change_id,
-        git_commit: Some(record.git_commit),
+        change_id: report.change_id.short(),
+        git_commit,
         git_previous_commit,
-        summary: record.summary,
-        confidence: captured_state.confidence,
+        summary: report
+            .git_checkpoint
+            .as_ref()
+            .map(|r| r.summary.clone())
+            .unwrap_or(report.summary),
+        confidence: report.confidence,
         git_index: Some(git_index),
         included_pending_capture: pending_capture.map(|state| state.short()),
-        principal: captured_state.attribution.principal.into(),
-        agent: captured_state
-            .attribution
-            .agent
-            .map(CommitAgentOutput::from),
+        principal: report.principal.into(),
+        agent: report.agent.map(CommitAgentOutput::from),
         placeholder_principal_warning: placeholder_principal_warning.clone(),
         next_action: commit_next_action(&trust),
         next_action_template: None,
@@ -446,6 +449,20 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
     )?;
 
     Ok(())
+}
+
+fn clone_git_overlay_worktree_status(
+    status: &git_overlay_txn::GitOverlayWorktreeStatus,
+) -> repo::Result<Option<objects::worktree::WorktreeStatus>> {
+    match status {
+        Ok(Some(s)) => Ok(Some(objects::worktree::WorktreeStatus {
+            modified: s.modified.clone(),
+            added: s.added.clone(),
+            deleted: s.deleted.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(objects::HeddleError::Config(err.to_string())),
+    }
 }
 
 struct StagedIndexCommit<'a> {
@@ -470,13 +487,10 @@ fn commit_staged_index(
         git_overlay_facts,
     } = staged;
     let index_tree = git_index_tree(repo)?;
-    let snapshot = create_snapshot_from_tree(
+    let attribution = build_attribution(
         repo,
         user_config,
-        index_tree,
-        Some(message.to_string()),
-        confidence,
-        SnapshotAgentOverrides {
+        &SnapshotAgentOverrides {
             provider: None,
             model: None,
             session: None,
@@ -486,49 +500,51 @@ fn commit_staged_index(
             no_agent: false,
         },
     )?;
-    let captured_state = repo
-        .current_state()?
-        .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
-    let snapshot_batch = find_recent_snapshot_batch(repo, &captured_state.change_id)?;
+    debug_assert_eq!(
+        plan_git_scope(SaveVerb::Commit, repo.capability(), true, false),
+        GitScope::Staged
+    );
+    let mut plan = SavePlan::commit(message.to_string(), attribution, GitScope::Staged)
+        .with_confidence(confidence)
+        .with_supplied_tree(index_tree)
+        .with_worktree_status_options(worktree_status_options(Some(repo.config())));
+    plan.require_clean_worktree = false;
+    plan.precomputed_worktree_status =
+        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
     let git_previous_commit = git_head_oid(repo.root());
-    let record = create_git_checkpoint_from_index_snapshot_with_worktree_status(
-        repo,
-        Some(message),
-        worktree_status_options(Some(repo.config())),
-        git_overlay_facts.worktree_status(),
-    )
-    .map_err(|err| {
-        anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
-            &snapshot.change_id,
-            Some(message),
-            &err,
-            true,
-        ))
+    let head_before = repo.head().ok().flatten();
+    let report = execute_save(repo, plan).map_err(|err| {
+        match (head_before.as_ref(), repo.head().ok().flatten()) {
+            (before, Some(after)) if before != Some(&after) => {
+                anyhow!(git_overlay_txn::commit_checkpoint_failed_advice(
+                    &after.short(),
+                    Some(message),
+                    &err,
+                    true,
+                ))
+            }
+            _ => err,
+        }
     })?;
-    let checkpoint_batch = find_recent_git_checkpoint_batch(repo, &record.git_commit)?;
-    repo.oplog()
-        .coalesce_batches(snapshot_batch.id, checkpoint_batch.id)
-        .context(
-            "commit completed but failed to record capture and Git checkpoint as one undo batch",
-        )?;
-
+    let summary_base = report
+        .git_checkpoint
+        .as_ref()
+        .map(|r| r.summary.as_str())
+        .unwrap_or(report.summary.as_str());
     let trust = git_overlay_txn::post_verify_commit(repo);
     let output = GitProjectionCommitOutput {
         output_kind: "commit",
         status: "committed",
         action: "commit",
-        change_id: snapshot.change_id,
-        git_commit: Some(record.git_commit),
+        change_id: report.change_id.short(),
+        git_commit: report.git_commit.clone(),
         git_previous_commit,
-        summary: staged_commit_summary(&record.summary, &intent),
-        confidence: captured_state.confidence,
+        summary: staged_commit_summary(summary_base, &intent),
+        confidence: report.confidence,
         git_index: Some(GitIndexPlan::index_only(&intent)),
         included_pending_capture: pending_capture.map(|state| state.short()),
-        principal: captured_state.attribution.principal.into(),
-        agent: captured_state
-            .attribution
-            .agent
-            .map(CommitAgentOutput::from),
+        principal: report.principal.into(),
+        agent: report.agent.map(CommitAgentOutput::from),
         placeholder_principal_warning: placeholder_principal_first_commit_warning(
             repo,
             user_config,
@@ -1054,36 +1070,6 @@ fn nothing_to_commit_advice() -> RecoveryAdvice {
         "heddle status",
         vec!["heddle status".to_string()],
     )
-}
-
-fn find_recent_snapshot_batch(repo: &Repository, state: &ChangeId) -> Result<OpBatch> {
-    repo.oplog()
-        .recent_batches_scoped(8, Some(&repo.op_scope()))?
-        .into_iter()
-        .find(|batch| {
-            batch.entries.iter().any(|entry| {
-                matches!(
-                    &entry.operation,
-                    OpRecord::Snapshot { new_state, .. } if new_state == state
-                )
-            })
-        })
-        .ok_or_else(|| anyhow!("capture succeeded but its oplog batch was not found"))
-}
-
-fn find_recent_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Result<OpBatch> {
-    repo.oplog()
-        .recent_batches_scoped(8, Some(&repo.op_scope()))?
-        .into_iter()
-        .find(|batch| {
-            batch.entries.iter().any(|entry| {
-                matches!(
-                    &entry.operation,
-                    OpRecord::GitCheckpoint { new_git_oid, .. } if new_git_oid == git_commit
-                )
-            })
-        })
-        .ok_or_else(|| anyhow!("Git checkpoint succeeded but its oplog batch was not found"))
 }
 
 fn git_head_oid(root: &Path) -> Option<String> {

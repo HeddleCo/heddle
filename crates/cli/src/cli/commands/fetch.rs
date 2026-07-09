@@ -46,7 +46,7 @@ struct FetchOutput {
     trust: super::verification_health::RepositoryVerificationState,
 }
 
-pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
+pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool, insecure: bool) -> Result<()> {
     let repo = cli.open_repo()?;
 
     // A git-overlay repo (not a hosted-native repo) fetches through the
@@ -127,7 +127,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
         // Hosted remotes remain: route them through the network path below.
         // (Any overlay remotes were already fetched above.)
-        return fetch_via_network(cli, &repo, hosted_remotes, all).await;
+        return fetch_via_network(cli, &repo, hosted_remotes, all, insecure).await;
     }
 
     let remotes = if all {
@@ -140,7 +140,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
         return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
     };
 
-    fetch_via_network(cli, &repo, remotes, all).await
+    fetch_via_network(cli, &repo, remotes, all, insecure).await
 }
 
 /// Enumerate every configured remote for `fetch --all`, unioning the Heddle
@@ -180,6 +180,7 @@ async fn fetch_via_network(
     repo: &Repository,
     remotes: Vec<String>,
     all: bool,
+    insecure: bool,
 ) -> Result<()> {
     let mut total_refs = 0;
     let mut total_objects = 0;
@@ -203,6 +204,8 @@ async fn fetch_via_network(
             RemoteTarget::Network { addr, repo_path } => {
                 #[cfg(feature = "client")]
                 {
+                    let allow_insecure = insecure
+                        || cli_shared::remote_allows_insecure(repo, Some(remote_name.as_str()));
                     let (refs, objects) = match fetch_network(
                         repo,
                         FetchNetworkOptions {
@@ -211,6 +214,7 @@ async fn fetch_via_network(
                             user_config: &user_config,
                             server_key,
                             remote_name,
+                            insecure: allow_insecure,
                             cli,
                         },
                     )
@@ -319,6 +323,7 @@ struct FetchNetworkOptions<'a> {
     user_config: &'a UserConfig,
     server_key: Option<String>,
     remote_name: &'a str,
+    insecure: bool,
     cli: &'a Cli,
 }
 
@@ -331,7 +336,7 @@ async fn fetch_network(
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut client = HostedGrpcClient::open_session(
+    let mut client = HostedGrpcClient::open_session_with_insecure(
         options.addr,
         options.user_config,
         options.server_key,
@@ -340,6 +345,7 @@ async fn fetch_network(
         // session. CredentialFallback is identical to ConfigToken when an env
         // token is set and adds the proof-key fallback otherwise.
         HostedAuthMode::CredentialFallback,
+        options.insecure,
     )
     .await?
     .with_human_signature_callback(crate::client::cli_human_signature_callback());

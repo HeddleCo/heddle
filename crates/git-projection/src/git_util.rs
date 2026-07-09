@@ -16,7 +16,7 @@ impl<'a> GitProjection<'a> {
     /// SHAs match the SHAs of imported commits — a prerequisite for any
     /// bidirectional sync where heddle and an upstream git host (e.g.
     /// GitHub) need to agree on which commits already exist.
-    pub(crate) fn build_commit_message(state: &State) -> String {
+    pub fn build_commit_message(state: &State) -> String {
         // Status is intentionally not surfaced here — published-vs-draft
         // belongs in heddle's note, not the commit message body, since
         // including it would change the commit SHA whenever a user toggles
@@ -43,7 +43,7 @@ impl<'a> GitProjection<'a> {
     /// The footer is the durable record — every reader on every host gets
     /// it regardless of remote configuration. Richer per-scope metadata
     /// rides on the opt-in git note (see [`super::git_notes`]).
-    pub(crate) fn build_commit_message_with_footer(
+    pub fn build_commit_message_with_footer(
         state: &State,
         hosted_url: Option<&str>,
         annotations_omitted: u32,
@@ -57,7 +57,7 @@ impl<'a> GitProjection<'a> {
         )
     }
 
-    pub(crate) fn build_commit_message_with_footer_with_body(
+    pub fn build_commit_message_with_footer_with_body(
         state: &State,
         body: &str,
         hosted_url: Option<&str>,

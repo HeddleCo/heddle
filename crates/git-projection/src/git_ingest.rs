@@ -15,7 +15,7 @@ use super::{
     git_util::ImportStats,
 };
 
-pub(crate) fn import_git_history(
+pub fn import_git_history(
     bridge: &mut GitProjection<'_>,
     git_path: Option<&Path>,
     refs: &[String],

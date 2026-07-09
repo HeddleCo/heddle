@@ -21,20 +21,20 @@ use sley::{
     ReferenceTarget, Repository as SleyRepository, plumbing::sley_object::EncodedObject,
 };
 
-use super::super::advice::RecoveryAdvice;
-use crate::git_projection_engine::{git_core::LocalGitIdentity, git_export};
+use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
+use objects::{HeddleError, RecoveryDetails};
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct GitCommitPreview {
+pub struct GitCommitPreview {
     pub message: String,
     pub files: Vec<String>,
 }
 
 /// Outcome of a real `--git-commit` write.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct GitCommitInfo {
+pub struct GitCommitInfo {
     pub sha: String,
     pub message: String,
 }
@@ -43,7 +43,7 @@ pub(crate) struct GitCommitInfo {
 /// merge output's `blockers` list with `status: "blocked"`, matching
 /// the schema settled by item 1.1.
 #[derive(Debug)]
-pub(super) struct GitCommitBlocked {
+pub struct GitCommitBlocked {
     pub blockers: Vec<String>,
 }
 
@@ -64,7 +64,7 @@ impl std::error::Error for GitCommitBlocked {}
 /// `expected_paths` is the set of paths the merge will/did write — any
 /// other uncommitted git change is "unrelated" and blocks the
 /// `--git-commit` flow rather than getting silently swept up.
-pub(super) fn validate_git_state(
+pub fn validate_git_state(
     repo: &Repository,
     expected_paths: &[String],
 ) -> std::result::Result<(), GitCommitBlocked> {
@@ -99,34 +99,16 @@ pub(super) fn validate_git_state(
 
     let expected: std::collections::HashSet<&str> =
         expected_paths.iter().map(|p| p.as_str()).collect();
-    let git_intent = match super::super::git_projection::git_index_intent_for_root(repo_root) {
-        Ok(intent) => intent,
+    let unrelated = match collect_unrelated_git_paths(repo_root, &expected) {
+        Ok(paths) => paths,
         Err(err) => {
             blockers.push(format!("failed to inspect git worktree status: {err}"));
             return Err(GitCommitBlocked { blockers });
         }
     };
-    let unrelated = unrelated_git_index_intent_paths(&git_intent, &expected);
 
     if !unrelated.is_empty() {
-        // Cap the rendered list — the user gets the count and a few
-        // examples; the full set lives in the workspace anyway.
-        // Per-path: if the path looks like common noise (`.DS_Store`,
-        // `xcuserdata/...`, editor swap files), append an inline
-        // `.heddleignore` hint so the user can fix the root cause in
-        // one edit instead of guessing the right glob.
-        let preview: Vec<String> = unrelated
-            .iter()
-            .take(5)
-            .map(|path| {
-                match super::super::heddleignore_defaults::noise_hint_for(std::path::Path::new(
-                    path,
-                )) {
-                    Some(hint) => format!("{path} {}", hint.render_inline()),
-                    None => path.clone(),
-                }
-            })
-            .collect();
+        let preview: Vec<String> = unrelated.iter().take(5).cloned().collect();
         let suffix = if unrelated.len() > preview.len() {
             format!(" (+{} more)", unrelated.len() - preview.len())
         } else {
@@ -147,28 +129,63 @@ pub(super) fn validate_git_state(
     }
 }
 
-fn unrelated_git_index_intent_paths(
-    intent: &super::super::git_projection::GitIndexIntent,
+fn collect_unrelated_git_paths(
+    repo_root: &std::path::Path,
     expected: &std::collections::HashSet<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
+    use sley::{ShortStatusOptions, StatusUntrackedMode, StreamControl};
+    let git = SleyRepository::discover(repo_root)
+        .with_context(|| format!("failed to open Git checkout at {}", repo_root.display()))?;
     let mut unrelated = Vec::new();
-    for path in intent.staged_paths.iter().chain(intent.extra_paths.iter()) {
-        let comparison_path = path
-            .strip_prefix("unstaged: ")
-            .or_else(|| path.strip_prefix("untracked: "))
-            .unwrap_or(path);
-        if !expected.contains(comparison_path) {
-            unrelated.push(path.clone());
-        }
-    }
-    unrelated
+    git.stream_short_status_with_options(
+        ShortStatusOptions {
+            untracked_mode: StatusUntrackedMode::All,
+            ..ShortStatusOptions::default()
+        },
+        |entry| {
+            let path = String::from_utf8_lossy(entry.path).into_owned();
+            if path.is_empty() {
+                return Ok(StreamControl::Continue);
+            }
+            let mut labels = Vec::new();
+            if entry.index == b'?' && entry.worktree == b'?' {
+                labels.push(format!("untracked: {path}"));
+            } else {
+                if entry.index != b' ' && entry.index != b'!' {
+                    labels.push(path.clone());
+                }
+                if entry.worktree != b' ' && entry.worktree != b'!' {
+                    labels.push(format!("unstaged: {path}"));
+                }
+            }
+            for label in labels {
+                let comparison = label
+                    .strip_prefix("unstaged: ")
+                    .or_else(|| label.strip_prefix("untracked: "))
+                    .unwrap_or(label.as_str());
+                if !expected.contains(comparison) {
+                    unrelated.push(label);
+                }
+            }
+            Ok(StreamControl::Continue)
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to inspect Git status before commit at {}",
+            repo_root.display()
+        )
+    })?;
+    unrelated.sort();
+    unrelated.dedup();
+    Ok(unrelated)
 }
 
 /// Build the commit message. Body includes the heddle merge state ID
 /// so post-merge audits can join git ↔ heddle. Trailers carry the
 /// `Merge-State` change-id and a `Co-Authored-By` for the merge
 /// attribution.
-pub(super) fn build_commit_message(
+pub fn build_commit_message(
     base_message: &str,
     merge_state_id: &str,
     attribution: &Attribution,
@@ -194,7 +211,7 @@ pub(super) fn build_commit_message(
 }
 
 /// Write a Git checkpoint commit for the landed Heddle merge state.
-pub(super) fn write_git_commit(
+pub fn write_git_commit(
     repo: &Repository,
     state_id: &ChangeId,
     paths: &[String],
@@ -216,7 +233,7 @@ pub(super) fn write_git_commit(
         .store()
         .get_state(state_id)?
         .ok_or_else(|| anyhow!("merge state {} was not found", state_id.short()))?;
-    let identity = crate::git_projection_engine::git_core::resolve_git_commit_identity(
+    let identity = heddle_git_projection::git_core::resolve_git_commit_identity(
         repo_root,
         &state.attribution.principal,
     )?;
@@ -334,38 +351,31 @@ fn update_head_ref(
     Ok(())
 }
 
-fn merge_git_commit_empty_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
+fn merge_git_commit_empty_advice() -> HeddleError {
+    HeddleError::recovery(RecoveryDetails::safety_refusal(
         "merge_git_commit_empty",
         "Merge produced no changed paths; refusing to write an empty Git commit",
         "Inspect repository state with `heddle status`; rerun without `--git-commit` if no Git commit is needed.",
         "the merge result has no paths to stage for Git",
         "--git-commit would create an empty Git commit that does not correspond to landed Heddle paths",
         "Heddle and Git state were left unchanged by the Git commit writer",
-        "heddle status",
-        vec!["heddle status".to_string()],
-    )
+    ))
 }
 
-fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> RecoveryAdvice {
+fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> HeddleError {
     let detail = if detail.trim().is_empty() {
         "Git did not report a detailed error".to_string()
     } else {
         detail
     };
-    RecoveryAdvice::safety_refusal(
+    HeddleError::recovery(RecoveryDetails::safety_refusal(
         "merge_git_commit_failed",
         format!("{stage} failed while finalizing merge --git-commit: {detail}"),
         "Resolve the Git checkout issue, then run `heddle commit -m \"...\"`; do not rerun `heddle merge`.",
         format!("{stage} failed after Heddle merge commit coordination started"),
         "retrying the Heddle merge could duplicate or obscure the already-landed Heddle merge state",
         "the Heddle merge state is preserved; the Git commit writer did not report a completed commit",
-        "heddle commit -m \"...\"",
-        vec![
-            "heddle commit -m \"...\"".to_string(),
-            "heddle verify".to_string(),
-        ],
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -399,23 +409,24 @@ mod tests {
 
     #[test]
     fn merge_git_commit_empty_uses_typed_advice() {
-        let advice = merge_git_commit_empty_advice();
-
-        assert_eq!(advice.kind, "merge_git_commit_empty");
-        assert_eq!(advice.primary_command, "heddle status");
-        assert!(advice.error.contains("no changed paths"));
-        assert!(advice.would_change.contains("empty Git commit"));
+        let err = merge_git_commit_empty_advice();
+        let objects::HeddleError::Recovery(details) = err else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(details.kind, "merge_git_commit_empty");
+        assert!(details.error.contains("no changed paths"));
+        assert!(details.would_change.contains("empty Git commit"));
     }
 
     #[test]
     fn merge_git_commit_failure_uses_typed_advice() {
-        let advice =
-            merge_git_commit_failed_advice("writing Git index", "index locked".to_string());
-
-        assert_eq!(advice.kind, "merge_git_commit_failed");
-        assert!(advice.error.contains("writing Git index failed"));
-        assert!(advice.error.contains("index locked"));
-        assert!(advice.primary_command.contains("heddle commit"));
-        assert!(advice.preserved.contains("Heddle merge state is preserved"));
+        let err = merge_git_commit_failed_advice("writing Git index", "index locked".to_string());
+        let objects::HeddleError::Recovery(details) = err else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(details.kind, "merge_git_commit_failed");
+        assert!(details.error.contains("writing Git index"));
+        assert!(details.error.contains("index locked"));
+        assert!(details.preserved.contains("Heddle merge state is preserved"));
     }
 }

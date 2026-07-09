@@ -32,31 +32,12 @@ mod repository_resolve;
 #[path = "repository_signing.rs"]
 mod repository_signing;
 pub use repository_signing::ResignOutcome;
-#[path = "repository_snapshot.rs"]
-mod repository_snapshot;
-#[cfg(test)]
-#[path = "repository_tests.rs"]
-mod repository_tests;
-#[path = "repository_thread_materialize.rs"]
-mod repository_thread_materialize;
-#[path = "repository_tree.rs"]
-mod repository_tree;
-#[path = "repository_worktree_apply.rs"]
-pub(crate) mod repository_worktree_apply;
-#[path = "repository_worktree_status.rs"]
-mod repository_worktree_status;
-#[path = "status_tracked_refresh.rs"]
-mod status_tracked_refresh;
-#[path = "status_untracked_scan.rs"]
-mod status_untracked_scan;
-
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-
 use chrono::Utc;
 pub use commit_graph::{CommitGraphIndex, find_merge_base};
 #[cfg(feature = "async-source")]
@@ -72,11 +53,12 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
+    object::{Attribution, ChangeId, ContentHash, Principal, State, ThreadName, Tree},
     store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
-    worktree::WorktreeStatus,
 };
+#[cfg(feature = "git-overlay")]
+use objects::{object::MarkerName, worktree::WorktreeStatus};
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use refs::{RefSummaryIndexInspection, SpoolFacet};
@@ -107,11 +89,59 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sley::{
     ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
-    Repository as SleyRepository, ShortStatusOptions as SleyShortStatusOptions,
-    StatusUntrackedMode as SleyStatusUntrackedMode, StreamControl as SleyStreamControl,
+    Repository as SleyRepository,
 };
-
+#[cfg(feature = "git-overlay")]
+use sley::{
+    ShortStatusOptions as SleyShortStatusOptions, StatusUntrackedMode as SleyStatusUntrackedMode,
+    StreamControl as SleyStreamControl,
+};
 use crate::{GitRefContentNamespace, GitRefName};
+#[path = "repository_snapshot.rs"]
+mod repository_snapshot;
+#[cfg(test)]
+#[path = "repository_tests.rs"]
+mod repository_tests;
+#[path = "repository_thread_materialize.rs"]
+mod repository_thread_materialize;
+#[path = "repository_tree.rs"]
+mod repository_tree;
+#[path = "repository_worktree_apply.rs"]
+pub(crate) mod repository_worktree_apply;
+#[path = "repository_worktree_status.rs"]
+mod repository_worktree_status;
+#[path = "status_tracked_refresh.rs"]
+mod status_tracked_refresh;
+#[path = "status_untracked_scan.rs"]
+mod status_untracked_scan;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
@@ -144,6 +174,7 @@ pub struct GitImportGuidance {
     pub recommended_command: String,
 }
 
+#[cfg(feature = "git-overlay")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitOverlayBranchTip {
     pub branch: String,
@@ -153,6 +184,7 @@ pub struct GitOverlayBranchTip {
     pub mapped_change: Option<ChangeId>,
 }
 
+#[cfg(feature = "git-overlay")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitOverlayTagTip {
     pub tag: String,
@@ -166,6 +198,7 @@ pub struct GitOverlayTagTip {
 /// (neither imported/projection-mapped nor checkpointed). Used to report
 /// how far a Git branch moved out-of-band before `heddle adopt --ref`
 /// reconciles it.
+#[cfg(feature = "git-overlay")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitOverlayOutOfBandCommits {
     pub count: usize,
@@ -177,6 +210,7 @@ pub struct GitOverlayOutOfBandCommits {
 /// Cap for the out-of-band commit walk so a read path (status/verify/health)
 /// never pays an O(full-history) traversal when external history was rewritten
 /// and no mapped ancestor exists.
+#[cfg(feature = "git-overlay")]
 const GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -453,12 +487,33 @@ impl Repository {
     /// `BlobHydrator` operate on the bare `Repository`), so they live here
     /// rather than in the generic `open_raw`.
     fn run_open_hooks(&self) -> Result<()> {
+        // Hot-path skip: when the schema ledger already records every
+        // registered migration *and* there is no lazy-hydrator metadata,
+        // both probes below are pure no-ops. Avoid the ledger parse /
+        // hydrator path.exists work on every warm open.
+        // See docs/perf/cli-core-loop-todo.md ("Reduce repo-open work by
+        // skipping migration/hydrator probes when a repo has a clean
+        // schema ledger and no lazy-hydrator file").
+        let hydrator_path =
+            crate::lazy_hydrator::LazyHydratorConfig::path_in(self.heddle_dir());
+        let schema_clean = crate::migration::is_schema_ledger_complete(self.heddle_dir());
+        let no_lazy_hydrator = !hydrator_path.exists();
+        if schema_clean && no_lazy_hydrator {
+            return Ok(());
+        }
+
         // Run any pending declarative migrations. Idempotent:
         // re-opening a repo a second time is a no-op for the migration pass.
         // Hard schema migrations are part of the open contract: if they cannot
         // complete, continuing with a partially-upgraded repo would make later
         // strict readers fail at arbitrary call sites.
-        crate::migration::apply_pending(self)?;
+        //
+        // Only skip the call when the ledger is complete: a missing or
+        // incomplete ledger still needs `apply_pending` (which also reports
+        // malformed ledger files).
+        if !schema_clean {
+            crate::migration::apply_pending(self)?;
+        }
         // Reconstruct any persisted lazy-clone blob hydrator. When
         // `.heddle/lazy-hydrator.toml` exists, look up the registered
         // factory for its `kind` and install the hydrator on the
@@ -466,17 +521,19 @@ impl Repository {
         // missing-blob marker can fetch transparently — without this
         // reconstruction, lazy clones would only work inside the single
         // `cmd_clone` process. See `lazy_hydrator.rs` for the shape.
-        match crate::lazy_hydrator::try_reconstruct(self.root(), self.heddle_dir()) {
-            Ok(Some(hydrator)) => self.set_blob_hydrator(hydrator),
-            Ok(None) => {}
-            Err(err) => {
-                // Hydrator construction failed (factory error or
-                // malformed metadata). Surface as a warning rather
-                // than blocking `open` — eager `heddle verify` calls
-                // shouldn't fail just because a stale hosted
-                // endpoint is unreachable; the user will get the real
-                // error on the first `require_blob` that needs it.
-                tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
+        if !no_lazy_hydrator {
+            match crate::lazy_hydrator::try_reconstruct(self.root(), self.heddle_dir()) {
+                Ok(Some(hydrator)) => self.set_blob_hydrator(hydrator),
+                Ok(None) => {}
+                Err(err) => {
+                    // Hydrator construction failed (factory error or
+                    // malformed metadata). Surface as a warning rather
+                    // than blocking `open` — eager `heddle verify` calls
+                    // shouldn't fail just because a stale hosted
+                    // endpoint is unreachable; the user will get the real
+                    // error on the first `require_blob` that needs it.
+                    tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
+                }
             }
         }
         Ok(())
@@ -507,7 +564,8 @@ impl Repository {
             return Err(HeddleError::RepositoryExists(root));
         }
 
-        fs::create_dir_all(&heddle_dir)?;
+        // Owner-only `.heddle` tree: holds keys, credentials, and object store.
+        objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
 
         let store = FsStore::new(&heddle_dir);
         store.init()?;
@@ -1069,6 +1127,11 @@ impl Repository {
         Ok(None)
     }
 
+    /// Enumerate Git branch tips with Heddle mapping status.
+    ///
+    /// Gated behind `git-overlay`: native-only builds do not expose overlay
+    /// branch enumeration on `Repository`.
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_branch_tips(&self) -> Result<Vec<GitOverlayBranchTip>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(Vec::new());
@@ -1148,6 +1211,7 @@ impl Repository {
         Ok(branch_tips)
     }
 
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_tag_tips(&self) -> Result<Vec<GitOverlayTagTip>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(Vec::new());
@@ -1210,6 +1274,7 @@ impl Repository {
         Ok(tag_tips)
     }
 
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_branch_tip(&self, name: &str) -> Result<Option<GitOverlayBranchTip>> {
         Ok(self
             .git_overlay_branch_tips()?
@@ -1217,6 +1282,7 @@ impl Repository {
             .find(|tip| tip.branch == name))
     }
 
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_tag_tip(&self, name: &str) -> Result<Option<GitOverlayTagTip>> {
         Ok(self
             .git_overlay_tag_tips()?
@@ -1224,12 +1290,48 @@ impl Repository {
             .find(|tip| tip.tag == name))
     }
 
+    /// Map a Git branch name to a Heddle change id when known.
+    ///
+    /// Kept available without `git-overlay` feature so open/HEAD reconciliation
+    /// can compile under native-only builds (it no-ops when capability is not
+    /// Git Overlay). Tip enumeration (`git_overlay_branch_tips`) remains gated.
     pub fn git_overlay_mapped_change_for_branch(&self, name: &str) -> Result<Option<ChangeId>> {
-        Ok(self
-            .git_overlay_branch_tip(name)?
-            .and_then(|tip| tip.mapped_change))
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+        let Some(git_repo) = self.git_overlay_sley_repository()? else {
+            return Ok(None);
+        };
+        let full_name = format!("refs/heads/{name}");
+        let projection_mapping = self.git_projection_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        for reference in git_repo.references().list_refs().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to enumerate git branches at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })? {
+            if reference.name != full_name {
+                continue;
+            }
+            let Some(target) =
+                self.git_overlay_commit_tip_oid(&git_repo, &reference, "branch", name)?
+            else {
+                return Ok(None);
+            };
+            return self.git_overlay_mapped_change_for_commit(
+                &target.to_string(),
+                &projection_mapping,
+                &ingest_mapping,
+                &checkpoint_mapping,
+            );
+        }
+        Ok(None)
     }
 
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_mapped_change_for_remote_tracking_ref(
         &self,
         name: &str,
@@ -1270,11 +1372,42 @@ impl Repository {
     }
 
     pub fn git_overlay_mapped_change_for_tag(&self, name: &str) -> Result<Option<ChangeId>> {
-        Ok(self
-            .git_overlay_tag_tip(name)?
-            .and_then(|tip| tip.mapped_change))
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+        let Some(git_repo) = self.git_overlay_sley_repository()? else {
+            return Ok(None);
+        };
+        let full_name = format!("refs/tags/{name}");
+        let projection_mapping = self.git_projection_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        for reference in git_repo.references().list_refs().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to enumerate git tags at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })? {
+            if reference.name != full_name {
+                continue;
+            }
+            let Some(target) =
+                self.git_overlay_commit_tip_oid(&git_repo, &reference, "tag", name)?
+            else {
+                return Ok(None);
+            };
+            return self.git_overlay_mapped_change_for_commit(
+                &target.to_string(),
+                &projection_mapping,
+                &ingest_mapping,
+                &checkpoint_mapping,
+            );
+        }
+        Ok(None)
     }
 
+    #[cfg(feature = "git-overlay")]
     fn change_is_ancestor(&self, ancestor: &ChangeId, descendant: &ChangeId) -> bool {
         let mut graph = CommitGraphIndex::new(self);
         graph.is_ancestor(ancestor, descendant).unwrap_or(false)
@@ -1293,6 +1426,7 @@ impl Repository {
     /// file" (~0.35s vs minutes on the ~6k-file ghostty tree). This stat-cache
     /// MUST be preserved across sley bumps — a sley that re-hashes unconditionally
     /// would silently reintroduce the pathological checkpoint cost.
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
@@ -1537,6 +1671,7 @@ impl Repository {
     ///
     /// Returns `Ok(None)` when the repository is not a Git overlay or the tip
     /// cannot be resolved; callers should degrade to a countless report.
+    #[cfg(feature = "git-overlay")]
     pub fn git_overlay_out_of_band_commits(
         &self,
         tip_git_commit: &str,
@@ -2624,14 +2759,17 @@ fn git_config_principal(root: &Path) -> Option<Principal> {
     Some(Principal::new(&name, &email))
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_path(path: &[u8]) -> String {
     String::from_utf8_lossy(path).into_owned()
 }
 
+#[cfg(feature = "git-overlay")]
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
 }
 
+#[cfg(feature = "git-overlay")]
 fn git_overlay_untracked_path_ignored(
     ignore_matcher: &crate::worktree_ignore::WorktreeIgnoreMatcher,
     path: &Path,

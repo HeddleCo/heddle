@@ -1,0 +1,40 @@
+[package]
+name = "heddle-git-projection"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Git projection engine: bidirectional conversion between Heddle state and Git repositories."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "heddle_git_projection"
+
+[dependencies]
+objects = { path = "../objects", package = "heddle-objects", version = "0.10", features = ["memory-backend"] }
+refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
+# `default-features = false` so this crate's `zstd` feature controls the
+# cascade end-to-end (same pattern as ingest/cli).
+repo = { path = "../repo", package = "heddle-repo", version = "0.10", default-features = false, features = ["git-overlay"] }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.10", default-features = false }
+wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
+
+serde.workspace = true
+serde_json.workspace = true
+sley.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+# This crate *is* the Git projection surface; `git-overlay` is always on so
+# residual `#[cfg(feature = "git-overlay")]` annotations from the CLI extract
+# stay valid without dead-code warnings in non-overlay contexts.
+default = ["git-overlay", "zstd"]
+git-overlay = []
+zstd = ["objects/zstd", "repo/zstd", "ingest/zstd", "wire/zstd"]
+
+[dev-dependencies]
+tempfile.workspace = true

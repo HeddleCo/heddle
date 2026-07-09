@@ -291,7 +291,7 @@ fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
 
 fn persist_local(path: &Path, identity: &LocalIdentity) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        objects::fs_atomic::create_private_dir_all(parent)?;
     }
     let contents = toml::to_string_pretty(identity)
         .map_err(|error| std::io::Error::other(format!("serializing local identity: {error}")))?;
@@ -314,7 +314,7 @@ pub fn load_device(path: &Path) -> std::io::Result<Option<DeviceIdentity>> {
 
 fn write_device(path: &Path, identity: &DeviceIdentity) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        objects::fs_atomic::create_private_dir_all(parent)?;
     }
     let contents = toml::to_string_pretty(identity)
         .map_err(|error| std::io::Error::other(format!("serializing device identity: {error}")))?;

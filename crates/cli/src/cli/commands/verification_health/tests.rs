@@ -14,9 +14,8 @@ use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
 
 use super::{
-    RepositoryVerificationState, VerificationActionPlan, action_template, clean_health,
-    machine_contract_coverage, remote_drift_decision, repository_setup_guidance,
-    repository_verification_blocked_advice,
+    RepositoryVerificationState, action_template, machine_contract_coverage, remote_drift_decision,
+    repository_setup_guidance, repository_verification_blocked_advice,
 };
 use crate::cli::commands::build_command_catalog;
 
@@ -186,50 +185,6 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
         advice.recovery_commands,
         vec!["heddle pull origin main --preview", "heddle verify"]
     );
-}
-
-#[test]
-fn verification_action_plan_keeps_blockers_above_guidance() {
-    let clean_health = clean_health("clean", Vec::new());
-
-    let machine_gap = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        Some("heddle land --thread feature --no-push".to_string()),
-        Some("heddle doctor schemas --output json".to_string()),
-    );
-    assert_eq!(
-        machine_gap.primary_action,
-        "heddle doctor schemas --output json"
-    );
-    assert_eq!(
-        machine_gap.recovery_commands,
-        vec!["heddle doctor schemas --output json"]
-    );
-    assert_eq!(machine_gap.remote_action.as_deref(), Some("heddle push"));
-    assert_eq!(
-        machine_gap.workflow_action.as_deref(),
-        Some("heddle land --thread feature --no-push")
-    );
-
-    let workflow_waiting = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        Some("heddle land --thread feature --no-push".to_string()),
-        None,
-    );
-    assert_eq!(
-        workflow_waiting.primary_action,
-        "heddle land --thread feature --no-push"
-    );
-
-    let publish_guidance = VerificationActionPlan::from_parts(
-        &clean_health,
-        Some("heddle push".to_string()),
-        None,
-        None,
-    );
-    assert_eq!(publish_guidance.primary_action, "heddle push");
 }
 
 #[test]

@@ -529,7 +529,11 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
+        Commands::Fetch {
+            remote,
+            all,
+            insecure,
+        } => cmd_fetch(&cli, remote.clone(), *all, *insecure).await,
 
         #[cfg(feature = "git-overlay")]
         Commands::Import { command } => match command {
@@ -625,6 +629,7 @@ async fn async_main() -> Result<()> {
                 args.force,
                 args.all_threads,
                 args.mirror.clone(),
+                args.insecure,
             )
             .await
         }
@@ -636,6 +641,7 @@ async fn async_main() -> Result<()> {
                 args.remote_op.thread.clone(),
                 args.local_thread.clone(),
                 args.lazy,
+                args.remote_op.insecure,
             )
             .await
         }
@@ -808,6 +814,7 @@ async fn async_main() -> Result<()> {
             lazy,
             filter,
             recursive,
+            insecure,
         }) => {
             cmd_clone(
                 &cli,
@@ -818,6 +825,7 @@ async fn async_main() -> Result<()> {
                 *lazy,
                 filter.clone(),
                 *recursive,
+                *insecure,
             )
             .await
         }

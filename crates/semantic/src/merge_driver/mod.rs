@@ -12,7 +12,10 @@ use std::path::Path;
 
 use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
-use crate::parser::{Language, ParsedFile};
+use crate::{
+    cache::SemanticParseCache,
+    parser::{Language, ParsedFile},
+};
 
 mod items;
 mod language_rules;
@@ -63,10 +66,14 @@ pub fn semantic_three_way_merge(
         return text_hunk_merge_with_markers(base, ours, theirs, markers);
     };
 
+    // Share the process-wide parse cache with semantic diff so base/ours/theirs
+    // are not thrice-cold on every merge when the same blobs were just parsed
+    // for classification or a prior merge attempt.
+    let cache = SemanticParseCache::shared();
     let (Some(base_parsed), Some(ours_parsed), Some(theirs_parsed)) = (
-        ParsedFile::parse(base_text, language),
-        ParsedFile::parse(ours_text, language),
-        ParsedFile::parse(theirs_text, language),
+        cache.parse(base_text, language),
+        cache.parse(ours_text, language),
+        cache.parse(theirs_text, language),
     ) else {
         return text_hunk_merge_with_markers(base, ours, theirs, markers);
     };

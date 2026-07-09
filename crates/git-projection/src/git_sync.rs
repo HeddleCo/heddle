@@ -7,7 +7,7 @@ use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
 
-use crate::git_projection_engine::git_core::{
+use crate::git_core::{
     GitProjection, GitProjectionError, GitProjectionResult, git_err, thread_is_unclaimed_bootstrap,
 };
 

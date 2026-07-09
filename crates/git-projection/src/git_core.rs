@@ -14,7 +14,7 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-pub(crate) use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
+pub use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
 pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
 use repo::{GitRefName, Repository as HeddleRepository};
 use sley::{
@@ -32,6 +32,7 @@ use super::{
     git_export::{commit_is_byte_faithful, export_all, export_current_thread},
     git_ingest::import_git_history,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
+    git_residual::{ResidualStore, resolve_lossy_object},
     git_util::ImportStats,
 };
 
@@ -119,7 +120,7 @@ pub enum GitProjectionError {
 pub type GitProjectionResult<T> = std::result::Result<T, GitProjectionError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RefUpdate {
+pub struct RefUpdate {
     pub name: String,
     pub target: ObjectId,
     pub namespace: RefNamespace,
@@ -379,24 +380,24 @@ pub enum WriteThroughOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocalGitIdentity {
-    pub(crate) name: String,
-    pub(crate) email: String,
+pub struct LocalGitIdentity {
+    pub name: String,
+    pub email: String,
 }
 
 impl LocalGitIdentity {
-    pub(crate) fn from_principal(principal: &Principal) -> Self {
+    pub fn from_principal(principal: &Principal) -> Self {
         Self {
             name: principal.name.clone(),
             email: principal.email.clone(),
         }
     }
 
-    pub(crate) fn to_ident_line(&self, seconds: i64) -> Vec<u8> {
+    pub fn to_ident_line(&self, seconds: i64) -> Vec<u8> {
         format!("{} <{}> {} +0000", self.name, self.email, seconds).into_bytes()
     }
 
-    pub(crate) fn to_signature(&self, seconds: i64) -> Signature {
+    pub fn to_signature(&self, seconds: i64) -> Signature {
         let ident = self.to_ident_line(seconds);
         Signature {
             name: GitByteString::new(self.name.as_bytes().to_vec()),
@@ -451,7 +452,7 @@ impl SyncMapping {
     }
 
     /// Insert a mapping and detect conflicts.
-    pub(crate) fn insert_checked(
+    pub fn insert_checked(
         &mut self,
         change_id: ChangeId,
         git_oid: ObjectId,
@@ -506,7 +507,7 @@ impl SyncMapping {
     /// alive by the notes/cache rebuild on the next export) makes the
     /// frontier walk and the tag/note sync treat a now-embargoed commit as
     /// served — leaking it via `refs/heads/<thread>` or a tag.
-    pub(crate) fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
+    pub fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
         let git_oid = self.heddle_to_git.remove(change_id)?;
         self.git_to_heddle.remove(&git_oid);
         Some(git_oid)
@@ -518,7 +519,7 @@ impl SyncMapping {
     }
 
     /// Iterate over mappings.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
@@ -526,11 +527,11 @@ impl SyncMapping {
     /// checkout-materialization path (#568 P1) uses this to decide whether it must
     /// hydrate the mapping from disk (a standalone projection checkout) or trust
     /// the mapping export just built in memory (a checkpoint/push).
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.heddle_to_git.is_empty()
     }
 
-    pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
+    pub fn retain_git_objects(&mut self, repo: &SleyRepository) {
         let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
             .iter()
@@ -549,7 +550,7 @@ impl SyncMapping {
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
+    pub fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
         let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
@@ -569,11 +570,11 @@ impl SyncMapping {
 
 /// Legacy-named implementation for explicit Git Projection and Bridge Mirror operations.
 pub struct GitProjection<'a> {
-    pub(crate) heddle_repo: &'a HeddleRepository,
-    pub(crate) git_repo_path: Option<PathBuf>,
-    pub(crate) mapping: SyncMapping,
-    pub(crate) commit_message_overrides: HashMap<ChangeId, String>,
-    pub(crate) commit_parent_overrides: HashMap<ChangeId, Vec<ObjectId>>,
+    pub heddle_repo: &'a HeddleRepository,
+    pub git_repo_path: Option<PathBuf>,
+    pub mapping: SyncMapping,
+    pub commit_message_overrides: HashMap<ChangeId, String>,
+    pub commit_parent_overrides: HashMap<ChangeId, Vec<ObjectId>>,
 }
 
 struct MappingFileSnapshot {
@@ -632,7 +633,7 @@ impl<'a> GitProjection<'a> {
     /// callers performing a multi-step bring-up (init + first export)
     /// can roll back the partially-created mirror if a later step
     /// fails. Call `guard.commit()` once the mirror is known-good.
-    pub(crate) fn init_mirror_with_guard(&mut self) -> GitProjectionResult<MirrorInitGuard> {
+    pub fn init_mirror_with_guard(&mut self) -> GitProjectionResult<MirrorInitGuard> {
         let git_dir = self.heddle_repo.heddle_dir().join("git");
 
         let did_create = if git_dir.exists() {
@@ -661,7 +662,7 @@ impl<'a> GitProjection<'a> {
     }
 
     /// Open the Git repository (mirror or regular).
-    pub(crate) fn open_git_repo(&self) -> GitProjectionResult<SleyRepository> {
+    pub fn open_git_repo(&self) -> GitProjectionResult<SleyRepository> {
         if let Some(ref path) = self.git_repo_path {
             open_repo(path)
         } else {
@@ -675,7 +676,7 @@ impl<'a> GitProjection<'a> {
     }
 
     /// Sort states topologically (parents before children).
-    pub(crate) fn sort_states_topologically(
+    pub fn sort_states_topologically(
         &self,
         states: &[ChangeId],
     ) -> GitProjectionResult<Vec<ChangeId>> {
@@ -721,11 +722,11 @@ impl<'a> GitProjection<'a> {
         export_all(self)
     }
 
-    pub(crate) fn set_commit_message_override(&mut self, state_id: ChangeId, message: String) {
+    pub fn set_commit_message_override(&mut self, state_id: ChangeId, message: String) {
         self.commit_message_overrides.insert(state_id, message);
     }
 
-    pub(crate) fn set_commit_parent_override(
+    pub fn set_commit_parent_override(
         &mut self,
         state_id: ChangeId,
         parents: Vec<ObjectId>,
@@ -733,7 +734,7 @@ impl<'a> GitProjection<'a> {
         self.commit_parent_overrides.insert(state_id, parents);
     }
 
-    pub(crate) fn with_mapping_rollback<T>(
+    pub fn with_mapping_rollback<T>(
         &mut self,
         operation: impl FnOnce(&mut Self) -> GitProjectionResult<T>,
     ) -> GitProjectionResult<T> {
@@ -1061,7 +1062,7 @@ impl<'a> GitProjection<'a> {
     /// -> Heddle state identity. Ingest reads directly from the checkout, so
     /// it only needs `refs/notes/heddle` hydrated in the checkout's own object
     /// database before `GitSource` opens the repository.
-    pub(crate) fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
+    pub fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
         if checkout_note_ref_exists(root).unwrap_or(false) {
             return true;
         }
@@ -1248,7 +1249,7 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    pub(crate) fn seed_git_checkpoint_mappings_from_checkout(
+    pub fn seed_git_checkpoint_mappings_from_checkout(
         &mut self,
         mirror_repo: &SleyRepository,
     ) -> GitProjectionResult<()> {
@@ -1306,7 +1307,7 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    pub(crate) fn stage_ingest_source_in_mirror(
+    pub fn stage_ingest_source_in_mirror(
         &mut self,
         source: &Path,
         refs: &[String],
@@ -1559,7 +1560,7 @@ impl<'a> GitProjection<'a> {
         self.write_thread_checkout_from_existing_mirror(thread)
     }
 
-    pub(crate) fn write_current_checkout_from_existing_mirror(
+    pub fn write_current_checkout_from_existing_mirror(
         &mut self,
     ) -> GitProjectionResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
@@ -2326,7 +2327,7 @@ fn common_repo_for_worktree(repo: &SleyRepository) -> GitProjectionResult<SleyRe
     open_repo(&common_dir)
 }
 
-pub(crate) fn git_err(err: impl std::fmt::Display) -> GitProjectionError {
+pub fn git_err(err: impl std::fmt::Display) -> GitProjectionError {
     GitProjectionError::Git(err.to_string())
 }
 
@@ -2359,7 +2360,7 @@ fn fsync_path(path: &Path) -> GitProjectionResult<()> {
 /// `heddle export git ...` doesn't see a half-built bare repo. Call
 /// `commit()` once the mirror is known-good (e.g. after a successful
 /// first export) to disarm the guard.
-pub(crate) struct MirrorInitGuard {
+pub struct MirrorInitGuard {
     path: PathBuf,
     /// `Some(true)` means we created the directory in this call and
     /// own its rollback; `Some(false)` (or `None` after commit) means
@@ -2368,14 +2369,14 @@ pub(crate) struct MirrorInitGuard {
 }
 
 impl MirrorInitGuard {
-    pub(crate) fn new_from_init(path: PathBuf, did_create: bool) -> Self {
+    pub fn new_from_init(path: PathBuf, did_create: bool) -> Self {
         Self {
             path,
             rollback: Some(did_create),
         }
     }
 
-    pub(crate) fn commit(mut self) {
+    pub fn commit(mut self) {
         self.rollback = None;
     }
 }
@@ -2405,7 +2406,7 @@ impl Drop for MirrorInitGuard {
 /// `import git`), the bootstrap `main` is unclaimed and the incoming git ref
 /// should win. This helper lets the Git projection engine recognize that
 /// case without silently overwriting real work.
-pub(crate) fn thread_is_unclaimed_bootstrap(
+pub fn thread_is_unclaimed_bootstrap(
     heddle_repo: &HeddleRepository,
     change_id: &ChangeId,
 ) -> GitProjectionResult<bool> {
@@ -2421,7 +2422,7 @@ pub(crate) fn thread_is_unclaimed_bootstrap(
     Ok(tree == Tree::new())
 }
 
-pub(crate) fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
+pub fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
     match SleyRepository::discover(path) {
         Ok(repo) => Ok(repo),
         Err(_) => SleyRepository::open(path).map_err(git_err),
@@ -2435,7 +2436,7 @@ pub(crate) fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
-pub(crate) fn delete_reference_if_present(
+pub fn delete_reference_if_present(
     repo: &SleyRepository,
     name: &str,
 ) -> GitProjectionResult<()> {
@@ -2491,7 +2492,7 @@ fn delete_reference(
     }
 }
 
-pub(crate) fn set_reference(
+pub fn set_reference(
     repo: &SleyRepository,
     name: &str,
     target: ObjectId,
@@ -2598,7 +2599,7 @@ fn checkout_git_head_is_detached(root: &Path) -> GitProjectionResult<bool> {
     Ok(repo.head().map(|head| head.is_detached()).unwrap_or(false))
 }
 
-pub(crate) fn resolve_git_commit_identity(
+pub fn resolve_git_commit_identity(
     repo_root: &Path,
     fallback: &Principal,
 ) -> GitProjectionResult<LocalGitIdentity> {
@@ -2614,7 +2615,7 @@ pub(crate) fn resolve_git_commit_identity(
     ))
 }
 
-pub(crate) fn git_config_identity_with_global_fallback(
+pub fn git_config_identity_with_global_fallback(
     repo_root: &Path,
 ) -> GitProjectionResult<Option<LocalGitIdentity>> {
     let name = git_config_value_with_global_fallback(repo_root, "user.name")?;
@@ -2628,7 +2629,7 @@ pub(crate) fn git_config_identity_with_global_fallback(
     Ok(None)
 }
 
-pub(crate) fn principal_is_default_unknown(principal: &Principal) -> bool {
+pub fn principal_is_default_unknown(principal: &Principal) -> bool {
     principal.name.trim().is_empty()
         || principal.email.trim().is_empty()
         || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
@@ -2765,7 +2766,7 @@ fn collect_ref_updates(repo: &SleyRepository) -> GitProjectionResult<Vec<RefUpda
 /// "total", and no orphan/unreferenced state (minted but reachable from no
 /// copied ref, hence never in the walk) can inflate any count.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ExportedCommitCounts {
+pub struct ExportedCommitCounts {
     pub total: usize,
     pub newly: usize,
 }
@@ -2783,7 +2784,7 @@ pub(crate) struct ExportedCommitCounts {
 /// run; a commit in the walk that is in this set is counted as `newly`, the
 /// rest as `already`. Routing both the total and the newly count through
 /// this single walk guarantees they can never diverge.
-pub(crate) fn count_exported_commits(
+pub fn count_exported_commits(
     repo: &SleyRepository,
     newly_minted: &HashSet<ObjectId>,
 ) -> GitProjectionResult<ExportedCommitCounts> {
@@ -2839,7 +2840,7 @@ fn collect_ref_updates_for_fetch(
     }
 }
 
-pub(crate) fn collect_import_source_ref_updates(
+pub fn collect_import_source_ref_updates(
     repo: &SleyRepository,
     refs: &[String],
 ) -> GitProjectionResult<Vec<RefUpdate>> {
@@ -2865,7 +2866,7 @@ fn full_ref_name(update: &RefUpdate) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn ensure_commit_update_fast_forward(
+pub fn ensure_commit_update_fast_forward(
     repo: &SleyRepository,
     name: &str,
     old: ObjectId,
@@ -3011,7 +3012,7 @@ fn write_exported_refs_at(
 
 /// Write `HEAD` as a symbolic ref pointing at `branch_ref` (e.g.
 /// `refs/heads/main`) via sley's ref backend.
-pub(crate) fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitProjectionResult<()> {
+pub fn write_head_symref(git_dir: &Path, branch_ref: &str) -> GitProjectionResult<()> {
     let repo = repo_for_git_dir(git_dir)?;
     repo.set_head_symref(branch_ref, HeadUpdateOptions::new())
         .map_err(git_err)?;
@@ -3032,7 +3033,7 @@ fn repo_for_git_dir(git_dir: &Path) -> GitProjectionResult<SleyRepository> {
 
 /// Heddle's exported-refs record for `target_repo` (full ref name → last-published
 /// tip OID), the local-path destination record. See [`read_exported_refs_at`].
-pub(crate) fn read_exported_refs(
+pub fn read_exported_refs(
     target_repo: &SleyRepository,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&exported_refs_manifest_path(target_repo))
@@ -3040,7 +3041,7 @@ pub(crate) fn read_exported_refs(
 
 /// Persist the local-path destination's exported-refs record. See
 /// [`write_exported_refs_at`].
-pub(crate) fn write_exported_refs(
+pub fn write_exported_refs(
     target_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<()> {
@@ -3070,14 +3071,14 @@ fn mirror_managed_refs_path(mirror_repo: &SleyRepository) -> PathBuf {
 /// mirror ref set so pre-existing heddle refs aren't all misread as foreign)
 /// from a record that exists but is empty (everything was legitimately dropped —
 /// do NOT re-seed).
-pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &SleyRepository) -> bool {
+pub fn mirror_managed_refs_recorded(mirror_repo: &SleyRepository) -> bool {
     mirror_managed_refs_path(mirror_repo).exists()
 }
 
 /// The full ref names heddle MANAGES in the mirror (full ref name → last-published
 /// tip OID). `Ok(empty)` when the record is absent — callers seed a first run from
 /// the current mirror ref set; see [`mirror_managed_refs_recorded`].
-pub(crate) fn read_mirror_managed_refs(
+pub fn read_mirror_managed_refs(
     mirror_repo: &SleyRepository,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
@@ -3085,7 +3086,7 @@ pub(crate) fn read_mirror_managed_refs(
 
 /// Persist the mirror's managed-refs record. Atomic temp+rename via
 /// [`write_exported_refs_at`].
-pub(crate) fn write_mirror_managed_refs(
+pub fn write_mirror_managed_refs(
     mirror_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<()> {
@@ -3104,7 +3105,7 @@ pub(crate) fn write_mirror_managed_refs(
 /// reconcile, `import git`, or `fetch`), so claiming them all as managed on the first
 /// run is correct. A record that EXISTS but is empty (everything was legitimately
 /// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
-pub(crate) fn read_or_seed_mirror_managed_refs(
+pub fn read_or_seed_mirror_managed_refs(
     mirror_repo: &SleyRepository,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
     if mirror_managed_refs_recorded(mirror_repo) {
@@ -3126,7 +3127,7 @@ pub(crate) fn read_or_seed_mirror_managed_refs(
 /// never enters the served frontier nor the destination's desired set (heddle#316).
 /// The FETCH path keeps using [`collect_ref_updates`]/[`collect_ref_updates_for_fetch`]
 /// (it must see every ref); only the export/push frontier is managed-filtered.
-pub(crate) fn collect_managed_ref_updates(
+pub fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<Vec<RefUpdate>> {
@@ -3282,36 +3283,36 @@ fn classify_tag_move(
 /// A served ref a push destination must write: its full name, the served `new`
 /// tip, and whether the receive-pack command must be forced.
 #[derive(Debug)]
-pub(crate) struct PlannedRefWrite {
-    pub(crate) full_name: String,
-    pub(crate) old: Option<ObjectId>,
-    pub(crate) new: ObjectId,
-    pub(crate) force: bool,
+pub struct PlannedRefWrite {
+    pub full_name: String,
+    pub old: Option<ObjectId>,
+    pub new: ObjectId,
+    pub force: bool,
 }
 
 /// A previously-exported ref the served mirror no longer carries: it must be
 /// deleted at the destination.
 #[derive(Debug)]
-pub(crate) struct PlannedRefDelete {
-    pub(crate) full_name: String,
-    pub(crate) old: ObjectId,
+pub struct PlannedRefDelete {
+    pub full_name: String,
+    pub old: ObjectId,
 }
 
 /// The ONE reconciliation plan EVERY push destination applies, so its published
 /// refs converge to the served frontier by construction.
 #[derive(Debug)]
-pub(crate) struct DestinationReconcilePlan {
+pub struct DestinationReconcilePlan {
     /// Survivors to write — creations, fast-forwards, and FORCED embargo rewinds.
-    pub(crate) writes: Vec<PlannedRefWrite>,
+    pub writes: Vec<PlannedRefWrite>,
     /// Previously-exported refs the mirror no longer serves AND that still exist
     /// at the destination — to delete. Scoped to heddle-owned refs (never foreign).
-    pub(crate) deletes: Vec<PlannedRefDelete>,
+    pub deletes: Vec<PlannedRefDelete>,
     /// The exported-refs record to persist for this destination after the push:
     /// full ref name → the tip heddle just published, plus the previously-recorded
     /// tip for any ref left in place — a still-served ref out of this push's scope
     /// OR an out-of-band tip whose retraction was skipped (so `--force` can still
     /// retract it later). A deleted ref drops out; a foreign ref never enters.
-    pub(crate) new_manifest: HashMap<String, ObjectId>,
+    pub new_manifest: HashMap<String, ObjectId>,
 }
 
 /// The sorted full names of the refs a destination reconcile plan WRITES —
@@ -3320,7 +3321,7 @@ pub(crate) struct DestinationReconcilePlan {
 /// can verify the round-trip with `git ls-remote`. Retraction deletes are
 /// not included. Sorted because the plan's write order derives from hash-map
 /// iteration and the reported list must be deterministic.
-pub(crate) fn planned_write_names(plan: &DestinationReconcilePlan) -> Vec<String> {
+pub fn planned_write_names(plan: &DestinationReconcilePlan) -> Vec<String> {
     let mut names: Vec<String> = plan
         .writes
         .iter()
@@ -3408,7 +3409,7 @@ fn creatable_ref_names(
 ///   scoping AND the single ownership token for both delete and force.
 /// * `force` — the user's explicit `--force`: additionally forces a true fork
 ///   AND authorizes retracting an out-of-band destination tip.
-pub(crate) fn plan_destination_reconcile(
+pub fn plan_destination_reconcile(
     mirror_repo: &SleyRepository,
     served_frontier: &[RefUpdate],
     creatable_names: Option<&HashSet<String>>,
@@ -3567,7 +3568,7 @@ fn read_destination_ref_map(
         .collect())
 }
 
-pub(crate) fn apply_ref_updates(
+pub fn apply_ref_updates(
     repo: &SleyRepository,
     updates: &[RefUpdate],
     log_message: &str,
@@ -3786,8 +3787,8 @@ fn clone_url_to_bare_via_sley(
 
 /// Materialize the checkout `.git` object closure for the commit mapped to
 /// `tip_state_id` (`tip_oid`) — reconstructing every byte-faithful commit from
-/// heddle state, and copying only the lossy residual from the eager `.heddle/git`
-/// mirror (#568 P1).
+/// heddle state, then resolving lossy objects from Raw Git Object Residuals
+/// (preferred) or the Bridge Mirror backstop (#568 P1 + residual foundation).
 ///
 /// Walks the heddle state DAG from `tip_state_id`. For each visited state:
 ///   * its mapped git OID is already in `excluded` (the prior checkout HEAD's full
@@ -3796,9 +3797,10 @@ fn clone_url_to_bare_via_sley(
 ///   * [`commit_is_byte_faithful`] ⇒ reconstruct the commit object (and, via
 ///     [`reconstruct_commit_bytes`]'s [`export_tree`], its whole tree/blob closure)
 ///     directly into `object_repo`, then recurse into its parents;
-///   * otherwise (lossy: `--lossy` import or non-UTF8 identity — the residual the
-///     mirror exclusively holds) ⇒ copy that commit's full reachable closure from
-///     `mirror_repo` and DO NOT recurse (the copy already brought its ancestry).
+///   * otherwise (lossy: `--lossy` import or non-UTF8 identity) ⇒ install that
+///     commit's object from residual storage when present; otherwise copy its
+///     reachable closure from the Bridge Mirror (lazily migrating the root into
+///     residuals) and DO NOT recurse when the mirror supplied the closure.
 ///
 /// CRITICAL safety gate: every reconstructed commit's git OID MUST equal the
 /// mapped `git_oid`. A mismatch means reconstruction diverged from the imported
@@ -3806,12 +3808,17 @@ fn clone_url_to_bare_via_sley(
 /// wrong-OID checkout — so this HARD-ERRORS instead. This assertion is what lets
 /// the reconstruction path be trusted as a mirror replacement.
 ///
-/// Output is byte-identical to the prior `copy_reachable_objects_excluding(mirror
-/// → checkout)`: git objects are content-addressed, so a faithful reconstruction
-/// lands the exact same OID the mirror copy would have, and the lossy path copies
-/// verbatim. The exclude set keeps it O(objects new since the parent).
+/// When a lossy object has neither a residual nor a mirror copy, this hard-fails
+/// with a clear fidelity error rather than silently omitting the object.
+///
+/// Output is byte-identical to prior mirror-backed materialization for objects
+/// that remain residual- or mirror-backed: git objects are content-addressed, so
+/// a faithful reconstruction lands the exact same OID the mirror copy would have,
+/// and the lossy path installs verbatim bytes. The exclude set keeps it O(objects
+/// new since the parent). `init_mirror` remains available for migration; this
+/// path does not delete `.heddle/git`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn materialize_checkout_closure_from_state(
+pub fn materialize_checkout_closure_from_state(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
     mirror_repo: &SleyRepository,
@@ -3820,12 +3827,13 @@ pub(crate) fn materialize_checkout_closure_from_state(
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {
-    // Lossy commits whose closure is copied verbatim from the mirror. Their roots
-    // are batched and copied once at the end (a single excluding pack install,
-    // matching the prior single-copy perf shape) rather than per-commit.
+    // Lossy commits whose closure still needs Bridge Mirror copy after residual
+    // install attempts. Residual-only roots are installed per-oid below; mirror
+    // roots are batched into one excluding pack install for perf shape parity.
     let mut lossy_roots: Vec<ObjectId> = Vec::new();
     let mut stack: Vec<ChangeId> = vec![*tip_state_id];
     let mut seen: HashSet<ChangeId> = HashSet::new();
+    let residual_store = ResidualStore::open(heddle_repo.heddle_dir());
 
     while let Some(state_id) = stack.pop() {
         if !seen.insert(state_id) {
@@ -3869,24 +3877,116 @@ pub(crate) fn materialize_checkout_closure_from_state(
             debug_assert_eq!(written, git_oid);
             stack.extend(state.parents.iter().copied());
         } else {
-            // Lossy residual: the verbatim bytes live only in the mirror. Copy this
-            // commit's full closure from there and stop — the copy carries its
-            // ancestry, so we don't reconstruct (or re-copy) beneath it.
+            // Lossy residual path: prefer Raw Git Object Residual, else Bridge
+            // Mirror. Residual install covers only this commit object (not its
+            // full tree closure); when residual is present we still fall back to
+            // mirror for missing dependents if the residual is commit-only, so
+            // keep the oid in lossy_roots for mirror closure copy when residual
+            // install alone is insufficient for the checkout.
             lossy_roots.push(git_oid);
         }
     }
 
     // Ensure the requested tip is materialized even in the degenerate case where
     // the walk skipped it (e.g. an unmapped store state that nonetheless has a
-    // mirror object): fall back to the mirror copy for it. The faithful path above
-    // already wrote it when reconstructable, and a redundant root here is pruned
-    // by the exclude set / idempotent install.
+    // residual/mirror object): fall back for it. The faithful path above already
+    // wrote it when reconstructable, and a redundant root here is pruned by the
+    // exclude set / idempotent install.
     if object_repo.read_object(&tip_oid).is_err() && !lossy_roots.contains(&tip_oid) {
         lossy_roots.push(tip_oid);
     }
 
     if !lossy_roots.is_empty() {
-        copy_reachable_objects_excluding(mirror_repo, object_repo, lossy_roots, excluded)?;
+        materialize_lossy_roots_from_residual_or_mirror(
+            &residual_store,
+            mirror_repo,
+            object_repo,
+            &lossy_roots,
+            excluded,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Install lossy roots into `object_repo`: residual first (with lazy mirror
+/// migration into residual storage), then Bridge Mirror reachable copy for any
+/// roots (and their closures) still missing. Hard-fails when a root is present
+/// in neither residual nor mirror.
+fn materialize_lossy_roots_from_residual_or_mirror(
+    residual_store: &ResidualStore,
+    mirror_repo: &SleyRepository,
+    object_repo: &SleyRepository,
+    lossy_roots: &[ObjectId],
+    excluded: &HashSet<ObjectId>,
+) -> GitProjectionResult<()> {
+    let format = object_repo.object_format();
+    let mut mirror_needed: Vec<ObjectId> = Vec::new();
+
+    for oid in lossy_roots {
+        if excluded.contains(oid) || object_repo.read_object(oid).is_ok() {
+            continue;
+        }
+        // Prefer residual. If residual is only the commit root, mirror copy may
+        // still be required for tree/blob dependents — those are pulled via the
+        // mirror batch below when the object still cannot be fully satisfied.
+        // For a residual that installs successfully, still attempt mirror
+        // closure copy for dependents that residual storage may not yet hold
+        // (foundation: residual capture is often commit-granular first).
+        match residual_store.install_into(object_repo, oid) {
+            Ok(true) => {
+                // Root installed from residual; still ask the mirror for any
+                // missing reachable dependents when the mirror is available.
+                mirror_needed.push(*oid);
+            }
+            Ok(false) => {
+                // No residual: require mirror (and migrate the root into residual
+                // when the mirror has it).
+                let residual = resolve_lossy_object(
+                    residual_store,
+                    Some(mirror_repo),
+                    format,
+                    oid,
+                    true, // lazy migrate mirror → residual
+                )?;
+                let written = object_repo
+                    .write_object(sley::plumbing::sley_object::EncodedObject::new(
+                        residual.object_type,
+                        residual.body,
+                    ))
+                    .map_err(git_err)?;
+                if written != *oid {
+                    return Err(GitProjectionError::Git(format!(
+                        "lossy materialize wrote {written}, expected {oid}"
+                    )));
+                }
+                mirror_needed.push(*oid);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if !mirror_needed.is_empty() {
+        // Best-effort closure fill from the Bridge Mirror. If the mirror lacks
+        // an object that residual already supplied as a root, copy is a no-op
+        // for present oids; missing dependents only surface when the checkout
+        // later needs them. When the mirror itself is empty/absent for these
+        // roots and residual supplied only the root commit, dependent trees may
+        // still be missing — that is a known residual-closure completeness gap
+        // tracked for full residual capture of tree/blob graphs.
+        if let Err(error) =
+            copy_reachable_objects_excluding(mirror_repo, object_repo, mirror_needed.iter().copied(), excluded)
+        {
+            // If every root is already readable in the target (residual-only
+            // path without a usable mirror), tolerate mirror copy failure only
+            // when all roots are present.
+            let all_roots_present = mirror_needed
+                .iter()
+                .all(|oid| object_repo.read_object(oid).is_ok());
+            if !all_roots_present {
+                return Err(error);
+            }
+        }
     }
 
     Ok(())
@@ -3916,7 +4016,7 @@ fn resolve_mapped_git_oid(
     Ok(None)
 }
 
-pub(crate) fn copy_reachable_objects(
+pub fn copy_reachable_objects(
     source: &SleyRepository,
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
@@ -3942,7 +4042,7 @@ pub(crate) fn copy_reachable_objects(
 /// prunes them all, turning per-checkpoint object transfer from O(total history)
 /// into O(objects new since the parent). Output is byte-identical — the same
 /// objects end up in `target`; the pruned ones were already there.
-pub(crate) fn copy_reachable_objects_excluding(
+pub fn copy_reachable_objects_excluding(
     source: &SleyRepository,
     target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,

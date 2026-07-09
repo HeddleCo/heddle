@@ -84,6 +84,21 @@ pub fn attenuate_for_agent(
 fn build_attenuation_block(
     restrictions: &AgentAttenuation,
 ) -> Result<biscuit_auth::builder::BlockBuilder> {
+    // Fail closed on characters that could break out of a Biscuit string
+    // literal or inject operators into the DSL before we assemble the block.
+    validate_biscuit_token_string("agent_id", &restrictions.agent_id)?;
+    if let Some(ops) = &restrictions.allowed_operations {
+        for op in ops {
+            validate_biscuit_token_string("allowed_operations entry", op)?;
+        }
+    }
+    if let Some(resources) = &restrictions.allowed_resources {
+        for (kind, path) in resources {
+            validate_biscuit_token_string("resource kind", kind)?;
+            validate_biscuit_token_string("resource path", path)?;
+        }
+    }
+
     let mut block = biscuit_auth::builder::BlockBuilder::new();
     block = block
         .fact(format!("agent({})", biscuit_string(&restrictions.agent_id)).as_str())
@@ -130,6 +145,28 @@ fn build_attenuation_block(
     Ok(block)
 }
 
+/// Allowlist for values interpolated into Biscuit DSL string literals.
+///
+/// Restricted to `[A-Za-z0-9._/@:+-]` so quotes, newlines, `$`, `|`, and
+/// other DSL/metacharacters cannot inject facts or checks. Paths may use
+/// `/`; operation names and agent ids are alphanumeric-plus-punctuation.
+fn validate_biscuit_token_string(field: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{field} must not be empty");
+    }
+    for ch in value.chars() {
+        if !matches!(
+            ch,
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '/' | '@' | ':' | '+' | '-'
+        ) {
+            anyhow::bail!(
+                "{field} contains forbidden character {ch:?}; allowed: [A-Za-z0-9._/@:+-]"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn biscuit_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -137,6 +174,9 @@ fn biscuit_string(s: &str) -> String {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
             _ => out.push(ch),
         }
     }
@@ -250,5 +290,51 @@ mod tests {
         let parsed =
             biscuit_auth::UnverifiedBiscuit::from_base64(attenuated.as_bytes()).expect("parse");
         assert!(parsed.block_count() >= 2, "expected attenuation block");
+    }
+
+    #[test]
+    fn rejects_injection_in_allowed_operations() {
+        let (parent, _kp) = fresh_parent_token();
+        let err = attenuate_for_agent(
+            &parent,
+            AgentAttenuation {
+                agent_id: "agent-1".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                allowed_operations: Some(vec![
+                    r#"x" || true || $op == "y"#.to_string(),
+                ]),
+                allowed_resources: None,
+            },
+        )
+        .expect_err("injection payload must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("forbidden character") || message.contains("allowed_operations"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn accepts_normal_operation_names() {
+        let (parent, _kp) = fresh_parent_token();
+        attenuate_for_agent(
+            &parent,
+            AgentAttenuation {
+                agent_id: "agent-1".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                allowed_operations: Some(vec!["GetState".to_string(), "ListRefs".to_string()]),
+                allowed_resources: Some(vec![("repo".to_string(), "org/acme/heddle".to_string())]),
+            },
+        )
+        .expect("normal ops must attenuate");
+    }
+
+    #[test]
+    fn validate_biscuit_token_string_allowlist() {
+        assert!(validate_biscuit_token_string("op", "GetState").is_ok());
+        assert!(validate_biscuit_token_string("path", "org/acme/heddle").is_ok());
+        assert!(validate_biscuit_token_string("op", r#"x" || true"#).is_err());
+        assert!(validate_biscuit_token_string("op", "a$b").is_err());
+        assert!(validate_biscuit_token_string("op", "").is_err());
     }
 }

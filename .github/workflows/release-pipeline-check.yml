@@ -88,6 +88,11 @@ jobs:
       - name: Assert no cross-crate publish-first snapshot regressions
         run: bash scripts/check-snapshot-atomicity.sh
 
+      # Track A verification ownership: health/state proof construction lives
+      # in heddle-core only. CLI may inject Machine-Contract Proof + render.
+      - name: Assert verification proof ownership stays in heddle-core
+        run: bash scripts/check-verification-owner.sh
+
   authored-states-signed:
     name: authored states sign via chokepoint (heddle#482)
     runs-on: blacksmith-2vcpu-ubuntu-2404

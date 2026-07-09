@@ -13,21 +13,22 @@
 //! convention.
 
 use anyhow::{Result, anyhow};
-use objects::store::ObjectStore;
-use oplog::{OpLogBackend, OpRecord};
+use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
+use objects::object::Attribution;
 use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::{ObjectId, Repository as SleyRepository};
 
 use super::{
-    action_line::print_next, command_catalog::ActionTemplate, git_overlay_txn,
-    snapshot::ensure_current_state, verification_health::RepositoryVerificationState,
+    action_line::print_next,
+    command_catalog::ActionTemplate,
+    git_overlay_txn,
+    snapshot::{SnapshotAgentOverrides, build_attribution},
+    verification_health::RepositoryVerificationState,
     worktree_safety::dirty_worktree_advice,
 };
 use crate::{
     cli::{CheckpointArgs, Cli, should_output_json, style, worktree_status_options},
     config::UserConfig,
-    git_projection_engine::{GitProjection, WriteThroughOutcome},
 };
 
 #[derive(Serialize)]
@@ -102,7 +103,7 @@ pub(crate) fn create_git_checkpoint(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, true, None, None)
+    create_git_checkpoint_inner(repo, message, status_options, true, None)
 }
 
 /// Variant of [`create_git_checkpoint`] that reuses an already-computed
@@ -118,14 +119,7 @@ pub(crate) fn create_git_checkpoint_with_worktree_status(
     status_options: repo::WorktreeStatusOptions,
     worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(
-        repo,
-        message,
-        status_options,
-        true,
-        None,
-        Some(worktree_status),
-    )
+    create_git_checkpoint_inner(repo, message, status_options, true, Some(worktree_status))
 }
 
 pub(crate) fn create_git_checkpoint_from_index_snapshot(
@@ -133,23 +127,19 @@ pub(crate) fn create_git_checkpoint_from_index_snapshot(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(repo, message, status_options, false, None, None)
+    create_git_checkpoint_inner(repo, message, status_options, false, None)
 }
 
+/// Index-snapshot checkpoint helper retained for callers that still compose
+/// capture and checkpoint as separate steps; commit uses `execute_save` now.
+#[allow(dead_code)]
 pub(crate) fn create_git_checkpoint_from_index_snapshot_with_worktree_status(
     repo: &Repository,
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     worktree_status: &git_overlay_txn::GitOverlayWorktreeStatus,
 ) -> Result<GitCheckpointRecord> {
-    create_git_checkpoint_inner(
-        repo,
-        message,
-        status_options,
-        false,
-        None,
-        Some(worktree_status),
-    )
+    create_git_checkpoint_inner(repo, message, status_options, false, Some(worktree_status))
 }
 
 fn create_git_checkpoint_inner(
@@ -157,7 +147,6 @@ fn create_git_checkpoint_inner(
     message: Option<&str>,
     status_options: repo::WorktreeStatusOptions,
     require_clean_worktree: bool,
-    git_parent_override: Option<Vec<ObjectId>>,
     precomputed_worktree_status: Option<&git_overlay_txn::GitOverlayWorktreeStatus>,
 ) -> Result<GitCheckpointRecord> {
     if repo.capability() != RepositoryCapability::GitOverlay {
@@ -185,76 +174,107 @@ fn create_git_checkpoint_inner(
             git_overlay_txn::preflight_checkpoint(repo, "checkpoint", &facts)?;
         }
     };
-    let state_id = ensure_current_state(
-        repo,
-        &UserConfig::load_default()?,
-        message
-            .map(ToOwned::to_owned)
-            .or_else(|| Some("Bootstrap git-overlay before checkpoint".to_string())),
-    )?;
-    let state = repo
-        .store()
-        .get_state(&state_id)?
-        .ok_or_else(|| anyhow!("no captured state found after bootstrap"))?;
-    if require_clean_worktree {
-        let tree = repo.require_tree(&state.tree)?;
-        let status = repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)?;
-        if !status.is_clean() {
-            return Err(anyhow!(dirty_worktree_advice(
-                "checkpoint",
-                &status,
-                "the current Heddle state was left unchanged; these paths have not been captured",
-            )));
-        }
-    }
-    if let Some(record) = repo.latest_git_checkpoint_for_change(&state.change_id)? {
-        return Ok(record);
-    }
+
+    let user_config = UserConfig::load_default()?;
+    // When bootstrapping a missing Heddle state, resolve full attribution so the
+    // capture inherits agent/principal rules. When reusing HEAD, only identity
+    // for the Git commit matters and is gated below.
+    let attribution = if repo.current_state()?.is_some() {
+        let principal = super::snapshot::resolve_principal(repo, &user_config)
+            .unwrap_or_else(|_| {
+                objects::object::Principal::new("Unknown", "unknown@example.com")
+            });
+        Attribution::human(principal)
+    } else {
+        build_attribution(
+            repo,
+            &user_config,
+            &SnapshotAgentOverrides {
+                provider: None,
+                model: None,
+                session: None,
+                segment: None,
+                policy: None,
+                no_policy: false,
+                no_agent: false,
+            },
+        )?
+    };
+
+    // Identity gate for Git commit author (same contract as before).
     git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
         repo,
-        &state.attribution.principal,
+        &attribution.principal,
         "checkpoint",
         "heddle checkpoint -m \"...\"",
     )?;
 
-    let summary = message
-        .map(ToOwned::to_owned)
-        .or_else(|| state.intent.clone())
-        .unwrap_or_else(|| format!("Checkpoint {}", state.change_id.short()));
-    let branch = repo
-        .git_overlay_current_branch()?
-        .unwrap_or_else(|| "HEAD".to_string());
-    let previous_git_oid = git_rev_parse_head(repo.root());
-    let mut bridge = GitProjection::new(repo);
-    if let Some(parents) = git_parent_override {
-        bridge.set_commit_parent_override(state.change_id, parents);
-    }
-    let git_commit = match bridge
-        .write_through_current_checkout_with_message(state.change_id, summary.clone())?
-    {
-        WriteThroughOutcome::Wrote(git_commit) => git_commit.to_string(),
-        WriteThroughOutcome::Skipped(reason) => {
-            return Err(anyhow!(
-                git_overlay_txn::checkpoint_git_write_skipped_advice(reason.to_string())
-            ));
-        }
+    let plan = SavePlan {
+        verb: SaveVerb::Checkpoint,
+        intent: message
+            .map(ToOwned::to_owned)
+            .or_else(|| Some("Bootstrap git-overlay before checkpoint".to_string())),
+        confidence: None,
+        attribution,
+        git_scope: if require_clean_worktree {
+            GitScope::WorktreeAll
+        } else {
+            GitScope::Staged
+        },
+        supplied_tree: None,
+        reuse_current_state: true,
+        require_clean_worktree,
+        worktree_status_options: status_options,
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        precomputed_worktree_status: precomputed_worktree_status.map(|status| match status {
+            Ok(Some(s)) => Ok(Some(objects::worktree::WorktreeStatus {
+                modified: s.modified.clone(),
+                added: s.added.clone(),
+                deleted: s.deleted.clone(),
+            })),
+            Ok(None) => Ok(None),
+            Err(err) => Err(objects::HeddleError::Config(err.to_string())),
+        }),
     };
-    let record = repo.record_git_checkpoint(&state.change_id, git_commit.clone(), summary)?;
-    repo.oplog().record_batch_scoped(
-        vec![OpRecord::GitCheckpoint {
-            branch,
-            state: state.change_id,
-            previous_git_oid,
-            new_git_oid: git_commit,
-        }],
-        Some(&repo.op_scope()),
-    )?;
-    Ok(record)
-}
 
-fn git_rev_parse_head(root: &std::path::Path) -> Option<String> {
-    let git = SleyRepository::discover(root).ok()?;
-    git.head().ok()?.oid.map(|id| id.to_string())
+    let report = execute_save(repo, plan).map_err(|err| {
+        // Preserve dirty-worktree RecoveryAdvice wording when the shared
+        // primitive refuses a dirty checkpoint.
+        if err
+            .chain()
+            .any(|cause| {
+                cause
+                    .downcast_ref::<objects::HeddleError>()
+                    .is_some_and(|he| {
+                        matches!(
+                            he,
+                            objects::HeddleError::Recovery(details) if details.kind == "dirty_worktree"
+                        )
+                    })
+            })
+        {
+            // Recompute dirty status for the richer CLI advice path.
+            if let Ok(Some(state)) = repo.current_state()
+                && let Ok(tree) = repo.require_tree(&state.tree)
+                && let Ok(status) =
+                    repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)
+                && !status.is_clean()
+            {
+                return anyhow!(dirty_worktree_advice(
+                    "checkpoint",
+                    &status,
+                    "the current Heddle state was left unchanged; these paths have not been captured",
+                ));
+            }
+        }
+        err
+    })?;
+
+    report
+        .git_checkpoint
+        .ok_or_else(|| anyhow!("checkpoint completed without a Git checkpoint record"))
 }
 
 fn build_output(

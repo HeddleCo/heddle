@@ -86,6 +86,16 @@ impl HostedSession {
         Ok(Self { config })
     }
 
+    /// Explicitly allow cleartext to non-loopback hosts for this session
+    /// (CLI `--insecure` or remote `insecure = true`). Does not disable an
+    /// allow already set via user config / env.
+    pub fn with_allow_insecure(mut self, allow: bool) -> Self {
+        if allow {
+            self.config.allow_insecure = true;
+        }
+        self
+    }
+
     /// Connect and run mandatory credential rotation.
     ///
     /// The rotation MUST run immediately after connect — every hosted entry
@@ -110,7 +120,20 @@ impl HostedGrpcClient {
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
+        Self::open_session_with_insecure(addr, user_config, server_key, mode, false).await
+    }
+
+    /// Like [`open_session`], but allows cleartext to non-loopback when
+    /// `allow_insecure` is true (CLI `--insecure` / remote `insecure = true`).
+    pub async fn open_session_with_insecure(
+        addr: SocketAddr,
+        user_config: &UserConfig,
+        server_key: Option<String>,
+        mode: HostedAuthMode,
+        allow_insecure: bool,
+    ) -> Result<Self> {
         Ok(HostedSession::build(user_config, server_key, mode)?
+            .with_allow_insecure(allow_insecure)
             .connect(addr)
             .await?)
     }

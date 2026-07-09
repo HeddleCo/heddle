@@ -6,10 +6,11 @@
 
 pub mod git_core;
 pub mod git_export;
-pub(crate) mod git_ingest;
+pub mod git_ingest;
 pub mod git_mapping;
 pub mod git_notes;
 pub mod git_reconstruct;
+pub mod git_residual;
 pub mod git_sync;
 pub mod git_util;
 #[cfg(debug_assertions)]
@@ -19,4 +20,8 @@ pub mod test_support;
 pub use git_core::{
     GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, WriteThroughOutcome,
     WriteThroughSkipReason,
+};
+pub use git_residual::{
+    BridgeMirrorRetirementStatus, ResidualObject, ResidualStore, RESIDUALS_DIR_NAME,
+    bridge_mirror_retirement_status, resolve_lossy_object,
 };

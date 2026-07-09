@@ -12,6 +12,7 @@ members = [
     "crates/merge",
     "crates/mount",
     "crates/format",
+    "crates/git-projection",
     "crates/objects",
     "crates/oplog",
     "crates/wire",
