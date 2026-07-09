@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
@@ -99,6 +104,64 @@ struct LandOutput {
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     chosen_path: String,
+}
+
+/// One peer's result inside a multi-land batch (`land --threads a,b`).
+#[derive(Debug, Clone, Serialize)]
+struct MultiLandPeerResult {
+    thread: String,
+    status: String,
+    message: String,
+    captured: bool,
+    checkpointed: bool,
+    git_commit: Option<String>,
+    integrated: bool,
+    synced: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    siblings_restacked: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
+
+/// Unified envelope for `land --threads a,b,c` (one JSON object, not N).
+#[derive(Serialize)]
+struct MultiLandOutput {
+    output_kind: &'static str,
+    status: String,
+    action: &'static str,
+    message: String,
+    threads: Vec<String>,
+    landed: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_at: Option<String>,
+    peers: Vec<MultiLandPeerResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_head: Option<String>,
+    recommended_action: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "verification")]
+    trust: Option<RepositoryVerificationState>,
+}
+
+impl super::compact::CompactProjection for MultiLandOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let mut out = super::compact::CompactOutput::new(self.output_kind);
+        out.status = Some(self.status.clone());
+        out.next_action = (!self.recommended_action.is_empty())
+            .then(|| self.recommended_action.clone());
+        if let Some(stop) = &self.stopped_at {
+            out.blockers = vec![format!("stopped at {stop}")];
+        }
+        out
+    }
+}
+
+thread_local! {
+    /// When set, individual `write_land_output` calls record into the batch
+    /// instead of printing (used by `land --threads`).
+    static MULTI_LAND_COLLECTOR: RefCell<Option<Vec<MultiLandPeerResult>>> =
+        const { RefCell::new(None) };
 }
 
 pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
@@ -1827,6 +1890,35 @@ fn scoped_resolve_list_command(thread: &Thread) -> String {
 }
 
 fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {
+    // Multi-land batch mode: collect peer results; emit one envelope at the end.
+    // Do not process::exit here — return Err so cmd_land_many can finish the batch
+    // envelope then stop.
+    if MULTI_LAND_COLLECTOR.with(|c| c.borrow().is_some()) {
+        MULTI_LAND_COLLECTOR.with(|c| {
+            if let Some(peers) = c.borrow_mut().as_mut() {
+                peers.push(MultiLandPeerResult {
+                    thread: output.thread.clone(),
+                    status: output.operator.status.clone(),
+                    message: output.operator.message.clone(),
+                    captured: output.captured,
+                    checkpointed: output.checkpointed,
+                    git_commit: output.git_commit.clone(),
+                    integrated: output.integrated,
+                    synced: output.synced,
+                    siblings_restacked: output.siblings_restacked.clone(),
+                    blockers: output.operator.blockers.clone(),
+                    warnings: output.operator.warnings.clone(),
+                });
+            }
+        });
+        if matches!(
+            output.operator.status.as_str(),
+            "blocked" | "failed"
+        ) {
+            return Err(anyhow!(output.operator.message.clone()));
+        }
+        return Ok(());
+    }
     if should_output_json(cli, None) {
         write_command_json(
             output,
@@ -2005,8 +2097,8 @@ fn load_incomplete_land_marker(repo: &Repository) -> Result<Option<IncompleteLan
 }
 
 /// If a prior land integrated Heddle then crashed before clearing the
-/// journal, roll back that integration so the next land starts clean.
-fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
+/// journal, roll back that integration so the next land/status starts clean.
+pub(crate) fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     let Some(marker) = load_incomplete_land_marker(repo)? else {
         return Ok(());
     };
@@ -2061,7 +2153,13 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         return Err(anyhow!("--threads requires at least one thread name"));
     }
 
+    MULTI_LAND_COLLECTOR.with(|c| {
+        *c.borrow_mut() = Some(Vec::with_capacity(ordered.len()));
+    });
+
     let mut landed: Vec<String> = Vec::new();
+    let mut stopped_at: Option<String> = None;
+    let mut stop_error: Option<anyhow::Error> = None;
     for (idx, thread_name) in ordered.iter().enumerate() {
         let mut one = args.clone();
         one.thread = Some(thread_name.clone());
@@ -2076,13 +2174,154 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         match Box::pin(cmd_land(cli, one)).await {
             Ok(()) => landed.push(thread_name.clone()),
             Err(err) => {
-                return Err(anyhow!(
-                    "multi-land stopped at '{}' after successfully landing [{}]: {err:#}",
-                    thread_name,
-                    landed.join(", ")
-                ));
+                stopped_at = Some(thread_name.clone());
+                stop_error = Some(err);
+                break;
             }
         }
+    }
+
+    let peers = MULTI_LAND_COLLECTOR
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or_default();
+
+    // Always emit a single batch envelope when any peer was attempted.
+    let repo = cli.open_repo().ok();
+    write_multi_land_output(
+        cli,
+        repo.as_ref(),
+        &ordered,
+        &landed,
+        stopped_at.as_deref(),
+        peers,
+    )?;
+
+    if let Some(err) = stop_error {
+        return Err(anyhow!(
+            "multi-land stopped at '{}' after successfully landing [{}]: {err:#}",
+            stopped_at.as_deref().unwrap_or("?"),
+            landed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn write_multi_land_output(
+    cli: &Cli,
+    repo: Option<&Repository>,
+    ordered: &[String],
+    landed: &[String],
+    stopped_at: Option<&str>,
+    peers: Vec<MultiLandPeerResult>,
+) -> Result<()> {
+    let all_ok = stopped_at.is_none() && landed.len() == ordered.len();
+    let status = if all_ok {
+        "landed"
+    } else if landed.is_empty() {
+        "blocked"
+    } else {
+        "partial"
+    };
+    let message = if all_ok {
+        format!(
+            "Landed {} thread(s): {}",
+            landed.len(),
+            landed.join(", ")
+        )
+    } else if let Some(stop) = stopped_at {
+        format!(
+            "Landed {} of {} thread(s); stopped at '{stop}'",
+            landed.len(),
+            ordered.len()
+        )
+    } else {
+        format!("Landed {} of {} thread(s)", landed.len(), ordered.len())
+    };
+    let git_head = repo.and_then(|r| {
+        sley::Repository::discover(r.root())
+            .ok()
+            .and_then(|git| git.head().ok())
+            .and_then(|h| h.oid.map(|o| o.to_string()))
+    });
+    let recommended_action = if all_ok {
+        if repo
+            .map(|r| r.capability() == repo::RepositoryCapability::GitOverlay)
+            .unwrap_or(false)
+        {
+            "heddle push".to_string()
+        } else {
+            String::new()
+        }
+    } else if let Some(stop) = stopped_at {
+        format!("heddle land --thread {stop} --no-push")
+    } else {
+        String::new()
+    };
+    let trust = repo.map(build_repository_verification_state);
+
+    let output = MultiLandOutput {
+        output_kind: "land_batch",
+        status: status.to_string(),
+        action: "land",
+        message,
+        threads: ordered.to_vec(),
+        landed: landed.to_vec(),
+        stopped_at: stopped_at.map(str::to_string),
+        peers,
+        git_head,
+        recommended_action: recommended_action.clone(),
+        trust,
+    };
+
+    if should_output_json(cli, None) {
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["land"]),
+        )?;
+    } else {
+        let marker = if all_ok {
+            style::ok_marker()
+        } else {
+            style::warn_marker()
+        };
+        println!("{marker} {}", output.message);
+        if let Some(head) = &output.git_head {
+            println!("  {}", style::field("git head", &head[..head.len().min(12)]));
+        }
+        for peer in &output.peers {
+            let peer_mark = if peer.status == "landed" {
+                style::ok_marker()
+            } else {
+                style::warn_marker()
+            };
+            println!(
+                "  {peer_mark} {} — {}",
+                style::bold(&peer.thread),
+                peer.status
+            );
+            if let Some(gc) = &peer.git_commit {
+                println!("      git {}", &gc[..gc.len().min(12)]);
+            }
+            if !peer.siblings_restacked.is_empty() {
+                println!(
+                    "      siblings restacked: {}",
+                    peer.siblings_restacked.join(", ")
+                );
+            }
+            for b in &peer.blockers {
+                println!("      blocker: {}", style::warn(b));
+            }
+        }
+        if !recommended_action.is_empty() {
+            print_next(&recommended_action);
+        }
+    }
+    if !all_ok {
+        // partial | blocked — use operator blocked exit (1) when applicable
+        let code = crate::cli::commands::operator_core::blocked_operator_exit_code(status)
+            .unwrap_or(1);
+        std::process::exit(code);
     }
     Ok(())
 }

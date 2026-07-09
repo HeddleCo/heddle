@@ -152,6 +152,8 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
+    // Recover crash mid-land before readiness gates (Heddle-ahead-of-Git).
+    let _ = super::workflow::recover_incomplete_land_if_present(&repo);
     let user_config = UserConfig::load_default().unwrap_or_default();
     // Compute the git-overlay worktree status ONCE up front. It feeds the initial
     // verification preflight here and the second preflight further down, which

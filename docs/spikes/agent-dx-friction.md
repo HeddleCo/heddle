@@ -238,3 +238,5 @@ When shipping:
 | 2026-07-09 | P1-A done: default shared cargo target for Rust solid/materialized; `--no-shared-target` opt-out; try/fanout inherit; loud blocked-config warn. |
 | 2026-07-09 | Manual dogfood of all shipped items (temp overlay repo). P0-A/B, P1-A/B, P2-B pass; P2-A restack pass; second-peer Git export non-FF remains residual; shared-target `.cargo/` ignore follow-up. |
 | 2026-07-09 | **R1** write-through tip FF parent policy + multi-peer land matrix test. **R2** incomplete-land journal + recover on next land. **R3** `land --threads a,b,c`. |
+| 2026-07-09 | Magic DX: land_batch envelope for `--threads`; incomplete-land recovery on status/ready. |
+

@@ -314,6 +314,8 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let repo = Repository::open(&start)?;
+    // Recover crash mid-land before reporting verification (Heddle-ahead-of-Git).
+    let _ = super::workflow::recover_incomplete_land_if_present(&repo);
     let repo_config = repo.config().clone();
     let as_json = should_output_json(cli, Some(&repo_config));
     let compact_json = as_json && output_is_compact(cli);

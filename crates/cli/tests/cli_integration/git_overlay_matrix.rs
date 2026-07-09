@@ -7294,7 +7294,7 @@ fn git_overlay_matrix_land_threads_flag_lands_peers_in_order() {
     std::fs::write(beta.join("b.txt"), "b\n").unwrap();
     json(&beta, &["--output", "json", "capture", "-m", "b"]);
 
-    // One command lands both peers (each land emits its own JSON line).
+    // One command lands both peers — single batch JSON envelope.
     let out = heddle(
         &[
             "--output",
@@ -7307,18 +7307,25 @@ fn git_overlay_matrix_land_threads_flag_lands_peers_in_order() {
         Some(temp.path()),
     )
     .expect("land --threads alpha,beta");
-    let landed_count = out
-        .lines()
-        .filter(|line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .and_then(|v| v["status"].as_str().map(|s| s == "landed"))
-                .unwrap_or(false)
-        })
-        .count();
+    let batch: Value = serde_json::from_str(out.trim()).unwrap_or_else(|err| {
+        panic!("expected single land_batch JSON: {err}: {out}");
+    });
     assert_eq!(
-        landed_count, 2,
-        "expected two landed JSON objects, got {landed_count}: {out}"
+        batch["output_kind"].as_str(),
+        Some("land_batch"),
+        "multi-land must emit land_batch envelope: {batch}"
+    );
+    assert_eq!(
+        batch["status"].as_str(),
+        Some("landed"),
+        "batch must report landed: {batch}"
+    );
+    let peers = batch["peers"].as_array().expect("peers array");
+    assert_eq!(peers.len(), 2, "two peer results: {batch}");
+    assert_eq!(
+        batch["landed"].as_array().map(|a| a.len()),
+        Some(2),
+        "landed list: {batch}"
     );
     let tree = git_stdout(temp.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
     assert!(
