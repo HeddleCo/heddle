@@ -198,6 +198,44 @@ impl ChangeMonitorSession {
     }
 }
 
+/// Rebuild the native change-monitor snapshot + cursor sidecars from a full
+/// worktree scan.
+///
+/// This is the deliberate, maintenance-time counterpart to the hot-path
+/// `prepare`/`persist_current_cursor` no-op: `heddle maintenance run` is where
+/// we are *supposed* to pay for a full `scan_snapshot_entries` walk to
+/// (re)materialize `monitor-native.bin` + `fsmonitor.toml`, so a subsequent
+/// live helper (or a later usable session) has a baseline to diff against.
+/// The status hot path must never call this — it exists solely so maintenance
+/// keeps refreshing the monitor sidecars it always has.
+///
+/// A live helper already owns the snapshot under its long-lived watcher, so
+/// when one answers we leave it alone. `Off`/`Watchman` modes have no native
+/// snapshot to build and are treated as no-ops.
+pub(crate) fn rebuild_local_monitor_snapshot(
+    repo_root: &Path,
+    settings: FsMonitorSettings,
+) -> Result<(), HeddleError> {
+    match settings.mode {
+        FsMonitorMode::Off | FsMonitorMode::Watchman => Ok(()),
+        FsMonitorMode::Native | FsMonitorMode::Auto => {
+            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
+            if try_local_helper_refresh(repo_root, &state_path)? {
+                return Ok(());
+            }
+            let previous = load_snapshot(&snapshot_path(&state_path)).unwrap_or_default();
+            let next_generation = previous.generation.saturating_add(1);
+            let snapshot = MonitorSnapshotState {
+                version: MONITOR_SNAPSHOT_VERSION,
+                generation: next_generation,
+                entries: scan_snapshot_entries(repo_root)?,
+            };
+            persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
+            persist_cursor(&state_path, &next_generation.to_string())
+        }
+    }
+}
+
 pub(crate) fn persist_current_monitor_cursor(
     repo_root: &Path,
     settings: FsMonitorSettings,

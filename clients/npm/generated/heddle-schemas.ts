@@ -400,7 +400,10 @@ export interface AuthCreateServiceTokenSchema {
   name: string;
   namespace: string;
   output_kind: "auth_create_service_token";
-  private_key_pem: string;
+  /** Path to the private-key PEM written with mode 0600. */
+  private_key_path: string;
+  /** Present only when `--show-secrets` was passed. */
+  private_key_pem?: string | null;
   scope: string;
   token: string;
 }

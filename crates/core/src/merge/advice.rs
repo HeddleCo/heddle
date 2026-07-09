@@ -81,14 +81,29 @@ pub(crate) fn dirty_worktree(
     } else {
         format!("unsaved worktree path(s): {path_list}, and {overflow} more")
     };
-    HeddleError::recovery(RecoveryDetails::safety_refusal(
-        "dirty_worktree",
-        format!("Refusing to {action} with a dirty worktree"),
-        "Preserve work with `heddle capture -m \"...\"`, `heddle commit -m \"...\"`, or `heddle stash push -m \"...\"`, then retry.",
-        unsafe_condition,
-        format!("{action} would overwrite uncommitted worktree content"),
-        already_preserved,
-    ))
+    HeddleError::recovery(
+        RecoveryDetails::safety_refusal(
+            "dirty_worktree",
+            // Established wording (`main`): the blocker leads with the fix
+            // ("Save or stash …"), not a bare refusal. The reparent rewrote
+            // this to "Refusing to … with a dirty worktree", dropping the
+            // recovery-first phrasing the typed advice contract asserts.
+            format!("Save or stash worktree changes before {action}"),
+            format!(
+                "Save the work with `heddle commit -m \"...\"`; use `heddle capture -m \"...\"` for a Heddle-only recovery point or park it with `heddle stash push -m \"...\"`, then retry."
+            ),
+            unsafe_condition,
+            format!(
+                "{action} would write another tree into the worktree; saving first prevents those path changes from being overwritten"
+            ),
+            already_preserved,
+        )
+        .with_recovery_commands(vec![
+            "heddle commit -m \"...\"".to_string(),
+            "heddle capture -m \"...\"".to_string(),
+            "heddle stash push -m \"...\"".to_string(),
+        ]),
+    )
 }
 
 pub(crate) fn source_thread_uncaptured_work(
