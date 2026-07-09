@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Implementation of `heddle start --shared-target`.
+//! Shared cargo `target/` redirect for solid/materialized threads.
 //!
-//! When `heddle start` runs with `--shared-target` in a Rust workspace,
-//! the resulting checkout's `target/` directory is redirected to a
-//! workspace-wide shared path, so multiple parallel materialized
-//! threads don't each get their own multi-gigabyte cargo target tree.
+//! For solid/materialized threads in a Rust workspace (top-level
+//! `Cargo.toml`), `heddle start` defaults to redirecting the checkout's
+//! `target/` to a workspace-wide shared path so parallel threads don't
+//! each get their own multi-gigabyte cargo target tree. Opt out with
+//! `--no-shared-target`; force the attempt with `--shared-target`.
 //!
 //! Implementation choice: write a `.cargo/config.toml` inside the new
 //! thread checkout with `[build] target-dir = "..."`. Cargo reads this
@@ -23,8 +24,6 @@
 //! present) or top-level `Cargo.toml` (fallback). Different repos
 //! produce different fingerprints, and a stable workspace produces a
 //! stable directory across thread creates.
-//!
-//! This module is item 2.1 of the heddle 6→8 plan.
 
 use std::{
     io::Write,
@@ -53,6 +52,30 @@ pub(crate) const ADVISORY_ACTIVE_THREAD_THRESHOLD: usize = 1;
 /// makes the workspace a cargo workspace at all.
 pub(crate) fn workspace_root_is_rust(repo: &Repository) -> bool {
     repo.root().join("Cargo.toml").is_file()
+}
+
+/// Resolve whether the shared-target redirect should be attempted.
+///
+/// Precedence:
+/// 1. `--no-shared-target` always opts out.
+/// 2. `--shared-target` forces the attempt (still a no-op without a
+///    top-level `Cargo.toml` at apply time).
+/// 3. Otherwise default on when the workspace root looks like Rust.
+///
+/// Callers still gate on solid/materialized mode: virtualized threads
+/// never redirect.
+pub(crate) fn shared_target_requested(
+    shared_target: bool,
+    no_shared_target: bool,
+    is_rust: bool,
+) -> bool {
+    if no_shared_target {
+        false
+    } else if shared_target {
+        true
+    } else {
+        is_rust
+    }
 }
 
 /// Compute the deterministic per-workspace fingerprint used for the
@@ -134,13 +157,14 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
         .replace('\t', "\\t");
 
     let body = format!(
-        "# Written by `heddle start --shared-target`. Redirects cargo's\n\
-         # `target/` directory to a workspace-wide shared path so\n\
-         # multiple parallel materialized threads don't each carry\n\
+        "# Written by `heddle start` (shared cargo target). Redirects\n\
+         # cargo's `target/` directory to a workspace-wide shared path\n\
+         # so multiple parallel materialized threads don't each carry\n\
          # their own multi-gigabyte build tree.\n\
          #\n\
          # Safe to delete: cargo will fall back to a per-checkout\n\
-         # `target/` next build.\n\
+         # `target/` next build. Opt out of writing this file with\n\
+         # `heddle start --no-shared-target`.\n\
          [build]\n\
          target-dir = \"{escaped}\"\n",
     );
@@ -250,13 +274,30 @@ pub(crate) fn should_advise_shared_target(repo: &Repository) -> bool {
         && count_active_materialized_threads(repo) >= ADVISORY_ACTIVE_THREAD_THRESHOLD
 }
 
-/// Print the heads-up advisory to stderr. Kept in this module so the
-/// wording lives next to the heuristic that triggers it.
+/// Print the heads-up advisory to stderr when shared-target is off
+/// (e.g. via `--no-shared-target`) while starting another heavy thread
+/// in a Rust workspace. Kept here so the wording lives next to the
+/// heuristic that triggers it.
 pub(crate) fn print_advisory(name: &str) {
     eprintln!(
         "note: starting materialized thread '{name}' alongside an existing materialized thread \
-         in a Rust workspace; consider `heddle start --shared-target {name}` to share cargo's \
-         target/ across threads (saves multiple GB).",
+         in a Rust workspace without a shared cargo target; omit `--no-shared-target` (or pass \
+         `--shared-target`) so threads share cargo's target/ (saves multiple GB).",
+    );
+}
+
+/// Loud stderr warning when a pre-existing `.cargo/config.toml` blocked
+/// the shared-target redirect. Must not be silent: callers previously
+/// treated the no-op as success and agents would burn GB on per-thread
+/// `target/` trees without noticing.
+pub(crate) fn print_blocked_warning(checkout: &Path) {
+    let config = checkout.join(".cargo").join("config.toml");
+    eprintln!(
+        "warning: shared cargo target redirect not applied: '{}' already exists; \
+         leaving the existing config in place (threads will not share target/). \
+         Remove or rename that file to allow the redirect, or pass `--no-shared-target` \
+         to opt out explicitly.",
+        config.display(),
     );
 }
 
@@ -265,6 +306,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn shared_target_requested_precedence() {
+        // Default on for Rust, off for non-Rust.
+        assert!(shared_target_requested(false, false, true));
+        assert!(!shared_target_requested(false, false, false));
+        // Explicit on forces attempt regardless of rust signal.
+        assert!(shared_target_requested(true, false, false));
+        assert!(shared_target_requested(true, false, true));
+        // Opt-out always wins.
+        assert!(!shared_target_requested(false, true, true));
+        assert!(!shared_target_requested(true, true, true));
+    }
 
     #[test]
     fn fingerprint_is_stable_across_calls() {

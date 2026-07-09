@@ -801,7 +801,9 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     print_cd_path: false,
                     daemon: true,
                     no_daemon: false,
+                    // Inherit default shared-target (on for Rust solid/materialized).
                     shared_target: false,
+                    no_shared_target: false,
                     hydrate: false,
                 },
             )?;

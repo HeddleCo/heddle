@@ -13,7 +13,7 @@ thread, then open a GitHub PR currently hit structural friction:
 2. Overlay bootstrap can invent a **parentless Heddle root** that export turns into an **orphan Git branch** (no merge-base with `main`).
 3. N peer threads all preview as pure FF onto staging; landing one requires **manual refresh order**.
 4. Refresh/merge can **drop +x / flatten symlinks** (usually via merge tree rewrite, not the leaf writer).
-5. Rust threads default to **per-checkout multi-GB `target/`** (`--shared-target` hidden / off).
+5. Rust threads default to **per-checkout multi-GB `target/`** (addressed: shared-target default-on for Rust solid/materialized).
 6. Default **`status --output json` is the most expensive shape**, dual Sley walks, agent timeouts.
 
 These are mostly **composition and defaults**, not missing engines.
@@ -26,7 +26,7 @@ These are mostly **composition and defaults**, not missing engines.
 | Overlay first state | `ensure_current_state` may invent `parents=[]` | Lazy bind active Git tip; never orphan when Git tip exists |
 | Peer fan-in | Manual serial refresh+land | **Shipped:** post-land auto-restack of same-target siblings; multi-`land --threads` still planned |
 | Mode/symlink fidelity | Materialize OK if tree right; merge often wrong | Merge preserves FileMode/kind; e2e gates |
-| Shared cargo target | Opt-in hidden flag | Default-on for Rust solid/materialized |
+| Shared cargo target | Default-on for Rust solid/materialized | Default-on for Rust solid/materialized |
 | Status shapes | Full JSON by default for agents | Probe/short shapes; one worktree walk |
 
 ## Decisions (locked for this spike)
@@ -73,13 +73,13 @@ These are mostly **composition and defaults**, not missing engines.
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** |
 | Owner | agent wave 2 (post-reinstall) |
 | Root cause | Opt-in + hidden flag; `try`/fanout force `shared_target: false`. |
 | Fix | Default-on for solid/materialized when root `Cargo.toml` exists; `--no-shared-target` opt-out; loud warn if config cannot be written; wire try/fanout. |
 | Key files | `worktree_cmd/shared_target.rs`, `cli_args/commands_args.rs`, `thread.rs`, `start_atomic.rs`, `try_cmd.rs`, `agent_cmd.rs` |
 | Acceptance | Second+ Rust thread shares `.heddle/targets/<fp>` without flags; opt-out works; tests updated. |
-| Progress | |
+| Progress | Default-on for solid/materialized when root `Cargo.toml` exists; `--no-shared-target` opt-out; try/agent fanout inherit default; loud warn when existing `.cargo/config.toml` blocks redirect; skip hydrating `target` when redirect active; tests updated. |
 
 #### P1-B. Status shapes + kill dual Sley walk + agent probe
 
@@ -176,7 +176,7 @@ Wave 3  P2-A + P2-B
 - [x] P0-A: overlay init + start + export has merge-base with base branch
 - [x] P0-B: inject Git checkpoint failure on land → no durable Heddle-only advance (or auto-undo)
 - [x] P0-B: local NonFastForwardRef message is not remote-titled
-- [ ] P1-A: default share + opt-out
+- [x] P1-A: default share + opt-out
 - [x] P1-B: one Sley walk; default JSON not Full; honest not_checked
 - [x] P2-A: post-land auto-restack of same-target siblings (multi-`land --threads` deferred)
 - [x] P2-B: executable + symlink fidelity (merge unit tests; flat rebuild + recursive)
@@ -190,7 +190,7 @@ When shipping:
 - fix(overlay): bind active Git tip instead of inventing orphan bootstrap roots
 - fix(land): do not leave Heddle ahead of Git on checkpoint failure; clarify local vs remote non-FF
 - feat(land): auto-restack same-target sibling threads after successful land
-- (later) feat(start): default shared cargo target for Rust workspaces
+- feat(start): default shared cargo target for Rust workspaces
 - perf(status): single worktree walk; agent JSON uses DefaultText not Full
 
 ## Open questions
@@ -211,3 +211,4 @@ When shipping:
 | 2026-07-09 | P0-B done (dogfood slice): local vs remote non-FF advice; land auto-undo on checkpoint failure. Full IntegrationTxn journal still residual. |
 | 2026-07-09 | P2-B done: merge preserves +x (union) and symlink kind through recursive and rename/flat rebuild paths; unit tests in heddle-merge. |
 | 2026-07-09 | P1-B done: single Sley short-status for status+index; agent JSON DefaultText; honest not_checked. |
+| 2026-07-09 | P1-A done: default shared cargo target for Rust solid/materialized; `--no-shared-target` opt-out; try/fanout inherit; loud blocked-config warn. |

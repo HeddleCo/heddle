@@ -240,6 +240,7 @@ fn start_help_carries_hidden_flag_breadcrumb() {
         "--daemon",
         "--no-daemon",
         "--shared-target",
+        "--no-shared-target",
     ] {
         assert!(
             help.contains(flag),

@@ -60,7 +60,11 @@ use repo::{
 
 use super::{
     mount_lifecycle::{self, MountOwnership},
-    worktree_cmd::{helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config},
+    worktree_cmd::{
+        helpers::write_isolated_checkout,
+        hydrate,
+        shared_target::{print_blocked_warning, write_cargo_config},
+    },
 };
 
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
@@ -926,10 +930,17 @@ impl StartThread {
         let sources = hydrate::hydratable_ignored_dirs(repo).map_err(apply_error)?;
         let mut linked: Vec<String> = Vec::new();
         let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &self.abs_path)?;
+        // When the shared cargo target redirect is active, skip hydrating a
+        // local `target/` symlink — cargo builds into the shared dir, and a
+        // local link would fight the redirect / waste the hydrate slot.
+        let skip_target_hydrate = self.record.shared_target_dir.is_some();
         for source in &sources {
             let Some((dest, link_name)) = hydrate::plan_link(&checkout_root, source) else {
                 continue;
             };
+            if skip_target_hydrate && link_name == "target" {
+                continue;
+            }
             let src = source.clone();
             let dest_fwd = dest.clone();
             let inv_checkout = checkout_root.clone();
@@ -1104,7 +1115,9 @@ impl AtomicMutation for StartThread {
                     let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;
                     // The writer no-ops on a pre-staged config; don't advertise a
                     // redirect that isn't in effect (`thread show` would lie).
+                    // Loud warn — silent no-op was a GB-scale footgun for agents.
                     if !applied {
+                        print_blocked_warning(&self.abs_path);
                         self.record.shared_target_dir = None;
                     }
                 }
@@ -1281,6 +1294,7 @@ mod tests {
             daemon: false,
             no_daemon: true,
             shared_target: false,
+            no_shared_target: false,
             hydrate,
         }
     }

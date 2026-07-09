@@ -731,7 +731,7 @@ Isolated checkouts are Heddle-managed working directories. They do not contain a
 `heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
 Advanced (hidden) flags:
-  --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target (workspace-shared cargo target dir). All are accepted here; they stay out of the flag list to keep everyday help terse.
+  --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target/--no-shared-target (workspace-shared cargo target dir; default on for Rust solid/materialized). All are accepted here; they stay out of the flag list to keep everyday help terse.
 ")]
 pub struct ThreadStartArgs {
     /// Thread name to create or resume.
@@ -812,10 +812,31 @@ pub struct ThreadStartArgs {
     /// gigabytes when several materialized threads coexist in a Rust
     /// workspace. Implemented by writing `.cargo/config.toml` inside
     /// the new thread checkout — transparent to any `cargo` invocation
-    /// in that directory. Has no effect on light (FUSE-mounted) threads,
-    /// and a no-op for repositories without a top-level `Cargo.toml`.
-    #[arg(long, hide = true)]
+    /// in that directory.
+    ///
+    /// Default: on for solid/materialized threads when the repository
+    /// root has a `Cargo.toml`. Pass `--no-shared-target` to opt out.
+    /// Explicit `--shared-target` forces the attempt on (still a no-op
+    /// without a top-level `Cargo.toml`). Has no effect on virtualized
+    /// (mounted) threads.
+    #[arg(
+        long,
+        overrides_with = "no_shared_target",
+        action = clap::ArgAction::SetTrue,
+        hide = true,
+    )]
     pub shared_target: bool,
+
+    /// Opt out of the default shared cargo `target/` redirect for
+    /// solid/materialized threads in Rust workspaces. See
+    /// `--shared-target`.
+    #[arg(
+        long,
+        overrides_with = "shared_target",
+        action = clap::ArgAction::SetTrue,
+        hide = true,
+    )]
+    pub no_shared_target: bool,
 
     /// Symlink the origin checkout's top-level ignored dependency
     /// directories (`node_modules`, `.venv`, `target`, …) into this

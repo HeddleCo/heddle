@@ -182,7 +182,9 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         print_cd_path: false,
         daemon: true,
         no_daemon: false,
+        // Inherit default shared-target (on for Rust solid/materialized).
         shared_target: false,
+        no_shared_target: false,
         hydrate: false,
     };
     let start_output = start_thread(&repo, start_args)?;

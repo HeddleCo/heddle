@@ -8200,6 +8200,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "--daemon",
         "--no-daemon",
         "--shared-target",
+        "--no-shared-target",
     ] {
         assert!(
             !start_first_run.contains(hidden),

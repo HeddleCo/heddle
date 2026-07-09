@@ -1820,26 +1820,29 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let target_dir_created = prepared_target.target_dir_created;
     let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
-    // Item 2.1 of the heddle 6→8 plan: when starting a heavy
-    // (materialized/lightweight) thread in a Rust workspace, redirect
-    // the new checkout's `target/` to a workspace-shared dir so
-    // parallel threads don't multiply cargo target trees on disk.
+    // Shared cargo target: default-on for solid/materialized threads in
+    // Rust workspaces (top-level Cargo.toml). `--no-shared-target` opts
+    // out; `--shared-target` forces the attempt. We compute the path
+    // *before* materialization so the heads-up advisory below can
+    // reflect what would have happened, and we apply the redirect
+    // *after* materialization (only the cargo config.toml writer
+    // touches the checkout; the materializer populates the rest).
     //
-    // We compute this *before* materialization so the heads-up
-    // advisory below can reflect what would have happened, and we
-    // apply the redirect *after* materialization (only the `cargo
-    // config.toml` writer touches the checkout; the materializer
-    // populates the rest).
-    //
-    // `--shared-target` in a non-Rust repo is a harmless no-op rather
-    // than an error: automation that passes the flag unconditionally
-    // across mixed-language repos shouldn't have to special-case
-    // every non-cargo project. We log a debug-level note so a curious
-    // operator can still see it landed silently.
-    let shared_target_dir_path: Option<PathBuf> = if args.shared_target
+    // Explicit `--shared-target` in a non-Rust repo is a harmless no-op
+    // rather than an error: automation that passes the flag
+    // unconditionally across mixed-language repos shouldn't have to
+    // special-case every non-cargo project. We log a debug-level note
+    // so a curious operator can still see it landed silently.
+    let is_rust_workspace = shared_target::workspace_root_is_rust(repo);
+    let wants_shared_target = shared_target::shared_target_requested(
+        args.shared_target,
+        args.no_shared_target,
+        is_rust_workspace,
+    );
+    let shared_target_dir_path: Option<PathBuf> = if wants_shared_target
         && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
     {
-        if shared_target::workspace_root_is_rust(repo) {
+        if is_rust_workspace {
             Some(shared_target::shared_target_dir(repo)?)
         } else {
             tracing::debug!(
@@ -1852,10 +1855,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         None
     };
 
-    // Heads-up advisory: when starting a second-or-later materialized
-    // thread in a Rust workspace without `--shared-target`, nudge the
-    // user toward the flag. Doesn't fail the start; just stderr.
-    if !args.shared_target
+    // Heads-up advisory: when starting a second-or-later solid/materialized
+    // thread in a Rust workspace *without* a shared target (opt-out or
+    // otherwise), nudge toward sharing. Doesn't fail the start; just stderr.
+    if shared_target_dir_path.is_none()
         && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
         && shared_target::should_advise_shared_target(repo)
     {
