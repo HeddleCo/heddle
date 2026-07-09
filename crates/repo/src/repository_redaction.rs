@@ -807,21 +807,41 @@ fn parse_blob_hash_hex(hex: &str) -> Result<ContentHash> {
 /// Remove the loose blob bytes for `hash` if a loose copy exists.
 /// Returns `(removed, remains_in_pack)`. Both `false` when the blob is
 /// not in the store at all (already gone).
+///
+/// SECURITY: purge is a destroy-the-bytes primitive. Deleting the loose
+/// file is not enough — the store keeps a decompressed copy of recently
+/// read/written blobs in an in-process cache (`recent_blobs`). A
+/// long-lived process (mount, `heddled`, hosted-sync redaction replay)
+/// that had the blob cached would keep serving the purged content and
+/// report it PRESENT via `has_blob`, defeating the purge. So we evict
+/// the in-process object caches unconditionally — even when no loose
+/// copy was on disk (the blob may be cached from a prior pack read) —
+/// before returning. `clear_recent_caches` is the trait-level cache
+/// drop; the next access to any object pays a cold read, which for the
+/// purged blob now correctly misses.
 fn remove_loose_blob_bytes(repo: &Repository, hash: &ContentHash) -> Result<(bool, bool)> {
     let store = repo.store();
-    if let Some(path) = store.loose_blob_path(hash)
+    let loose_removed = if let Some(path) = store.loose_blob_path(hash)
         && path.exists()
     {
         fs::remove_file(&path)
             .with_context(|| format!("remove loose blob '{}'", path.display()))?;
-        // Even after loose removal, the blob may still be in a pack.
-        // We don't have a non-disruptive way to check packs here
-        // without holding the pack index — leave the field
-        // conservatively `false` and let a future refinement set it
-        // when the pack-aware purge lands.
-        return Ok((true, false));
-    }
-    Ok((false, false))
+        true
+    } else {
+        false
+    };
+    // Drop cached copies so the purged blob cannot be served (or
+    // reported present) out of `recent_blobs` after its bytes are gone.
+    // Done regardless of whether a loose file existed: a cached blob
+    // with no loose copy (read from a pack) is exactly the case that
+    // must not keep leaking the purged content.
+    store.clear_recent_caches();
+    // Even after loose removal, the blob may still be in a pack. We
+    // don't have a non-disruptive way to check packs here without
+    // holding the pack index — leave the field conservatively `false`
+    // and let a future refinement set it when the pack-aware purge
+    // lands.
+    Ok((loose_removed, false))
 }
 
 #[cfg(test)]

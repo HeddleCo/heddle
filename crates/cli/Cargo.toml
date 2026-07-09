@@ -42,7 +42,7 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.10" }
 merge = { path = "../merge", package = "heddle-merge", version = "0.10" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.13" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.10" }
-heddle-core = { path = "../core", version = "0.10" }
+heddle-core = { path = "../core", version = "0.10", default-features = false }
 heddle-format = { path = "../format", version = "0.10" }
 heddle-client = { path = "../client", version = "0.10", optional = true }
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.10" }
@@ -53,6 +53,7 @@ async-trait.workspace = true
 # would re-enable compression even when the user explicitly built
 # with `--no-default-features`.
 ingest = { path = "../ingest", package = "heddle-ingest", version = "0.10", default-features = false }
+heddle-git-projection = { path = "../git-projection", version = "0.10", default-features = false }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.10" }
 wire = { path = "../wire", package = "heddle-wire", version = "0.10", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.10" }
@@ -172,6 +173,8 @@ zstd = [
     "wire/zstd",
     "repo/zstd",
     "ingest/zstd",
+    "heddle-git-projection/zstd",
+    "heddle-core/zstd",
 ]
 # Wire the content-addressed mount through the CLI. Off by
 # default — each native backend pulls in a kernel-side dep that

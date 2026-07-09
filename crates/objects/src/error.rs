@@ -14,6 +14,11 @@ pub struct RecoveryDetails {
     pub unsafe_condition: String,
     pub would_change: String,
     pub preserved: String,
+    /// Explicit, path-specific recovery commands. When present these override
+    /// the `kind`-keyed fallback the CLI envelope would otherwise reconstruct
+    /// (the first entry is the primary command). `None` = use the generic
+    /// per-`kind` recovery mapping.
+    pub recovery_commands: Option<Vec<String>>,
 }
 
 impl RecoveryDetails {
@@ -32,7 +37,17 @@ impl RecoveryDetails {
             unsafe_condition: unsafe_condition.into(),
             would_change: would_change.into(),
             preserved: already_preserved.into(),
+            recovery_commands: None,
         }
+    }
+
+    /// Attach explicit, path-specific recovery commands (the first entry is the
+    /// primary command). Used where the callsite has context — e.g. a source
+    /// checkout path — that the `kind`-keyed CLI fallback cannot reconstruct.
+    #[must_use]
+    pub fn with_recovery_commands(mut self, commands: Vec<String>) -> Self {
+        self.recovery_commands = Some(commands);
+        self
     }
 
     pub fn invalid_usage(

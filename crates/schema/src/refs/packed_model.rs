@@ -8,6 +8,7 @@ use objects::object::ChangeId;
 const THREADS_PREFIX: &str = "refs/threads/";
 const MARKERS_PREFIX: &str = "refs/markers/";
 
+#[derive(Clone, Debug)]
 pub struct PackedRefsModel {
     threads: HashMap<String, ChangeId>,
     markers: HashMap<String, ChangeId>,

@@ -223,6 +223,23 @@ pub static MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// Returns true when every registered migration id is already recorded in
+/// the schema ledger. Used by repository open to skip the migration pass
+/// entirely on a clean ledger (see `docs/perf/cli-core-loop-todo.md`).
+///
+/// Missing or malformed ledger → `false` (caller must run
+/// [`apply_pending`]). Malformed ledger is *not* surfaced as an error here:
+/// open still routes through `apply_pending`, which reports the parse failure.
+pub fn is_schema_ledger_complete(heddle_dir: &Path) -> bool {
+    let path = heddle_dir.join("state/schema_versions.toml");
+    let Ok(ledger) = SchemaVersionsLedger::load(&path) else {
+        return false;
+    };
+    MIGRATIONS
+        .iter()
+        .all(|migration| ledger.applied.contains(migration.id))
+}
+
 /// Apply any registered migration not yet present in
 /// `<repo>/.heddle/state/schema_versions.toml`. Idempotent: a second
 /// invocation produces zero `Applied` outcomes.

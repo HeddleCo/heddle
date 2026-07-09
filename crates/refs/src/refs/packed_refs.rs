@@ -11,6 +11,7 @@ use objects::{
 use super::PackedRefsModel as CorePackedRefs;
 use crate::fs_atomic::write_file_atomic;
 
+#[derive(Clone)]
 pub(super) struct PackedRefs {
     inner: CorePackedRefs,
 }

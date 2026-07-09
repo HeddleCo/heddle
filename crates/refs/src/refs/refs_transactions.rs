@@ -12,9 +12,7 @@ use objects::{
 };
 
 use super::{
-    RefManager, RefUpdate, format_change_id_text,
-    packed_refs::PackedRefs,
-    parse_change_id_text,
+    RefManager, RefUpdate, format_change_id_text, parse_change_id_text,
     reconcile::{LoadRequest, Loaded},
     ref_summary_index::SummaryDelta,
     refs_storage::RefsLock,
@@ -23,6 +21,9 @@ use super::{
         describe_head, matches_expectation,
     },
 };
+
+#[cfg(test)]
+use super::packed_refs::PackedRefs;
 use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
 
 enum PackedRemove {
@@ -90,7 +91,7 @@ impl RefManager {
                 }
             }
         }
-        let packed_id = PackedRefs::load(&self.packed_refs_path())?.get_thread(name);
+        let packed_id = self.load_packed_refs_cached()?.get_thread(name);
         let effective_prev = packed_id.map(|id| format_change_id_text(&id));
         Ok((path, packed_id, effective_prev))
     }
@@ -113,7 +114,7 @@ impl RefManager {
                 }
             }
         }
-        let packed_id = PackedRefs::load(&self.packed_refs_path())?.get_marker(name);
+        let packed_id = self.load_packed_refs_cached()?.get_marker(name);
         let effective_prev = packed_id.map(|id| format_change_id_text(&id));
         Ok((packed_id, effective_prev))
     }
@@ -526,14 +527,16 @@ impl RefManager {
             return Ok(());
         }
 
-        let mut packed = PackedRefs::load(&pp)?;
+        let mut packed = self.load_packed_refs_cached()?;
         for removal in removals {
             match removal {
                 PackedRemove::Thread(name) => packed.remove_track(name),
                 PackedRemove::Marker(name) => packed.remove_marker(name),
             }
         }
-        packed.save(&pp)
+        packed.save(&pp)?;
+        self.invalidate_packed_refs_cache();
+        Ok(())
     }
 
     fn rollback_updates(
@@ -557,6 +560,7 @@ impl RefManager {
             None if packed_path.exists() => std::fs::remove_file(packed_path)?,
             None => {}
         }
+        self.invalidate_packed_refs_cache();
 
         Ok(())
     }

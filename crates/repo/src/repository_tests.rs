@@ -31,6 +31,21 @@ fn create_test_repo() -> (TempDir, Repository) {
     (temp_dir, repo)
 }
 
+#[cfg(unix)]
+#[test]
+fn init_creates_heddle_dir_with_mode_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init(temp_dir.path()).unwrap();
+    let mode = fs::metadata(repo.heddle_dir())
+        .expect("heddle dir metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, ".heddle must be owner-only, got {mode:o}");
+}
+
 fn open_test_repo_with_store<S: ObjectStore>(
     heddle_dir: impl AsRef<Path>,
     store: S,
@@ -1755,6 +1770,7 @@ fn git_overlay_head_state_matches_symref_semantics() {
 /// `heddle status`. The accessor must instead report "no overlay
 /// status available" (`Ok(None)`) so callers fall back to heddle's own
 /// tree-compare path.
+#[cfg(feature = "git-overlay")]
 #[test]
 fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
     let temp_dir = TempDir::new().unwrap();
@@ -2333,7 +2349,7 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
 /// surfaced this ran on a Git repo, so `ready` consumed
 /// `git_overlay_worktree_status`. A `node_modules` symlink with a
 /// `node_modules/` rule in `.gitignore` must be ignored there too.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "git-overlay"))]
 #[test]
 fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
     use std::os::unix::fs::symlink;
@@ -2373,7 +2389,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 /// heddle#303, git-overlay variant of the mid-session-refresh AC.
 /// Broadening `.gitignore` to `node_modules` mid-session must mask a
 /// previously-seen untracked tree on the next status, no `unlink`.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "git-overlay"))]
 #[test]
 fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
     let temp = TempDir::new().unwrap();

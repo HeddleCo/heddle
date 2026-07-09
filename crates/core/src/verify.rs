@@ -151,6 +151,8 @@ pub struct PlainGitVerifyProbe {
     #[serde(skip)]
     #[schemars(skip)]
     pub changes: WorktreeStatus,
+    /// Canonical public field is `verification` (alpha: no dual-emit of `trust`).
+    #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
 }
 

@@ -1535,9 +1535,16 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<StatusThreadSum
     names.extend(current.iter().cloned());
     names.extend(manager.list()?.into_iter().map(|thread| thread.thread));
 
+    // Load the agent registry once for the whole summary walk. Per-thread
+    // `AgentRegistry::list()` re-reads the same on-disk table and dominated
+    // `thread_summary_ms` when many threads were present.
+    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+
     let mut summaries = Vec::new();
     for name in names {
-        if let Some(summary) = find_thread_summary_single(repo, &name)? {
+        if let Some(summary) =
+            find_thread_summary_with_agents(repo, &name, &registry_entries)?
+        {
             summaries.push(summary);
         }
     }
@@ -1567,6 +1574,15 @@ pub fn find_thread_summary_single(
     repo: &Repository,
     name: &str,
 ) -> Result<Option<StatusThreadSummary>> {
+    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+    find_thread_summary_with_agents(repo, name, &registry_entries)
+}
+
+fn find_thread_summary_with_agents(
+    repo: &Repository,
+    name: &str,
+    registry_entries: &[AgentEntry],
+) -> Result<Option<StatusThreadSummary>> {
     let current = repo.current_lane()?;
     let is_current = current.as_deref() == Some(name);
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1581,17 +1597,15 @@ pub fn find_thread_summary_single(
     let mut thread =
         thread.unwrap_or_else(|| synthetic_thread(repo, name, ref_state.map(|id| id.short())));
     let _ = refresh_thread_freshness(repo, &mut thread);
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let entries = registry
-        .list()?
-        .into_iter()
+    let entries: Vec<&AgentEntry> = registry_entries
+        .iter()
         .filter(|entry| entry.thread == name)
-        .collect::<Vec<_>>();
+        .collect();
     Ok(Some(thread_summary_from_thread(
         repo,
         thread,
         is_current,
-        primary_agent_entry(&entries),
+        primary_agent_entry_refs(&entries),
     )))
 }
 
@@ -1697,12 +1711,18 @@ fn thread_summary_from_thread(
     }
 }
 
-fn primary_agent_entry(entries: &[AgentEntry]) -> Option<&AgentEntry> {
+fn primary_agent_entry_refs<'a>(entries: &[&'a AgentEntry]) -> Option<&'a AgentEntry> {
     entries
         .iter()
+        .copied()
         .filter(|entry| entry.status == AgentStatus::Active)
         .max_by_key(|entry| entry.started_at)
-        .or_else(|| entries.iter().max_by_key(|entry| entry.started_at))
+        .or_else(|| {
+            entries
+                .iter()
+                .copied()
+                .max_by_key(|entry| entry.started_at)
+        })
 }
 
 fn non_empty(value: String) -> Option<String> {

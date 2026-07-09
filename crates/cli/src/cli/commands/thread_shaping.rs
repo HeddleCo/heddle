@@ -19,7 +19,7 @@ use super::{
     operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread_cmd::{
         capture_thread_update_before, current_thread_ref_state, load_thread, refresh_thread,
         refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
@@ -170,6 +170,13 @@ pub fn cmd_thread_absorb(
             },
         )?;
     }
+    // Bootstrap missing current state (freshly-adopted git-overlay parent) so
+    // the core merge facade has a base to absorb into instead of hard-erroring.
+    let _ = ensure_current_state(
+        &parent_repo,
+        &user_config,
+        Some(format!("Bootstrap git-overlay before absorbing {}", child.thread)),
+    )?;
     let output = merge_thread_into_current(
         &parent_repo,
         &child.thread,
@@ -331,6 +338,13 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .manual_resolution_state
             .is_none()
     {
+        // Bootstrap missing current state (freshly-adopted git-overlay repo)
+        // so the conflict-preview merge has a base instead of hard-erroring.
+        let _ = ensure_current_state(
+            &repo,
+            &UserConfig::load_default().unwrap_or_default(),
+            Some(format!("Bootstrap git-overlay before resolving {}", thread.id)),
+        )?;
         let preview =
             merge_thread_into_current(&repo, &thread.id, None, false, true, false, false, false)?;
         if preview.conflict_count > 0 {

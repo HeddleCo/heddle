@@ -24,7 +24,7 @@ use super::{
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread_cmd::{
         current_thread, load_thread, refresh_thread, refresh_thread_freshness, thread_manager,
         thread_not_found_advice,
@@ -731,6 +731,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )?;
     }
 
+    // Bootstrap missing current state (freshly-adopted git-overlay repos) so
+    // the core merge facade has a base to merge into instead of hard-erroring.
+    let _ = ensure_current_state(
+        &repo,
+        &user_config,
+        Some(format!("Bootstrap git-overlay before landing {}", merge_thread.id)),
+    )?;
     let merge_output = merge_thread_into_current(
         &repo,
         &merge_thread.id,
@@ -955,6 +962,16 @@ fn materialize_land_conflict_for_thread(repo: &Repository, thread: &Thread) -> R
 }
 
 fn materialize_land_conflict_in_repo(repo: &Repository, target_thread: &str) -> Result<bool> {
+    // Bootstrap missing current state so freshly-adopted overlay repos have a
+    // base for the conflict-materializing merge instead of hard-erroring.
+    let _ = ensure_current_state(
+        repo,
+        &UserConfig::load_default().unwrap_or_default(),
+        Some(format!(
+            "Bootstrap git-overlay before materializing land conflict for {}",
+            target_thread
+        )),
+    )?;
     let output =
         merge_thread_into_current(repo, target_thread, None, false, false, false, false, false)?;
     Ok(!output.conflicts.is_empty() && repo.merge_state_manager().is_merge_in_progress())

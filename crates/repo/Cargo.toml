@@ -50,10 +50,11 @@ default = ["git-overlay", "native", "zstd"]
 # Repository mode features. At least one must be enabled. The OSS CLI
 # can be built as git-overlay-only (works on top of existing Git repos),
 # native-only (content-addressed VCS, no Git Projection import/export surface), or both.
-# Currently these features are declared as a foundation; the
-# overlay-specific methods on `Repository` are not yet gated behind
-# `git-overlay` — that's a follow-up refactor once the CLI surface
-# (the user-visible binary differentiation) is gated in `crates/cli`.
+# Pure overlay query types/methods on `Repository` are gated behind
+# `git-overlay` (`GitOverlayBranchTip` / `git_overlay_branch_tips` and kin).
+# Open-path helpers and capability plumbing still compile under native so
+# capability detection can no-op; full extraction of every overlay symbol
+# remains follow-on work. Default features keep the OSS CLI overlay-enabled.
 git-overlay = []
 native = []
 # Forward zstd compression through to objects (where the pack

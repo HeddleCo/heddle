@@ -151,6 +151,10 @@ pub struct UserRemoteConfig {
     pub tls_ca_certificate_path: Option<PathBuf>,
     #[serde(default)]
     pub auth_proof_key_pem_path: Option<PathBuf>,
+    /// Allow cleartext connections to non-loopback hosts without TLS.
+    /// Prefer enabling TLS; this is an explicit opt-in for lab/VPN testing.
+    #[serde(default)]
+    pub insecure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +425,9 @@ impl UserConfig {
         if self.remote.tls_enabled {
             config = config.with_tls(false);
         }
+        if self.remote.insecure {
+            config = config.with_allow_insecure(true);
+        }
         if let Some(domain) = &self.remote.tls_domain_name {
             config = config.with_tls_domain_name(domain.clone());
         }
@@ -435,6 +442,9 @@ impl UserConfig {
 
         if env_bool("HEDDLE_REMOTE_TLS")? {
             config = config.with_tls(false);
+        }
+        if env_bool("HEDDLE_REMOTE_INSECURE")? {
+            config = config.with_allow_insecure(true);
         }
         match env::var("HEDDLE_REMOTE_TLS_DOMAIN") {
             Ok(domain) => config = config.with_tls_domain_name(domain),
@@ -577,6 +587,7 @@ mod tests {
         "HEDDLE_REMOTE_TLS",
         "HEDDLE_REMOTE_TLS_DOMAIN",
         "HEDDLE_REMOTE_TLS_CA_CERT",
+        "HEDDLE_REMOTE_INSECURE",
         "HEDDLE_AUTO_CAPTURE",
     ];
 

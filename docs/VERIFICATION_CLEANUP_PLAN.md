@@ -166,10 +166,21 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Dry-run JSON exists for both.
    - README and command docs no longer teach `bridge git`.
 4. Raw Git Object Residuals
-   - Residual durable object model exists.
+   - Residual durable object model exists. **Foundation shipped:**
+     `heddle_git_projection::ResidualStore` under `.heddle/git-residuals/`,
+     put/get/has/list + hash identity, lazy migrate-from-mirror helper, and
+     `bridge_mirror_retirement_status` (report-only). Checkout materialize and
+     export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
+     hard fail when neither residual nor mirror can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
+     (**Not yet** — residual validation remains follow-on.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
+     (**Partial** — residual install is hooked; full closure capture on lossy
+     import and mirror-free export are not complete.)
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
+     (**Partial** — migrate helper exists; automatic full-mirror migration and
+     explicit mirror deletion maintenance are not complete. Mirror is **not**
+     deleted.)
 5. Retire public bridge/mirror workflow (done for public bridge-git)
    - The public bridge-git workflow is removed; diagnostics, repair, and ingest behavior live on replacement surfaces.
    - Top-level `push`/`pull`/`sync` route Git remotes.

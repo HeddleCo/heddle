@@ -13,6 +13,7 @@ mod check_atomic_ledger_encapsulation;
 mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;
 mod check_snapshot_atomicity;
+mod check_verification_owner;
 mod fuse_dispatch_bench;
 
 fn main() -> Result<()> {
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
             check_atomic_ledger_encapsulation::run(args.collect())
         }
         Some("check-oprecord-exhaustiveness") => check_oprecord_exhaustiveness::run(args.collect()),
+        Some("check-verification-owner") => check_verification_owner::run(args.collect()),
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: grpc-ts)"),
