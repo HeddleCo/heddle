@@ -116,6 +116,21 @@ use crate::{GitRefContentNamespace, GitRefName};
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
+/// One Sley short-status stream result for Git overlay status consumers.
+///
+/// Built by [`Repository::git_overlay_short_status`] so worktree changes and
+/// Git index planning share a single walk.
+#[derive(Debug)]
+pub struct GitOverlayShortStatus {
+    pub worktree: WorktreeStatus,
+    /// Paths staged in the Git index (for commit-mode planning).
+    pub index_staged_paths: Vec<String>,
+    /// Extra worktree paths with `unstaged: ` / `untracked: ` prefixes.
+    pub index_extra_paths: Vec<String>,
+    /// False when the discovered Git workdir does not match the Heddle root.
+    pub index_plan_applicable: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
     GitOverlay,
@@ -1294,6 +1309,18 @@ impl Repository {
     /// MUST be preserved across sley bumps — a sley that re-hashes unconditionally
     /// would silently reintroduce the pathological checkpoint cost.
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
+        Ok(self
+            .git_overlay_short_status()?
+            .map(|status| status.worktree))
+    }
+
+    /// Single Sley short-status stream for Git overlay: worktree change
+    /// classification plus raw Git-index intent rows for commit planning.
+    ///
+    /// Callers that need both worktree status and a Git index plan (e.g.
+    /// `heddle status`) MUST use this instead of calling
+    /// [`Self::git_overlay_worktree_status`] and a second short-status walk.
+    pub fn git_overlay_short_status(&self) -> Result<Option<GitOverlayShortStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
@@ -1309,7 +1336,12 @@ impl Repository {
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         let ignore_patterns = self.ignore_patterns()?;
-        let ignore_matcher = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+        let worktree_ignore =
+            crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+        let index_ignore = objects::worktree::build_worktree_ignore(&ignore_patterns);
+        let index_plan_applicable = git_worktree_matches_repo_root(&git_repo, self.root());
+        let mut index_staged_paths = Vec::new();
+        let mut index_extra_paths = Vec::new();
 
         git_repo
             .stream_short_status_with_options(
@@ -1319,26 +1351,43 @@ impl Repository {
                 },
                 |entry| {
                     let path = git_path(entry.path);
+                    if path.is_empty() {
+                        return Ok(SleyStreamControl::Continue);
+                    }
+
+                    // Index-plan classification (same rules as core GitIndexPlan).
+                    // Runs even for `.heddle/*` paths so commit planning stays honest.
+                    if index_plan_applicable {
+                        append_short_status_to_index_intent(
+                            &mut index_staged_paths,
+                            &mut index_extra_paths,
+                            &index_ignore,
+                            entry,
+                            &path,
+                        );
+                    }
+
+                    // Worktree change classification skips overlay-internal paths.
                     if ignored_git_overlay_status_path(&path) {
                         return Ok(SleyStreamControl::Continue);
                     }
-                    let path = PathBuf::from(path);
+                    let path_buf = PathBuf::from(&path);
 
                     if entry.index == b'?' && entry.worktree == b'?' {
-                        if git_overlay_untracked_path_ignored(&ignore_matcher, &path) {
+                        if git_overlay_untracked_path_ignored(&worktree_ignore, &path_buf) {
                             return Ok(SleyStreamControl::Continue);
                         }
-                        added.insert(path);
+                        added.insert(path_buf);
                     } else if entry.index == b'D' || entry.worktree == b'D' {
-                        deleted.insert(path);
+                        deleted.insert(path_buf);
                     } else if entry.index == b'A'
                         || entry.index == b'R'
                         || entry.index == b'C'
                         || entry.head_oid.is_none()
                     {
-                        added.insert(path);
+                        added.insert(path_buf);
                     } else {
-                        modified.insert(path);
+                        modified.insert(path_buf);
                     }
 
                     Ok(SleyStreamControl::Continue)
@@ -1352,10 +1401,15 @@ impl Repository {
                 ))
             })?;
 
-        Ok(Some(WorktreeStatus {
-            modified: modified.into_iter().collect(),
-            added: added.into_iter().collect(),
-            deleted: deleted.into_iter().collect(),
+        Ok(Some(GitOverlayShortStatus {
+            worktree: WorktreeStatus {
+                modified: modified.into_iter().collect(),
+                added: added.into_iter().collect(),
+                deleted: deleted.into_iter().collect(),
+            },
+            index_staged_paths,
+            index_extra_paths,
+            index_plan_applicable,
         }))
     }
 
@@ -2630,6 +2684,50 @@ fn git_path(path: &[u8]) -> String {
 
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
+}
+
+const GIT_MODE_COMMIT: u32 = 0o160000;
+
+fn git_worktree_matches_repo_root(git: &SleyRepository, root: &Path) -> bool {
+    git.workdir().is_some_and(|workdir| {
+        let left = workdir.canonicalize();
+        let right = root.canonicalize();
+        match (left, right) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    })
+}
+
+fn append_short_status_to_index_intent(
+    staged_paths: &mut Vec<String>,
+    extra_paths: &mut Vec<String>,
+    ignore_matcher: &objects::worktree::WorktreeIgnoreMatcher,
+    entry: sley::ShortStatusRow<'_>,
+    path: &str,
+) {
+    if entry.index == b'?' && entry.worktree == b'?' {
+        if !ignore_matcher.is_ignored(Path::new(path)) {
+            extra_paths.push(format!("untracked: {path}"));
+        }
+        return;
+    }
+    if entry.index != b' ' && entry.index != b'!' {
+        staged_paths.push(path.to_string());
+    }
+    if entry.worktree != b' '
+        && entry.worktree != b'!'
+        && !status_row_is_gitlink_worktree_only(entry)
+    {
+        extra_paths.push(format!("unstaged: {path}"));
+    }
+}
+
+fn status_row_is_gitlink_worktree_only(entry: sley::ShortStatusRow<'_>) -> bool {
+    entry.index == b' '
+        && (entry.index_mode == Some(GIT_MODE_COMMIT)
+            || entry.head_mode == Some(GIT_MODE_COMMIT)
+            || entry.worktree_mode == Some(GIT_MODE_COMMIT))
 }
 
 fn git_overlay_untracked_path_ignored(

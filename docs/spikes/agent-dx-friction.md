@@ -85,13 +85,13 @@ These are mostly **composition and defaults**, not missing engines.
 
 | Field | Value |
 |-------|--------|
-| Status | **TODO** |
+| Status | **DONE** |
 | Owner | agent wave 2 (post-reinstall) |
 | Root cause | Full JSON detail; two full Sley short-status walks; clean-path verification fan-out. |
 | Fix | One Sley stream → changes + index plan; shapes probe/short/default/full; agent JSON default not Full; honest partial trust. |
-| Key files | `core/status.rs`, `cli/.../status.rs`, `repository.rs` (`git_overlay_worktree_status`) |
+| Key files | `core/status.rs`, `cli/.../status.rs`, `repository.rs` (`git_overlay_short_status`) |
 | Acceptance | Single Sley short-status per status invocation; `status --output json` without `--full` is not Full thread walk; probe/short documents `not_checked` where applicable; profile shows dual walk gone. |
-| Progress | |
+| Progress | `Repository::git_overlay_short_status` one Sley stream → worktree + index intent; `status()` loads both via `load_git_overlay_status_and_index_plan` (profile `git_index_ms=0`). CLI: `status --output json` defaults to `StatusDetail::DefaultText` (not Full); Full only with `--verbose`. Shapes documented on `StatusDetail` (ShortText/CompactMachine/DefaultText/Full); no separate `--shape`/`Probe` flag. Machine contract and skipped checks stay `not_checked` (never fake `verified`). Cached `heddle_worktree_is_clean` on dirty-git path. Tests: `single_short_status_stream_builds_worktree_and_index_plan`, `default_detail_skips_full_thread_walk_cost_and_keeps_not_checked`. |
 
 ### P2 — Correctness + multi-agent productization
 
@@ -169,7 +169,7 @@ Wave 3  P2-A + P2-B
 
 ### Status cost
 
-- Dual `stream_short_status` + Full detail for JSON (`core/status.rs`, `cli/.../status.rs`).
+- Dual `stream_short_status` + Full detail for JSON — **fixed** via `git_overlay_short_status` + DefaultText JSON default.
 
 ## Test plan (overall)
 
@@ -177,7 +177,7 @@ Wave 3  P2-A + P2-B
 - [x] P0-B: inject Git checkpoint failure on land → no durable Heddle-only advance (or auto-undo)
 - [x] P0-B: local NonFastForwardRef message is not remote-titled
 - [ ] P1-A: default share + opt-out
-- [ ] P1-B: one Sley walk; probe shape
+- [x] P1-B: one Sley walk; default JSON not Full; honest not_checked
 - [x] P2-A: post-land auto-restack of same-target siblings (multi-`land --threads` deferred)
 - [x] P2-B: executable + symlink fidelity (merge unit tests; flat rebuild + recursive)
 - [ ] `cargo install --path crates/cli` smoke after P0
@@ -191,13 +191,13 @@ When shipping:
 - fix(land): do not leave Heddle ahead of Git on checkpoint failure; clarify local vs remote non-FF
 - feat(land): auto-restack same-target sibling threads after successful land
 - (later) feat(start): default shared cargo target for Rust workspaces
-- (later) perf(status): single worktree walk + agent probe shape
+- perf(status): single worktree walk; agent JSON uses DefaultText not Full
 
 ## Open questions
 
 1. Should lazy tip bind import **full history** or **single tip** only? (Recommendation: single tip first; full adopt remains explicit.)
 2. Land auto-undo: always, or only when land-owned capture+merge batch is cleanly reversible?
-3. JSON status default change: break alpha clients now or add `status --shape` first?
+3. JSON status default change: break alpha clients now or add `status --shape` first? **Decided:** change default now (alpha); document shapes on `StatusDetail` rather than new `--shape` flag.
 
 ## Progress log
 
@@ -210,3 +210,4 @@ When shipping:
 | 2026-07-09 | P0-A done: lazy single-tip bind in `ensure_current_state`; no orphan Bootstrap root when Git tip exists. |
 | 2026-07-09 | P0-B done (dogfood slice): local vs remote non-FF advice; land auto-undo on checkpoint failure. Full IntegrationTxn journal still residual. |
 | 2026-07-09 | P2-B done: merge preserves +x (union) and symlink kind through recursive and rename/flat rebuild paths; unit tests in heddle-merge. |
+| 2026-07-09 | P1-B done: single Sley short-status for status+index; agent JSON DefaultText; honest not_checked. |

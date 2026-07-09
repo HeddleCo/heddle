@@ -16,7 +16,7 @@ use objects::{
     error::Result,
     object::{Principal, State, ThreadName},
     store::{AgentEntry, AgentRegistry, AgentStatus},
-    worktree::{WorktreeStatus, build_worktree_ignore},
+    worktree::WorktreeStatus,
 };
 use refs::Head;
 use repo::{
@@ -79,6 +79,17 @@ impl StatusOptions {
     }
 }
 
+/// Status report shape. Cheaper shapes skip the multi-thread Full walk.
+///
+/// | Shape | Typical CLI | Thread walk | Notes |
+/// |-------|-------------|-------------|-------|
+/// | [`ShortText`](Self::ShortText) | `status --short` | none | prompt / shell |
+/// | [`CompactMachine`](Self::CompactMachine) | `status --output json-compact` | none | decision surface |
+/// | [`DefaultText`](Self::DefaultText) | `status`, `status --output json` | current thread only | agent JSON default |
+/// | [`Full`](Self::Full) | `status -v` / `--verbose` | all threads | parallel-thread fan-out |
+///
+/// Skipped verification rows stay `not_checked` / partial — never fake
+/// `verified: true` for work that was not performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusDetail {
     ShortText,
@@ -565,14 +576,16 @@ pub fn build_repository_verification_health_with_worktree_status(
     match worktree_status {
         Ok(Some(status)) if !status.is_clean() => {
             let changed = status.modified.len() + status.added.len() + status.deleted.len();
+            // Cache Heddle compare — do not re-scan the worktree three times.
+            let heddle_clean = heddle_worktree_is_clean(repo);
             checks.push(RepositoryVerificationCheck {
                 name: "worktree".to_string(),
-                status: if heddle_worktree_is_clean(repo) {
+                status: if heddle_clean {
                     "needs_checkpoint".to_string()
                 } else {
                     "dirty_worktree".to_string()
                 },
-                summary: if heddle_worktree_is_clean(repo) {
+                summary: if heddle_clean {
                     format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     )
@@ -581,7 +594,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                 },
                 details: dirty_details(status),
             });
-            if heddle_worktree_is_clean(repo) {
+            if heddle_clean {
                 return RepositoryVerificationHealth {
                     status: "needs_checkpoint".to_string(),
                     clean: false,
@@ -1327,24 +1340,35 @@ impl GitIndexPlan {
     }
 }
 
-const GIT_MODE_COMMIT: u32 = 0o160000;
-
 pub fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
-    let Some(git) = repo.git_overlay_sley_repository()? else {
+    let Some(snap) = repo.git_overlay_short_status()? else {
         return Ok(None);
     };
-    if !git_worktree_matches_root(&git, repo.root()) {
-        return Ok(None);
-    }
-    let ignore_patterns = repo.ignore_patterns()?;
-    Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent_for_root_with_ignore_and_repo(repo.root(), &ignore_patterns, &git)?,
-    )))
+    Ok(git_index_plan_from_short_status(&snap))
 }
 
-fn git_worktree_matches_root(git: &SleyRepository, root: &Path) -> bool {
-    git.workdir()
-        .is_some_and(|workdir| paths_equal(&workdir, root))
+fn git_index_plan_from_short_status(snap: &repo::GitOverlayShortStatus) -> Option<GitIndexPlan> {
+    if !snap.index_plan_applicable {
+        return None;
+    }
+    Some(GitIndexPlan::from_intent(&GitIndexIntent {
+        staged_paths: snap.index_staged_paths.clone(),
+        extra_paths: snap.index_extra_paths.clone(),
+    }))
+}
+
+/// One Sley short-status stream → worktree status + optional Git index plan.
+fn load_git_overlay_status_and_index_plan(
+    repo: &Repository,
+) -> (Result<Option<WorktreeStatus>>, Option<GitIndexPlan>) {
+    match repo.git_overlay_short_status() {
+        Ok(Some(snap)) => {
+            let index = git_index_plan_from_short_status(&snap);
+            (Ok(Some(snap.worktree)), index)
+        }
+        Ok(None) => (Ok(None), None),
+        Err(err) => (Err(err), None),
+    }
 }
 
 fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
@@ -1358,65 +1382,6 @@ fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
         }
     }
     (unstaged_paths, untracked_paths)
-}
-
-fn git_index_intent_for_root_with_ignore_and_repo(
-    root: &Path,
-    ignore_patterns: &[String],
-    git: &SleyRepository,
-) -> Result<GitIndexIntent> {
-    let ignore_matcher = build_worktree_ignore(ignore_patterns);
-    let mut intent = GitIndexIntent::default();
-    git.stream_short_status_with_options(
-        ShortStatusOptions {
-            untracked_mode: StatusUntrackedMode::All,
-            ..ShortStatusOptions::default()
-        },
-        |entry| {
-            append_status_row_to_index_intent(&mut intent, &ignore_matcher, entry);
-            Ok(StreamControl::Continue)
-        },
-    )
-    .map_err(|err| {
-        HeddleError::Config(format!(
-            "failed to inspect Git status before commit at {}: {err}",
-            root.display()
-        ))
-    })?;
-    Ok(intent)
-}
-
-fn append_status_row_to_index_intent(
-    intent: &mut GitIndexIntent,
-    ignore_matcher: &objects::worktree::WorktreeIgnoreMatcher,
-    entry: ShortStatusRow<'_>,
-) {
-    let path = String::from_utf8_lossy(entry.path).into_owned();
-    if path.is_empty() {
-        return;
-    }
-    if entry.index == b'?' && entry.worktree == b'?' {
-        if !ignore_matcher.is_ignored(Path::new(&path)) {
-            intent.extra_paths.push(format!("untracked: {path}"));
-        }
-        return;
-    }
-    if entry.index != b' ' && entry.index != b'!' {
-        intent.staged_paths.push(path.clone());
-    }
-    if entry.worktree != b' '
-        && entry.worktree != b'!'
-        && !status_row_is_gitlink_worktree_only(entry)
-    {
-        intent.extra_paths.push(format!("unstaged: {path}"));
-    }
-}
-
-fn status_row_is_gitlink_worktree_only(entry: ShortStatusRow<'_>) -> bool {
-    entry.index == b' '
-        && (entry.index_mode == Some(GIT_MODE_COMMIT)
-            || entry.head_mode == Some(GIT_MODE_COMMIT)
-            || entry.worktree_mode == Some(GIT_MODE_COMMIT))
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1786,9 +1751,12 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     };
     let import_hint_ms = import_hint_start.elapsed().as_millis();
 
+    // Single Sley short-status walk: worktree changes + Git index plan.
     let git_overlay_status_start = Instant::now();
-    let git_worktree_status_result = repo.git_overlay_worktree_status();
+    let (git_worktree_status_result, git_index) = load_git_overlay_status_and_index_plan(repo);
     let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
+    // Index plan is derived from the same rows; no second walk to attribute.
+    let git_index_ms = 0;
 
     let verification_start = Instant::now();
     let verification_health = build_repository_verification_health_with_worktree_status(
@@ -1806,10 +1774,6 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
 
     let git_worktree_status = git_worktree_status_result.unwrap_or(None);
-
-    let git_index_start = Instant::now();
-    let git_index = git_index_plan_for_repo(repo)?;
-    let git_index_ms = git_index_start.elapsed().as_millis();
 
     let identity_notice = first_capture_identity_notice(ctx, repo, current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(
@@ -2514,14 +2478,6 @@ fn override_trust_recommended_action(trust: &mut RepositoryVerificationState, ac
     }
 }
 
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize();
-    let right = right.canonicalize();
-    match (left, right) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
 
 fn first_capture_identity_notice(
     ctx: &ExecutionContext,
@@ -2997,6 +2953,96 @@ mod tests {
                 "fast and slow short-status classification disagree for {label}",
             );
         }
+    }
+
+    #[test]
+    fn single_short_status_stream_builds_worktree_and_index_plan() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+        std::fs::write(root.join("tracked.txt"), "v1\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(root)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(root)
+            .output()
+            .expect("git commit");
+        repo::Repository::init_default(root).expect("heddle init");
+        let repo = repo::Repository::open(root).expect("open");
+        if repo.capability() != repo::RepositoryCapability::GitOverlay {
+            return;
+        }
+        std::fs::write(root.join("tracked.txt"), "v2\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "u\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "untracked.txt"])
+            .current_dir(root)
+            .output()
+            .expect("stage untracked");
+        std::fs::write(root.join("untracked.txt"), "u2\n").unwrap();
+
+        let snap = repo
+            .git_overlay_short_status()
+            .expect("short status")
+            .expect("overlay short status");
+        assert!(snap.index_plan_applicable);
+        assert!(!snap.worktree.is_clean(), "expected dirty worktree from single stream");
+        assert!(
+            !snap.index_staged_paths.is_empty() || !snap.index_extra_paths.is_empty(),
+            "expected index intent rows from same stream"
+        );
+
+        let (wt, plan) = super::load_git_overlay_status_and_index_plan(&repo);
+        let wt = wt.expect("worktree ok").expect("some status");
+        assert_eq!(wt.modified.len(), snap.worktree.modified.len());
+        assert_eq!(wt.added.len(), snap.worktree.added.len());
+        assert_eq!(wt.deleted.len(), snap.worktree.deleted.len());
+        assert!(plan.is_some(), "index plan derived from same snapshot");
+    }
+
+    #[test]
+    fn default_detail_skips_full_thread_walk_cost_and_keeps_not_checked() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        repo::Repository::init_default(temp.path()).expect("init repo");
+        let ctx = ExecutionContext::builder().start_path(temp.path()).build();
+
+        let default_report = status(
+            &ctx,
+            StatusOptions::new(
+                StatusDetail::DefaultText,
+                repo::WorktreeStatusOptions::default(),
+            )
+            .with_start_path(temp.path()),
+        )
+        .expect("default status");
+
+        assert_eq!(default_report.trust.machine_contract, "not_checked");
+        assert!(
+            default_report
+                .trust
+                .checks
+                .iter()
+                .any(|c| c.name == "Machine contract" && c.status == "not_checked"),
+            "default shape must not fake machine-contract verification"
+        );
+        // Index plan attribution: git_index_ms is 0 when derived from same walk.
+        assert_eq!(default_report.profile.git_index_ms, 0);
     }
 
     #[test]

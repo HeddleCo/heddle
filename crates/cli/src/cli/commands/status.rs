@@ -317,11 +317,13 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     let repo_config = repo.config().clone();
     let as_json = should_output_json(cli, Some(&repo_config));
     let compact_json = as_json && output_is_compact(cli);
+    // Agent JSON must not default to Full (all-thread walk). Full only for
+    // --verbose; default JSON is DefaultText (current thread + honest trust).
     let detail = if short && !as_json {
         StatusDetail::ShortText
-    } else if compact_json {
+    } else if compact_json || (short && as_json) {
         StatusDetail::CompactMachine
-    } else if cli.verbose > 0 || as_json {
+    } else if cli.verbose > 0 {
         StatusDetail::Full
     } else {
         StatusDetail::DefaultText
