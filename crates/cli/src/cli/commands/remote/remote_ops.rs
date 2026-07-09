@@ -350,7 +350,7 @@ pub async fn cmd_pull(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token);
+            let _ = (addr, repo_path, token, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("pull"));
         }

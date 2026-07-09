@@ -335,24 +335,6 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn merge_integrity_refusal(
-        error: impl Into<String>,
-        unsafe_condition: impl Into<String>,
-        would_change: impl Into<String>,
-        preserved: impl Into<String>,
-    ) -> Self {
-        Self::safety_refusal(
-            "repository_integrity_error",
-            error,
-            "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
-            unsafe_condition,
-            would_change,
-            preserved,
-            "heddle fsck --full",
-            vec!["heddle fsck --full".to_string()],
-        )
-    }
-
     pub(crate) fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
         Self::safety_refusal(
             "daemon_protocol_version_mismatch",
@@ -1219,32 +1201,6 @@ impl RecoveryAdvice {
                 refresh_command,
                 "heddle thread list".to_string(),
             ],
-        )
-    }
-
-    /// Merge planning could not find a common ancestor between the
-    /// current change and the target change. This usually means the two
-    /// histories are completely disjoint — typically because the
-    /// repositories were imported separately or one side was rewritten
-    /// without preserving identity.
-    pub(crate) fn merge_no_common_ancestor(current_ref: &str, target_ref: &str) -> Self {
-        let current_show = format!("heddle thread show {current_ref}");
-        let target_show = format!("heddle thread show {target_ref}");
-        Self::safety_refusal(
-            "merge_no_common_ancestor",
-            format!(
-                "No common ancestor between '{current_ref}' and '{target_ref}' — the two histories are disjoint"
-            ),
-            format!(
-                "Inspect each side with `{current_show}` and `{target_show}` to confirm whether one history was imported separately, then choose an integration path that doesn't require a shared base."
-            ),
-            format!(
-                "merge planning needs a shared base commit, but the commit graph for '{current_ref}' and '{target_ref}' has no common ancestor"
-            ),
-            "merging two disjoint histories without an explicit reconciliation strategy could overwrite one side's commits",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            current_show.clone(),
-            vec![current_show, target_show, "heddle log".to_string()],
         )
     }
 

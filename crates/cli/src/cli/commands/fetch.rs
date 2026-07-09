@@ -230,7 +230,7 @@ async fn fetch_via_network(
                 }
                 #[cfg(not(feature = "client"))]
                 {
-                    let _ = (addr, repo_path);
+                    let _ = (addr, repo_path, insecure);
                     anyhow::bail!(RecoveryAdvice::network_feature_unavailable("fetch"));
                 }
             }

@@ -438,7 +438,7 @@ pub async fn cmd_push(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, single_state_id);
+            let _ = (addr, repo_path, token, single_state_id, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }

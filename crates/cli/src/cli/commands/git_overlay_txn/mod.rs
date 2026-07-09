@@ -262,19 +262,6 @@ pub(crate) fn native_checkpoint_unavailable_advice(repo: &Repository) -> Recover
     )
 }
 
-pub(crate) fn checkpoint_git_write_skipped_advice(reason: String) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "checkpoint_git_write_skipped",
-        format!("Checkpoint could not update the Git checkout: {reason}"),
-        "Resolve the Git checkout issue, then retry with `heddle checkpoint -m \"...\"`.",
-        reason,
-        "checkpoint would need to write the current Heddle state into the Git branch and index",
-        "the current Heddle state was preserved; no Git checkpoint record was written",
-        "heddle checkpoint -m \"...\"",
-        vec!["heddle checkpoint -m \"...\"".to_string()],
-    )
-}
-
 pub(crate) fn commit_checkpoint_failed_advice(
     change_id: &str,
     message: Option<&str>,

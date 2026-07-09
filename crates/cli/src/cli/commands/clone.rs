@@ -72,7 +72,11 @@ struct CloneOptions {
     /// Recursive monorepo clone: resolve the hosted root spool's child tree and
     /// clone every child at its anchored state into its mount path.
     recursive: bool,
-    /// Allow cleartext to non-loopback hosts for this clone.
+    /// Allow cleartext to non-loopback hosts for this clone. Only read on
+    /// the network clone paths, which are gated behind the `client`
+    /// feature; a build without `client` never reads this field back out
+    /// (`clone_local` explicitly discards it via `insecure: _`).
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     insecure: bool,
 }
 
