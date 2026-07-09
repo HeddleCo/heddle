@@ -313,6 +313,12 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         report = build_thread_preview_report(&repo, &mut thread, true)?;
     }
     let has_integration_target = report.merge_relation != "no_target";
+    // Soft agent-confidence highlight for humans — never blocks ready/land.
+    let policy_warnings = if has_integration_target {
+        super::workflow::auto_land_policy_warnings(&repo, &thread)
+    } else {
+        Vec::new()
+    };
     if has_integration_target {
         let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);
         if !policy_blockers.is_empty() {
@@ -420,7 +426,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         action: OperatorAction::Ready,
         message: message.clone(),
         blockers: report.blockers.clone(),
-        warnings: Vec::new(),
+        warnings: policy_warnings,
         next_action: recommended_action_value.clone(),
         recommended_action: recommended_action_value,
     };

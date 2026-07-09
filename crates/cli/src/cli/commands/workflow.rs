@@ -581,7 +581,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         "heddle land --thread <name>",
     )?;
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
-    let preview_warnings = land_warnings_for_preview(&preview);
+    let mut preview_warnings = land_warnings_for_preview(&preview);
+    preview_warnings.extend(auto_land_policy_warnings(&repo, &merge_thread));
+    preview_warnings.sort();
+    preview_warnings.dedup();
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
     let squash_land = should_squash_land(&args, &user_config);
@@ -1652,8 +1655,10 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
     Ok(target.short())
 }
 
-const AUTO_LAND_CONFIDENCE_THRESHOLD: f32 = 0.75;
-const AUTO_LAND_CONFIDENCE_RECOVERY_ACTION: &str =
+/// Highlight threshold for agent self-reported confidence. Below this,
+/// ready/land **warn** (do not block) so humans can still ship draft work.
+const AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD: f32 = 0.75;
+const AGENT_CONFIDENCE_RECAPTURE_ACTION: &str =
     "heddle commit -m \"...\" --confidence <confidence>";
 
 pub(crate) fn integration_blockers(
@@ -1671,55 +1676,57 @@ pub(crate) fn integration_blockers(
     blockers
 }
 
+/// Hard policy gates that block land/ready. Confidence is **not** included —
+/// it is an honesty signal for humans (see [`auto_land_policy_warnings`]).
 pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
     let mut blockers = Vec::new();
-    let agent_authored = thread_is_agent_authored(repo, thread);
-    if agent_authored
-        && let Some(confidence) = thread.confidence_summary.value
-        && confidence < AUTO_LAND_CONFIDENCE_THRESHOLD
-    {
-        blockers.push(format!(
-            "confidence {:.2} is below the auto-land threshold of 0.75",
-            confidence
-        ));
-    }
+    let _ = repo; // kept for signature stability with call sites
     if matches!(thread.verification_summary.tests_passed, Some(false)) {
         blockers.push("verification summary reports failing tests".to_string());
     }
     blockers
 }
 
+/// Soft highlights for humans/agents. Low agent confidence never blocks land.
+pub(crate) fn auto_land_policy_warnings(repo: &Repository, thread: &Thread) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if thread_is_agent_authored(repo, thread)
+        && let Some(confidence) = thread.confidence_summary.value
+        && confidence < AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD
+    {
+        warnings.push(format!(
+            "agent confidence {:.2} is below {:.2} — review carefully before shipping (does not block land)",
+            confidence, AGENT_CONFIDENCE_HIGHLIGHT_THRESHOLD
+        ));
+    }
+    warnings
+}
+
 pub(crate) fn integration_blocker_recommended_action(
     blockers: &[String],
     scope_to_checkout: Option<&std::path::Path>,
 ) -> Option<String> {
+    // Only hard policy (failing tests) yields a recapture recovery breadcrumb.
+    // Low confidence is advisory and must not rewrite recommended_action.
     blockers
         .iter()
-        .any(|blocker| {
-            blocker.starts_with("confidence ")
-                || blocker == "verification summary reports failing tests"
-        })
-        .then(|| auto_land_confidence_recovery_action(scope_to_checkout))
+        .any(|blocker| blocker == "verification summary reports failing tests")
+        .then(|| auto_land_tests_failed_recovery_action(scope_to_checkout))
 }
 
-/// The `confidence`/`verification` policy blocker is cleared by re-capturing the
-/// thread's state with a fresh confidence. That capture must land in the
-/// *thread's* checkout, not whatever checkout `ready`/`land` was invoked from —
-/// running an unscoped `heddle commit` from the parent of an isolated
-/// agent-authored thread commits the parent and never updates the blocked
-/// thread. When the thread's checkout differs from the current one, scope the
-/// recovery with the global `--repo` flag so the capture targets the thread.
-/// (heddle#464.)
-fn auto_land_confidence_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
+/// Recapture breadcrumb when verification summary reports failing tests.
+/// Scoped with `--repo` when the thread checkout differs from the current one
+/// (heddle#464).
+fn auto_land_tests_failed_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
     match scope_to_checkout {
         Some(path) => format!(
             "heddle --repo {} {}",
             crate::cli::render::shell_quote(&path.display().to_string()),
-            AUTO_LAND_CONFIDENCE_RECOVERY_ACTION
+            AGENT_CONFIDENCE_RECAPTURE_ACTION
                 .strip_prefix("heddle ")
                 .expect("recovery action is a heddle command"),
         ),
-        None => AUTO_LAND_CONFIDENCE_RECOVERY_ACTION.to_string(),
+        None => AGENT_CONFIDENCE_RECAPTURE_ACTION.to_string(),
     }
 }
 
@@ -2364,26 +2371,8 @@ mod tests {
         }
     }
 
-    // heddle#464 bug 2: the confidence/verification policy-blocker recovery used
-    // to be a bare `heddle commit ... --confidence`, which commits the CURRENT
-    // checkout. Run from the parent of an isolated thread, that never updates the
-    // blocked thread's state. Scope it to the thread's checkout via `--repo`.
-    #[test]
-    fn confidence_blocker_recovery_scopes_to_thread_checkout() {
-        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
-        let action = integration_blocker_recommended_action(
-            &blockers,
-            Some(Path::new("/work/threads/agent-thread")),
-        )
-        .expect("a confidence blocker must yield a recovery action");
-        assert_eq!(
-            action,
-            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
-        );
-        validate_recommended_action(&action)
-            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
-    }
-
+    // heddle#464: failing-tests policy recovery must scope recapture to the
+    // thread checkout when land runs from the parent.
     #[test]
     fn verification_blocker_recovery_scopes_to_thread_checkout() {
         let blockers = vec!["verification summary reports failing tests".to_string()];
@@ -2400,15 +2389,25 @@ mod tests {
             .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
     }
 
-    // The in-thread case (recovery run from inside the thread's own checkout)
-    // must stay unscoped — a `--repo` pointing back at the current checkout is
-    // noise, and the bare command already targets the right state.
     #[test]
-    fn confidence_blocker_recovery_stays_unscoped_in_thread() {
-        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+    fn low_confidence_is_not_a_hard_blocker_recovery() {
+        // Confidence is advisory; it must not drive integration_blocker recovery.
+        let blockers = vec![
+            "agent confidence 0.40 is below 0.75 — review carefully before shipping (does not block land)"
+                .to_string(),
+        ];
+        assert!(
+            integration_blocker_recommended_action(&blockers, None).is_none(),
+            "confidence highlights must not rewrite recommended_action"
+        );
+    }
+
+    #[test]
+    fn verification_blocker_recovery_stays_unscoped_in_thread() {
+        let blockers = vec!["verification summary reports failing tests".to_string()];
         let action = integration_blocker_recommended_action(&blockers, None)
-            .expect("a confidence blocker must yield a recovery action");
-        assert_eq!(action, AUTO_LAND_CONFIDENCE_RECOVERY_ACTION);
+            .expect("a verification blocker must yield a recovery action");
+        assert_eq!(action, AGENT_CONFIDENCE_RECAPTURE_ACTION);
         validate_recommended_action(&action)
             .unwrap_or_else(|e| panic!("unscoped recovery must validate: {e}"));
     }
@@ -2425,12 +2424,11 @@ mod tests {
             "Thread 'agent-thread' is stale against 'main'".to_string(),
             "Heavy-impact change: crates/wire/src/lib.rs — review broader impact before merging"
                 .to_string(),
-            "confidence 0.40 is below the auto-land threshold of 0.75".to_string(),
         ];
 
-        assert_eq!(
-            non_staleness_blockers(&blockers),
-            vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()]
+        assert!(
+            non_staleness_blockers(&blockers).is_empty(),
+            "staleness and heavy-impact must not remain hard non-staleness blockers"
         );
     }
 

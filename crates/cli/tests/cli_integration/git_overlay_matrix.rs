@@ -1812,7 +1812,7 @@ fn git_overlay_matrix_agent_ship_allows_absent_confidence() {
 }
 
 #[test]
-fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action() {
+fn git_overlay_matrix_low_confidence_warns_but_does_not_block_ready_or_land() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -1855,21 +1855,27 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
         String::from_utf8_lossy(&capture.stderr)
     );
 
+    // Low confidence is a human highlight, not a ready/land gate.
     let ready = json(&thread_path, &["--output", "json", "ready"]);
-    assert_eq!(ready["status"], "blocked", "{ready}");
-    assert_eq!(
-        ready["recommended_action"], "heddle commit -m \"...\" --confidence <confidence>",
-        "ready should give the corrective action before marking the thread ready: {ready}"
+    assert_ne!(
+        ready["status"], "blocked",
+        "low agent confidence must not block ready: {ready}"
+    );
+    let ready_warnings = ready["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        ready_warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|text| text.contains("confidence") && text.contains("0.60"))),
+        "ready should warn about low confidence: {ready}"
     );
     assert!(
         ready["blockers"]
             .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker
+            .map(|arr| !arr.iter().any(|b| b
                 .as_str()
-                .is_some_and(|text| text.contains("confidence 0.60 is below"))),
-        "ready should explain the confidence policy gate: {ready}"
+                .is_some_and(|t| t.contains("confidence"))))
+            .unwrap_or(true),
+        "ready must not list confidence as a blocker: {ready}"
     );
 
     let preview = json(
@@ -1887,7 +1893,8 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
         "heddle land --thread feature/land-low-confidence --no-push"
     );
 
-    let ship_output = heddle_output(
+    let land = json(
+        temp.path(),
         &[
             "--output",
             "json",
@@ -1896,62 +1903,33 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
             "feature/land-low-confidence",
             "--no-push",
         ],
-        Some(temp.path()),
-    )
-    .expect("invoke blocked low-confidence land");
-    assert!(
-        !ship_output.status.success(),
-        "blocked policy land should exit nonzero"
-    );
-    let land: Value = serde_json::from_slice(&ship_output.stdout)
-        .unwrap_or_else(|err| panic!("blocked land should emit JSON on stdout: {err}"));
-    assert_eq!(land["status"], "blocked");
-    assert_eq!(land["integrated"], false);
-    assert_eq!(land["checkpointed"], false);
-    // heddle#464 bug 2: this land runs from the PARENT checkout (`temp.path()`)
-    // against an isolated thread whose checkout is `thread_path`. An unscoped
-    // `heddle commit` would commit the parent and never update the blocked
-    // thread's confidence, so the recovery must scope the recapture to the
-    // thread via the global `--repo` flag. (Contrast the in-thread `ready`
-    // recovery above, which stays unscoped.)
-    // The thread's checkout lives under `.heddle/threads/<encoded>/<repo-name>`, and
-    // the slash in `feature/land-low-confidence` is percent-encoded into one
-    // path segment (`feature%2Fland-low-confidence`, heddle#572 r2). The `%`
-    // is outside `shell_quote`'s bare set, so the breadcrumb single-quotes the
-    // `--repo` path — apply the same quoting here rather than hard-coding it.
-    let expected_scoped_recapture = format!(
-        "heddle --repo {} commit -m \"...\" --confidence <confidence>",
-        repo::shell_quote(&thread_path.display().to_string())
     );
     assert_eq!(
-        land["recommended_action"], expected_scoped_recapture,
-        "blocked policy land from the parent must scope the recapture to the thread's checkout, not land again or commit the parent: {land}"
+        land["status"].as_str(),
+        Some("landed"),
+        "low confidence must not block land: {land}"
+    );
+    assert_eq!(land["integrated"], true, "{land}");
+    let land_warnings = land["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        land_warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|text| text.contains("confidence") && text.contains("0.60"))),
+        "land should warn about low confidence: {land}"
     );
     assert!(
         land["blockers"]
             .as_array()
-            .unwrap()
-            .iter()
-            .any(|blocker| blocker
-                .as_str()
-                .is_some_and(|text| text.contains("confidence 0.60 is below"))),
-        "land should explain the policy blocker: {land}"
+            .map(|arr| arr.is_empty()
+                || !arr.iter().any(|b| b
+                    .as_str()
+                    .is_some_and(|t| t.contains("confidence"))))
+            .unwrap_or(true),
+        "land must not list confidence as a blocker: {land}"
     );
     assert!(
-        land["skipped_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step == "checkpoint(not reached)"),
-        "blocked land should not claim checkpoint was unnecessary: {land}"
-    );
-    assert!(
-        !land["skipped_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step == "checkpoint(not needed)"),
-        "blocked land should reserve checkpoint(not needed) for paths that reached merge: {land}"
+        land["checkpointed"] == true || land["git_commit"].as_str().is_some(),
+        "land should still write through Git: {land}"
     );
 }
 
