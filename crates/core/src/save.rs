@@ -252,7 +252,12 @@ pub fn plan_writes_git_checkpoint(
 /// Mutation composition, hooks, thread metadata, Git write-through, and post
 /// verification live here.
 pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
-    if plan_writes_git_checkpoint(&plan, repo.capability())
+    // A plan that asks for a Git checkpoint on a non-overlay repo is a hard
+    // error: `plan_writes_git_checkpoint` silently returns false for native
+    // repos, so guard on the raw `git_scope` intent instead (the previous
+    // `plan_writes_git_checkpoint(..) && capability != GitOverlay` was
+    // self-contradictory and never fired).
+    if plan.git_scope != GitScope::None
         && repo.capability() != RepositoryCapability::GitOverlay
     {
         return Err(anyhow!(HeddleError::recovery(

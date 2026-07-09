@@ -176,9 +176,41 @@ fn create_git_checkpoint_inner(
     };
 
     let user_config = UserConfig::load_default()?;
-    // When bootstrapping a missing Heddle state, resolve full attribution so the
-    // capture inherits agent/principal rules. When reusing HEAD, only identity
-    // for the Git commit matters and is gated below.
+
+    // Fast path for an already-captured state: reuse an existing checkpoint
+    // record and gate identity on the state's STORED principal, in main's
+    // order — record-reuse first (a no-op checkpoint must not fail identity),
+    // and never against an `unknown@example.com` fallback (which would let a
+    // misconfigured identity slip a Git commit through). Bootstrap + new-state
+    // creation fall through to `execute_save` below.
+    if let Some(existing_state) = repo.current_state()? {
+        if require_clean_worktree {
+            let tree = repo.require_tree(&existing_state.tree)?;
+            let status =
+                repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)?;
+            if !status.is_clean() {
+                return Err(anyhow!(dirty_worktree_advice(
+                    "checkpoint",
+                    &status,
+                    "the current Heddle state was left unchanged; these paths have not been captured",
+                )));
+            }
+        }
+        if let Some(record) = repo.latest_git_checkpoint_for_change(&existing_state.change_id)? {
+            return Ok(record);
+        }
+        git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
+            repo,
+            &existing_state.attribution.principal,
+            "checkpoint",
+            "heddle checkpoint -m \"...\"",
+        )?;
+    }
+
+    // Attribution for the `execute_save` plan. When bootstrapping a missing
+    // Heddle state, resolve full attribution so the capture inherits
+    // agent/principal rules; when reusing HEAD the plan reuses the current
+    // state and this attribution is only a fallback identity for the commit.
     let attribution = if repo.current_state()?.is_some() {
         let principal = super::snapshot::resolve_principal(repo, &user_config)
             .unwrap_or_else(|_| {
@@ -200,14 +232,6 @@ fn create_git_checkpoint_inner(
             },
         )?
     };
-
-    // Identity gate for Git commit author (same contract as before).
-    git_overlay_txn::preflight_git_checkpoint_identity_for_principal(
-        repo,
-        &attribution.principal,
-        "checkpoint",
-        "heddle checkpoint -m \"...\"",
-    )?;
 
     let plan = SavePlan {
         verb: SaveVerb::Checkpoint,

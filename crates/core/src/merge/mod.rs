@@ -42,8 +42,8 @@ use sley::Repository as SleyRepository;
 use crate::{
     ActionTemplate, DiffReport, SemanticChangeEntry, compute_state_diff, compute_tree_diff,
     verify::{
-        RepositoryVerificationState, action_template, build_repository_verification_state,
-        serialize_empty_action_as_null,
+        MachineContractInput, RepositoryVerificationState, action_template,
+        build_repository_verification_state_with_machine_contract, serialize_empty_action_as_null,
     },
 };
 
@@ -250,8 +250,14 @@ fn repository_verification_blockers(trust: &RepositoryVerificationState) -> Vec<
         .collect()
 }
 
-fn trust_state(repo: &Repository) -> Result<RepositoryVerificationState> {
-    Ok(build_repository_verification_state(repo)?)
+fn trust_state(
+    repo: &Repository,
+    machine_contract: &MachineContractInput,
+) -> Result<RepositoryVerificationState> {
+    Ok(build_repository_verification_state_with_machine_contract(
+        repo,
+        machine_contract,
+    )?)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -343,6 +349,10 @@ pub struct MergeReport {
 
 struct MergeReportInput<'a> {
     repo: &'a Repository,
+    /// Real machine-contract coverage, injected by the CLI shell so the
+    /// operator report's trust classification matches `heddle verify`
+    /// (contract gaps stay visible instead of degrading to `not_checked`).
+    machine_contract: &'a MachineContractInput,
     thread: &'a Option<Thread>,
     preview_report: Option<&'a ThreadPreviewReport>,
     conflicts: Option<Vec<String>>,
@@ -524,7 +534,6 @@ pub fn merge_thread(repo: &Repository, opts: MergeOptions) -> Result<MergeReport
 }
 
 pub fn merge_thread_into_current(
-
     repo: &Repository,
     track_name: &str,
     message: Option<String>,
@@ -533,6 +542,35 @@ pub fn merge_thread_into_current(
     with_diff: bool,
     no_semantic: bool,
     git_commit: bool,
+) -> Result<MergeReport> {
+    merge_thread_into_current_with_machine_contract(
+        repo,
+        track_name,
+        message,
+        no_commit,
+        preview,
+        with_diff,
+        no_semantic,
+        git_commit,
+        &MachineContractInput::default(),
+    )
+}
+
+/// Contract-aware entry point. The CLI shell passes the real machine-contract
+/// coverage (from the command catalog) so the operator report's trust
+/// classification matches `heddle verify`; embedders that lack a command
+/// catalog fall through the default (`not_checked`) via the wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_thread_into_current_with_machine_contract(
+    repo: &Repository,
+    track_name: &str,
+    message: Option<String>,
+    no_commit: bool,
+    preview: bool,
+    with_diff: bool,
+    no_semantic: bool,
+    git_commit: bool,
+    machine_contract: &MachineContractInput,
 ) -> Result<MergeReport> {
     // Strategy + diff-semantics decided ONCE per merge attempt
     // (HeddleCo/heddle#503). Preview, refresh, apply, and diff all read
@@ -563,7 +601,7 @@ pub fn merge_thread_into_current(
     }
 
     if preview {
-        let trust = trust_state(repo)?;
+        let trust = trust_state(repo, machine_contract)?;
         if trust_blocks_merge_preview(&trust) {
             return Ok(merge_blocked_by_trust_output(
                 &thread, None, trust, preview, None,
@@ -633,7 +671,13 @@ pub fn merge_thread_into_current(
         )));
     }
     if let Some(output) =
-        merge_freshness_preflight_output(repo, &thread, preview_report.as_ref(), preview)?
+        merge_freshness_preflight_output(
+            repo,
+            machine_contract,
+            &thread,
+            preview_report.as_ref(),
+            preview,
+        )?
     {
         return Ok(output);
     }
@@ -685,7 +729,7 @@ pub fn merge_thread_into_current(
     };
 
     if merge_plan.relation().kind() == MergeRelationKind::AlreadyUpToDate {
-        let trust = trust_state(repo)?;
+        let trust = trust_state(repo, machine_contract)?;
         if !trust.verified {
             return Ok(merge_blocked_by_trust_output(
                 &thread,
@@ -706,6 +750,7 @@ pub fn merge_thread_into_current(
         };
         return merge_output_from_report(MergeReportInput {
             repo,
+            machine_contract,
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
@@ -756,6 +801,7 @@ pub fn merge_thread_into_current(
             // Fail loudly *before* advancing heddle state.
             return merge_output_from_report(MergeReportInput {
                 repo,
+                machine_contract,
                 thread: &thread,
                 preview_report: preview_report.as_ref(),
                 conflicts: Some(vec![]),
@@ -1007,7 +1053,7 @@ pub fn merge_thread_into_current(
             git_commit_preview: git_commit_preview_payload,
             git_commit: git_commit_info,
             trust: Some({
-                let mut trust = trust_state(repo)?;
+                let mut trust = trust_state(repo, machine_contract)?;
                 if let Some(action) = recommended_action.as_ref() {
                     override_trust_recommended_action(&mut trust, action.clone());
                 }
@@ -1087,6 +1133,7 @@ pub fn merge_thread_into_current(
         }
         return merge_output_from_report(MergeReportInput {
             repo,
+            machine_contract,
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(merge_result.conflicts.clone()),
@@ -1134,6 +1181,7 @@ pub fn merge_thread_into_current(
         };
         return merge_output_from_report(MergeReportInput {
             repo,
+            machine_contract,
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(merge_result.conflicts.clone()),
@@ -1179,6 +1227,7 @@ pub fn merge_thread_into_current(
         let no_commit_diff: Option<DiffReport> = None;
         return merge_output_from_report(MergeReportInput {
             repo,
+            machine_contract,
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
@@ -1244,6 +1293,7 @@ pub fn merge_thread_into_current(
         };
         return merge_output_from_report(MergeReportInput {
             repo,
+            machine_contract,
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
@@ -1407,6 +1457,7 @@ pub fn merge_thread_into_current(
 
     merge_output_from_report(MergeReportInput {
         repo,
+        machine_contract,
         thread: &thread,
         preview_report: preview_report.as_ref(),
         conflicts: Some(vec![]),
@@ -2280,6 +2331,7 @@ fn merge_output_from_report(input: MergeReportInput<'_>) -> Result<MergeReport> 
         git_commit: input.git_commit,
         trust: Some(merge_output_trust(
             input.repo,
+            input.machine_contract,
             recommended_action.as_deref(),
         )?),
     })
@@ -2362,9 +2414,10 @@ fn coordination_blocker_recommended_action(merge_state: Option<&String>) -> Stri
 
 fn merge_output_trust(
     repo: &Repository,
+    machine_contract: &MachineContractInput,
     recommended_action: Option<&str>,
 ) -> Result<RepositoryVerificationState> {
-    let mut trust = trust_state(repo)?;
+    let mut trust = trust_state(repo, machine_contract)?;
     if let Some(action) = recommended_action {
         override_trust_recommended_action(&mut trust, action);
     }
@@ -2522,6 +2575,7 @@ fn merge_blocked_by_trust_output(
 
 fn merge_freshness_preflight_output(
     repo: &Repository,
+    machine_contract: &MachineContractInput,
     thread: &Option<Thread>,
     preview_report: Option<&ThreadPreviewReport>,
     preview_only: bool,
@@ -2539,6 +2593,7 @@ fn merge_freshness_preflight_output(
     };
     Ok(Some(stale_thread_merge_blocked_output(
         repo,
+        machine_contract,
         thread,
         report,
         preview_only,
@@ -2547,6 +2602,7 @@ fn merge_freshness_preflight_output(
 
 fn stale_thread_merge_blocked_output(
     repo: &Repository,
+    machine_contract: &MachineContractInput,
     thread: &Option<Thread>,
     preview_report: &ThreadPreviewReport,
     preview_only: bool,
@@ -2618,7 +2674,11 @@ fn stale_thread_merge_blocked_output(
         diff: None,
         git_commit_preview: None,
         git_commit: None,
-        trust: Some(merge_output_trust(repo, Some(&recommended_action))?),
+        trust: Some(merge_output_trust(
+            repo,
+            machine_contract,
+            Some(&recommended_action),
+        )?),
     })
 }
 
@@ -2878,12 +2938,13 @@ mod tests {
         // `merge_thread_into_current`.
         let source = include_str!("mod.rs");
         let body = source
-            .split_once("pub fn merge_thread_into_current(
-")
-            .expect("merge_thread_into_current must exist")
+            .split_once("pub fn merge_thread_into_current_with_machine_contract(")
+            .expect("merge_thread_into_current_with_machine_contract must exist")
             .1
             .split_once("\nfn mark_merge_previewed(")
-            .expect("merge_thread_into_current must be delimited by mark_merge_previewed")
+            .expect(
+                "merge_thread_into_current_with_machine_contract must be delimited by mark_merge_previewed",
+            )
             .0;
         let decide_calls = body.matches("MergeAttemptPlan::decide(").count();
         assert_eq!(

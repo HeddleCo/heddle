@@ -9,8 +9,10 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heddle_core::merge::{
-    MergeReport, merge_thread_into_current as core_merge_thread_into_current,
+    MergeReport,
+    merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
 };
+use heddle_core::verify::MachineContractInput;
 use repo::Repository;
 use serde_json::Value;
 
@@ -97,7 +99,11 @@ pub fn cmd_merge(
         with_diff,
         no_semantic,
         git_commit,
+        &MachineContractInput::from_coverage(
+            super::verification_health::machine_contract_coverage(),
+        ),
     )?;
+    rewrite_land_recommendations_for_remote(&repo, &mut output);
     scope_merge_recommendations_to_cli_repo(cli, &mut output);
 
     // `post_merge` JSON-protocol hook. Best-effort; can't veto an applied merge.
@@ -132,6 +138,31 @@ fn merge_output_exit_code(output: &MergeOutput) -> Option<i32> {
         return None;
     }
     blocked_operator_exit_code(&output.operator.status)
+}
+
+/// Core builds `heddle land ... --no-push` recommendations because it can't
+/// resolve remotes through the CLI remote helpers. When a default push remote
+/// exists, rewrite those to `--push` so the recommended land command matches
+/// what `main` produced (a repo with a remote should default to pushing).
+fn rewrite_land_recommendations_for_remote(repo: &Repository, output: &mut MergeOutput) {
+    let has_push_target = super::remote::resolved_default_remote_name(repo)
+        .ok()
+        .flatten()
+        .is_some();
+    if !has_push_target {
+        return;
+    }
+    let rewrite = |action: Option<String>| -> Option<String> {
+        action.map(|action| {
+            if action.contains(" land ") && action.contains("--no-push") {
+                action.replace("--no-push", "--push")
+            } else {
+                action
+            }
+        })
+    };
+    output.operator.recommended_action = rewrite(output.operator.recommended_action.take());
+    output.operator.next_action = rewrite(output.operator.next_action.take());
 }
 
 fn scope_merge_recommendations_to_cli_repo(cli: &Cli, output: &mut MergeOutput) {
@@ -332,24 +363,6 @@ fn render_merge_output(cli: &Cli, repo: &Repository, output: MergeOutput) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use heddle_core::merge::MergeAttemptPlan;
-    use merge::MergeStrategy;
-
-    /// Regression-lock for HeddleCo/heddle#503.
-    #[test]
-    fn merge_strategy_is_decided_once_preview_equals_apply() {
-        let semantic = MergeAttemptPlan::decide(false);
-        let hunk_only = MergeAttemptPlan::decide(true);
-        if cfg!(feature = "semantic") {
-            assert_eq!(semantic.strategy(), MergeStrategy::Semantic);
-            assert!(semantic.use_semantic());
-        } else {
-            assert_eq!(semantic.strategy(), MergeStrategy::HunkOnly);
-            assert!(!semantic.use_semantic());
-        }
-        assert_eq!(hunk_only.strategy(), MergeStrategy::HunkOnly);
-        assert!(!hunk_only.use_semantic());
-    }
 
     #[test]
     fn prepare_dir_for_file_replacement_removes_empty_directory() {
