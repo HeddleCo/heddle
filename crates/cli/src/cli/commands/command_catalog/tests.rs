@@ -394,6 +394,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["spool", "membership"],
         &["spool", "membership", "acme/root"],
     ),
+    #[cfg(feature = "client")]
+    sample(&["prove", "submit"], &["prove", "submit", "chal-123"]),
+    #[cfg(feature = "client")]
+    sample(&["prove", "list"], &["prove", "list"]),
     sample(&["switch"], &["switch", "main"]),
     sample(&["sync"], &["sync"]),
     sample(&["thread", "create"], &["thread", "create", "feature"]),
@@ -2052,6 +2056,6 @@ fn op_id_persistence_reads_contract_table() {
 fn feature_gated_command_roots_are_catalog_owned() {
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "presence", "spool", "support"]
+        &["auth", "presence", "prove", "spool", "support"]
     );
 }

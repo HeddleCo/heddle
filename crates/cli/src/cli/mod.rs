@@ -36,8 +36,8 @@ pub use cli_args::{
 };
 #[cfg(feature = "client")]
 pub use cli_args::{
-    AuthCommands, SpoolAttachArgs, SpoolChildrenArgs, SpoolCommands, SpoolDetachArgs,
-    SpoolHistoryArgs, SupportCommands,
+    AuthCommands, ProveArgs, ProveCommands, ProveListArgs, ProveSubmitArgs, SpoolAttachArgs,
+    SpoolChildrenArgs, SpoolCommands, SpoolDetachArgs, SpoolHistoryArgs, SupportCommands,
 };
 #[cfg(feature = "git-overlay")]
 pub use cli_args::{ExportCommands, ImportCommands};

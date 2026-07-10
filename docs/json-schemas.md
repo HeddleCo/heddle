@@ -3048,8 +3048,8 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "advanced_scope_json_commands_with_accepted_opaque_schema": 47,
     "advanced_scope_mutating_commands_total": 78,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "catalog_commands_total": 216,
-    "catalog_mutating_commands_total": 109,
+    "catalog_commands_total": 219,
+    "catalog_mutating_commands_total": 110,
     "json_commands_total": 171,
     "json_commands_with_accepted_opaque_schema": 47,
     "json_commands_with_schema": 124,
@@ -3063,7 +3063,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 47,
     "status": "available",
-    "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+    "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3101,7 +3101,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "216 command(s), 171 JSON command(s), 109 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
+  "summary": "219 command(s), 171 JSON command(s), 110 mutating command(s), 104 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 47 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

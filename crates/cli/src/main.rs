@@ -10,6 +10,8 @@ use cli::cli::commands::cmd_context_reason_git;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
+use cli::cli::commands::cmd_prove;
+#[cfg(feature = "client")]
 use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
@@ -769,6 +771,9 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Spool { command } => cmd_spool(&cli, command.clone()).await,
+
+        #[cfg(feature = "client")]
+        Commands::Prove(args) => cmd_prove(&cli, args.clone()).await,
 
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),

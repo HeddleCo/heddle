@@ -54,6 +54,8 @@ mod operator_core;
 mod operator_loop;
 mod oplog;
 mod oss;
+#[cfg(feature = "client")]
+mod prove;
 mod purge;
 mod query;
 mod ready_cmd;
@@ -198,6 +200,8 @@ pub use session::{
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
+#[cfg(feature = "client")]
+pub use prove::cmd_prove;
 #[cfg(feature = "client")]
 pub use spool::cmd_spool;
 pub use stash::cmd_stash;

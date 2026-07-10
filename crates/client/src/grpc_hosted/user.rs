@@ -5,11 +5,12 @@ use grpc::heddle::v1::{
     DeleteRepositoryRequest, DetachChildRequest, GetCurrentUserNamespaceRequest,
     GetGovernanceHistoryRequest, GetMembershipHistoryRequest, GovernanceHistoryEntry,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation, ListChildrenRequest,
-    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MembershipHistoryEntry, MonorepoNode, ResolveMonorepoRequest,
-    RevokeApprovalRequest, RevokeSupportAccessRequest, SpoolSummary, SupportAccessGrant,
-    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
-    grant_target_ref::Target as GrantTargetKind,
+    ListGrantsRequest, ListProofsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
+    ListThreadApprovalsRequest, MembershipHistoryEntry, MonorepoNode, ProofSummary,
+    RequestProofChallengeRequest, RequestProofChallengeResponse, ResolveMonorepoRequest,
+    RevokeApprovalRequest, RevokeSupportAccessRequest, SpoolSummary, SubmitProofRequest,
+    SubmitProofResponse, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use tonic::Request;
 use wire::ProtocolError;
@@ -660,6 +661,56 @@ impl HostedGrpcClient {
             }
         )
         .entries)
+    }
+
+    // --- Git-native identity proofs (Prove; wraps weft's F1a engine, F1b) ---
+    // Thin unary wrappers over the `HostedUserService` proof RPCs. Each returns
+    // the raw proto reply so the CLI renders. RequestProofChallenge/SubmitProof
+    // mutate proof state; ListProofs is read-only. All route through the shared
+    // `authed_call!` chokepoint for uniform bearer/PoP auth + error mapping.
+
+    /// Start a git-native identity proof for `repo` on `host`. The server
+    /// returns the challenge id, the exact marker line to publish, and the
+    /// well-known path to publish it at. Publishing the marker (commit + push
+    /// to the caller's repo) is the caller's action — this RPC only mints the
+    /// challenge.
+    pub async fn request_proof_challenge(
+        &mut self,
+        host: &str,
+        repo: &str,
+    ) -> Result<RequestProofChallengeResponse, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            request_proof_challenge,
+            "RequestProofChallenge",
+            RequestProofChallengeRequest {
+                host: host.to_string(),
+                repo: repo.to_string(),
+            }
+        ))
+    }
+
+    /// Submit a previously started challenge for verification. The server
+    /// fetches the marker from the well-known path and returns the resulting
+    /// `ProofStatus` plus a human-readable detail.
+    pub async fn submit_proof(
+        &mut self,
+        challenge_id: &str,
+    ) -> Result<SubmitProofResponse, ProtocolError> {
+        Ok(authed_call!(
+            self,
+            submit_proof,
+            "SubmitProof",
+            SubmitProofRequest {
+                challenge_id: challenge_id.to_string(),
+            }
+        ))
+    }
+
+    /// List the caller's own git-native proofs (host, repo, status,
+    /// verified-at).
+    pub async fn list_proofs(&mut self) -> Result<Vec<ProofSummary>, ProtocolError> {
+        Ok(authed_call!(self, list_proofs, "ListProofs", ListProofsRequest {}).proofs)
     }
 
     /// Test-only: exercise the exact `signed_call!` orchestration (PoP sign →
