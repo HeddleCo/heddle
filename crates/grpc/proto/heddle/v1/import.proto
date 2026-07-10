@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "heddle/v1/hosted.proto";
+
+// ───────────────────────────────────────────────────────────────
+// ImportService — git-provider repo imports (producer surface).
+// Producer RPC for the weft git-import worker (weft#379). tapestry
+// (authenticated user, no PG access) enqueues an import; weft inserts
+// an `import_jobs` row + notifies the worker. weft#386 will later add a
+// StreamAdoptProgress server-streaming RPC to this same service.
+// ADDITIVE contract only; handlers land in weft (a follow-up).
+// ───────────────────────────────────────────────────────────────
+
+service ImportService {
+  // Enqueue a git-provider repo import. Returns immediately with the job id;
+  // the import runs asynchronously in the weft import worker (LISTEN/NOTIFY +
+  // backup poll, lease-claimed for horizontal scale). Caller identity (user_id)
+  // comes from the biscuit subject — NOT a request field.
+  rpc CreateImportJob(CreateImportJobRequest) returns (CreateImportJobResponse);
+}
+
+message CreateImportJobRequest {
+  int64 installation_id = 1;   // GitHub App installation that grants access
+  int64 provider_repo_id = 2;  // provider's numeric repo id (stable across renames)
+  string full_name = 3;        // e.g. "owner/repo"
+  // REUSE the existing SpoolVisibility enum in hosted.proto (SPOOL_VISIBILITY_*).
+  SpoolVisibility requested_visibility = 4;
+  bool adopt_on_complete = 5;  // false = mirror-only; true = adopt into native heddle after mirror
+}
+
+message CreateImportJobResponse {
+  string job_id = 1;           // uuid of the enqueued import_jobs row
+}
