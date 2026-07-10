@@ -194,6 +194,14 @@ impl Repository {
             refreshed_change_monitor = true;
         }
 
+        // `maintenance run` is the deliberate place to pay for a full-tree
+        // monitor scan and (re)materialize the native monitor sidecars
+        // (`monitor-native.bin` + `fsmonitor.toml`). The status hot path
+        // intentionally no-ops the native snapshot to stay cheap, so without
+        // this explicit rebuild maintenance would stop refreshing the monitor
+        // sidecar it has always produced.
+        crate::fsmonitor::rebuild_local_monitor_snapshot(self.root(), options.fsmonitor)?;
+
         let report = self.inspect_performance_with_options(options)?;
         Ok(RepositoryMaintenanceRunReport {
             rebuilt_commit_graph,

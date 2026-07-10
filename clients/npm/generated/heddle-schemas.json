@@ -10721,8 +10721,16 @@
           ],
           "type": "string"
         },
-        "private_key_pem": {
+        "private_key_path": {
+          "description": "Path to the private-key PEM written with mode 0600.",
           "type": "string"
+        },
+        "private_key_pem": {
+          "description": "Present only when `--show-secrets` was passed.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "scope": {
           "type": "string"
@@ -10737,7 +10745,7 @@
         "namespace",
         "scope",
         "token",
-        "private_key_pem",
+        "private_key_path",
         "expires_in_days"
       ],
       "title": "AuthCreateServiceTokenSchema",

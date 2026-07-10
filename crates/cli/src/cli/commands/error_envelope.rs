@@ -198,7 +198,15 @@ impl ErrorClassification {
     }
 
     fn from_recovery_details(details: &objects::RecoveryDetails) -> Self {
-        let recovery_commands = typed_recovery_commands(details.kind);
+        // Prefer explicit, path-specific commands the callsite attached (e.g.
+        // `heddle --repo <checkout> ready …` for source-thread refusals). The
+        // `kind`-keyed fallback below has no access to that path, so it can only
+        // reconstruct the generic recovery variant (HeddleCo/heddle#981).
+        let recovery_commands = details
+            .recovery_commands
+            .clone()
+            .filter(|commands| !commands.is_empty())
+            .unwrap_or_else(|| typed_recovery_commands(details.kind));
         let primary_command = recovery_commands
             .first()
             .cloned()
@@ -303,6 +311,28 @@ fn typed_recovery_commands(kind: &str) -> Vec<String> {
         "repository_integrity_error" => &["heddle fsck --full"],
         "repository_not_found" => &["heddle init"],
         "state_not_found" => &["heddle log"],
+        // Merge-orchestration refusals raised from core as typed
+        // `RecoveryDetails` (crates/core/src/merge/advice.rs). Before this
+        // mapping they all degraded to `heddle help --output json` in the
+        // machine envelope, losing the specific recovery path the human
+        // hint already documents (HeddleCo/heddle#981 regression). Commands
+        // mirror the CLI-side `RecoveryAdvice` versions on `main`.
+        "merge_already_in_progress" => {
+            &["heddle status", "heddle continue", "heddle resolve --abort"]
+        }
+        "thread_not_found" => &["heddle thread list"],
+        "merge_no_common_ancestor" => &["heddle status"],
+        // Generic capture/stash recovery. `source_thread_uncaptured_work`
+        // normally arrives with explicit path-specific `heddle --repo
+        // <checkout> ...` commands attached to `RecoveryDetails`
+        // (`from_recovery_details` prefers those); this `kind`-keyed fallback
+        // only applies when no explicit commands were set. `dirty_worktree` has
+        // no checkout path to scope to, so the generic form matches `main`.
+        "dirty_worktree" | "source_thread_uncaptured_work" => &[
+            super::advice::DIRTY_WORKTREE_COMMIT_COMMAND,
+            super::advice::DIRTY_WORKTREE_CAPTURE_COMMAND,
+            super::advice::DIRTY_WORKTREE_STASH_COMMAND,
+        ],
         _ => &["heddle help --output json"],
     };
     commands
@@ -752,6 +782,51 @@ mod tests {
         assert_eq!(classified.kind, "no_merge_in_progress");
         assert_eq!(classified.primary_command, "heddle status");
         assert!(classified.unsafe_condition.contains("no active merge"));
+    }
+
+    #[test]
+    fn typed_merge_refusal_kinds_keep_specific_recovery_commands() {
+        // HeddleCo/heddle#981: merge-orchestration refusals raised from core
+        // as typed `RecoveryDetails` must not degrade to
+        // `heddle help --output json` in the machine envelope.
+        let in_progress = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "merge_already_in_progress",
+            "A merge is already in progress",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&in_progress);
+        assert_eq!(classified.kind, "merge_already_in_progress");
+        assert_eq!(classified.primary_command, "heddle status");
+        assert_eq!(
+            classified.recovery_commands,
+            vec!["heddle status", "heddle continue", "heddle resolve --abort"]
+        );
+
+        let not_found = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "thread_not_found",
+            "Thread 'x' not found",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&not_found);
+        assert_eq!(classified.primary_command, "heddle thread list");
+
+        let dirty = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(
+            "dirty_worktree",
+            "Refusing to merge with a dirty worktree",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+        )));
+        let classified = classify_error(&dirty);
+        assert_ne!(classified.primary_command, "heddle help --output json");
+        assert_eq!(classified.recovery_commands.len(), 3);
     }
 
     #[test]

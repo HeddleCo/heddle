@@ -409,7 +409,7 @@ impl RefManager {
             return Ok(());
         }
 
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         for delta in deltas {
             summary.apply_delta(delta, &packed);
         }
@@ -420,7 +420,7 @@ impl RefManager {
 
     pub(super) fn list_threads_from_storage(&self) -> Result<Vec<ThreadName>> {
         let loose = self.scan_loose_threads()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         let mut all: Vec<ThreadName> = loose.keys().map(|k| ThreadName::new(k.as_str())).collect();
         for name in packed.list_threads() {
             if !loose.contains_key(&name) {
@@ -433,7 +433,7 @@ impl RefManager {
 
     pub(super) fn list_markers_from_storage(&self) -> Result<Vec<MarkerName>> {
         let loose = self.scan_loose_markers()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
         let mut all: Vec<MarkerName> = loose.keys().map(|k| MarkerName::new(k.as_str())).collect();
         for name in packed.list_markers() {
             if !loose.contains_key(&name) {
@@ -482,7 +482,7 @@ impl RefManager {
     fn build_ref_summary_index_from_storage(&self) -> Result<RefSummaryIndex> {
         let loose_threads = self.scan_loose_threads()?;
         let loose_markers = self.scan_loose_markers()?;
-        let packed = PackedRefs::load(&self.packed_refs_path())?;
+        let packed = self.load_packed_refs_cached()?;
 
         let mut threads: Vec<RefSummaryEntry> = loose_threads
             .iter()

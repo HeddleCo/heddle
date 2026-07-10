@@ -36,6 +36,7 @@ impl<'a> ResolvePolicy<'a> {
     }
 
     /// history_target and other rich CLI resolvers.
+    #[cfg(feature = "git-overlay")]
     pub fn with_git_overlay_hints() -> Self {
         Self {
             git_import_guidance: true,
@@ -132,6 +133,7 @@ fn resolve_missing_state(
     spec: &str,
     policy: ResolvePolicy<'_>,
 ) -> Result<ResolvedState, StateResolveError> {
+    #[cfg(feature = "git-overlay")]
     if policy.git_import_guidance {
         if let Some(tip) = repo.git_overlay_branch_tip(spec)?
             && !tip.history_imported
@@ -148,6 +150,8 @@ fn resolve_missing_state(
             ));
         }
     }
+    #[cfg(not(feature = "git-overlay"))]
+    let _ = (repo, policy);
 
     Err(StateResolveError::Failure(StateResolveFailure::NotFound {
         spec: spec.to_string(),
@@ -235,6 +239,7 @@ mod tests {
         assert_eq!(repo.head().unwrap(), Some(resolved.change_id));
     }
 
+    #[cfg(feature = "git-overlay")]
     #[test]
     fn git_overlay_hint_policy_distinguishes_not_found() {
         let (_temp, repo, _) = repo_with_snapshot();

@@ -76,6 +76,21 @@ desktop.ini
 
 /// Category of common-noise match. Used to produce both a
 /// human-readable label and a suggested `.heddleignore` line.
+// TODO(pr981-review): `NoiseCategory`/`NoiseHint`/`noise_hint_for` lost
+// their only external caller when `merge/git_commit.rs` was ported from
+// `cli/commands/merge/` to `core/src/merge/` in e87795ea ("Code review
+// remediation"). The old CLI-side `unrelated_git_index_intent_paths`
+// blocker rendering called `heddleignore_defaults::noise_hint_for` to
+// append an inline `.heddleignore` hint (see e87795ea^:crates/cli/src/
+// cli/commands/merge/git_commit.rs:122); the ported
+// `crates/core/src/merge/git_commit.rs` now builds the same preview list
+// via a plain `.cloned().collect()` with no noise-hint decoration.
+// This looks like an accidental feature drop in the reparent (same
+// pattern as the oplog fixture this branch's tip commit restores), not
+// an intentional removal — confirm with a human whether to wire
+// `noise_hint_for` back into `core::merge::git_commit`'s unrelated-path
+// preview, or delete this module if the drop was intentional.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoiseCategory {
     MacOsFinder,
@@ -90,6 +105,7 @@ pub enum NoiseCategory {
 /// A suggestion to suppress one stray path. Carries enough context
 /// for the caller (merge refusal, capture preflight) to render the
 /// hint inline next to the offending path.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoiseHint {
     pub category: NoiseCategory,
@@ -102,6 +118,7 @@ pub struct NoiseHint {
     pub suggested_pattern: &'static str,
 }
 
+#[allow(dead_code)]
 impl NoiseHint {
     /// Pre-formatted bracket hint suitable for inline rendering:
     /// `[HINT: looks like macOS noise — add `.DS_Store` to .heddleignore?]`
@@ -123,6 +140,7 @@ impl NoiseHint {
 /// component. We deliberately don't probe the filesystem here so
 /// the helper is safe to call from preflight code that may be
 /// running before a tree exists on disk.
+#[allow(dead_code)]
 pub fn noise_hint_for(path: &Path) -> Option<NoiseHint> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let components: Vec<&str> = path

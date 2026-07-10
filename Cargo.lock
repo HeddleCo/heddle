@@ -1695,6 +1695,7 @@ dependencies = [
  "heddle-crypto",
  "heddle-daemon",
  "heddle-format",
+ "heddle-git-projection",
  "heddle-grpc",
  "heddle-ingest",
  "heddle-merge",
@@ -1801,6 +1802,8 @@ dependencies = [
  "chrono",
  "heddle-cli-shared",
  "heddle-crypto",
+ "heddle-git-projection",
+ "heddle-merge",
  "heddle-objects",
  "heddle-oplog",
  "heddle-refs",
@@ -1813,6 +1816,8 @@ dependencies = [
  "serde_json",
  "sley",
  "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -1882,6 +1887,23 @@ version = "0.10.0"
 dependencies = [
  "thiserror 2.0.18",
  "zstd",
+]
+
+[[package]]
+name = "heddle-git-projection"
+version = "0.10.0"
+dependencies = [
+ "heddle-ingest",
+ "heddle-objects",
+ "heddle-refs",
+ "heddle-repo",
+ "heddle-wire",
+ "serde",
+ "serde_json",
+ "sley",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

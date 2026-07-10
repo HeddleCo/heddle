@@ -163,20 +163,22 @@ fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> 
 }
 
 impl FsStore {
+    /// Insert into the recent-blob cache when the payload fits the size gate.
+    fn cache_recent_blob(&self, hash: ContentHash, blob: &Blob) {
+        if blob.content().len() > super::fs_store::RECENT_BLOB_CACHE_MAX_BYTES {
+            return;
+        }
+        if let Ok(mut cache) = self.recent_blobs.write() {
+            cache.insert(hash, blob.clone());
+        }
+    }
+
     /// Single-pass blob lookup. The wrapper in `ObjectStore::get_blob`
     /// retries this once after a stale-reload on miss.
     fn try_get_blob_once(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        let path = hash_path(&blobs_dir(&self.root), hash);
-        let loose_exists = path.exists();
-        let pack_has = if loose_exists {
-            false
-        } else if let Ok(manager) = self.pack_manager().read() {
-            manager.has_object(hash)
-        } else {
-            false
-        };
-        if (loose_exists || pack_has)
-            && let Ok(cache) = self.recent_blobs.read()
+        // Cache first — avoid `path.exists()` / pack probes on warm hits.
+        // Write lock: LRU promotion mutates the order list.
+        if let Ok(mut cache) = self.recent_blobs.write()
             && let Some(blob) = cache.get(hash)
         {
             trace!("Found blob in recent object cache");
@@ -195,9 +197,12 @@ impl FsStore {
             // hash check can't recover from cleanly. For multi-MB
             // blobs the verify was the dominant tail of the cold
             // read (~3GB/s × 10MB ≈ 3.3ms per call).
-            return Ok(Some(Blob::new(data)));
+            let blob = Blob::new(data);
+            self.cache_recent_blob(*hash, &blob);
+            return Ok(Some(blob));
         }
 
+        let path = hash_path(&blobs_dir(&self.root), hash);
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Blob data read");
@@ -215,6 +220,7 @@ impl FsStore {
                         found: blob.hash(),
                     });
                 }
+                self.cache_recent_blob(*hash, &blob);
                 Ok(Some(blob))
             }
             None => Ok(None),
@@ -240,6 +246,15 @@ impl FsStore {
     }
 
     fn try_has_blob_once(&self, hash: &ContentHash) -> Result<bool> {
+        // Keep `has_blob` coherent with cache-first `get_blob`. A pure
+        // existence check needs no LRU promotion, so take the *read*
+        // lock and use `contains` — concurrent `has_blob` calls in
+        // heddled/mount don't serialize on the exclusive write lock.
+        if let Ok(cache) = self.recent_blobs.read()
+            && cache.contains(hash)
+        {
+            return Ok(true);
+        }
         let path = hash_path(&blobs_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
@@ -259,7 +274,7 @@ impl FsStore {
     /// pure in-memory varint decode for packed blobs. *No*
     /// decompression.
     fn try_get_blob_size_once(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        if let Ok(cache) = self.recent_blobs.read()
+        if let Ok(mut cache) = self.recent_blobs.write()
             && let Some(blob) = cache.get(hash)
         {
             return Ok(Some(blob.content().len() as u64));
@@ -286,8 +301,8 @@ impl FsStore {
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         // Cache first. The recent-object cache only ever holds trees we
         // wrote or read this process, so a hit is authoritative for a
-        // read.
-        if let Ok(cache) = self.recent_trees.read()
+        // read. Write lock: LRU promotion mutates the order list.
+        if let Ok(mut cache) = self.recent_trees.write()
             && let Some(tree) = cache.get(hash)
         {
             trace!("Found tree in recent object cache");
@@ -327,6 +342,9 @@ impl FsStore {
                     found: tree.hash(),
                 });
             }
+            if let Ok(mut cache) = self.recent_trees.write() {
+                cache.insert(*hash, tree.clone());
+            }
             return Ok(Some(tree));
         }
         Ok(None)
@@ -351,22 +369,22 @@ impl FsStore {
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_trees.read()
+            && cache.contains(hash)
+        {
+            return Ok(true);
+        }
         let path = hash_path(&trees_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
 
     fn try_get_state_once(&self, id: &ChangeId) -> Result<Option<State>> {
-        let path = state_path(&self.root, id);
-        let loose_exists = path.exists();
-        let pack_has = if loose_exists {
-            false
-        } else if let Ok(manager) = self.pack_manager().read() {
-            manager.has_object_id(&PackObjectId::ChangeId(*id))
-        } else {
-            false
-        };
-        if (loose_exists || pack_has)
-            && let Ok(cache) = self.recent_states.read()
+        // Cache first — avoid `path.exists()` / pack probes on warm hits.
+        // Write lock: LRU promotion mutates the order list. Put paths and
+        // successful reads below keep this coherent for the process.
+        if let Ok(mut cache) = self.recent_states.write()
             && let Some(state) = cache.get(id)
         {
             trace!("Found state in recent object cache");
@@ -382,7 +400,8 @@ impl FsStore {
         // miss) returns the stale packed body. (Trees/blobs are
         // content-addressed and can't go stale this way, so their read paths
         // deliberately keep pack-first ordering.)
-        if loose_exists && let Some(data) = read_file_bytes(&path)? {
+        let path = state_path(&self.root, id);
+        if let Some(data) = read_file_bytes(&path)? {
             trace!(
                 size = data.as_slice().len(),
                 "State read from loose object (shadows any packed copy)"
@@ -410,6 +429,13 @@ impl FsStore {
     }
 
     fn try_has_state_once(&self, id: &ChangeId) -> Result<bool> {
+        // Read-lock `contains`: an existence check needs no LRU
+        // promotion, so it must not serialize on the write lock.
+        if let Ok(cache) = self.recent_states.read()
+            && cache.contains(id)
+        {
+            return Ok(true);
+        }
         let path = state_path(&self.root, id);
         self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::ChangeId(*id)))
     }
@@ -468,9 +494,7 @@ impl ObjectStore for FsStore {
         } else {
             trace!("Blob already exists, skipping write");
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, blob.clone());
-        }
+        self.cache_recent_blob(hash, blob);
 
         Ok(hash)
     }
@@ -494,9 +518,7 @@ impl ObjectStore for FsStore {
             );
             self.write_loose_object_atomic(&path, &data)?;
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, blob.clone());
-        }
+        self.cache_recent_blob(hash, blob);
 
         Ok(hash)
     }
@@ -513,9 +535,7 @@ impl ObjectStore for FsStore {
             );
             self.write_loose_object_atomic(&path, data)?;
         }
-        if let Ok(mut cache) = self.recent_blobs.write() {
-            cache.insert(hash, Blob::from_slice(data));
-        }
+        self.cache_recent_blob(hash, &Blob::from_slice(data));
 
         Ok(hash)
     }
@@ -554,7 +574,7 @@ impl ObjectStore for FsStore {
         // Trust without re-hashing — `path.exists()` is the only
         // I/O we need.
         if let Ok(verified) = self.verified_loose_blobs.read()
-            && verified.get(hash).is_some()
+            && verified.contains(hash)
             && path.exists()
         {
             return Some(path);

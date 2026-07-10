@@ -198,6 +198,44 @@ impl ChangeMonitorSession {
     }
 }
 
+/// Rebuild the native change-monitor snapshot + cursor sidecars from a full
+/// worktree scan.
+///
+/// This is the deliberate, maintenance-time counterpart to the hot-path
+/// `prepare`/`persist_current_cursor` no-op: `heddle maintenance run` is where
+/// we are *supposed* to pay for a full `scan_snapshot_entries` walk to
+/// (re)materialize `monitor-native.bin` + `fsmonitor.toml`, so a subsequent
+/// live helper (or a later usable session) has a baseline to diff against.
+/// The status hot path must never call this — it exists solely so maintenance
+/// keeps refreshing the monitor sidecars it always has.
+///
+/// A live helper already owns the snapshot under its long-lived watcher, so
+/// when one answers we leave it alone. `Off`/`Watchman` modes have no native
+/// snapshot to build and are treated as no-ops.
+pub(crate) fn rebuild_local_monitor_snapshot(
+    repo_root: &Path,
+    settings: FsMonitorSettings,
+) -> Result<(), HeddleError> {
+    match settings.mode {
+        FsMonitorMode::Off | FsMonitorMode::Watchman => Ok(()),
+        FsMonitorMode::Native | FsMonitorMode::Auto => {
+            let state_path = repo_root.join(".heddle/state").join("fsmonitor.toml");
+            if try_local_helper_refresh(repo_root, &state_path)? {
+                return Ok(());
+            }
+            let previous = load_snapshot(&snapshot_path(&state_path)).unwrap_or_default();
+            let next_generation = previous.generation.saturating_add(1);
+            let snapshot = MonitorSnapshotState {
+                version: MONITOR_SNAPSHOT_VERSION,
+                generation: next_generation,
+                entries: scan_snapshot_entries(repo_root)?,
+            };
+            persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
+            persist_cursor(&state_path, &next_generation.to_string())
+        }
+    }
+}
+
 pub(crate) fn persist_current_monitor_cursor(
     repo_root: &Path,
     settings: FsMonitorSettings,
@@ -283,64 +321,30 @@ impl DaemonHandler for LocalMonitorServer {
 
 impl ChangeMonitorBackend for LocalMonitor {
     fn prepare(repo_root: &Path, state_path: PathBuf) -> ChangeMonitorSession {
-        let previous = match load_snapshot(&snapshot_path(&state_path)) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                warn!(%error, root = %repo_root.display(), "local monitor snapshot unavailable; treating as fresh instance");
-                MonitorSnapshotState::default()
-            }
-        };
-        let current_entries = match scan_snapshot_entries(repo_root) {
-            Ok(entries) => entries,
-            Err(error) => {
-                warn!(%error, root = %repo_root.display(), "local monitor scan failed");
-                return ChangeMonitorSession {
-                    state_path,
-                    backend: Some("native"),
-                    reason: Some(format!("native_error:{error}")),
-                    status: MonitorStatus::Disabled,
-                    ..ChangeMonitorSession::default()
-                };
-            }
-        };
-
-        let next_generation = previous.generation.saturating_add(1);
-        let pending_snapshot = MonitorSnapshotState {
-            version: MONITOR_SNAPSHOT_VERSION,
-            generation: next_generation,
-            entries: current_entries,
-        };
-        let previous_present = !previous.entries.is_empty() || previous.generation > 0;
-        let status = if previous_present {
-            MonitorStatus::Usable
-        } else {
-            MonitorStatus::FreshInstance
-        };
-        let changed_paths = (status == MonitorStatus::Usable)
-            .then(|| diff_snapshot_entries(&previous.entries, &pending_snapshot.entries));
-
+        // In-process fallback when the helper daemon is unavailable.
+        // Never pay for a full-tree WalkBuilder `scan_snapshot_entries` on
+        // the status hot path: without a live watcher we cannot produce a
+        // reliable changed-paths set, so return a session that simply never
+        // skips directories (`can_skip_directory` requires `Usable`).
+        // `Disabled` also lets `FsMonitorMode::Auto` fall through to
+        // Watchman. See docs/perf/cli-core-loop-todo.md.
+        let _ = repo_root;
         ChangeMonitorSession {
-            changed_paths,
-            next_cursor: Some(next_generation.to_string()),
             state_path,
-            pending_snapshot: Some(pending_snapshot),
             backend: Some("native"),
-            reason: (status == MonitorStatus::FreshInstance)
-                .then_some("fresh_instance".to_string()),
-            status,
+            reason: Some("helper_unavailable_no_full_scan".to_string()),
+            status: MonitorStatus::Disabled,
+            ..ChangeMonitorSession::default()
         }
     }
 
     fn persist_current_cursor(repo_root: &Path, state_path: PathBuf) -> Result<(), HeddleError> {
-        let previous = load_snapshot(&snapshot_path(&state_path)).unwrap_or_default();
-        let next_generation = previous.generation.saturating_add(1);
-        let snapshot = MonitorSnapshotState {
-            version: MONITOR_SNAPSHOT_VERSION,
-            generation: next_generation,
-            entries: scan_snapshot_entries(repo_root)?,
-        };
-        persist_snapshot(&snapshot_path(&state_path), &snapshot)?;
-        persist_cursor(&state_path, &next_generation.to_string())
+        // Same policy as `prepare`: do not full-tree scan just to advance a
+        // cursor when the helper is down. A no-op keeps status cheap; the
+        // helper's own `refresh` path still rebuilds snapshots under the
+        // long-lived watcher.
+        let _ = (repo_root, state_path);
+        Ok(())
     }
 }
 
@@ -864,24 +868,6 @@ fn should_exclude_monitor_path(rel_path: &Path) -> bool {
         .components()
         .next()
         .is_some_and(|component| matches!(component.as_os_str().to_str(), Some(".heddle")))
-}
-
-fn diff_snapshot_entries(
-    previous: &BTreeMap<String, SnapshotEntry>,
-    current: &BTreeMap<String, SnapshotEntry>,
-) -> BTreeSet<String> {
-    let mut changed = BTreeSet::new();
-    for (path, entry) in current {
-        if previous.get(path) != Some(entry) {
-            changed.insert(path.clone());
-        }
-    }
-    for path in previous.keys() {
-        if !current.contains_key(path) {
-            changed.insert(path.clone());
-        }
-    }
-    changed
 }
 
 fn persist_cursor(state_path: &Path, clock: &str) -> Result<(), HeddleError> {

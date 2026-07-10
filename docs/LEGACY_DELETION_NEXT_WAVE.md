@@ -248,3 +248,28 @@ Heddle-side compensating code only after Sley exposes the corresponding facade.
 Verification:
 - Sley parity tests for the facade.
 - Heddle hosted/local sync targeted tests after dependency update.
+
+### Raw Git Object Residuals + Bridge Mirror retirement (foundation)
+
+Foundation is in place; the persistent Bridge Mirror (`.heddle/git`) is **not**
+deleted yet.
+
+Shipped foundation:
+- Durable residual store at `.heddle/git-residuals/<format>/<oid-prefix>/<oid-rest>`
+  (`heddle_git_projection::ResidualStore`): put/get/has/list, hash-identity
+  verification, lazy migrate-from-mirror helper.
+- Checkout materialize / export lossy paths prefer reconstruct, then residual,
+  then Bridge Mirror; hard-fail when a mapped non-reconstructable object has
+  neither residual nor mirror bytes.
+- Maintenance inspection via `bridge_mirror_retirement_status` (report only;
+  no mirror deletion).
+- `init_mirror` remains for migration paths.
+
+Not yet complete (do not claim done):
+- Full residual capture on lossy import for entire tree/blob closures.
+- Fsck residual validation for every mapped non-reconstructable oid.
+- Explicit maintenance command that deletes an empty migrated Bridge Mirror.
+- Export/push/sync that never opens `.heddle/git` at all.
+
+See `docs/adr/0042-retire-persistent-bridge-mirror.md` and
+`docs/VERIFICATION_CLEANUP_PLAN.md` (Track B).

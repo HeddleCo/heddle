@@ -309,7 +309,57 @@ pub fn build_repository_verification_health_with_worktree_status(
     worktree_status: &Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationHealth {
     if repo.capability() != RepositoryCapability::GitOverlay {
-        return match worktree_status {
+        // An in-progress operation (e.g. a conflicted merge awaiting `heddle
+        // continue`/`heddle abort`) takes precedence over worktree dirtiness:
+        // the health, and the recommended action derived from it, must point
+        // at completing the operation, not at capturing the half-merged tree.
+        // The pre-facade `build_native_heddle_health` checked this first;
+        // dropping it made native `status`/`thread show`/`doctor` recommend
+        // `heddle commit` mid-merge instead of `heddle continue`.
+        match repo.operation_status() {
+            Ok(Some(operation)) => {
+                return RepositoryVerificationHealth {
+                    status: "operation_in_progress".to_string(),
+                    clean: false,
+                    summary: operation.message.clone(),
+                    recovery_commands: vec![operation.next_action.clone()],
+                    checks: vec![RepositoryVerificationCheck {
+                        name: "operation".to_string(),
+                        status: "operation_in_progress".to_string(),
+                        summary: operation.message,
+                        details: Default::default(),
+                    }],
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return degraded_health(
+                    vec![RepositoryVerificationCheck {
+                        name: "operation".to_string(),
+                        status: "degraded".to_string(),
+                        summary: error.to_string(),
+                        details: Default::default(),
+                    }],
+                    "Could not inspect in-progress operations",
+                );
+            }
+        }
+        // A native repo's worktree dirtiness is derived from the current state
+        // tree, NOT from the git-overlay walk. Callers that share a single
+        // `git_overlay_worktree_status()` result (e.g. `ready`) hand us
+        // `Ok(None)` on native repos — that means "not computed for native",
+        // NOT "clean". Re-derive the native status ourselves in that case so
+        // uncaptured worktree edits stay honest (matches the pre-facade
+        // `build_native_heddle_health` behavior).
+        let computed_native_status;
+        let effective_status: &Result<Option<WorktreeStatus>> = match worktree_status {
+            Ok(Some(_)) | Err(_) => worktree_status,
+            Ok(None) => {
+                computed_native_status = native_worktree_status(repo);
+                &computed_native_status
+            }
+        };
+        return match effective_status {
             Ok(Some(status)) if !status.is_clean() => {
                 let changed = status.modified.len() + status.added.len() + status.deleted.len();
                 let summary = format!(
@@ -1079,7 +1129,20 @@ fn core_worktree_status_options(repo: &Repository) -> repo::WorktreeStatusOption
     }
 }
 
-pub(crate) fn default_remote_name(repo: &Repository) -> Option<String> {
+/// Derive a native repo's worktree dirtiness from its current-state tree.
+/// A repo without a current state is treated as clean. Used when a caller
+/// only supplied a git-overlay walk (`Ok(None)` on native repos) so the
+/// native verification path can still report uncaptured edits honestly.
+fn native_worktree_status(repo: &Repository) -> Result<Option<WorktreeStatus>> {
+    let Some(state) = repo.current_state()? else {
+        return Ok(Some(WorktreeStatus::default()));
+    };
+    let tree = repo.require_tree(&state.tree)?;
+    repo.compare_worktree_cached_with_options(&tree, &core_worktree_status_options(repo))
+        .map(Some)
+}
+
+pub fn default_remote_name(repo: &Repository) -> Option<String> {
     RemoteConfig::open(repo)
         .ok()
         .and_then(|cfg| cfg.default_name().map(str::to_string))
@@ -1535,9 +1598,16 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<StatusThreadSum
     names.extend(current.iter().cloned());
     names.extend(manager.list()?.into_iter().map(|thread| thread.thread));
 
+    // Load the agent registry once for the whole summary walk. Per-thread
+    // `AgentRegistry::list()` re-reads the same on-disk table and dominated
+    // `thread_summary_ms` when many threads were present.
+    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+
     let mut summaries = Vec::new();
     for name in names {
-        if let Some(summary) = find_thread_summary_single(repo, &name)? {
+        if let Some(summary) =
+            find_thread_summary_with_agents(repo, &name, &registry_entries)?
+        {
             summaries.push(summary);
         }
     }
@@ -1567,6 +1637,15 @@ pub fn find_thread_summary_single(
     repo: &Repository,
     name: &str,
 ) -> Result<Option<StatusThreadSummary>> {
+    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+    find_thread_summary_with_agents(repo, name, &registry_entries)
+}
+
+fn find_thread_summary_with_agents(
+    repo: &Repository,
+    name: &str,
+    registry_entries: &[AgentEntry],
+) -> Result<Option<StatusThreadSummary>> {
     let current = repo.current_lane()?;
     let is_current = current.as_deref() == Some(name);
     let manager = ThreadManager::new(repo.heddle_dir());
@@ -1581,17 +1660,15 @@ pub fn find_thread_summary_single(
     let mut thread =
         thread.unwrap_or_else(|| synthetic_thread(repo, name, ref_state.map(|id| id.short())));
     let _ = refresh_thread_freshness(repo, &mut thread);
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let entries = registry
-        .list()?
-        .into_iter()
+    let entries: Vec<&AgentEntry> = registry_entries
+        .iter()
         .filter(|entry| entry.thread == name)
-        .collect::<Vec<_>>();
+        .collect();
     Ok(Some(thread_summary_from_thread(
         repo,
         thread,
         is_current,
-        primary_agent_entry(&entries),
+        primary_agent_entry_refs(&entries),
     )))
 }
 
@@ -1697,12 +1774,18 @@ fn thread_summary_from_thread(
     }
 }
 
-fn primary_agent_entry(entries: &[AgentEntry]) -> Option<&AgentEntry> {
+fn primary_agent_entry_refs<'a>(entries: &[&'a AgentEntry]) -> Option<&'a AgentEntry> {
     entries
         .iter()
+        .copied()
         .filter(|entry| entry.status == AgentStatus::Active)
         .max_by_key(|entry| entry.started_at)
-        .or_else(|| entries.iter().max_by_key(|entry| entry.started_at))
+        .or_else(|| {
+            entries
+                .iter()
+                .copied()
+                .max_by_key(|entry| entry.started_at)
+        })
 }
 
 fn non_empty(value: String) -> Option<String> {

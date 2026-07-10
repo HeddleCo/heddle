@@ -695,7 +695,11 @@ pub struct AuthCreateServiceTokenSchema {
     pub namespace: String,
     pub scope: String,
     pub token: String,
-    pub private_key_pem: String,
+    /// Path to the private-key PEM written with mode 0600.
+    pub private_key_path: String,
+    /// Present only when `--show-secrets` was passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_pem: Option<String>,
     pub expires_in_days: u32,
 }
 
