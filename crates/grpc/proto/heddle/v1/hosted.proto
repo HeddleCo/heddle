@@ -109,6 +109,35 @@ service HostedUserService {
   // Walk `spool_path`'s membership facet history newest-first (first-parent).
   // Mirrors weft `membership::membership_history` -> Vec<MembershipHistoryEntry>.
   rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (GetMembershipHistoryResponse);
+
+  // ── Git-native identity proofs (Prove; wraps weft's F1a engine) ──
+  // A caller proves control of a repo on an external host by publishing a
+  // marker line to a well-known path, then submitting the challenge for
+  // verification. Handlers land in weft (a follow-up); this is the contract.
+  //
+  // Start a proof: the server returns the exact marker line + well-known path
+  // the caller must publish to `repo` on `host`.
+  rpc RequestProofChallenge(RequestProofChallengeRequest) returns (RequestProofChallengeResponse);
+  // Submit a started challenge for verification; the server fetches the marker
+  // and returns the resulting status.
+  rpc SubmitProof(SubmitProofRequest) returns (SubmitProofResponse);
+  // List the caller's own proofs.
+  rpc ListProofs(ListProofsRequest) returns (ListProofsResponse);
+
+  // ── Handle / escrow (wraps weft's F3a engine) ───────────────────
+  // Availability + right-of-first-refusal escrow + self-claim for native
+  // handles. Handlers land in weft (a follow-up); this is the contract.
+  //
+  // Report a native handle's availability + whether it is held for a verified
+  // owner.
+  rpc GetHandleStatus(GetHandleStatusRequest) returns (GetHandleStatusResponse);
+  // Start the 30-day right-of-first-refusal on a held name.
+  rpc RequestHeldName(RequestHeldNameRequest) returns (RequestHeldNameResponse);
+  // An existing verified owner self-claims their held native name (the
+  // existing-user native-claim path the escrow engine's `held_check_in_txn`
+  // co-holder branch was built for; weft#456 subject-canonicalization is a
+  // handler-side dep, not a proto concern).
+  rpc ClaimHandle(ClaimHandleRequest) returns (ClaimHandleResponse);
 }
 
 // Namespace kinds in the hosted control plane. `USER` namespaces are
@@ -308,6 +337,10 @@ message SpoolSummary {
   string full_path = 2;
   string kind = 3; // UX label only: "namespace" | "repository"/"project" — NEVER structural
   bool is_repo = 4; // capability: content-bearing spool (pushable/pullable)
+  // Unset when the serving registry has no activity data; weft computes the
+  // value in the registry (weft#457) and populates it in the follow-on handler
+  // pass.
+  google.protobuf.Timestamp last_activity_at = 5;
 }
 
 message Bookmark {
@@ -723,4 +756,113 @@ message GetMembershipHistoryRequest {
 
 message GetMembershipHistoryResponse {
   repeated MembershipHistoryEntry entries = 1;
+}
+
+// ============================================================================
+// Git-native identity proofs (Prove; wraps weft's F1a engine). ADDITIVE.
+// A caller proves control of an external-host repo by publishing a marker line
+// to a well-known path, then submitting the challenge for verification.
+// ============================================================================
+
+// Verification state of a git-native proof. Namespaced per the file's enum
+// convention.
+enum ProofStatus {
+  PROOF_STATUS_UNSPECIFIED = 0;
+  // The challenge has been requested but not yet successfully verified.
+  PROOF_STATUS_PENDING = 1;
+  // The marker line was found and verified.
+  PROOF_STATUS_VERIFIED = 2;
+  // Verification ran but failed (marker missing/mismatched).
+  PROOF_STATUS_FAILED = 3;
+}
+
+message RequestProofChallengeRequest {
+  // The external host the repo lives on, e.g. "github.com".
+  string host = 1;
+  // The repo the caller will publish the proof to.
+  string repo = 2;
+}
+
+message RequestProofChallengeResponse {
+  // Opaque id for the started challenge; echoed back on SubmitProof.
+  string challenge_id = 1;
+  // The exact line to publish, e.g. `heddle-proof: <subject> <challenge>`.
+  string marker_line = 2;
+  // The path to publish the marker at, e.g. `.well-known/heddle`.
+  string well_known_path = 3;
+}
+
+message SubmitProofRequest {
+  string challenge_id = 1;
+}
+
+message SubmitProofResponse {
+  ProofStatus status = 1;
+  // Human-readable detail (failure reason, or a confirmation note).
+  string detail = 2;
+}
+
+message ListProofsRequest {}
+
+// One of the caller's own proofs.
+message ProofSummary {
+  string host = 1;
+  string repo = 2;
+  ProofStatus status = 3;
+  // When the proof was verified; unset while pending/failed.
+  google.protobuf.Timestamp verified_at = 4;
+}
+
+message ListProofsResponse {
+  repeated ProofSummary proofs = 1;
+}
+
+// ============================================================================
+// Handle / escrow (wraps weft's F3a engine). ADDITIVE. Availability lookup +
+// right-of-first-refusal escrow + verified-owner self-claim for native handles.
+// ============================================================================
+
+// Availability of a native handle. Namespaced per the file's enum convention.
+enum HandleAvailability {
+  HANDLE_AVAILABILITY_UNSPECIFIED = 0;
+  // Free to claim.
+  HANDLE_AVAILABILITY_AVAILABLE = 1;
+  // Held in escrow for a verified owner (right-of-first-refusal window).
+  HANDLE_AVAILABILITY_HELD = 2;
+  // Already claimed by another account.
+  HANDLE_AVAILABILITY_TAKEN = 3;
+  // Reserved (system/policy).
+  HANDLE_AVAILABILITY_RESERVED = 4;
+  // Withheld because it is confusable with an existing handle.
+  HANDLE_AVAILABILITY_CONFUSABLE = 5;
+}
+
+message GetHandleStatusRequest {
+  string name = 1;
+}
+
+message GetHandleStatusResponse {
+  HandleAvailability availability = 1;
+  // True when the name is held in escrow for a verified owner (co-holder).
+  bool held_for_verified_owner = 2;
+}
+
+message RequestHeldNameRequest {
+  string name = 1;
+}
+
+message RequestHeldNameResponse {
+  // Deadline of the 30-day right-of-first-refusal window.
+  google.protobuf.Timestamp rfr_deadline = 1;
+}
+
+message ClaimHandleRequest {
+  string name = 1;
+}
+
+message ClaimHandleResponse {
+  // True when the claim succeeded.
+  bool claimed = 1;
+  // The canonical form of the claimed handle.
+  string canonical_handle = 2;
 }
