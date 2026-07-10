@@ -30,6 +30,17 @@ service HostedUserService {
   // (a follow-up); this is the contract only.
   rpc ResolveSubjects(ResolveSubjectsRequest) returns (ResolveSubjectsResponse);
 
+  // Resolve a bare handle name (canonical text or bare name) to its
+  // principal, so the frontend can route `/gh:<name>` / `/<name>` /
+  // `/u:<subject>` URLs. The 404-vs-410 distinction is backed by the
+  // tombstone DB invariant: a never-claimed name → gRPC NotFound (→ 404);
+  // a tombstoned/renamed-away name → response with `tombstoned = true`
+  // (→ 410 Gone), the principal MAY carry the canonical `/u:<subject>`
+  // redirect target when available; an active name → the principal. The
+  // subject must NOT appear except as that `/u:` redirect target. Backend
+  // impl lives in weft (a follow-up); this is the contract only (weft#467).
+  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
+
   // ── Thread merge approvals ───────────────────────────────────────
   rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval);
   rpc RevokeApproval(RevokeApprovalRequest) returns (DeleteResponse);
@@ -545,6 +556,24 @@ message ResolvedPrincipal {
   // rendered Signal-style as `torvalds·a3f9` in trust-sensitive contexts.
   // Empty for verified identities (they render bare). F0b computes it.
   string discriminator = 8;
+}
+
+// ── Handle resolution (URL routing, weft#467) ────────────────────────────────
+// Resolve a bare handle name to its principal for `/gh:<name>` / `/<name>` /
+// `/u:<subject>` routing. Never-claimed → gRPC NotFound (frontend 404);
+// tombstoned/renamed-away → `tombstoned = true` (frontend 410 Gone).
+message ResolveHandleRequest {
+  // Canonical text or bare name, e.g. "gh:torvalds" / "torvalds".
+  string name = 1;
+}
+
+message ResolveHandleResponse {
+  // The resolved principal (reuses ResolvedPrincipal). On a tombstoned name
+  // this MAY carry the canonical `/u:<subject>` redirect target when known;
+  // otherwise the subject must not appear here.
+  ResolvedPrincipal principal = 1;
+  // True ⇒ the name existed but was renamed away → frontend serves 410 Gone.
+  bool tombstoned = 2;
 }
 
 // ============================================================================

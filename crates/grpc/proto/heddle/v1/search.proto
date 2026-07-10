@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+// ───────────────────────────────────────────────────────────────
+// SearchService — caller-scoped global entity search (Tier 1).
+// Spike: weft#445 (docs/spikes/search-service.md §3); impl: weft#446.
+// ADDITIVE contract only; handlers land in weft (a follow-up).
+// ───────────────────────────────────────────────────────────────
+
+service SearchService {
+  // Caller-scoped global entity search (Tier 1). Every result is authorized;
+  // repo-scoped hits pass the caller's readable-set + per-hit door, and an
+  // unreadable repo's hits never surface.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+// Request-side scope filter only. The response has no entity-kind enum: the
+// SearchHit `oneof` tag IS the entity kind (no illegal kind/payload mismatch).
+enum SearchEntityKind {
+  SEARCH_ENTITY_KIND_UNSPECIFIED = 0;
+  SEARCH_ENTITY_KIND_USER = 1;
+  SEARCH_ENTITY_KIND_REPO = 2;
+  SEARCH_ENTITY_KIND_AGENT = 3;
+  SEARCH_ENTITY_KIND_THREAD = 4;
+  SEARCH_ENTITY_KIND_FEED = 5;
+  // 6+ reserved for Tier 2: CONTENT, MESSAGE, STATE, SYMBOL.
+}
+
+message SearchRequest {
+  string query = 1;                     // freeform; empty ⇒ INVALID_ARGUMENT
+  repeated SearchEntityKind scopes = 2; // empty ⇒ all v1 kinds
+  uint32 limit = 3;                     // 0 ⇒ default(20); server-capped at 50
+  string cursor = 4;                    // opaque; from a prior SearchResponse
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;          // ranked, interleaved across kinds (desc score)
+  string next_cursor = 2;               // empty ⇒ no more pages
+}
+
+message SearchHit {
+  // Common to every hit — sort/link/render without unpacking the payload.
+  float score = 1;                      // normalized [0,1], comparable across kinds
+  string deep_link_target = 2;          // canonical in-app route
+  string snippet = 3;                   // ts_headline excerpt (may be empty)
+
+  // Kind-specific typed payload — the oneof tag IS the entity kind.
+  oneof entity {
+    UserHit user = 10;
+    RepoHit repo = 11;
+    AgentHit agent = 12;
+    ThreadHit thread = 13;
+    FeedHit feed = 14;
+    // Tier 2 reserves 20+: ContentHit, MessageHit, StateHit, SymbolHit.
+  }
+}
+
+// handle = canonical text (gh:torvalds / torvalds / torvalds#hex); NEVER the biscuit subject.
+message UserHit {
+  string handle = 1;
+  string kind = 2;
+  bool verified = 3;
+  string display_name = 4;
+}
+
+message RepoHit {
+  string full_path = 1;
+  string slug = 2;
+  string display_name = 3;
+  bool is_namespace = 4;
+}
+
+message AgentHit {
+  string display_name = 1;
+  string agent_ref = 2; // agent_ref opaque — never the biscuit subject
+}
+
+message ThreadHit {
+  string thread_id = 1;
+  string title = 2;
+  string repo_path = 3;
+  string state = 4;
+}
+
+message FeedHit {
+  string headline = 1;
+  string repo_path = 2;
+}
