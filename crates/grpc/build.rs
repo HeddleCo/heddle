@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "heddle/v1/support.proto",
         "heddle/v1/tree_edit.proto",
         "heddle/v1/search.proto",
+        "heddle/v1/import.proto",
     ]
     .map(|path| proto_dir.join(path));
     let descriptor_path = PathBuf::from(std::env::var("OUT_DIR")?).join("heddle_descriptor.bin");
