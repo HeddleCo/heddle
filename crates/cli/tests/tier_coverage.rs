@@ -40,7 +40,10 @@ fn every_commands_variant_has_explicit_root_contract() {
     let mut missing = Vec::new();
     for variant in &variants {
         if cfg!(not(feature = "client"))
-            && matches!(variant.as_str(), "Auth" | "Support" | "Presence" | "Spool")
+            && matches!(
+                variant.as_str(),
+                "Auth" | "Support" | "Presence" | "Prove" | "Spool"
+            )
         {
             continue;
         }

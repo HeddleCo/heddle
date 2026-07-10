@@ -28,7 +28,7 @@ use crate::cli::{
     render::shell_quote,
 };
 #[cfg(feature = "client")]
-use crate::cli::{AuthCommands, PresenceCommands, SpoolCommands, SupportCommands};
+use crate::cli::{AuthCommands, PresenceCommands, ProveCommands, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{ExportCommands, ImportCommands};
 
@@ -2676,6 +2676,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["spool", "membership"],
         category(feature_gated(READ_TEXT, "client"), "repo"),
     ),
+    entry(&["prove"], category(feature_gated(GROUP, "client"), "repo")),
+    entry(
+        &["prove", "submit"],
+        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+    ),
+    entry(
+        &["prove", "list"],
+        category(feature_gated(READ_TEXT, "client"), "repo"),
+    ),
     entry(
         &["support"],
         category(feature_gated(GROUP, "client"), "repo"),
@@ -4824,6 +4833,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SpoolCommands::Children(_) => vec!["spool", "children"],
             SpoolCommands::Governance(_) => vec!["spool", "governance"],
             SpoolCommands::Membership(_) => vec!["spool", "membership"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Prove(args) => match &args.command {
+            Some(ProveCommands::Submit(_)) => vec!["prove", "submit"],
+            Some(ProveCommands::List(_)) => vec!["prove", "list"],
+            None => vec!["prove"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {

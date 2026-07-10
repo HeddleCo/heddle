@@ -15,6 +15,8 @@ mod commands_hook;
 mod commands_integration;
 mod commands_main;
 mod commands_oplog;
+#[cfg(feature = "client")]
+mod commands_prove;
 mod commands_query;
 mod commands_redact;
 mod commands_remote;
@@ -76,6 +78,8 @@ pub use commands_main::{
     ActorCommands, Commands, DaemonCommands, FsckRepairTarget, MaintenanceCommands, SessionCommands,
 };
 pub use commands_oplog::OplogCommands;
+#[cfg(feature = "client")]
+pub use commands_prove::{ProveArgs, ProveCommands, ProveListArgs, ProveSubmitArgs};
 pub use commands_query::QueryArgs;
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,

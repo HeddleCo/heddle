@@ -20,7 +20,7 @@ use super::{
     },
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, SpoolCommands, SupportCommands};
+use super::{AuthCommands, ProveArgs, SpoolCommands, SupportCommands};
 #[cfg(feature = "git-overlay")]
 use super::{ExportCommands, ImportCommands};
 
@@ -521,6 +521,22 @@ Examples:
         #[command(subcommand)]
         command: SpoolCommands,
     },
+
+    /// Prove control of an external-host repo (git-native identity proof).
+    ///
+    /// `heddle prove <host> <repo>` starts a proof: the server returns a
+    /// marker line to publish at a well-known path in your repo. Publish it
+    /// (commit + push — the CLI never pushes for you), then run
+    /// `heddle prove submit <challenge_id>` to verify. `heddle prove list`
+    /// shows your proofs.
+    #[cfg(feature = "client")]
+    #[command(after_help = "\
+Examples:
+  heddle prove github.com owner/repo        # start a proof; prints the marker line to publish
+  heddle prove submit <challenge_id>        # verify after you push the .well-known/heddle file
+  heddle prove list                         # list your proofs
+")]
+    Prove(ProveArgs),
 
     /// Semantic analysis queries (call-graph hot-spots, churn,
     /// signature-stability surfaces).
