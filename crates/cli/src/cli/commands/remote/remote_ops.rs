@@ -8,13 +8,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
-#[cfg(feature = "client")]
-use heddle_core::remote_pull_failure;
 use heddle_core::{
-    GitConfigContext, PullExecutionFacts, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
+    GitConfigContext, LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
     RemoteInfo, RemoteListReport, build_pull_outcome, format_pull_outcome_text,
-    list_plain_git_remotes, list_remotes, merged_remote_items, plan_pull, pull_should_materialize,
-    show_plain_git_remote, show_remote,
+    format_pulling_from, git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
+    list_plain_git_remotes, list_remotes, local_pull_changed, merged_remote_items, plan_pull,
+    pull_should_materialize, show_plain_git_remote, show_remote,
+};
+#[cfg(feature = "client")]
+use heddle_core::{
+    HostedPullResult, HostedPullResultFields, format_connected_to,
+    heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
 };
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
@@ -88,19 +92,19 @@ struct GitOverlayPullOutputInput {
 fn git_overlay_pull_output(input: GitOverlayPullOutputInput) -> PullOutput {
     let outcome = build_pull_outcome(
         Some(&input.plan),
-        PullExecutionFacts::GitOverlay {
-            remote: input.remote,
-            branch: input.branch,
-            old_git_head: input.old_git_head,
-            new_git_head: input.new_git_head,
-            old_state: input.old_state.map(|state| state.to_string()),
-            new_state: input.new_state.map(|state| state.to_string()),
-            changed: input.outcome.changed,
-            states_created: input.outcome.states_created,
-            commits_seen: input.outcome.commits_seen,
-            materialized_checkout: input.outcome.materialized_checkout,
-            changed_paths: input.changed_paths,
-        },
+        git_overlay_pull_execution_facts(
+            input.remote,
+            input.branch,
+            input.old_git_head,
+            input.new_git_head,
+            input.old_state.map(|state| state.to_string()),
+            input.new_state.map(|state| state.to_string()),
+            input.outcome.changed,
+            input.outcome.states_created,
+            input.outcome.commits_seen,
+            input.outcome.materialized_checkout,
+            input.changed_paths,
+        ),
     );
     PullOutput {
         outcome,
@@ -108,24 +112,33 @@ fn git_overlay_pull_output(input: GitOverlayPullOutputInput) -> PullOutput {
     }
 }
 
-fn heddle_pull_output(
+fn heddle_pull_output_from_local(
     plan: Option<&PullPlan>,
     changed: bool,
     remote: String,
     thread: String,
-    state: Option<String>,
-    objects: Option<usize>,
+    summary: &LocalTransferSummary,
     trust: RepositoryVerificationState,
 ) -> PullOutput {
     let outcome = build_pull_outcome(
         plan,
-        PullExecutionFacts::Heddle {
-            changed,
-            remote,
-            thread,
-            state,
-            objects,
-        },
+        heddle_pull_execution_facts_from_local(changed, remote, thread, summary),
+    );
+    PullOutput { outcome, trust }
+}
+
+#[cfg(feature = "client")]
+fn heddle_pull_output_from_hosted(
+    plan: Option<&PullPlan>,
+    changed: bool,
+    remote: String,
+    thread: String,
+    fields: &HostedPullResultFields,
+    trust: RepositoryVerificationState,
+) -> PullOutput {
+    let outcome = build_pull_outcome(
+        plan,
+        heddle_pull_execution_facts_from_hosted(changed, remote, thread, fields),
     );
     PullOutput { outcome, trust }
 }
@@ -378,12 +391,18 @@ async fn pull_local(
         }));
     }
 
+    let source_label = format!("file://{}", source_path.display());
     if !should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{} pulling from {}",
-            style::working_marker(),
-            style::dim(&format!("file://{}", source_path.display()))
-        );
+        let working = format_pulling_from(&source_label);
+        if let Some(source) = working.strip_prefix("pulling from ") {
+            println!(
+                "{} pulling from {}",
+                style::working_marker(),
+                style::dim(source)
+            );
+        } else {
+            println!("{} {working}", style::working_marker());
+        }
     }
 
     let source = LocalSync::open(source_path)?;
@@ -400,7 +419,12 @@ async fn pull_local(
     let track_tn = ThreadName::new(track_to_update);
 
     let pre_target = repo.refs().get_thread(&track_tn)?;
-    let changed = pre_target.as_ref() != Some(&state_id) || objects_copied > 0;
+    let pre_target_str = pre_target.as_ref().map(|s| s.to_string());
+    let changed = local_pull_changed(
+        pre_target_str.as_deref(),
+        &state_id.to_string(),
+        objects_copied,
+    );
 
     // Materialize policy comes from plan_pull (pure); lazy is always false here.
     let head_ref = repo.head_ref()?;
@@ -429,24 +453,30 @@ async fn pull_local(
     }
 
     if should_output_json(cli, Some(repo.config())) {
-        let output = heddle_pull_output(
+        let summary = LocalTransferSummary {
+            state: Some(state_id.to_string()),
+            objects: Some(objects_copied),
+        };
+        let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
             source_path.display().to_string(),
             track_to_update.to_string(),
-            Some(state_id.to_string()),
-            Some(objects_copied),
+            &summary,
             build_repository_verification_state(repo),
         );
         crate::cli::render::write_json_stdout(&output)?;
     } else {
-        let output = heddle_pull_output(
+        let summary = LocalTransferSummary {
+            state: Some(state_id.short().to_string()),
+            objects: Some(objects_copied),
+        };
+        let output = heddle_pull_output_from_local(
             Some(plan),
             changed,
             source_path.display().to_string(),
             remote_thread.to_string(),
-            Some(state_id.short().to_string()),
-            Some(objects_copied),
+            &summary,
             build_repository_verification_state(repo),
         );
         let text = format_pull_outcome_text(&output.outcome, 8);
@@ -529,11 +559,12 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     .with_human_signature_callback(crate::client::cli_human_signature_callback());
 
     if !should_output_json(options.cli, Some(repo.config())) {
-        println!(
-            "{} connected to {}",
-            style::ok_marker(),
-            style::dim(&options.addr.to_string())
-        );
+        let line = format_connected_to(&options.addr.to_string());
+        if let Some(addr) = line.strip_prefix("connected to ") {
+            println!("{} connected to {}", style::ok_marker(), style::dim(addr));
+        } else {
+            println!("{} {line}", style::ok_marker());
+        }
     }
 
     let result = client
@@ -551,68 +582,82 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         )
         .await?;
 
-    if result.success {
-        let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
-        let mut changed = false;
-        if let Some(final_state) = result.final_state {
-            let track_tn = ThreadName::new(track_to_update);
-            let pre_target = repo.refs().get_thread(&track_tn)?;
-            changed = pre_target.as_ref() != Some(&final_state);
-            if changed {
-                let head_ref = repo.head_ref()?;
-                let should_materialize =
-                    pull_should_materialize(options.plan.will_materialize, options.lazy);
-                if should_materialize {
-                    match (&head_ref, pre_target) {
-                        (Head::Attached { .. }, Some(_)) => {
-                            super::super::ff_record::record_ff_advance(
-                                repo,
-                                options.remote_thread,
-                                &final_state,
-                            )?;
+    // Keep typed ChangeId for ref/worktree I/O; map string fields for pure parse.
+    let final_state_id = result.final_state;
+    let fields = HostedPullResultFields {
+        success: result.success,
+        final_state: final_state_id.as_ref().map(|state| state.to_string()),
+        error: result.error,
+    };
+    match parse_hosted_pull_result(options.remote_thread, options.local_thread, &fields) {
+        HostedPullResult::Success { final_state } => {
+            let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
+            let mut changed = false;
+            if let Some(final_state_id) = final_state_id {
+                let track_tn = ThreadName::new(track_to_update);
+                let pre_target = repo.refs().get_thread(&track_tn)?;
+                let pre_target_str = pre_target.as_ref().map(|s| s.to_string());
+                changed = pull_tip_changed(pre_target_str.as_deref(), final_state.as_deref());
+                if changed {
+                    let head_ref = repo.head_ref()?;
+                    let should_materialize =
+                        pull_should_materialize(options.plan.will_materialize, options.lazy);
+                    if should_materialize {
+                        match (&head_ref, pre_target) {
+                            (Head::Attached { .. }, Some(_)) => {
+                                super::super::ff_record::record_ff_advance(
+                                    repo,
+                                    options.remote_thread,
+                                    &final_state_id,
+                                )?;
+                            }
+                            (Head::Attached { .. }, None) => {
+                                repo.fast_forward_attached_from_materialized_state(
+                                    &final_state_id,
+                                    None,
+                                )?;
+                            }
+                            (Head::Detached { .. }, _) => {
+                                repo.goto(&final_state_id)?;
+                                repo.refs().set_thread(&track_tn, &final_state_id)?;
+                            }
                         }
-                        (Head::Attached { .. }, None) => {
-                            repo.fast_forward_attached_from_materialized_state(&final_state, None)?;
-                        }
-                        (Head::Detached { .. }, _) => {
-                            repo.goto(&final_state)?;
-                            repo.refs().set_thread(&track_tn, &final_state)?;
-                        }
+                    } else {
+                        repo.refs().set_thread(&track_tn, &final_state_id)?;
                     }
-                } else {
-                    repo.refs().set_thread(&track_tn, &final_state)?;
                 }
             }
+            // Facts reuse the same string-mapped transport fields.
+            let facts_fields = HostedPullResultFields {
+                success: true,
+                final_state,
+                error: None,
+            };
+            if should_output_json(options.cli, Some(repo.config())) {
+                let output = heddle_pull_output_from_hosted(
+                    Some(options.plan),
+                    changed,
+                    options.remote_thread.to_string(),
+                    track_to_update.to_string(),
+                    &facts_fields,
+                    build_repository_verification_state(repo),
+                );
+                crate::cli::render::write_json_stdout(&output)?;
+            } else {
+                let output = heddle_pull_output_from_hosted(
+                    Some(options.plan),
+                    changed,
+                    options.remote_thread.to_string(),
+                    options.remote_thread.to_string(),
+                    &facts_fields,
+                    build_repository_verification_state(repo),
+                );
+                render_pull_outcome_text(&output.outcome, &output.trust);
+            }
         }
-        if should_output_json(options.cli, Some(repo.config())) {
-            let output = heddle_pull_output(
-                Some(options.plan),
-                changed,
-                options.remote_thread.to_string(),
-                track_to_update.to_string(),
-                result.final_state.map(|state| state.to_string()),
-                None,
-                build_repository_verification_state(repo),
-            );
-            crate::cli::render::write_json_stdout(&output)?;
-        } else {
-            let output = heddle_pull_output(
-                Some(options.plan),
-                changed,
-                options.remote_thread.to_string(),
-                options.remote_thread.to_string(),
-                result.final_state.map(|state| state.to_string()),
-                None,
-                build_repository_verification_state(repo),
-            );
-            render_pull_outcome_text(&output.outcome, &output.trust);
+        HostedPullResult::Failed(failure) => {
+            return Err(map_pull_failure(failure));
         }
-    } else {
-        return Err(map_pull_failure(remote_pull_failure(
-            options.remote_thread,
-            options.local_thread,
-            result.error.as_deref(),
-        )));
     }
 
     Ok(())

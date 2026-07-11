@@ -5,6 +5,9 @@
 //!   list` / `heddle remote show`.
 //! - Push/pull routing: capability → plan decisions (git-overlay mirror vs
 //!   native fan-out, default thread selection).
+//! - Transport result fields (CLI maps wire/protobuf → plain structs) →
+//!   [`PushExecutionFacts`] / [`PullExecutionFacts`], multi-ref progress, and
+//!   unstyled working/mirror/ref-list text. No tonic/gRPC types here.
 //! - Typed outcomes, failure kinds (map to RecoveryAdvice kinds), multi-ref
 //!   progress events, and unstyled human text assembly.
 //! - CLI probes the repo, plans, executes network I/O, maps failures, and styles.
@@ -1412,6 +1415,231 @@ pub fn multi_thread_push_execution_facts(
 }
 
 // ---------------------------------------------------------------------------
+// Transport result fields → execution facts (no gRPC / wire types in core)
+// ---------------------------------------------------------------------------
+//
+// CLI maps protobuf / `wire::*Complete` / local transfer counts into these
+// plain field structs, then calls the pure constructors below. Domain builds
+// [`PushExecutionFacts`] / [`PullExecutionFacts`]; CLI never invents outcome
+// JSON fields outside `build_*_outcome`.
+
+/// Caller-mapped hosted push transport fields (no wire/protobuf types).
+///
+/// Map from transport `success` / `new_state` / `error` before invoking pure
+/// parse helpers. State is already stringified by the caller (full or short).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPushResultFields {
+    pub success: bool,
+    pub new_state: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Caller-mapped hosted pull transport fields (no wire/protobuf types).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPullResultFields {
+    pub success: bool,
+    pub final_state: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Local path transfer counts/SHAs after a successful single-thread push/pull.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTransferSummary {
+    pub state: Option<String>,
+    pub objects: Option<usize>,
+}
+
+/// Parsed hosted push: success state string or typed [`PushFailure`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedPushResult {
+    /// Transport reported success; `state` is the remote tip when present.
+    Success { state: Option<String> },
+    /// Transport reported failure (or blank error → [`UNKNOWN_TRANSPORT_ERROR`]).
+    Failed(PushFailure),
+}
+
+/// Parsed hosted pull: final state string or typed [`PullFailure`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedPullResult {
+    /// Transport reported success; `final_state` is the tip when present.
+    Success { final_state: Option<String> },
+    /// Transport reported failure.
+    Failed(PullFailure),
+}
+
+/// Parse hosted push fields into success state or [`PushFailure`].
+///
+/// Pure: no network I/O. Callers map wire/protobuf → [`HostedPushResultFields`]
+/// first.
+pub fn parse_hosted_push_result(
+    track_name: &str,
+    fields: &HostedPushResultFields,
+) -> HostedPushResult {
+    if fields.success {
+        HostedPushResult::Success {
+            state: fields.new_state.clone(),
+        }
+    } else {
+        HostedPushResult::Failed(remote_push_failure(track_name, fields.error.as_deref()))
+    }
+}
+
+/// Parse hosted pull fields into final state or [`PullFailure`].
+pub fn parse_hosted_pull_result(
+    remote_thread: &str,
+    local_thread: Option<&str>,
+    fields: &HostedPullResultFields,
+) -> HostedPullResult {
+    if fields.success {
+        HostedPullResult::Success {
+            final_state: fields.final_state.clone(),
+        }
+    } else {
+        HostedPullResult::Failed(remote_pull_failure(
+            remote_thread,
+            local_thread,
+            fields.error.as_deref(),
+        ))
+    }
+}
+
+/// Single-thread native push execution facts from state/object counts.
+pub fn heddle_single_push_execution_facts(
+    state: Option<String>,
+    objects: Option<usize>,
+) -> PushExecutionFacts {
+    PushExecutionFacts::HeddleSingle { state, objects }
+}
+
+/// Map a local transfer summary into single-thread push execution facts.
+pub fn heddle_single_push_execution_facts_from_local(
+    summary: &LocalTransferSummary,
+) -> PushExecutionFacts {
+    heddle_single_push_execution_facts(summary.state.clone(), summary.objects)
+}
+
+/// Map hosted push success fields into single-thread execution facts.
+///
+/// Object counts are unknown on the hosted path (`None`). Caller must only
+/// invoke this after [`parse_hosted_push_result`] reports success (or when
+/// `fields.success` is already known true).
+pub fn heddle_single_push_execution_facts_from_hosted(
+    fields: &HostedPushResultFields,
+) -> PushExecutionFacts {
+    heddle_single_push_execution_facts(fields.new_state.clone(), None)
+}
+
+/// Git-overlay refs push execution facts (local `GitProjection` path).
+pub fn git_overlay_push_execution_facts(
+    remote_name: String,
+    current_thread: Option<String>,
+    refs_written: Vec<String>,
+    tracking: Option<GitOverlayPushTracking>,
+) -> PushExecutionFacts {
+    PushExecutionFacts::GitOverlayRefs {
+        remote_name,
+        current_thread,
+        refs_written,
+        tracking,
+    }
+}
+
+/// Native heddle pull execution facts.
+pub fn heddle_pull_execution_facts(
+    changed: bool,
+    remote: String,
+    thread: String,
+    state: Option<String>,
+    objects: Option<usize>,
+) -> PullExecutionFacts {
+    PullExecutionFacts::Heddle {
+        changed,
+        remote,
+        thread,
+        state,
+        objects,
+    }
+}
+
+/// Map hosted pull success fields + materialize change flag into pull facts.
+///
+/// Object counts are unknown on the hosted path (`None`).
+pub fn heddle_pull_execution_facts_from_hosted(
+    changed: bool,
+    remote: String,
+    thread: String,
+    fields: &HostedPullResultFields,
+) -> PullExecutionFacts {
+    heddle_pull_execution_facts(changed, remote, thread, fields.final_state.clone(), None)
+}
+
+/// Map a local transfer summary into heddle pull execution facts.
+pub fn heddle_pull_execution_facts_from_local(
+    changed: bool,
+    remote: String,
+    thread: String,
+    summary: &LocalTransferSummary,
+) -> PullExecutionFacts {
+    heddle_pull_execution_facts(
+        changed,
+        remote,
+        thread,
+        summary.state.clone(),
+        summary.objects,
+    )
+}
+
+/// Git-overlay pull / import execution facts.
+#[allow(clippy::too_many_arguments)]
+pub fn git_overlay_pull_execution_facts(
+    remote: String,
+    branch: Option<String>,
+    old_git_head: Option<String>,
+    new_git_head: Option<String>,
+    old_state: Option<String>,
+    new_state: Option<String>,
+    changed: bool,
+    states_created: usize,
+    commits_seen: usize,
+    materialized_checkout: bool,
+    changed_paths: Vec<String>,
+) -> PullExecutionFacts {
+    PullExecutionFacts::GitOverlay {
+        remote,
+        branch,
+        old_git_head,
+        new_git_head,
+        old_state,
+        new_state,
+        changed,
+        states_created,
+        commits_seen,
+        materialized_checkout,
+        changed_paths,
+    }
+}
+
+/// Whether a pull tip moved: `final_state` differs from the pre-pull tip.
+///
+/// When `final_state` is missing, the tip is treated as unchanged (hosted
+/// success-with-no-state is a no-op for ref advance).
+pub fn pull_tip_changed(pre_target: Option<&str>, final_state: Option<&str>) -> bool {
+    match final_state {
+        Some(state) => pre_target != Some(state),
+        None => false,
+    }
+}
+
+/// Local-path pull change: tip moved **or** objects were copied.
+pub fn local_pull_changed(
+    pre_target: Option<&str>,
+    final_state: &str,
+    objects_copied: usize,
+) -> bool {
+    pre_target != Some(final_state) || objects_copied > 0
+}
+
+// ---------------------------------------------------------------------------
 // Multi-ref push progress (pure event facts for --all-threads fan-out)
 // ---------------------------------------------------------------------------
 
@@ -1439,6 +1667,67 @@ pub enum MultiRefPushProgress {
     },
     /// One thread failed; fan-out continues for remaining threads.
     ThreadFailed { thread: String, error: String },
+}
+
+/// Begin multi-ref fan-out progress for a display target.
+pub fn multi_ref_push_begin(target: impl Into<String>) -> MultiRefPushProgress {
+    MultiRefPushProgress::Begin {
+        target: target.into(),
+    }
+}
+
+/// Local-path thread success progress (state short + objects when known).
+pub fn multi_ref_thread_succeeded_local(
+    thread: impl Into<String>,
+    state_short: Option<String>,
+    objects: Option<usize>,
+) -> MultiRefPushProgress {
+    MultiRefPushProgress::ThreadSucceeded {
+        thread: thread.into(),
+        state_short,
+        objects,
+        remote_state: None,
+    }
+}
+
+/// Hosted-path thread success progress (remote state when known).
+pub fn multi_ref_thread_succeeded_hosted(
+    thread: impl Into<String>,
+    remote_state: Option<String>,
+) -> MultiRefPushProgress {
+    MultiRefPushProgress::ThreadSucceeded {
+        thread: thread.into(),
+        state_short: None,
+        objects: None,
+        remote_state,
+    }
+}
+
+/// Thread failure progress with normalized transport error text.
+pub fn multi_ref_thread_failed(
+    thread: impl Into<String>,
+    error: Option<&str>,
+) -> MultiRefPushProgress {
+    MultiRefPushProgress::ThreadFailed {
+        thread: thread.into(),
+        error: transport_error_message(error),
+    }
+}
+
+/// Map hosted per-thread push fields into a multi-ref progress event.
+///
+/// Pure result-summary: success → [`MultiRefPushProgress::ThreadSucceeded`]
+/// with `remote_state`; failure → [`MultiRefPushProgress::ThreadFailed`] with
+/// normalized error text.
+pub fn multi_ref_progress_from_hosted_thread(
+    thread: &str,
+    fields: &HostedPushResultFields,
+) -> MultiRefPushProgress {
+    if fields.success {
+        multi_ref_thread_succeeded_hosted(thread, fields.new_state.clone())
+    } else {
+        multi_ref_thread_failed(thread, fields.error.as_deref())
+    }
 }
 
 /// Unstyled human line for a multi-ref progress fact (no TTY markers).
@@ -1483,6 +1772,59 @@ pub fn format_multi_ref_push_progress(event: &MultiRefPushProgress) -> String {
             format!("failed to push {thread}: {error}")
         }
     }
+}
+
+/// Comma-separated ref/thread list for multi-thread push reporting.
+///
+/// Order is preserved (caller sorts via [`multi_thread_reported_refs`] when
+/// the JSON `refs_written` order is required).
+pub fn format_ref_list(refs: &[String]) -> String {
+    refs.join(", ")
+}
+
+/// Unstyled detail line for landed multi-thread refs (`refs: a, b`), sorted.
+///
+/// Returns `None` when no threads landed (partial fan-out with zero success).
+pub fn format_multi_thread_refs_detail(pushed_threads: &[String]) -> Option<String> {
+    if pushed_threads.is_empty() {
+        return None;
+    }
+    let sorted = multi_thread_reported_refs(pushed_threads);
+    Some(format!("refs: {}", format_ref_list(&sorted)))
+}
+
+// ---------------------------------------------------------------------------
+// Unstyled working / mirror lines (CLI adds markers + style)
+// ---------------------------------------------------------------------------
+
+/// Unstyled "pushing to …" working line.
+pub fn format_pushing_to(target: &str) -> String {
+    format!("pushing to {target}")
+}
+
+/// Unstyled "pulling from …" working line.
+pub fn format_pulling_from(source: &str) -> String {
+    format!("pulling from {source}")
+}
+
+/// Unstyled "connected to …" line after a network session opens.
+pub fn format_connected_to(addr: &str) -> String {
+    format!("connected to {addr}")
+}
+
+/// Unstyled remote-state detail field (`remote state: {state}`).
+pub fn format_remote_state_detail(state: &str) -> String {
+    format!("remote state: {state}")
+}
+
+/// Unstyled mirror success line (heddle#25 ad-hoc dual-push).
+pub fn format_mirror_success_text(remote: &str) -> String {
+    format!("mirrored to {remote}")
+}
+
+/// Unstyled mirror failure line (primary push still succeeded).
+pub fn format_mirror_failure_text(remote: &str, error: &str) -> String {
+    format!("mirror push to {remote} failed (primary push still succeeded): {error}")
 }
 
 // ---------------------------------------------------------------------------
@@ -2995,6 +3337,152 @@ mod tests {
             Some(ALL_THREADS_MIRROR_COVERS_NOTE)
         );
         assert_eq!(all_threads_mirror_coverage_note(false), None);
+    }
+
+    #[test]
+    fn hosted_push_result_parse_and_execution_facts() {
+        let ok = HostedPushResultFields {
+            success: true,
+            new_state: Some("s1".into()),
+            error: None,
+        };
+        assert_eq!(
+            parse_hosted_push_result("main", &ok),
+            HostedPushResult::Success {
+                state: Some("s1".into())
+            }
+        );
+        assert_eq!(
+            heddle_single_push_execution_facts_from_hosted(&ok),
+            PushExecutionFacts::HeddleSingle {
+                state: Some("s1".into()),
+                objects: None,
+            }
+        );
+        let fail = HostedPushResultFields {
+            success: false,
+            new_state: None,
+            error: Some(" refused ".into()),
+        };
+        assert_eq!(
+            parse_hosted_push_result("feat", &fail),
+            HostedPushResult::Failed(PushFailure::RemoteFailed {
+                track_name: "feat".into(),
+                error: "refused".into(),
+            })
+        );
+        let local = LocalTransferSummary {
+            state: Some("abc".into()),
+            objects: Some(3),
+        };
+        assert_eq!(
+            heddle_single_push_execution_facts_from_local(&local),
+            PushExecutionFacts::HeddleSingle {
+                state: Some("abc".into()),
+                objects: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn hosted_pull_result_parse_and_execution_facts() {
+        let ok = HostedPullResultFields {
+            success: true,
+            final_state: Some("s9".into()),
+            error: None,
+        };
+        assert_eq!(
+            parse_hosted_pull_result("main", Some("local"), &ok),
+            HostedPullResult::Success {
+                final_state: Some("s9".into())
+            }
+        );
+        assert_eq!(
+            heddle_pull_execution_facts_from_hosted(true, "origin".into(), "main".into(), &ok),
+            PullExecutionFacts::Heddle {
+                changed: true,
+                remote: "origin".into(),
+                thread: "main".into(),
+                state: Some("s9".into()),
+                objects: None,
+            }
+        );
+        let fail = HostedPullResultFields {
+            success: false,
+            final_state: None,
+            error: None,
+        };
+        assert_eq!(
+            parse_hosted_pull_result("main", None, &fail),
+            HostedPullResult::Failed(PullFailure::RemoteFailed {
+                remote_thread: "main".into(),
+                local_thread: None,
+                error: UNKNOWN_TRANSPORT_ERROR.into(),
+            })
+        );
+        assert!(pull_tip_changed(Some("a"), Some("b")));
+        assert!(!pull_tip_changed(Some("a"), Some("a")));
+        assert!(!pull_tip_changed(Some("a"), None));
+        assert!(local_pull_changed(Some("a"), "a", 1));
+        assert!(!local_pull_changed(Some("a"), "a", 0));
+    }
+
+    #[test]
+    fn multi_ref_progress_constructors_and_ref_list() {
+        assert_eq!(
+            multi_ref_push_begin("file:///tmp/r"),
+            MultiRefPushProgress::Begin {
+                target: "file:///tmp/r".into(),
+            }
+        );
+        let local = multi_ref_thread_succeeded_local("main", Some("abc".into()), Some(2));
+        assert_eq!(
+            format_multi_ref_push_progress(&local),
+            "pushed abc to main (2 objects)"
+        );
+        let hosted_fields = HostedPushResultFields {
+            success: true,
+            new_state: Some("s1".into()),
+            error: None,
+        };
+        assert_eq!(
+            multi_ref_progress_from_hosted_thread("feat", &hosted_fields),
+            multi_ref_thread_succeeded_hosted("feat", Some("s1".into()))
+        );
+        let fail_fields = HostedPushResultFields {
+            success: false,
+            new_state: None,
+            error: Some("boom".into()),
+        };
+        assert_eq!(
+            format_multi_ref_push_progress(&multi_ref_progress_from_hosted_thread(
+                "x",
+                &fail_fields
+            )),
+            "failed to push x: boom"
+        );
+        assert_eq!(
+            format_ref_list(&["b".into(), "a".into()]),
+            "b, a".to_string()
+        );
+        assert_eq!(
+            format_multi_thread_refs_detail(&["z".into(), "a".into()]).as_deref(),
+            Some("refs: a, z")
+        );
+        assert!(format_multi_thread_refs_detail(&[]).is_none());
+    }
+
+    #[test]
+    fn working_and_mirror_text_helpers() {
+        assert_eq!(format_pushing_to("file:///r"), "pushing to file:///r");
+        assert_eq!(format_pulling_from("file:///s"), "pulling from file:///s");
+        assert_eq!(
+            format_connected_to("127.0.0.1:1"),
+            "connected to 127.0.0.1:1"
+        );
+        assert_eq!(format_remote_state_detail("s1"), "remote state: s1");
+        assert_eq!(format_mirror_success_text("origin"), "mirrored to origin");
+        assert!(format_mirror_failure_text("m", "e").contains("mirror push to m failed"));
     }
 
     #[test]
