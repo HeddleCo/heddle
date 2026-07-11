@@ -161,6 +161,9 @@ Until then: status stays **Open / residual tracked** in `WAVES.md`.
 | [WAVES.md](WAVES.md) | Wave 5–8 status |
 | [PRODUCT_CONTRACT.md](PRODUCT_CONTRACT.md) | Supported platforms / explicit non-goals |
 | [PERF_BASELINE.md](PERF_BASELINE.md) | Single-host equal-work samples; multi-host open |
+| [MULTI_HOST_PERF.md](MULTI_HOST_PERF.md) | Multi-host equal-work recipe + pass criteria (prep) |
+| [MULTI_HOST_PERF_MATRIX.md](MULTI_HOST_PERF_MATRIX.md) | Living multi-host stamp table |
+| [L8_PACK_INSTALL_JOURNAL.md](L8_PACK_INSTALL_JOURNAL.md) | L8 pack install design + Option D GC foundation |
 | [RELEASE_GATES.md](RELEASE_GATES.md) | Executable correctness/perf gates |
 | [PACKED_REFS_STRESS.md](PACKED_REFS_STRESS.md) | 10k+ packed-refs stress recipe + non-claims |
 | `docs/design/reftable-spike.md` | Reftable defer decision (not product) |
