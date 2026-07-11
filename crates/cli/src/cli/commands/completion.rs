@@ -4,6 +4,11 @@
 use anyhow::{Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
+use heddle_core::completion_plan::{
+    CompletionShell, completion_shell_example_command, completion_shell_unsupported_hint,
+    completion_shell_unsupported_kind, completion_shell_unsupported_summary,
+    parse_completion_shell,
+};
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, CompletionSubject};
@@ -11,25 +16,25 @@ use crate::cli::{Cli, CompletionSubject};
 pub fn cmd_completion(shell: String) -> Result<()> {
     let mut cmd = Cli::command();
 
-    match shell.as_str() {
-        "bash" => {
+    match parse_completion_shell(&shell) {
+        Some(CompletionShell::Bash) => {
             generate(Shell::Bash, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{BASH_DYNAMIC_COMPLETION}");
         }
-        "zsh" => {
+        Some(CompletionShell::Zsh) => {
             generate(Shell::Zsh, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{ZSH_DYNAMIC_COMPLETION}");
         }
-        "fish" => {
+        Some(CompletionShell::Fish) => {
             generate(Shell::Fish, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{FISH_DYNAMIC_COMPLETION}");
         }
-        _ => {
+        None => {
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "completion_shell_unsupported",
-                format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
-                "Use one of: bash, zsh, fish.",
-                "heddle shell completion bash",
+                completion_shell_unsupported_kind(),
+                completion_shell_unsupported_summary(&shell),
+                completion_shell_unsupported_hint(),
+                completion_shell_example_command(),
             )));
         }
     }

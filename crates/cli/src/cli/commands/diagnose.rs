@@ -5,6 +5,11 @@ use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
+use heddle_core::diagnose_plan::{
+    DIAGNOSE_SECTION_DOCTOR, DIAGNOSE_STATE_INITIAL, DIAGNOSE_THREAD_DETACHED,
+    changed_path_preview, diagnose_changes_summary, diagnose_detached_health_status,
+    diagnose_thread_visibility_label, diagnose_workspace_summary,
+};
 use objects::object::Tree;
 use repo::{
     GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread, ThreadFreshness,
@@ -463,14 +468,7 @@ fn diagnose_health(
         };
         return DiagnoseHealthOutput {
             output_kind: "diagnose_health",
-            status: if worktree_dirty && initial_state {
-                "uncaptured"
-            } else if worktree_dirty {
-                "dirty_worktree"
-            } else {
-                "detached"
-            }
-            .to_string(),
+            status: diagnose_detached_health_status(worktree_dirty, initial_state).to_string(),
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
             recommended_action_template: action_template(recommended_action),
@@ -538,7 +536,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
 
     println!(
         "{} {}",
-        style::bold("Doctor"),
+        style::bold(DIAGNOSE_SECTION_DOCTOR),
         style::dim(&output.repository)
     );
     println!(
@@ -603,7 +601,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             }
         }
     } else {
-        println!("Thread: detached");
+        println!("{DIAGNOSE_THREAD_DETACHED}");
     }
 
     if let Some(state) = &output.state {
@@ -634,26 +632,38 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             println!("Capture durability: local only");
         }
     } else {
-        println!("State: (initial)");
+        println!("{DIAGNOSE_STATE_INITIAL}");
     }
 
     println!(
-        "Changes: {} modified, {} added, {} deleted",
-        output.changes.modified.len(),
-        output.changes.added.len(),
-        output.changes.deleted.len()
+        "Changes: {}",
+        diagnose_changes_summary(
+            output.changes.modified.len(),
+            output.changes.added.len(),
+            output.changes.deleted.len()
+        )
     );
     if output.changes.total > 0 {
-        println!("Changed paths: {}", changed_path_preview(&output.changes));
+        println!(
+            "Changed paths: {}",
+            changed_path_preview(
+                &output.changes.modified,
+                &output.changes.added,
+                &output.changes.deleted,
+                output.changes.total,
+            )
+        );
     }
 
     println!(
-        "Workspace: {} thread(s), {} parallel, {} ready, {} blocked, {} actor(s)",
-        output.workspace.thread_count,
-        output.workspace.parallel_count,
-        output.workspace.ready_count,
-        output.workspace.blocked_count,
-        output.workspace.active_actor_count
+        "Workspace: {}",
+        diagnose_workspace_summary(
+            output.workspace.thread_count,
+            output.workspace.parallel_count,
+            output.workspace.ready_count,
+            output.workspace.blocked_count,
+            output.workspace.active_actor_count,
+        )
     );
     println!("Health: {}", style::bold(&output.health.status));
     if !output.health.blockers.is_empty() {
@@ -675,24 +685,8 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
 }
 
 fn diagnose_thread_visibility(thread: &DiagnoseThreadOutput) -> &str {
-    thread
-        .mode
-        .as_ref()
-        .map(thread_workspace_label)
-        .unwrap_or(&thread.visibility)
-}
-
-fn changed_path_preview(changes: &DiagnoseChangesOutput) -> String {
-    let mut paths = changes
-        .modified
-        .iter()
-        .chain(changes.added.iter())
-        .chain(changes.deleted.iter())
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>();
-    if changes.total > paths.len() {
-        paths.push(format!("+{} more", changes.total - paths.len()));
-    }
-    paths.join(", ")
+    diagnose_thread_visibility_label(
+        thread.mode.as_ref().map(thread_workspace_label),
+        &thread.visibility,
+    )
 }

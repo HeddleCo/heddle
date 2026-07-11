@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
+use heddle_core::maintenance_plan::{
+    inspect_change_monitor_line, inspect_commit_graph_line, inspect_packs_line,
+    inspect_partial_fetch_line, inspect_pull_planner_cache_line, inspect_ref_summary_index_line,
+    inspect_refs_line, inspect_worktree_index_line, run_commit_graph_now_line,
+    run_pruned_pull_planner_entries_line, run_pull_planner_cache_now_line,
+    run_rebuilt_commit_graph_line, run_rebuilt_pull_planner_cache_line,
+    run_rebuilt_ref_summary_index_line, run_rebuilt_worktree_index_line, run_ref_summary_now_line,
+    run_refreshed_change_monitor_line, run_worktree_index_now_line,
+};
 
 use crate::cli::{
     Cli, MaintenanceCommands,
@@ -18,51 +27,64 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!(
-                    "Commit graph: {} (nodes: {}, bloom-covered: {})",
-                    presence(report.commit_graph.present),
-                    report.commit_graph.node_count,
-                    report.commit_graph.bloom_covered_nodes
+                    "{}",
+                    inspect_commit_graph_line(
+                        report.commit_graph.present,
+                        report.commit_graph.node_count,
+                        report.commit_graph.bloom_covered_nodes
+                    )
                 );
                 println!(
-                    "Worktree index: {} (files: {}, directories: {}, untracked directories: {})",
-                    presence(report.worktree_index.present),
-                    report.worktree_index.file_entries,
-                    report.worktree_index.directory_entries,
-                    report.worktree_index.untracked_directory_entries
+                    "{}",
+                    inspect_worktree_index_line(
+                        report.worktree_index.present,
+                        report.worktree_index.file_entries,
+                        report.worktree_index.directory_entries,
+                        report.worktree_index.untracked_directory_entries
+                    )
                 );
                 println!(
-                    "Change monitor: {} / {}",
-                    report.change_monitor.backend, report.change_monitor.status
+                    "{}",
+                    inspect_change_monitor_line(
+                        &report.change_monitor.backend,
+                        &report.change_monitor.status
+                    )
                 );
                 println!(
-                    "Refs: {} threads, {} markers, {} remotes, {} remote threads",
-                    report.ref_counts.threads,
-                    report.ref_counts.markers,
-                    report.ref_counts.remotes,
-                    report.ref_counts.remote_threads
+                    "{}",
+                    inspect_refs_line(
+                        report.ref_counts.threads,
+                        report.ref_counts.markers,
+                        report.ref_counts.remotes,
+                        report.ref_counts.remote_threads
+                    )
                 );
                 println!(
-                    "Ref summary index: {} (valid: {}, threads: {}, markers: {}, remotes: {}, remote threads: {})",
-                    presence(report.ref_summary_index.present),
-                    yes_no(report.ref_summary_index.valid),
-                    report.ref_summary_index.threads,
-                    report.ref_summary_index.markers,
-                    report.ref_summary_index.remotes,
-                    report.ref_summary_index.remote_threads
+                    "{}",
+                    inspect_ref_summary_index_line(
+                        report.ref_summary_index.present,
+                        report.ref_summary_index.valid,
+                        report.ref_summary_index.threads,
+                        report.ref_summary_index.markers,
+                        report.ref_summary_index.remotes,
+                        report.ref_summary_index.remote_threads
+                    )
                 );
                 println!(
-                    "Packs: {} pack files, {} indexes",
-                    report.pack_files.pack_count, report.pack_files.index_count
+                    "{}",
+                    inspect_packs_line(report.pack_files.pack_count, report.pack_files.index_count)
                 );
                 println!(
-                    "Partial fetch: {} missing blobs",
-                    report.partial_fetch.missing_blob_count
+                    "{}",
+                    inspect_partial_fetch_line(report.partial_fetch.missing_blob_count)
                 );
                 println!(
-                    "Pull planner cache: {} (manifests: {}, planner entries: {})",
-                    report.pull_planner_cache.status,
-                    report.pull_planner_cache.manifest_count,
-                    report.pull_planner_cache.planner_entry_count
+                    "{}",
+                    inspect_pull_planner_cache_line(
+                        &report.pull_planner_cache.status,
+                        report.pull_planner_cache.manifest_count,
+                        report.pull_planner_cache.planner_entry_count
+                    )
                 );
             }
         }
@@ -71,46 +93,56 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             if should_output_json(cli, Some(repo.config())) {
                 println!("{}", serde_json::to_string(&run)?);
             } else {
-                println!("Rebuilt commit graph: {}", yes_no(run.rebuilt_commit_graph));
                 println!(
-                    "Rebuilt ref summary index: {}",
-                    yes_no(run.rebuilt_ref_summary_index)
+                    "{}",
+                    run_rebuilt_commit_graph_line(run.rebuilt_commit_graph)
                 );
                 println!(
-                    "Rebuilt worktree index: {}",
-                    yes_no(run.rebuilt_worktree_index)
+                    "{}",
+                    run_rebuilt_ref_summary_index_line(run.rebuilt_ref_summary_index)
                 );
                 println!(
-                    "Refreshed change monitor: {}",
-                    yes_no(run.refreshed_change_monitor)
+                    "{}",
+                    run_rebuilt_worktree_index_line(run.rebuilt_worktree_index)
                 );
                 println!(
-                    "Rebuilt pull planner cache: {}",
-                    yes_no(run.rebuilt_pull_planner_cache)
+                    "{}",
+                    run_refreshed_change_monitor_line(run.refreshed_change_monitor)
                 );
                 println!(
-                    "Pruned pull planner entries: {}",
-                    run.pruned_pull_planner_entries
+                    "{}",
+                    run_rebuilt_pull_planner_cache_line(run.rebuilt_pull_planner_cache)
                 );
                 println!(
-                    "Commit graph now has {} nodes and {} Bloom-covered nodes",
-                    run.report.commit_graph.node_count, run.report.commit_graph.bloom_covered_nodes
+                    "{}",
+                    run_pruned_pull_planner_entries_line(run.pruned_pull_planner_entries)
                 );
                 println!(
-                    "Ref summary index now covers {} threads, {} markers, {} remotes, and {} remote threads",
-                    run.report.ref_summary_index.threads,
-                    run.report.ref_summary_index.markers,
-                    run.report.ref_summary_index.remotes,
-                    run.report.ref_summary_index.remote_threads
+                    "{}",
+                    run_commit_graph_now_line(
+                        run.report.commit_graph.node_count,
+                        run.report.commit_graph.bloom_covered_nodes
+                    )
                 );
                 println!(
-                    "Worktree index now has {} files cached",
-                    run.report.worktree_index.file_entries
+                    "{}",
+                    run_ref_summary_now_line(
+                        run.report.ref_summary_index.threads,
+                        run.report.ref_summary_index.markers,
+                        run.report.ref_summary_index.remotes,
+                        run.report.ref_summary_index.remote_threads
+                    )
                 );
                 println!(
-                    "Pull planner cache now has {} manifests and {} planner entries",
-                    run.report.pull_planner_cache.manifest_count,
-                    run.report.pull_planner_cache.planner_entry_count
+                    "{}",
+                    run_worktree_index_now_line(run.report.worktree_index.file_entries)
+                );
+                println!(
+                    "{}",
+                    run_pull_planner_cache_now_line(
+                        run.report.pull_planner_cache.manifest_count,
+                        run.report.pull_planner_cache.planner_entry_count
+                    )
                 );
             }
         }
@@ -130,12 +162,4 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn presence(value: bool) -> &'static str {
-    if value { "present" } else { "absent" }
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }

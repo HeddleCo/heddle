@@ -17,10 +17,19 @@
 //! disk is tight, and the keys-only check catches every drift class
 //! the doc has historically suffered (renames, deletions, leaks of
 //! fields like `git_import_guidance` into per-command outputs).
+//!
+//! Pure sample/schema helpers live in `heddle_core::doctor_schemas_plan`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::doctor_schemas_plan::{
+    DocSample, SchemaCoverageBlockingFacts, collect_coverage_field_drifts,
+    coverage_has_no_blocking_schema_gaps as coverage_gaps_clean, doctor_schemas_json_sample_span,
+    documented_samples_with_bound_verbs as core_documented_samples_with_bound_verbs,
+    extract_samples, sample_matches_verb_with_hints, schema_allows_additional_properties,
+    schema_property_keys, top_level_keys,
+};
 use serde::Serialize;
 use serde_json::Value;
 use sley::Repository as SleyRepository;
@@ -201,6 +210,27 @@ impl From<MachineContractCoverage> for CommandContractSchemaCoverage {
             undocumented_schema_examples: coverage.undocumented_schema_examples,
         }
     }
+}
+
+impl CommandContractSchemaCoverage {
+    fn blocking_facts(&self) -> SchemaCoverageBlockingFacts {
+        SchemaCoverageBlockingFacts {
+            verified_scope_json_commands_without_schema: self
+                .verified_scope_json_commands_without_schema,
+            verified_scope_mutating_commands_without_schema: self
+                .verified_scope_mutating_commands_without_schema,
+            verified_scope_json_commands_with_accepted_opaque_schema: self
+                .verified_scope_json_commands_with_accepted_opaque_schema,
+            verified_scope_mutating_commands_with_accepted_opaque_schema: self
+                .verified_scope_mutating_commands_with_accepted_opaque_schema,
+            unaccepted_opaque_schema_verbs_total: self.unaccepted_opaque_schema_verbs_total,
+            undocumented_schema_verbs_total: self.undocumented_schema_verbs_total,
+        }
+    }
+}
+
+fn coverage_has_no_blocking_schema_gaps(coverage: &CommandContractSchemaCoverage) -> bool {
+    coverage_gaps_clean(coverage.blocking_facts())
 }
 
 /// Public entrypoint for `heddle doctor schemas`.
@@ -413,7 +443,8 @@ fn refresh_command_contract_coverage_sample(
     doc: &str,
     coverage: &CommandContractSchemaCoverage,
 ) -> Result<String> {
-    let (start, end) = doctor_schemas_json_sample_span(doc)?;
+    let (start, end) =
+        doctor_schemas_json_sample_span(doc).map_err(|err| anyhow!(err.message()))?;
     let sample_text = &doc[start..end];
     let mut sample: Value =
         serde_json::from_str(sample_text).context("parse doctor schemas JSON sample")?;
@@ -441,27 +472,6 @@ fn refresh_command_contract_coverage_sample(
     Ok(updated)
 }
 
-fn doctor_schemas_json_sample_span(doc: &str) -> Result<(usize, usize)> {
-    let heading = "## `heddle doctor schemas --output json`";
-    let heading_start = doc
-        .find(heading)
-        .ok_or_else(|| anyhow!("missing `{heading}` section"))?;
-    let after_heading = &doc[heading_start..];
-    let fence_rel = after_heading
-        .find("```json")
-        .ok_or_else(|| anyhow!("missing JSON fence under `{heading}`"))?;
-    let fence_start = heading_start + fence_rel;
-    let content_start = doc[fence_start..]
-        .find('\n')
-        .map(|newline| fence_start + newline + 1)
-        .ok_or_else(|| anyhow!("unterminated JSON fence under `{heading}`"))?;
-    let content_end = doc[content_start..]
-        .find("\n```")
-        .map(|closing| content_start + closing)
-        .ok_or_else(|| anyhow!("unterminated JSON fence under `{heading}`"))?;
-    Ok((content_start, content_end))
-}
-
 fn validate_report(report: &SchemaReport) -> Result<()> {
     if !coverage_has_no_blocking_schema_gaps(&report.command_contract_schema_coverage) {
         return Err(anyhow!(schema_contract_advice(report)));
@@ -475,15 +485,6 @@ fn validate_report(report: &SchemaReport) -> Result<()> {
     Ok(())
 }
 
-fn coverage_has_no_blocking_schema_gaps(coverage: &CommandContractSchemaCoverage) -> bool {
-    coverage.verified_scope_json_commands_without_schema == 0
-        && coverage.verified_scope_mutating_commands_without_schema == 0
-        && coverage.verified_scope_json_commands_with_accepted_opaque_schema == 0
-        && coverage.verified_scope_mutating_commands_with_accepted_opaque_schema == 0
-        && coverage.unaccepted_opaque_schema_verbs_total == 0
-        && coverage.undocumented_schema_verbs_total == 0
-}
-
 fn collect_coverage_drift_issues(
     sample: &DocSample,
     verb: &str,
@@ -491,97 +492,13 @@ fn collect_coverage_drift_issues(
     command_coverage: &Value,
     issues: &mut Vec<SchemaIssue>,
 ) {
-    collect_coverage_drift_issues_at_path(
-        &sample.json,
-        "",
-        sample.start_line,
-        verb,
-        machine_coverage,
-        command_coverage,
-        issues,
-    );
-}
-
-fn collect_coverage_drift_issues_at_path(
-    value: &Value,
-    path: &str,
-    line: usize,
-    verb: &str,
-    machine_coverage: &Value,
-    command_coverage: &Value,
-    issues: &mut Vec<SchemaIssue>,
-) {
-    let Value::Object(map) = value else {
-        return;
-    };
-    for (key, child) in map {
-        let child_path = if path.is_empty() {
-            key.clone()
-        } else {
-            format!("{path}.{key}")
-        };
-        match key.as_str() {
-            "machine_contract_coverage" => {
-                compare_documented_coverage(
-                    &child_path,
-                    child,
-                    machine_coverage,
-                    line,
-                    verb,
-                    issues,
-                );
-            }
-            "command_contract_schema_coverage" => {
-                compare_documented_coverage(
-                    &child_path,
-                    child,
-                    command_coverage,
-                    line,
-                    verb,
-                    issues,
-                );
-            }
-            _ => {}
-        }
-        collect_coverage_drift_issues_at_path(
-            child,
-            &child_path,
-            line,
-            verb,
-            machine_coverage,
-            command_coverage,
-            issues,
-        );
-    }
-}
-
-fn compare_documented_coverage(
-    path: &str,
-    documented: &Value,
-    runtime: &Value,
-    line: usize,
-    verb: &str,
-    issues: &mut Vec<SchemaIssue>,
-) {
-    let (Value::Object(documented), Value::Object(runtime)) = (documented, runtime) else {
-        return;
-    };
-    for (field, documented_value) in documented {
-        let Some(runtime_value) = runtime.get(field) else {
-            continue;
-        };
-        if documented_value != runtime_value {
-            let field_path = format!("{path}.{field}");
-            issues.push(SchemaIssue {
-                verb: verb.to_string(),
-                line,
-                unknown_key: field_path.clone(),
-                detail: format!(
-                    "sample field '{field_path}' is {}, but runtime reports {}",
-                    documented_value, runtime_value
-                ),
-            });
-        }
+    for drift in collect_coverage_field_drifts(&sample.json, machine_coverage, command_coverage) {
+        issues.push(SchemaIssue {
+            verb: verb.to_string(),
+            line: sample.start_line,
+            unknown_key: drift.field_path,
+            detail: drift.detail,
+        });
     }
 }
 
@@ -732,331 +649,14 @@ fn render_human(report: &SchemaReport) {
     }
 }
 
-/// Top-level property keys declared in a generated schema. Returns an
-/// empty set when `properties` is missing (e.g. the schema is a `null`
-/// or a primitive — never the case for the registry today, but handle
-/// it).
-fn schema_property_keys(schema: &Value) -> std::collections::BTreeSet<String> {
-    schema_property_keys_from(schema, schema)
-}
-
-fn schema_property_keys_from(root: &Value, schema: &Value) -> std::collections::BTreeSet<String> {
-    let mut keys: std::collections::BTreeSet<String> = schema
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
-
-    for combinator in ["anyOf", "oneOf", "allOf"] {
-        if let Some(variants) = schema.get(combinator).and_then(|value| value.as_array()) {
-            for variant in variants {
-                keys.extend(schema_property_keys_from(root, variant));
-            }
-        }
-    }
-
-    if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str())
-        && let Some(target) = schema_ref_target(root, reference)
-    {
-        keys.extend(schema_property_keys_from(root, target));
-    }
-
-    keys
-}
-
-fn schema_ref_target<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    let path = reference.strip_prefix("#/")?;
-    let mut current = root;
-    for part in path.split('/') {
-        let decoded = part.replace("~1", "/").replace("~0", "~");
-        current = current.get(&decoded)?;
-    }
-    Some(current)
-}
-
-fn schema_allows_additional_properties(schema: &Value) -> bool {
-    schema
-        .get("additionalProperties")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
-
-/// A literal JSON sample lifted out of `docs/json-schemas.md`.
-#[derive(Debug)]
-struct DocSample {
-    /// The closest preceding `## ` heading, used as the fallback
-    /// verb when no inline `heddle <verb>` reference is present.
-    heading: String,
-    /// Inline verb reference parsed from the most recent paragraph
-    /// before the fence (e.g. `` `heddle thread marker create|delete|show`
-    /// emit: ``). When present, this overrides the section heading.
-    inline_verb: Option<String>,
-    /// 1-based line number where the ```json fence opens.
-    start_line: usize,
-    /// Parsed JSON. May be a non-object (e.g. literal `null`).
-    json: Value,
-}
-
-/// Walk every fenced ```json block in the doc and pair it with both
-/// the nearest preceding `## ` heading and the most recent inline
-/// `heddle <verb>` reference. Skips fences whose JSON doesn't parse
-/// — those are rare placeholder snippets (e.g. samples with `...`
-/// fillers) that we deliberately don't validate.
-fn extract_samples(doc: &str) -> Vec<DocSample> {
-    let mut samples = Vec::new();
-    let mut current_heading = String::new();
-    let mut last_inline_verb: Option<String> = None;
-    let mut in_fence = false;
-    let mut fence_start = 0usize;
-    let mut buffer = String::new();
-
-    for (idx, line) in doc.lines().enumerate() {
-        let lineno = idx + 1;
-        if !in_fence && line.starts_with("## ") {
-            current_heading = line.trim_start_matches("## ").trim().to_string();
-            // New section — drop any stale inline verb hint.
-            last_inline_verb = None;
-            continue;
-        }
-        if !in_fence {
-            // Look for inline verb mentions in normal prose, e.g.
-            // `` `heddle thread marker create|delete|show` emit: ``.
-            // Also reset the hint on a blank line that isn't immediately
-            // before a fence — that way only references in the
-            // paragraph adjacent to the fence stick.
-            if let Some(verb) = parse_inline_verb(line) {
-                last_inline_verb = Some(verb);
-            }
-        }
-        if !in_fence && line.trim() == "```json" {
-            in_fence = true;
-            fence_start = lineno;
-            buffer.clear();
-            continue;
-        }
-        if in_fence && line.trim() == "```" {
-            in_fence = false;
-            // Try to parse — silently skip placeholder samples
-            // that contain `...` ellipses or other non-JSON.
-            if let Ok(json) = serde_json::from_str::<Value>(&buffer) {
-                samples.push(DocSample {
-                    heading: current_heading.clone(),
-                    inline_verb: last_inline_verb.clone(),
-                    start_line: fence_start,
-                    json,
-                });
-                // Clear the inline hint once consumed so it doesn't
-                // bleed onto the next sample.
-                last_inline_verb = None;
-            }
-            buffer.clear();
-            continue;
-        }
-        if in_fence {
-            buffer.push_str(line);
-            buffer.push('\n');
-        }
-    }
-
-    samples
-}
-
 /// Every `docs/json-schemas.md` ```json sample that binds to at least one
 /// verb in `verbs`, paired with the subset of `verbs` it binds to (via
 /// section heading or inline `heddle <verb>` hint), in document order.
 ///
-/// This is the same heading/inline binding `heddle doctor schemas`
-/// validates samples with, exposed so the `output_kind` discriminator
-/// invariant can assert — sample-by-sample — that every documented sample
-/// for a catalog-advertised discriminator verb carries the right
-/// discriminator. Returning the full bound-verb set (not one verb at a
-/// time) lets the invariant accept a grouped sample, e.g. the single
-/// `heddle undo|undo --redo` sample binds to both undo modes and may
-/// legitimately show either variant's discriminator. Sharing the binding
-/// keeps the invariant and the production drift gate agreeing on which
-/// sample documents which verb.
+/// Thin re-export of the pure core binder so integration tests keep the
+/// same path through the CLI command module.
 pub fn documented_samples_with_bound_verbs(doc: &str, verbs: &[&str]) -> Vec<(Value, Vec<String>)> {
-    extract_samples(doc)
-        .into_iter()
-        .filter_map(|sample| {
-            let bound: Vec<String> = verbs
-                .iter()
-                .filter(|verb| sample_matches_verb_with_hints(&sample, verb))
-                .map(|verb| (*verb).to_string())
-                .collect();
-            (!bound.is_empty()).then_some((sample.json, bound))
-        })
-        .collect()
-}
-
-/// Bind a sample to a verb using inline hints first, then heading
-/// fallback.
-fn sample_matches_verb_with_hints(sample: &DocSample, verb: &str) -> bool {
-    if let Some(inline) = &sample.inline_verb {
-        if inline_verb_matches(inline, verb) {
-            return true;
-        }
-        // When an inline hint is present, do *not* fall back to the
-        // section heading — the inline hint is more specific and
-        // overrides. Otherwise the same `thread marker create|delete|show`
-        // sample would be claimed by both `thread marker list` (heading) and
-        // `thread marker create` (inline), which is exactly the bug.
-        return false;
-    }
-    sample_matches_verb(&sample.heading, verb)
-}
-
-/// Match a `verb` against an inline reference like `marker
-/// create|delete|show` (the pipe-separated form is canonical in this
-/// doc). Each pipe-delimited variant is compared verb-equal.
-fn inline_verb_matches(inline: &str, verb: &str) -> bool {
-    // Normalize: an inline hint of "thread marker create|delete|show" with
-    // verb "thread marker create" should match. The hint is a sub-verb
-    // expansion: split the LAST whitespace-separated token on `|`
-    // and try each form.
-    let trimmed = inline.trim();
-    if trimmed == verb {
-        return true;
-    }
-    // If the hint contains a pipe in the last token, try each form.
-    let mut parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if let Some(last) = parts.pop()
-        && last.contains('|')
-    {
-        let prefix = parts.join(" ");
-        for variant in last.split('|') {
-            let combined = if prefix.is_empty() {
-                variant.to_string()
-            } else {
-                format!("{prefix} {variant}")
-            };
-            if combined == verb {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Parse an inline verb reference out of a single line of prose.
-///
-/// Handles the canonical doc form: a backtick-fenced `heddle <verb>`
-/// followed by `emits:` or `emit:`. Returns `None` for everything
-/// else (including ordinary `heddle <verb>` mentions in prose that
-/// don't introduce a sample).
-fn parse_inline_verb(line: &str) -> Option<String> {
-    // Look for the pattern: `heddle <verb>` (...) emits | emit
-    let bytes = line.as_bytes();
-    let backtick_start = line.find('`')?;
-    // Find the closing backtick after backtick_start.
-    let after_first = &line[backtick_start + 1..];
-    let backtick_end_rel = after_first.find('`')?;
-    let inner = &after_first[..backtick_end_rel];
-    let inner = inner.trim();
-    // The doc uses both `heddle <verb>` and `<verb>` forms inline.
-    // Accept either — when the prefix is absent, the inner string
-    // itself is treated as the verb candidate.
-    let inner_verb = inner.strip_prefix("heddle ").unwrap_or(inner).trim();
-    // Strip output-mode selectors so the registry-verb comparison
-    // doesn't have to know about the transport flag.
-    let inner_verb = strip_json_mode_tokens(inner_verb);
-    // Reject obviously-non-verb backtick contents (e.g. type names,
-    // path fragments). Verbs in this doc are always lowercase
-    // alphanumeric tokens, optionally with `--flag` and `|`-separated
-    // sub-variants.
-    if !is_plausible_verb_phrase(&inner_verb) {
-        return None;
-    }
-    // Confirm "emits" / "emit" appears later in the line.
-    let after_close = &line[backtick_start + 1 + backtick_end_rel + 1..];
-    let after_close_lower = after_close.to_ascii_lowercase();
-    // Allow trailing colons, dashes, etc.
-    let _ = bytes; // silence unused warning if linter complains.
-    if after_close_lower.contains("emits") || after_close_lower.contains("emit") {
-        Some(inner_verb.to_string())
-    } else {
-        None
-    }
-}
-
-/// Lightweight plausibility check for an inline-verb candidate.
-/// We accept lowercase ASCII letters, digits, hyphens, pipes,
-/// spaces, angle brackets, and the literal `--flag` form. Anything
-/// else (uppercase, dots, slashes) is rejected so that backtick-
-/// fenced type names or paths don't pollute the matching.
-fn is_plausible_verb_phrase(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    s.chars().all(|c| {
-        c.is_ascii_lowercase()
-            || c.is_ascii_digit()
-            || matches!(c, ' ' | '-' | '|' | '<' | '>' | '_')
-    })
-}
-
-/// `## heddle status --output json` matches the verb `"status"`. Strips
-/// the `heddle ` prefix, output-mode selectors, and any `<state>`-style
-/// placeholders. Pipe-separated headings (e.g. `heddle schemas
-/// status|log|verify --output json`) match every variant.
-fn sample_matches_verb(heading: &str, verb: &str) -> bool {
-    let stripped = heading.trim_start_matches('`').trim_end_matches('`').trim();
-    let stripped = stripped.trim_start_matches("heddle ").trim();
-    let mut tokens = strip_json_mode_tokens(stripped)
-        .split_whitespace()
-        .filter(|tok| !tok.starts_with('<'))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return false;
-    }
-    let last = tokens.pop().unwrap();
-    let prefix = tokens.join(" ");
-    if last.contains('|') {
-        for variant in last.split('|') {
-            let combined = if prefix.is_empty() {
-                variant.to_string()
-            } else {
-                format!("{prefix} {variant}")
-            };
-            if combined == verb {
-                return true;
-            }
-        }
-        false
-    } else {
-        let combined = if prefix.is_empty() {
-            last.to_string()
-        } else {
-            format!("{prefix} {last}")
-        };
-        combined == verb
-    }
-}
-
-fn strip_json_mode_tokens(input: &str) -> String {
-    let mut out = Vec::new();
-    let mut tokens = input.split_whitespace().peekable();
-    while let Some(token) = tokens.next() {
-        if token == "--output=json" {
-            continue;
-        }
-        if token == "--output" && tokens.peek().is_some_and(|next| *next == "json") {
-            tokens.next();
-            continue;
-        }
-        out.push(token);
-    }
-    out.join(" ")
-}
-
-/// Returns top-level keys when `value` is an object. None for
-/// primitives, arrays, and `null` — those are valid sample shapes
-/// (e.g. `review next` returning literal null) but contribute no
-/// keys to compare.
-fn top_level_keys(value: &Value) -> Option<Vec<String>> {
-    let object = value.as_object()?;
-    Some(object.keys().cloned().collect())
+    core_documented_samples_with_bound_verbs(doc, verbs)
 }
 
 /// Walk parents of `start` until we find a directory containing a
@@ -1077,82 +677,6 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_samples_from_simple_doc() {
-        let doc = "\
-## `heddle foo --output json`
-
-Some prose.
-
-```json
-{\"a\": 1, \"b\": 2}
-```
-
-## `heddle bar --output json`
-
-```json
-{\"x\": true}
-```
-";
-        let samples = extract_samples(doc);
-        assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].heading, "`heddle foo --output json`");
-        assert_eq!(samples[0].json.get("a").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(samples[1].heading, "`heddle bar --output json`");
-    }
-
-    #[test]
-    fn skips_fences_with_nonparseable_placeholder_samples() {
-        let doc = "\
-## `heddle baz --output json`
-
-```json
-{\"placeholder\": ...}
-```
-";
-        let samples = extract_samples(doc);
-        assert!(samples.is_empty());
-    }
-
-    #[test]
-    fn sample_matches_verb_strips_heddle_prefix_and_args() {
-        assert!(sample_matches_verb(
-            "`heddle status --output json`",
-            "status"
-        ));
-        assert!(sample_matches_verb(
-            "`heddle status --output json`",
-            "status"
-        ));
-        assert!(sample_matches_verb(
-            "`heddle show <state> --output json`",
-            "show"
-        ));
-        assert!(!sample_matches_verb("`heddle status --output json`", "log"));
-    }
-
-    #[test]
-    fn top_level_keys_returns_none_for_null() {
-        assert!(top_level_keys(&Value::Null).is_none());
-        assert!(top_level_keys(&Value::Bool(true)).is_none());
-    }
-
-    #[test]
-    fn top_level_keys_returns_keys_for_object() {
-        let v: Value = serde_json::from_str(r#"{"a": 1, "b": 2}"#).unwrap();
-        let mut keys = top_level_keys(&v).unwrap();
-        keys.sort();
-        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn generic_object_schema_allows_sample_keys() {
-        let schema: Value =
-            serde_json::from_str(r#"{"type": "object", "additionalProperties": true}"#).unwrap();
-        assert!(schema_allows_additional_properties(&schema));
-        assert!(schema_property_keys(&schema).is_empty());
-    }
 
     #[test]
     fn coverage_samples_must_match_runtime_coverage_values() {

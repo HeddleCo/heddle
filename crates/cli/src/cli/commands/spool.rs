@@ -13,7 +13,10 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Result, anyhow};
-use grpc::heddle::v1::ChildEdgeStatus;
+use heddle_core::spool_plan::{
+    default_mount_name, edge_status_label_from_i32, short_id, spool_attach_message,
+    spool_children_empty_message, spool_children_header, spool_detach_message,
+};
 use repo::Repository;
 
 use super::RecoveryAdvice;
@@ -77,15 +80,6 @@ async fn open_hosted_client(repo: &Repository, remote_name: &str) -> Result<Host
     Ok(client)
 }
 
-/// Default mount name = the child path's last `/`-segment.
-fn default_mount_name(child_path: &str) -> &str {
-    child_path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .find(|s| !s.is_empty())
-        .unwrap_or(child_path)
-}
-
 fn change_id_string(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
@@ -93,20 +87,6 @@ fn change_id_string(bytes: &[u8]) -> String {
     objects::object::ChangeId::try_from_slice(bytes)
         .map(|id| id.to_string_full())
         .unwrap_or_default()
-}
-
-fn short(id: &str) -> &str {
-    &id[..id.len().min(12)]
-}
-
-fn edge_status_label(status: i32) -> &'static str {
-    match ChildEdgeStatus::try_from(status).unwrap_or(ChildEdgeStatus::Unspecified) {
-        ChildEdgeStatus::UpToDate => "up-to-date",
-        ChildEdgeStatus::FastForwardable => "fast-forwardable",
-        ChildEdgeStatus::Diverged => "diverged",
-        ChildEdgeStatus::NoChildHead => "no-child-head",
-        ChildEdgeStatus::Unspecified => "unspecified",
-    }
 }
 
 async fn cmd_spool_attach(cli: &Cli, args: SpoolAttachArgs) -> Result<()> {
@@ -121,15 +101,17 @@ async fn cmd_spool_attach(cli: &Cli, args: SpoolAttachArgs) -> Result<()> {
         .await?;
 
     println!(
-        "Attached {child} under {parent} at '{mount}'",
-        child = args.child,
-        parent = args.parent,
+        "{}",
+        spool_attach_message(&args.child, &args.parent, &mount)
     );
     let anchored = change_id_string(&edge.anchored_state_id);
     if !anchored.is_empty() {
-        println!("  anchored state: {}", short(&anchored));
+        println!("  anchored state: {}", short_id(&anchored));
     }
-    println!("  status:         {}", edge_status_label(edge.status));
+    println!(
+        "  status:         {}",
+        edge_status_label_from_i32(edge.status)
+    );
     Ok(())
 }
 
@@ -138,14 +120,10 @@ async fn cmd_spool_detach(cli: &Cli, args: SpoolDetachArgs) -> Result<()> {
     let mut client = open_hosted_client(&repo, &args.remote).await?;
     let removed = client.detach_child(&args.parent, &args.mount_name).await?;
 
-    if removed {
-        println!("Detached '{}' from {}", args.mount_name, args.parent);
-    } else {
-        println!(
-            "No child mounted at '{}' under {} (nothing to detach).",
-            args.mount_name, args.parent
-        );
-    }
+    println!(
+        "{}",
+        spool_detach_message(&args.mount_name, &args.parent, removed)
+    );
     Ok(())
 }
 
@@ -155,17 +133,17 @@ async fn cmd_spool_children(cli: &Cli, args: SpoolChildrenArgs) -> Result<()> {
     let children = client.list_children(&args.parent).await?;
 
     if children.is_empty() {
-        println!("{} has no child spools.", args.parent);
+        println!("{}", spool_children_empty_message(&args.parent));
     } else {
-        println!("{} child spool(s) of {}:", children.len(), args.parent);
+        println!("{}", spool_children_header(children.len(), &args.parent));
         for edge in &children {
             let anchored = change_id_string(&edge.anchored_state_id);
             println!(
                 "  {mount:<20} {child}  [{status}] @ {state}",
                 mount = edge.mount_name,
                 child = edge.child_spool_id,
-                status = edge_status_label(edge.status),
-                state = short(&anchored),
+                status = edge_status_label_from_i32(edge.status),
+                state = short_id(&anchored),
             );
         }
     }
@@ -192,7 +170,7 @@ async fn cmd_spool_governance(cli: &Cli, args: SpoolHistoryArgs) -> Result<()> {
             let cid = change_id_string(&entry.change_id);
             println!(
                 "  {cid}  visibility={vis}  {when}",
-                cid = short(&cid),
+                cid = short_id(&cid),
                 vis = entry.visibility,
                 when = ts_label(&entry.committed_at),
             );
@@ -221,7 +199,7 @@ async fn cmd_spool_membership(cli: &Cli, args: SpoolHistoryArgs) -> Result<()> {
             let cid = change_id_string(&entry.change_id);
             println!(
                 "  {cid}  {n} grant(s)  {when}",
-                cid = short(&cid),
+                cid = short_id(&cid),
                 n = entry.grants.len(),
                 when = ts_label(&entry.committed_at),
             );
@@ -249,7 +227,10 @@ fn ts_label(ts: &Option<prost_types::Timestamp>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use heddle_core::spool_plan::{
+        ChildEdgeStatusKind, default_mount_name, edge_status_from_i32, edge_status_label,
+        edge_status_label_from_i32,
+    };
 
     #[test]
     fn default_mount_name_uses_last_path_segment() {
@@ -261,25 +242,15 @@ mod tests {
 
     #[test]
     fn edge_status_label_covers_every_variant() {
+        // Wire discriminants match hosted.proto ChildEdgeStatus.
+        assert_eq!(edge_status_label_from_i32(1), "up-to-date");
+        assert_eq!(edge_status_label_from_i32(2), "fast-forwardable");
+        assert_eq!(edge_status_label_from_i32(3), "diverged");
+        assert_eq!(edge_status_label_from_i32(4), "no-child-head");
+        assert_eq!(edge_status_label_from_i32(0), "unspecified");
         assert_eq!(
-            edge_status_label(ChildEdgeStatus::UpToDate as i32),
-            "up-to-date"
-        );
-        assert_eq!(
-            edge_status_label(ChildEdgeStatus::FastForwardable as i32),
-            "fast-forwardable"
-        );
-        assert_eq!(
-            edge_status_label(ChildEdgeStatus::Diverged as i32),
-            "diverged"
-        );
-        assert_eq!(
-            edge_status_label(ChildEdgeStatus::NoChildHead as i32),
-            "no-child-head"
-        );
-        assert_eq!(
-            edge_status_label(ChildEdgeStatus::Unspecified as i32),
-            "unspecified"
+            edge_status_label(edge_status_from_i32(1)),
+            edge_status_label(ChildEdgeStatusKind::UpToDate)
         );
     }
 }

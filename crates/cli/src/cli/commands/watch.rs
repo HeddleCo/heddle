@@ -43,7 +43,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
+use heddle_core::watch_plan::{
+    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
+    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
+    watch_passes_filter,
+};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use objects::{object::ChangeId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
@@ -56,21 +61,10 @@ use crate::cli::{
     style::{accent, change_id as style_change_id, confidence as style_confidence, dim, warn},
 };
 
-/// Reasonable default debounce — `notify` can fire several modify
-/// events for one atomic rewrite, so we coalesce within this window.
-const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
-
 /// Truncation budget for intent text in columnar mode. Long intents
 /// get an ellipsis suffix; the column stays predictable so eyes can
 /// track confidence values without horizontal scanning.
 const INTENT_DISPLAY_WIDTH: usize = 50;
-
-/// Hard cap on the in-process recent-entries window. Keeps memory
-/// bounded on very long-running watch sessions; if the oplog has
-/// more than this many entries, only the tail is replayed —
-/// chronological correctness past this window isn't a `watch`
-/// concern (use `heddle log` for full history).
-const MAX_TAIL_WINDOW: usize = 100_000;
 
 /// Entry kinds the user can pass to `--filter`. Names match the `kind` field
 /// emitted in JSON mode (which is `OpRecord::verb()`) so a `--filter snapshot`
@@ -191,22 +185,16 @@ fn json_mode(cli: &Cli, _args: &WatchArgs) -> bool {
 /// Empty string => no filter. Unknown kinds raise — easier to fix a
 /// typo at boot than to wonder why nothing prints.
 fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
-    let Some(raw) = spec else {
-        return Ok(None);
-    };
-    let kinds: Vec<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if kinds.is_empty() {
-        return Ok(None);
-    }
     let valid = valid_filter_kinds();
-    for kind in &kinds {
-        if !valid.contains(&kind.as_str()) {
-            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+    plan_watch_filter(spec, &valid).map_err(|err| match err {
+        WatchFilterPlanError::EmptyToken => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_filter_invalid",
+            "empty event kind token in --filter",
+            "Use a comma-separated list of non-empty kinds, or omit `--filter`.",
+            "heddle watch --filter snapshot,merge",
+        )),
+        WatchFilterPlanError::UnknownKind { kind, valid } => {
+            anyhow!(RecoveryAdvice::invalid_usage(
                 "watch_filter_invalid",
                 format!(
                     "unknown event kind in --filter: {kind:?} (valid: {})",
@@ -214,10 +202,9 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
                 ),
                 "Use one of the valid watch event kinds, or omit `--filter`.",
                 "heddle watch --filter snapshot",
-            )));
+            ))
         }
-    }
-    Ok(Some(kinds))
+    })
 }
 
 /// Parse a duration like `30s` / `5m` / `1h` / `2d` into a UTC
@@ -225,35 +212,26 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
 /// --since`); intentionally *not* a full ISO-8601 timestamp parser —
 /// keep the operator UX simple.
 fn parse_since(spec: &str) -> Result<DateTime<Utc>> {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+    plan_watch_since_cutoff(spec, Utc::now()).map_err(|err| match err {
+        WatchSincePlanError::Empty => anyhow!(RecoveryAdvice::invalid_usage(
             "watch_since_empty",
             "--since cannot be empty",
             "Use a duration like `30s`, `5m`, `1h`, or `2d`, or omit `--since`.",
             "heddle watch --since 5m",
-        )));
-    }
-    let (num_part, unit) = trimmed.split_at(
-        trimmed
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(trimmed.len()),
-    );
-    let n: i64 = num_part
-        .parse()
-        .with_context(|| format!("--since: expected leading digits in {spec:?}"))?;
-    let delta = match unit {
-        "s" | "" => ChronoDuration::seconds(n),
-        "m" => ChronoDuration::minutes(n),
-        "h" => ChronoDuration::hours(n),
-        "d" => ChronoDuration::days(n),
-        other => {
-            return Err(anyhow!(
-                "--since: unknown unit {other:?} (use s, m, h, or d)"
-            ));
-        }
-    };
-    Ok(Utc::now() - delta)
+        )),
+        WatchSincePlanError::InvalidNumber { spec } => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_since_invalid_number",
+            format!("--since: expected leading digits in {spec:?}"),
+            "Use a duration like `30s`, `5m`, `1h`, or `2d`.",
+            "heddle watch --since 5m",
+        )),
+        WatchSincePlanError::UnknownUnit { unit } => anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_since_unknown_unit",
+            format!("--since: unknown unit {unit:?} (use s, m, h, or d)"),
+            "Use a duration like `30s`, `5m`, `1h`, or `2d`.",
+            "heddle watch --since 5m",
+        )),
+    })
 }
 
 /// Install a Ctrl-C handler that flips an atomic flag the tail loop
@@ -368,15 +346,15 @@ fn drain_and_emit_pending(
     Ok(!entries.is_empty())
 }
 
-/// Returns `true` for the notify event kinds that indicate the
-/// oplog file (or its parent dir) just got rewritten. Atomic
-/// `write_file_atomic` produces `Create` (the temp file) and
-/// `Modify::Name(...)` (the rename) — both are relevant.
+/// Map `notify` event kinds onto the pure watch relevance classifier.
 fn is_relevant_event(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-    )
+    let class = match kind {
+        EventKind::Modify(_) => WatchNotifyClass::Modify,
+        EventKind::Create(_) => WatchNotifyClass::Create,
+        EventKind::Remove(_) => WatchNotifyClass::Remove,
+        _ => WatchNotifyClass::Other,
+    };
+    is_relevant_watch_event(class)
 }
 
 /// Read the oplog and return all entries with `id > watermark`,
@@ -587,19 +565,11 @@ impl Renderer {
     }
 
     fn passes_filter(&self, entry: &EmittedEntry) -> bool {
-        let Some(allowed) = &self.filter else {
-            return true;
-        };
         // `merge` is a UX alias the operator can pass — it matches
         // ThreadUpdate (the wire-level kind for both ordinary
-        // captures-on-thread and merges into a target). When the
-        // operator wants only "true merges", they can post-filter
-        // on `change_id` distinct-ness; that nuance is out of
-        // scope for the CLI flag.
-        let kind = entry.kind.as_str();
-        allowed
-            .iter()
-            .any(|k| k == kind || (k == "merge" && kind == "thread_update"))
+        // captures-on-thread and merges into a target). Matching
+        // lives in `heddle_core::watch_plan`.
+        watch_passes_filter(self.filter.as_deref(), entry.kind.as_str())
     }
 
     fn render_json(&self, e: &EmittedEntry) -> String {

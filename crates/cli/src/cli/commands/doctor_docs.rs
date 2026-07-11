@@ -9,6 +9,9 @@
 //! The check is built on top of clap's own `Cli::command()`, so it's
 //! always in sync with the binary you're running. Wire `heddle doctor
 //! docs --all --output json` into CI on every PR to catch doc drift.
+//!
+//! Pure invocation extraction/tokenization lives in
+//! `heddle_core::doctor_docs_plan`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,6 +20,9 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
+use heddle_core::doctor_docs_plan::{
+    DocsInvocation, display_path, extract_invocations, looks_like_value,
+};
 use objects::worktree::should_ignore;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -336,13 +342,6 @@ fn walk_markdown(repo_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
-fn display_path(repo_root: &Path, file: &Path) -> String {
-    file.strip_prefix(repo_root)
-        .unwrap_or(file)
-        .to_string_lossy()
-        .into_owned()
-}
-
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
@@ -369,162 +368,9 @@ pub fn scan_markdown(
     }
 }
 
-#[derive(Debug, Clone)]
-struct Invocation {
-    line: usize,
-    raw: String,
-    tokens: Vec<String>,
-}
-
-/// Pull `heddle <…>` invocations out of either inline backtick code
-/// (`` `heddle …` ``) or fenced code blocks. We deliberately ignore
-/// non-backticked prose so things like "we use heddle for VCS" aren't
-/// flagged.
-fn extract_invocations(text: &str) -> Vec<Invocation> {
-    let mut result = Vec::new();
-    let mut in_fence = false;
-    let mut planned_fence = false;
-    let mut skip_next_planned_line = false;
-    for (idx, line) in text.lines().enumerate() {
-        let line_no = idx + 1;
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                in_fence = false;
-                planned_fence = false;
-            } else {
-                in_fence = true;
-                planned_fence = is_planned_docs_marker(trimmed) || skip_next_planned_line;
-                skip_next_planned_line = false;
-            }
-            continue;
-        }
-        if is_planned_docs_marker(line) {
-            skip_next_planned_line = true;
-            continue;
-        }
-        if skip_next_planned_line {
-            if trimmed.is_empty() {
-                continue;
-            }
-            skip_next_planned_line = false;
-            continue;
-        }
-        if planned_fence {
-            continue;
-        }
-        if in_fence {
-            // Inside a code fence: scan whole line for `heddle …`
-            // tokens, stopping at end of line.
-            let lower = line.trim_start();
-            // Strip a leading shell prompt or comment marker.
-            let cleaned = strip_shell_prefix(lower);
-            if let Some(rest) = cleaned.strip_prefix("heddle ")
-                && let Some(tokens) = tokenize(rest)
-            {
-                result.push(Invocation {
-                    line: line_no,
-                    raw: format!("heddle {}", rest.trim_end()),
-                    tokens,
-                });
-            }
-        } else {
-            // Outside a fence: pull out backticked snippets that begin
-            // with `heddle `.
-            let bytes = line.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b'`' {
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len() && bytes[end] != b'`' {
-                        end += 1;
-                    }
-                    if end <= bytes.len() {
-                        let snippet = &line[start..end];
-                        let cleaned = strip_shell_prefix(snippet);
-                        if let Some(rest) = cleaned.strip_prefix("heddle ")
-                            && let Some(tokens) = tokenize(rest)
-                        {
-                            result.push(Invocation {
-                                line: line_no,
-                                raw: format!("heddle {}", rest.trim_end()),
-                                tokens,
-                            });
-                        }
-                        i = end + 1;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-    result
-}
-
-/// Explicit opt-out for planned or illustrative command surfaces.
-///
-/// Place `<!-- doctor-docs:planned -->` immediately before a markdown
-/// line or fence, or include `doctor-docs:planned` in the fence info
-/// string. The skip is deliberately local so shipped-command examples in
-/// the same document remain checked against the live CLI contract.
-fn is_planned_docs_marker(line: &str) -> bool {
-    line.contains("doctor-docs:planned") || line.contains("doctor-docs: planned")
-}
-
-fn strip_shell_prefix(s: &str) -> &str {
-    let s = s.trim_start();
-    s.strip_prefix("$ ")
-        .or_else(|| s.strip_prefix("# "))
-        .unwrap_or(s)
-}
-
-/// Best-effort word-splitter. We don't need full POSIX shell semantics;
-/// we only need verbs, subverbs, and `--flag` / `--flag=value` tokens.
-/// Anything inside `<…>` is treated as a placeholder and skipped.
-fn tokenize(s: &str) -> Option<Vec<String>> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    for c in s.chars() {
-        match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            // Stop on shell control characters — these wreck token
-            // boundaries and signal "this is a longer pipeline" we
-            // probably can't reason about cleanly. `<…>` and `>…<`
-            // are NOT in this set: docs routinely use `<name>` and
-            // `<dir>` as placeholders, and those need to remain
-            // intact so the per-token placeholder check can skip
-            // them.
-            '|' | '&' | ';' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-                break;
-            }
-            _ => current.push(c),
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out)
-}
-
 fn check_invocation(
     file: &str,
-    inv: &Invocation,
+    inv: &DocsInvocation,
     cli_command: &ClapCommand,
     catalog: &CommandCatalogOutput,
     out: &mut Vec<DocsIssue>,
@@ -685,12 +531,6 @@ fn check_invocation(
         }
         i += 1;
     }
-}
-
-fn looks_like_value(tok: &str) -> bool {
-    // Heuristic: paths, dotted slugs, or quoted strings are values; bare
-    // identifiers are likely subcommand names.
-    tok.contains('.') || tok.contains('/') || tok.starts_with('"')
 }
 
 fn find_subcommand<'a>(cmd: &'a ClapCommand, name: &str) -> Option<&'a ClapCommand> {

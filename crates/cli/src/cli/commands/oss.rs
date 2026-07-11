@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #[cfg(feature = "git-overlay")]
 use anyhow::Result;
+#[cfg(feature = "git-overlay")]
+use heddle_core::oss_plan::git_overlay_guide_json;
 
 #[cfg(feature = "git-overlay")]
 use crate::cli::style;
@@ -10,25 +12,7 @@ use crate::cli::{Cli, should_output_json};
 #[cfg(feature = "git-overlay")]
 pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::json!({
-                "topic": "git-overlay",
-                "summary": "Use Heddle as the daily loop with explicit Git projection compatibility: status, diff, commit, start --path, ready, land, push, undo, verify.",
-                "steps": [
-                    "heddle status",
-                    "heddle init",
-                    "heddle diff",
-                    "heddle commit -m <message>",
-                    "heddle start <name> --path ../<name>",
-                    "heddle ready",
-                    "heddle land --thread <name> --no-push",
-                    "heddle push",
-                    "heddle undo",
-                    "heddle verify"
-                ]
-            })
-        );
+        println!("{}", git_overlay_guide_json());
         return Ok(());
     }
 
