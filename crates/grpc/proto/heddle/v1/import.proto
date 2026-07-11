@@ -3,6 +3,7 @@ syntax = "proto3";
 package heddle.v1;
 
 import "heddle/v1/hosted.proto";
+import "heddle/v1/common.proto";
 
 // ───────────────────────────────────────────────────────────────
 // ImportService — git-provider repo imports (producer surface).
@@ -19,17 +20,97 @@ service ImportService {
   // backup poll, lease-claimed for horizontal scale). Caller identity (user_id)
   // comes from the biscuit subject — NOT a request field.
   rpc CreateImportJob(CreateImportJobRequest) returns (CreateImportJobResponse);
+
+  // Detached + reattachable live progress for one or more import jobs
+  // (weft#489). Emits a snapshot event per job immediately, then tails the
+  // durable row. Multiplexed over N jobs — one stream for a whole import
+  // batch. A client disconnect cancels only the stream, never the job (the
+  // worker owns the job via its lease). Mirrors the planned StreamAdoptProgress
+  // (weft#386) shape.
+  rpc StreamImportProgress(StreamImportProgressRequest) returns (stream ImportProgressEvent);
+}
+
+// Which provider a token-authed import targets (weft#485). GitHub App imports
+// use GitHubAppSource; public-URL imports carry no provider.
+enum ImportProvider {
+  IMPORT_PROVIDER_UNSPECIFIED = 0;
+  IMPORT_PROVIDER_GITHUB = 1;
+  IMPORT_PROVIDER_GITLAB = 2;
+}
+
+// Existing GitHub-App mode, now shaped as a nested source. Mirrors the legacy
+// top-level CreateImportJobRequest fields 1-3.
+message GitHubAppSource {
+  int64 installation_id = 1;   // GitHub App installation that grants access
+  int64 provider_repo_id = 2;  // provider's numeric repo id (stable across renames)
+  string full_name = 3;        // e.g. "owner/repo"
+}
+
+// OAuth-token mode (weft#378): the server resolves a stored provider token for
+// the caller. No installation id — access is the user's own grant.
+message ProviderTokenSource {
+  ImportProvider provider = 1;
+  string full_name = 2;        // "owner/repo" (or "group/sub/repo" for GitLab)
+}
+
+// Public, credential-free clone (weft#378). https only, SSRF-guarded
+// server-side; deliberately no "owner/repo" shorthand — one unambiguous shape.
+message PublicUrlSource {
+  string url = 1;              // https clone URL; userinfo rejected
 }
 
 message CreateImportJobRequest {
+  // Legacy fields (1-5) kept verbatim for wire compat; used as the GitHub-App
+  // form when `source` is absent. New callers set `source` instead.
   int64 installation_id = 1;   // GitHub App installation that grants access
   int64 provider_repo_id = 2;  // provider's numeric repo id (stable across renames)
   string full_name = 3;        // e.g. "owner/repo"
   // REUSE the existing SpoolVisibility enum in hosted.proto (SPOOL_VISIBILITY_*).
   SpoolVisibility requested_visibility = 4;
   bool adopt_on_complete = 5;  // false = mirror-only; true = adopt into native heddle after mirror
+
+  // Additive source selector (weft#485). Exactly one of the three modes; the
+  // legacy fields 1-3 remain the fallback GitHub-App form for old clients.
+  oneof source {
+    GitHubAppSource github_app = 6;
+    ProviderTokenSource provider_token = 7;
+    PublicUrlSource public_url = 8;
+  }
+  // Import INTO this existing (empty) spool. "" = the worker derives/creates
+  // one (the #379 personal-namespace behavior, kept for CLI callers).
+  string target_spool_path = 9;
+  // Idempotency key. A retry-safe double-submit returns the SAME job_id.
+  string client_operation_id = 10;
 }
 
 message CreateImportJobResponse {
   string job_id = 1;           // uuid of the enqueued import_jobs row
+}
+
+message StreamImportProgressRequest {
+  // All ids must belong to the caller (permission_denied otherwise).
+  repeated string job_ids = 1;
+}
+
+// Terminal result of an import job. Set ONLY on the terminal event.
+message ImportOutcome {
+  bool ok = 1;
+  string spool_full_path = 2;         // where the repo landed (ok = true)
+  ImportErrorCode error_code = 3;     // reuses the common.proto enum
+  string error_message = 4;           // sanitized, human-readable
+}
+
+// An idempotent state snapshot for one import job (weft#489). NOT a delta — a
+// reattaching client gets the current state (with its stored `seq`), then
+// tails. No `percent`: smart-HTTP has no up-front total, so the contract is
+// phase + bytes + human message.
+message ImportProgressEvent {
+  string job_id = 1;
+  uint64 seq = 2;              // per-job monotonic; reattach dedup/ordering
+  ImportPhase phase = 3;       // reuses the common.proto enum
+  string message = 4;          // human line (sanitized sideband / phase_detail)
+  uint64 bytes_received = 5;   // wire bytes so far (0 = unknown)
+  uint64 objects_indexed = 6;
+  uint32 attempt = 7;          // >1 ⇒ lease was reclaimed and the job restarted
+  ImportOutcome outcome = 8;   // set ONLY on the terminal event
 }
