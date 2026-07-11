@@ -5,6 +5,9 @@
 //! materialization path once a concrete [`ThreadMode`] is known:
 //! - checkout path layout (explicit `--path` vs managed default)
 //! - ordered materialize step sequence (create dir, copy tree, manifest, …)
+//! - typed start-transaction effect kinds and reverse cleanup lists
+//! - target-dir claim → checkout / self-created-dir rewind actions
+//! - classification of mid-apply `anyhow` failures into [`HeddleError`]
 //! - reflink vs full-copy policy for bytes-on-disk checkouts
 //! - cargo `--shared-target` redirect and advisory flags
 //!
@@ -14,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use objects::HeddleError;
 use repo::ThreadMode;
 
 // ---------------------------------------------------------------------------
@@ -306,6 +310,252 @@ pub fn plan_materialize_steps(
     plan_thread_materialize(mode, apply_shared_target, hydrate_requested).steps
 }
 
+// ---------------------------------------------------------------------------
+// Transaction effect kinds + start transaction plan
+// ---------------------------------------------------------------------------
+
+/// Payload-free kind of a durable effect the start transaction can stage.
+///
+/// Mirrors [`MaterializeStep`] without the copy-policy payload so applied-
+/// effect lists and cleanup planners stay `Copy`. Execution remains CLI-owned
+/// (`start_atomic::StartThread::apply`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartEffectKind {
+    CreateTargetDir,
+    WriteThreadRef,
+    MaterializeCheckout,
+    WriteManifest,
+    WriteCargoConfigRedirect,
+    HydrateIgnoredDirs,
+    EstablishVirtualizedMount,
+    WriteThreadRecord,
+}
+
+impl MaterializeStep {
+    /// Strip the copy-policy payload to the pure effect kind.
+    pub fn effect_kind(&self) -> StartEffectKind {
+        match self {
+            Self::CreateTargetDir => StartEffectKind::CreateTargetDir,
+            Self::WriteThreadRef => StartEffectKind::WriteThreadRef,
+            Self::MaterializeCheckout { .. } => StartEffectKind::MaterializeCheckout,
+            Self::WriteManifest => StartEffectKind::WriteManifest,
+            Self::WriteCargoConfigRedirect => StartEffectKind::WriteCargoConfigRedirect,
+            Self::HydrateIgnoredDirs => StartEffectKind::HydrateIgnoredDirs,
+            Self::EstablishVirtualizedMount => StartEffectKind::EstablishVirtualizedMount,
+            Self::WriteThreadRecord => StartEffectKind::WriteThreadRecord,
+        }
+    }
+}
+
+/// Typed start-transaction plan: ordered effect kinds + mode flags.
+///
+/// Built from the same inputs as [`plan_thread_materialize`]; preferred when
+/// callers need effect-kind lists (cleanup, ledger assertions) rather than
+/// the payload-bearing [`MaterializeStep`] sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartTransactionPlan {
+    /// Forward-apply order of durable effects.
+    pub effects: Vec<StartEffectKind>,
+    pub copy_policy: CheckoutCopyPolicy,
+    pub write_manifest: bool,
+    pub apply_shared_target: bool,
+    pub hydrate: bool,
+    pub virtualized_mount: bool,
+}
+
+/// Build the typed start-transaction plan from mode + post-decision flags.
+pub fn plan_start_transaction(
+    mode: &ThreadMode,
+    apply_shared_target: bool,
+    hydrate_requested: bool,
+) -> StartTransactionPlan {
+    let materialize = plan_thread_materialize(mode, apply_shared_target, hydrate_requested);
+    StartTransactionPlan {
+        effects: materialize
+            .steps
+            .iter()
+            .map(MaterializeStep::effect_kind)
+            .collect(),
+        copy_policy: materialize.copy_policy,
+        write_manifest: materialize.write_manifest,
+        apply_shared_target: materialize.apply_shared_target,
+        hydrate: materialize.hydrate,
+        virtualized_mount: materialize.virtualized_mount,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Target-dir claim → pure rewind actions
+// ---------------------------------------------------------------------------
+
+/// What the target-dir claim established about the worktree leaf (pure).
+///
+/// CLI `start_atomic` captures an open directory handle alongside this kind;
+/// rewinds and writers key on the kind, never a stale plan-time bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDirClaimKind {
+    /// This start created the leaf as a fresh empty directory.
+    Created,
+    /// This start adopted a pre-existing real empty directory.
+    AdoptedEmpty,
+}
+
+/// Pure checkout-dir rewind action for a settled (or absent) target claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutRewindPlan {
+    /// Clear contents, then remove the directory if it still occupies the path.
+    ClearAndRemoveDir,
+    /// Clear only the contents this start wrote; leave the directory itself.
+    ClearContentsOnly,
+    /// Claim never established — touch nothing.
+    TouchNothing,
+}
+
+/// Plan how the checkout rewind treats the target leaf for a claim outcome.
+///
+/// Rules (matching CLI `rewind_checkout`):
+/// - [`TargetDirClaimKind::Created`] → clear + remove dir
+/// - [`TargetDirClaimKind::AdoptedEmpty`] → clear contents only
+/// - `None` → touch nothing (refused/unestablished leaf)
+pub fn plan_checkout_rewind(claim: Option<TargetDirClaimKind>) -> CheckoutRewindPlan {
+    match claim {
+        Some(TargetDirClaimKind::Created) => CheckoutRewindPlan::ClearAndRemoveDir,
+        Some(TargetDirClaimKind::AdoptedEmpty) => CheckoutRewindPlan::ClearContentsOnly,
+        None => CheckoutRewindPlan::TouchNothing,
+    }
+}
+
+/// Pure self-created target-dir removal action (the create-step inverse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfCreatedDirRewindPlan {
+    /// Remove the leaf only if the claim identity still occupies the path.
+    RemoveIfStillAtPath,
+    /// Adopted or unestablished — never remove the leaf.
+    TouchNothing,
+}
+
+/// Plan the create-step inverse for a settled (or absent) target claim.
+///
+/// Only a [`TargetDirClaimKind::Created`] claim removes the leaf; adopted
+/// dirs and `None` are left untouched (matching CLI `remove_self_created_dir`).
+pub fn plan_self_created_dir_rewind(claim: Option<TargetDirClaimKind>) -> SelfCreatedDirRewindPlan {
+    match claim {
+        Some(TargetDirClaimKind::Created) => SelfCreatedDirRewindPlan::RemoveIfStillAtPath,
+        Some(TargetDirClaimKind::AdoptedEmpty) | None => SelfCreatedDirRewindPlan::TouchNothing,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup / rewind step lists from applied effects
+// ---------------------------------------------------------------------------
+
+/// One reverse-order cleanup action implied by a successfully applied effect.
+///
+/// Order from [`plan_start_cleanup`] is reverse-apply (last applied first),
+/// matching the atomic mutation rewind ledger. FS/ref execution stays CLI-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartCleanupStep {
+    /// Converge thread records back to the pre-start snapshot.
+    RestoreThreadRecord,
+    /// Tear down the virtualized mount if this start established it.
+    UnmountVirtualized,
+    /// Unlink hydrate dep symlinks (+ restore the exclude file if written).
+    UnwindHydrate,
+    /// Restore prior cargo config bytes, or remove a config this start created.
+    RestoreCargoConfig,
+    /// Restore prior manifest bytes, or remove a manifest this start created.
+    RestoreManifest,
+    /// Clear per-root materialize sidecars, then apply the checkout-dir rewind.
+    RewindCheckout { plan: CheckoutRewindPlan },
+    /// CAS-guarded rollback of the thread ref to its pre-start expectation.
+    RollbackThreadRef,
+    /// Remove a self-created target dir (create-step inverse).
+    RemoveSelfCreatedDir { plan: SelfCreatedDirRewindPlan },
+}
+
+/// Build reverse cleanup steps for effects that successfully applied.
+///
+/// `applied` is forward-apply order (the subset of [`StartTransactionPlan::effects`]
+/// whose forwards completed). `target_claim` is the settled claim from the
+/// create-target-dir step (`None` when that step refused or never ran).
+///
+/// Partial starts are expressible by passing only the applied prefix — e.g. a
+/// failure mid-hydrate yields applied effects through `HydrateIgnoredDirs` and
+/// rewinds every hydrate link plus the checkout.
+pub fn plan_start_cleanup(
+    applied: &[StartEffectKind],
+    target_claim: Option<TargetDirClaimKind>,
+) -> Vec<StartCleanupStep> {
+    let checkout_plan = plan_checkout_rewind(target_claim);
+    let self_created_plan = plan_self_created_dir_rewind(target_claim);
+    let mut steps = Vec::with_capacity(applied.len());
+    for effect in applied.iter().rev() {
+        match effect {
+            StartEffectKind::WriteThreadRecord => {
+                steps.push(StartCleanupStep::RestoreThreadRecord);
+            }
+            StartEffectKind::EstablishVirtualizedMount => {
+                steps.push(StartCleanupStep::UnmountVirtualized);
+            }
+            StartEffectKind::HydrateIgnoredDirs => {
+                steps.push(StartCleanupStep::UnwindHydrate);
+            }
+            StartEffectKind::WriteCargoConfigRedirect => {
+                steps.push(StartCleanupStep::RestoreCargoConfig);
+            }
+            StartEffectKind::WriteManifest => {
+                steps.push(StartCleanupStep::RestoreManifest);
+            }
+            StartEffectKind::MaterializeCheckout => {
+                steps.push(StartCleanupStep::RewindCheckout {
+                    plan: checkout_plan,
+                });
+            }
+            StartEffectKind::WriteThreadRef => {
+                steps.push(StartCleanupStep::RollbackThreadRef);
+            }
+            StartEffectKind::CreateTargetDir => {
+                steps.push(StartCleanupStep::RemoveSelfCreatedDir {
+                    plan: self_created_plan,
+                });
+            }
+        }
+    }
+    steps
+}
+
+// ---------------------------------------------------------------------------
+// Mid-apply error classification
+// ---------------------------------------------------------------------------
+
+/// Classify an `anyhow` error from a materialize/hydrate helper into the
+/// [`HeddleError`] the start transaction's `Result` requires.
+///
+/// Mirrors CLI `start_atomic::apply_error` (heddle#571): must NOT blanket-wrap
+/// every failure as a `Conflict`. A plain I/O failure mid-materialize (e.g.
+/// `clonefile`/`FICLONE` ENOENT) must surface as `Io` so diagnosis and
+/// `exit::from_error` kind-keyed classification stay correct.
+///
+/// Recovery rules:
+/// - an already-structured [`HeddleError`] keeps its variant;
+/// - an error whose chain bottoms out in a `std::io::Error` becomes
+///   [`HeddleError::Io`], preserving both the original `ErrorKind` and the
+///   full `anyhow` context (`{err:#}`) as the message;
+/// - only a genuinely-unclassifiable error falls back to
+///   [`HeddleError::Conflict`].
+pub fn classify_materialize_error(err: anyhow::Error) -> HeddleError {
+    match err.downcast::<HeddleError>() {
+        Ok(heddle) => heddle,
+        Err(err) => match err
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind)
+        {
+            Some(kind) => HeddleError::Io(std::io::Error::new(kind, format!("{err:#}"))),
+            None => HeddleError::Conflict(format!("{err:#}")),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +743,207 @@ mod tests {
         assert!(mode_is_bytes_on_disk(&ThreadMode::Solid));
         assert!(mode_is_bytes_on_disk(&ThreadMode::Materialized));
         assert!(!mode_is_bytes_on_disk(&ThreadMode::Virtualized));
+    }
+
+    #[test]
+    fn start_transaction_plan_matches_materialize_steps() {
+        let plan = plan_start_transaction(&ThreadMode::Materialized, true, true);
+        assert_eq!(plan.copy_policy, CheckoutCopyPolicy::PreferReflink);
+        assert!(plan.write_manifest);
+        assert!(plan.apply_shared_target);
+        assert!(plan.hydrate);
+        assert!(!plan.virtualized_mount);
+        assert_eq!(
+            plan.effects,
+            vec![
+                StartEffectKind::CreateTargetDir,
+                StartEffectKind::WriteThreadRef,
+                StartEffectKind::MaterializeCheckout,
+                StartEffectKind::WriteManifest,
+                StartEffectKind::WriteCargoConfigRedirect,
+                StartEffectKind::HydrateIgnoredDirs,
+                StartEffectKind::WriteThreadRecord,
+            ]
+        );
+
+        let virtualized = plan_start_transaction(&ThreadMode::Virtualized, true, true);
+        assert_eq!(
+            virtualized.effects,
+            vec![
+                StartEffectKind::CreateTargetDir,
+                StartEffectKind::WriteThreadRef,
+                StartEffectKind::EstablishVirtualizedMount,
+                StartEffectKind::WriteThreadRecord,
+            ]
+        );
+        assert!(virtualized.virtualized_mount);
+        assert!(!virtualized.apply_shared_target);
+        assert!(!virtualized.hydrate);
+    }
+
+    #[test]
+    fn materialize_step_effect_kind_strips_payload() {
+        assert_eq!(
+            MaterializeStep::MaterializeCheckout {
+                copy_policy: CheckoutCopyPolicy::FullCopy
+            }
+            .effect_kind(),
+            StartEffectKind::MaterializeCheckout
+        );
+        assert_eq!(
+            MaterializeStep::WriteManifest.effect_kind(),
+            StartEffectKind::WriteManifest
+        );
+    }
+
+    #[test]
+    fn checkout_and_self_created_rewind_plans_key_on_claim() {
+        assert_eq!(
+            plan_checkout_rewind(Some(TargetDirClaimKind::Created)),
+            CheckoutRewindPlan::ClearAndRemoveDir
+        );
+        assert_eq!(
+            plan_checkout_rewind(Some(TargetDirClaimKind::AdoptedEmpty)),
+            CheckoutRewindPlan::ClearContentsOnly
+        );
+        assert_eq!(plan_checkout_rewind(None), CheckoutRewindPlan::TouchNothing);
+
+        assert_eq!(
+            plan_self_created_dir_rewind(Some(TargetDirClaimKind::Created)),
+            SelfCreatedDirRewindPlan::RemoveIfStillAtPath
+        );
+        assert_eq!(
+            plan_self_created_dir_rewind(Some(TargetDirClaimKind::AdoptedEmpty)),
+            SelfCreatedDirRewindPlan::TouchNothing
+        );
+        assert_eq!(
+            plan_self_created_dir_rewind(None),
+            SelfCreatedDirRewindPlan::TouchNothing
+        );
+    }
+
+    #[test]
+    fn start_cleanup_reverses_applied_effects_for_created_claim() {
+        let applied = plan_start_transaction(&ThreadMode::Materialized, true, true).effects;
+        let cleanup = plan_start_cleanup(&applied, Some(TargetDirClaimKind::Created));
+        assert_eq!(
+            cleanup,
+            vec![
+                StartCleanupStep::RestoreThreadRecord,
+                StartCleanupStep::UnwindHydrate,
+                StartCleanupStep::RestoreCargoConfig,
+                StartCleanupStep::RestoreManifest,
+                StartCleanupStep::RewindCheckout {
+                    plan: CheckoutRewindPlan::ClearAndRemoveDir
+                },
+                StartCleanupStep::RollbackThreadRef,
+                StartCleanupStep::RemoveSelfCreatedDir {
+                    plan: SelfCreatedDirRewindPlan::RemoveIfStillAtPath
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn start_cleanup_partial_hydrate_with_adopted_claim() {
+        // Applied through hydrate; record not yet written. Adopted empty user --path.
+        let applied = [
+            StartEffectKind::CreateTargetDir,
+            StartEffectKind::WriteThreadRef,
+            StartEffectKind::MaterializeCheckout,
+            StartEffectKind::HydrateIgnoredDirs,
+        ];
+        let cleanup = plan_start_cleanup(&applied, Some(TargetDirClaimKind::AdoptedEmpty));
+        assert_eq!(
+            cleanup,
+            vec![
+                StartCleanupStep::UnwindHydrate,
+                StartCleanupStep::RewindCheckout {
+                    plan: CheckoutRewindPlan::ClearContentsOnly
+                },
+                StartCleanupStep::RollbackThreadRef,
+                StartCleanupStep::RemoveSelfCreatedDir {
+                    plan: SelfCreatedDirRewindPlan::TouchNothing
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn start_cleanup_virtualized_and_refused_claim() {
+        let applied = plan_start_transaction(&ThreadMode::Virtualized, false, false).effects;
+        let cleanup = plan_start_cleanup(&applied, None);
+        assert_eq!(
+            cleanup,
+            vec![
+                StartCleanupStep::RestoreThreadRecord,
+                StartCleanupStep::UnmountVirtualized,
+                StartCleanupStep::RollbackThreadRef,
+                StartCleanupStep::RemoveSelfCreatedDir {
+                    plan: SelfCreatedDirRewindPlan::TouchNothing
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_materialize_error_preserves_io_and_does_not_mislabel_as_conflict() {
+        let bare_io = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        ));
+        let mapped = classify_materialize_error(bare_io);
+        assert!(
+            matches!(mapped, HeddleError::Io(_)),
+            "a bare io error must surface as Io, got {mapped:?}"
+        );
+        assert!(
+            !format!("{mapped}").starts_with("conflict:"),
+            "io error must not be reported as a conflict: {mapped}"
+        );
+
+        let structured_io = anyhow::Error::new(HeddleError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        )));
+        assert!(
+            matches!(
+                classify_materialize_error(structured_io),
+                HeddleError::Io(_)
+            ),
+            "a propagated HeddleError::Io must keep its variant"
+        );
+
+        let conflict = anyhow::Error::new(HeddleError::Conflict("real merge conflict".to_string()));
+        assert!(
+            matches!(
+                classify_materialize_error(conflict),
+                HeddleError::Conflict(_)
+            ),
+            "a genuine conflict must remain a conflict"
+        );
+    }
+
+    #[test]
+    fn classify_materialize_error_preserves_context_when_reclassifying_io() {
+        use anyhow::Context as _;
+
+        let with_ctx = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "os error 13",
+        ))
+        .context("writing .cargo/config.toml to /work/.cargo/config.toml")
+        .unwrap_err();
+
+        let mapped = classify_materialize_error(with_ctx);
+        assert!(
+            matches!(&mapped, HeddleError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+            "io kind must survive reclassification, got {mapped:?}"
+        );
+        let msg = format!("{mapped}");
+        assert!(
+            msg.contains(".cargo/config.toml") && msg.contains("writing"),
+            "reclassified io error must retain the path/action context: {msg}"
+        );
     }
 }

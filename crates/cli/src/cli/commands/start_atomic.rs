@@ -47,6 +47,10 @@ use std::{
     rc::Rc,
 };
 
+use heddle_core::{
+    CheckoutRewindPlan, SelfCreatedDirRewindPlan, TargetDirClaimKind, classify_materialize_error,
+    plan_checkout_rewind, plan_self_created_dir_rewind,
+};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{ChangeId, ThreadName},
@@ -64,44 +68,12 @@ use super::{
 };
 
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
-/// `HeddleError` the primitive's `Result` requires (mirrors undo/redo's
-/// `apply_error`). The command-level preflights produce the structured
-/// refusals; a message reaching here only ever surfaces a genuinely
-/// unexpected mid-apply failure whose rewind has already run.
+/// `HeddleError` the primitive's `Result` requires.
 ///
-/// This must NOT blanket-wrap every failure as a `Conflict`: a plain I/O
-/// failure mid-materialize (e.g. a `clonefile`/`FICLONE` ENOENT, heddle#571)
-/// would then be reported to the user as `conflict: No such file or directory`,
-/// which is both wrong and blocks diagnosis. So we recover the real variant:
-///   * an already-structured `HeddleError` (the common case — repo-layer errors
-///     propagate through the helpers' `anyhow::Result` via `?`) keeps its
-///     variant, so an `Io`/`NotFound`/etc. stays itself and only a genuine
-///     merge/visibility `Conflict` stays a `Conflict`;
-///   * an error whose chain bottoms out in a `std::io::Error` surfaces as
-///     `HeddleError::Io`, preserving BOTH the original `ErrorKind` (so
-///     `exit::from_error`'s kind-keyed classification stays correct) AND the
-///     `anyhow` context (the exact path/action that helpers like
-///     `write_cargo_config` attach via `.with_context`) — we must not downcast
-///     the bare `io::Error` out of the chain, which would throw every context
-///     layer away and leave the user with a contextless `No such file or
-///     directory`;
-///   * only a genuinely-unclassifiable error falls back to `Conflict`.
+/// Pure classification lives in [`heddle_core::classify_materialize_error`]
+/// (heddle#571); this thin adapter keeps the local `apply_error` call sites.
 fn apply_error(err: anyhow::Error) -> HeddleError {
-    match err.downcast::<HeddleError>() {
-        Ok(heddle) => heddle,
-        // Not already a structured `HeddleError`. If an `io::Error` sits
-        // anywhere in the chain, keep the variant as `Io` with its kind, but
-        // carry the full context chain (`{err:#}`) as the message so the
-        // path/action survives. Extract the kind first so the `downcast_ref`
-        // borrow is dropped before we format `err`.
-        Err(err) => match err
-            .downcast_ref::<std::io::Error>()
-            .map(std::io::Error::kind)
-        {
-            Some(kind) => HeddleError::Io(std::io::Error::new(kind, format!("{err:#}"))),
-            None => HeddleError::Conflict(format!("{err:#}")),
-        },
-    }
+    classify_materialize_error(err)
 }
 
 // ---- In-process fault seam (unit tests only) ----
@@ -229,16 +201,12 @@ fn maybe_swap_target_leaf(point: TargetSwapPoint, abs_path: &Path) -> HeddleResu
 /// swap cannot redirect checkout bytes into a symlink target (heddle#356 cid
 /// 3336120590).
 ///
-/// A leaf that is anything else — a symlink, a non-directory file, or a
-/// non-empty directory — is NOT representable here: `create_target_dir` refuses
-/// the start with an `Err` instead, so there is no "owned" value that can stand
-/// for a foreign object.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum TargetDirKind {
-    Created,
-    AdoptedEmpty,
-}
-
+/// The pure claim kind is [`TargetDirClaimKind`] in `heddle-core`; rewinds
+/// consult [`plan_checkout_rewind`] / [`plan_self_created_dir_rewind`]. A leaf
+/// that is anything else — a symlink, a non-directory file, or a non-empty
+/// directory — is NOT representable here: `create_target_dir` refuses the start
+/// with an `Err` instead, so there is no "owned" value that can stand for a
+/// foreign object.
 #[derive(Clone, Debug)]
 pub(crate) enum TargetDir {
     /// THIS invocation created the leaf as a fresh, real, empty directory →
@@ -262,10 +230,10 @@ impl TargetDir {
         Self::AdoptedEmpty(handle)
     }
 
-    fn kind(&self) -> TargetDirKind {
+    fn kind(&self) -> TargetDirClaimKind {
         match self {
-            Self::Created(_) => TargetDirKind::Created,
-            Self::AdoptedEmpty(_) => TargetDirKind::AdoptedEmpty,
+            Self::Created(_) => TargetDirClaimKind::Created,
+            Self::AdoptedEmpty(_) => TargetDirClaimKind::AdoptedEmpty,
         }
     }
 
@@ -502,30 +470,25 @@ fn clear_claimed_dir_contents(abs_path: &Path, claim: &TargetDir) -> HeddleResul
 
 /// The precise checkout-rewind inverse, keyed on the runtime [`TargetDir`] claim
 /// from [`create_target_dir`] (NOT a stale plan-time bool — cid 3335052857 /
-/// 3335586962):
-///   * [`TargetDir::Created`] → this invocation made the worktree directory, so
-///     remove it entirely (restoring "didn't exist"); its dep symlinks go with
-///     it, since `remove_dir_all` unlinks symlinks without following them, so the
-///     origin's deps are never touched.
-///   * [`TargetDir::AdoptedEmpty`] → we adopted a real, empty pre-existing dir
-///     (user `--path`, or a concurrent real-empty-dir) — not ours to delete, so
-///     preserve the directory and clear only the contents we materialized inside.
-///   * `None` → the claim never established an owned empty dir here (the forward
-///     refused on a symlink/foreign object, or never ran). Touch NOTHING — the
-///     whole point of the close-the-class fix is that rollback never clears or
-///     deletes through a path it did not itself establish as a real empty dir.
+/// 3335586962). Pure action selection is
+/// [`heddle_core::plan_checkout_rewind`]; this applies the FS side:
+///   * [`CheckoutRewindPlan::ClearAndRemoveDir`] → clear contents + remove leaf
+///   * [`CheckoutRewindPlan::ClearContentsOnly`] → clear contents, keep leaf
+///   * [`CheckoutRewindPlan::TouchNothing`] → claim unestablished; touch nothing
 ///
 /// Tolerant of an already-absent target so it composes with other rewind steps.
 fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
-    let Some(claim) = claim else {
-        return Ok(());
-    };
-    match claim.kind() {
-        TargetDirKind::Created => {
+    match plan_checkout_rewind(claim.as_ref().map(TargetDir::kind)) {
+        CheckoutRewindPlan::TouchNothing => Ok(()),
+        CheckoutRewindPlan::ClearContentsOnly => {
+            let claim = claim.expect("ClearContentsOnly requires an adopted claim");
+            clear_claimed_dir_contents(abs_path, &claim)
+        }
+        CheckoutRewindPlan::ClearAndRemoveDir => {
+            let claim = claim.expect("ClearAndRemoveDir requires a created claim");
             clear_claimed_dir_contents(abs_path, &claim)?;
             remove_claimed_created_dir_if_still_at_path(abs_path, &claim)
         }
-        TargetDirKind::AdoptedEmpty => clear_claimed_dir_contents(abs_path, &claim),
     }
 }
 
@@ -613,19 +576,20 @@ fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<Target
 }
 
 /// Inverse of the target-dir creation step: remove the worktree directory ONLY
-/// when this invocation created it ([`TargetDir::Created`], restoring "didn't
-/// exist"). `claim` is the runtime [`TargetDir`] signal from
-/// [`create_target_dir`], NOT a stale plan-time bool — an adopted (concurrent or
-/// user-supplied) dir, or a leaf this step never established (`None`), is never
-/// removed here. Tolerant of an already-absent dir so it composes after the
-/// checkout rewind (which removes a self-created dir first; this then no-ops on
-/// `NotFound`).
+/// when this invocation created it. Pure action selection is
+/// [`heddle_core::plan_self_created_dir_rewind`]; this applies the FS side.
+/// `claim` is the runtime [`TargetDir`] signal from [`create_target_dir`], NOT
+/// a stale plan-time bool — an adopted (concurrent or user-supplied) dir, or a
+/// leaf this step never established (`None`), is never removed here. Tolerant
+/// of an already-absent dir so it composes after the checkout rewind (which
+/// removes a self-created dir first; this then no-ops on `NotFound`).
 fn remove_self_created_dir(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
-    match claim {
-        Some(claim) if claim.kind() == TargetDirKind::Created => {
+    match plan_self_created_dir_rewind(claim.as_ref().map(TargetDir::kind)) {
+        SelfCreatedDirRewindPlan::TouchNothing => Ok(()),
+        SelfCreatedDirRewindPlan::RemoveIfStillAtPath => {
+            let claim = claim.expect("RemoveIfStillAtPath requires a created claim");
             remove_claimed_created_dir_if_still_at_path(abs_path, &claim)
         }
-        _ => Ok(()),
     }
 }
 
@@ -1976,7 +1940,7 @@ mod tests {
         let claim = create_target_dir(&target, true).unwrap();
         assert_eq!(
             claim.kind(),
-            TargetDirKind::AdoptedEmpty,
+            TargetDirClaimKind::AdoptedEmpty,
             "a real empty dir a concurrent process created is ADOPTED, not claimed as created \
              (a stale plan-time bool would have claimed it)"
         );
@@ -1999,7 +1963,7 @@ mod tests {
         let claim = create_target_dir(&target, true).unwrap();
         assert_eq!(
             claim.kind(),
-            TargetDirKind::Created,
+            TargetDirClaimKind::Created,
             "an absent target this start creates is owned by us"
         );
         assert!(
@@ -2024,7 +1988,7 @@ mod tests {
         let claim = create_target_dir(&target, false).unwrap();
         assert_eq!(
             claim.kind(),
-            TargetDirKind::AdoptedEmpty,
+            TargetDirClaimKind::AdoptedEmpty,
             "a user-supplied pre-existing empty dir is adopted, not ours to own/remove"
         );
         remove_self_created_dir(&target, Some(claim)).unwrap();
@@ -2048,7 +2012,7 @@ mod tests {
         std::fs::write(victim.join("precious.txt"), b"precious").unwrap();
 
         let claim = create_target_dir(&checkout, true).unwrap();
-        assert_eq!(claim.kind(), TargetDirKind::Created);
+        assert_eq!(claim.kind(), TargetDirClaimKind::Created);
 
         std::fs::remove_dir(&checkout).unwrap();
         std::os::unix::fs::symlink(&victim, &checkout).unwrap();

@@ -2,6 +2,7 @@
 //! Embeddable Heddle facade scaffolding.
 
 pub mod actor;
+pub mod agent_fanout;
 pub mod clone_plan;
 pub mod context;
 pub mod contract;
@@ -29,13 +30,23 @@ pub use actor::{
     list_actors_from_registry, mark_actor_done, nonempty_attr, plan_actor_done, plan_actor_spawn,
     resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
 };
+pub use agent_fanout::{
+    FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneReport, FanoutNodeSpec,
+    FanoutPlan, FanoutPlanError, FanoutPlanReport, FanoutPlanRequest, FanoutTaskPlaceholder,
+    assemble_fanout_plan_report, assemble_fanout_start_commands, ensure_unique_thread_names,
+    fanout_child_body, fanout_parent_body, fanout_parent_delegated_by, fanout_start_attach_rule,
+    parse_fanout_lane, parse_fanout_lanes, plan_fanout, select_fanout_base,
+    select_fanout_parent_thread,
+};
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
-    ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight,
-    UnsupportedCloneFlag, absolute_path, assemble_clone_security_preflight,
+    ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight, MonorepoClonePlan,
+    MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeFacts, MonorepoNodePlan,
+    MonorepoSkippedChild, UnsupportedCloneFlag, absolute_path, assemble_clone_security_preflight,
     looks_like_git_overlay_url, looks_like_local_path, normalize_clone_depth, plan_adopt,
-    plan_clone, resolve_adopt_start_path, resolve_clone_destination, select_clone_mode,
-    validate_clone_destination, validate_clone_mode_options,
+    plan_clone, plan_monorepo_clone, resolve_adopt_start_path, resolve_clone_destination,
+    select_clone_mode, validate_clone_destination, validate_clone_mode_options,
+    validate_monorepo_clone_options,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -67,14 +78,18 @@ pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use remote::{
     COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF, GIT_NOTES_VISIBILITY_WARNING,
     GitConfigContext, GitOverlayPushTracking, GitRemoteConfigured, GitUpstreamConfigured,
-    HostedPushPlan, IncludedGitRemoteConfigError, PullExecutionFacts, PullOutcome, PullPlan,
-    PullPlanRequest, PushExecutionFacts, PushOutcome, PushPath, PushPlan, PushPlanRequest,
-    RemoteInfo, RemoteListReport, RemotePreflightBlocker, all_threads_uses_single_mirror_push,
+    HostedPushPlan, IncludedGitRemoteConfigError, MultiRefPushProgress, PullExecutionFacts,
+    PullFailure, PullOutcome, PullOutcomeText, PullPlan, PullPlanRequest, PushExecutionFacts,
+    PushFailure, PushOutcome, PushOutcomeText, PushPath, PushPlan, PushPlanRequest, RemoteInfo,
+    RemoteListReport, RemotePreflightBlocker, all_threads_uses_single_mirror_push,
     build_pull_outcome, build_push_outcome, default_pull_thread_name, default_push_thread_name,
-    git_overlay_current_thread_push_ok, git_overlay_ref_scope, git_overlay_thread_mismatch_blocker,
-    list_plain_git_remotes, list_remotes, merged_remote_items, plain_git_remote_items,
-    plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree, pull_status,
-    pull_will_materialize, push_scope_label, push_status, remote_missing_blocker,
+    first_multi_thread_push_failure, format_multi_ref_push_progress, format_pull_outcome_text,
+    format_push_outcome_text, git_overlay_current_thread_push_ok,
+    git_overlay_push_scope_description, git_overlay_ref_scope, git_overlay_thread_mismatch_blocker,
+    list_plain_git_remotes, list_remotes, merged_remote_items, named_thread_tip_mismatch_failure,
+    plain_git_remote_items, plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree,
+    pull_should_materialize, pull_status, pull_will_materialize, push_scope_label, push_status,
+    refuse_named_thread_tip_overwrite, remote_advice_kind, remote_missing_blocker,
     resolve_default_remote_name, resolved_default_remote_name, show_plain_git_remote, show_remote,
     summarize_pull_outcome, summarize_push_outcome, transport_mismatch_blocker,
     uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
@@ -111,10 +126,13 @@ pub use thread_lifecycle::{
     should_materialize_refresh_conflict_markers, thread_mode_requires_unmount,
 };
 pub use thread_materialize::{
-    ADVISORY_ACTIVE_HEAVY_THREAD_THRESHOLD, CheckoutCopyPolicy, CheckoutPathPlan, MaterializeStep,
-    SharedTargetRedirectDecision, ThreadMaterializePlan, mode_is_bytes_on_disk,
-    plan_checkout_copy_policy, plan_checkout_path, plan_hydrate, plan_materialize_steps,
-    plan_shared_target_redirect, plan_thread_materialize, plan_write_manifest,
+    ADVISORY_ACTIVE_HEAVY_THREAD_THRESHOLD, CheckoutCopyPolicy, CheckoutPathPlan,
+    CheckoutRewindPlan, MaterializeStep, SelfCreatedDirRewindPlan, SharedTargetRedirectDecision,
+    StartCleanupStep, StartEffectKind, StartTransactionPlan, TargetDirClaimKind,
+    ThreadMaterializePlan, classify_materialize_error, mode_is_bytes_on_disk,
+    plan_checkout_copy_policy, plan_checkout_path, plan_checkout_rewind, plan_hydrate,
+    plan_materialize_steps, plan_self_created_dir_rewind, plan_shared_target_redirect,
+    plan_start_cleanup, plan_start_transaction, plan_thread_materialize, plan_write_manifest,
     shared_target_redirect_applies, shared_target_workspace_is_busy, should_advise_shared_target,
     should_warn_materialized_without_reflink,
 };
