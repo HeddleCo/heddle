@@ -34,7 +34,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `crates/core/src/save*`, thread-shaping, CLI `workflow`/`start`/`ready`/`land` adapters only  
 **Focus:** typed `*Options`/`*Report`; CLI becomes render/dispatch  
-**Status (2026-07-11):** **High-value complete on program tip** — pure plan/report/decision ownership for capture safety, ready/land accounting, land text, undo human labels, thread resolve blockers, operator verification claims, harness relay JSON, monorepo/fanout preflight, git commit index planning, resolve markers, and related helpers live in `heddle-core`. CLI retains I/O, RecoveryAdvice, hooks, and render. Full thin-CLI for every `cmd_*` is **not** claimed; long-tail residual tracked in `docs/program/cli-domain-residual.md` (schemas/doctor/watch/redact/etc.).
+**Status (2026-07-11):** **Facade residual complete on program tip** — pure plan/report/decision ownership for capture safety, ready/land accounting, land text, undo human labels, thread resolve blockers, operator verification claims, harness relay JSON, monorepo/fanout preflight, git commit index planning, resolve markers, and long-tail residual plans (doctor/watch/integration/try/diagnose/etc.) live in `heddle-core`. CLI retains I/O, RecoveryAdvice, hooks, and render. `docs/program/cli-domain-residual.md` reports **`uses_heddle_core=yes` for all 67 `cmd_*` files** (heuristic: imports facade; not a claim that every command body is fully extracted).
 
 ## Wave 4 — Remotes / projection command extraction
 
