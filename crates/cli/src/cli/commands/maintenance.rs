@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
 use heddle_core::maintenance_plan::{
-    inspect_change_monitor_line, inspect_commit_graph_line, inspect_packs_line,
-    inspect_partial_fetch_line, inspect_pull_planner_cache_line, inspect_ref_summary_index_line,
-    inspect_refs_line, inspect_worktree_index_line, run_commit_graph_now_line,
-    run_pruned_pull_planner_entries_line, run_pull_planner_cache_now_line,
-    run_rebuilt_commit_graph_line, run_rebuilt_pull_planner_cache_line,
-    run_rebuilt_ref_summary_index_line, run_rebuilt_worktree_index_line, run_ref_summary_now_line,
-    run_refreshed_change_monitor_line, run_worktree_index_now_line,
+    inspect_change_monitor_line, inspect_commit_graph_line, inspect_pack_install_line,
+    inspect_packs_line, inspect_partial_fetch_line, inspect_pull_planner_cache_line,
+    inspect_ref_summary_index_line, inspect_refs_line, inspect_worktree_index_line,
+    run_commit_graph_now_line, run_pack_install_recover_line, run_pruned_pull_planner_entries_line,
+    run_pull_planner_cache_now_line, run_rebuilt_commit_graph_line,
+    run_rebuilt_pull_planner_cache_line, run_rebuilt_ref_summary_index_line,
+    run_rebuilt_worktree_index_line, run_ref_summary_now_line, run_refreshed_change_monitor_line,
+    run_unpaired_packs_pruned_line, run_worktree_index_now_line,
 };
 
 use crate::cli::{
@@ -76,6 +77,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 );
                 println!(
                     "{}",
+                    inspect_pack_install_line(
+                        report.pack_files.unpaired_pack_count,
+                        report.pack_files.pending_install_intents
+                    )
+                );
+                println!(
+                    "{}",
                     inspect_partial_fetch_line(report.partial_fetch.missing_blob_count)
                 );
                 println!(
@@ -116,6 +124,20 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 println!(
                     "{}",
                     run_pruned_pull_planner_entries_line(run.pruned_pull_planner_entries)
+                );
+                println!(
+                    "{}",
+                    run_pack_install_recover_line(
+                        run.pack_install_intents_recovered_completed,
+                        run.pack_install_intents_aborted
+                    )
+                );
+                println!(
+                    "{}",
+                    run_unpaired_packs_pruned_line(
+                        run.unpaired_packs_pruned,
+                        run.unpaired_pack_bytes_freed
+                    )
                 );
                 println!(
                     "{}",

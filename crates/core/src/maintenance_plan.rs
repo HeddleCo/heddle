@@ -156,6 +156,31 @@ pub fn run_pull_planner_cache_now_line(manifests: usize, planner_entries: usize)
     )
 }
 
+/// L8 pack-install residual: unpaired packs + pending install intents.
+///
+/// `Pack install: U unpaired packs, P pending install intents`.
+pub fn inspect_pack_install_line(unpaired: usize, pending_intents: usize) -> String {
+    format!("Pack install: {unpaired} unpaired packs, {pending_intents} pending install intents")
+}
+
+/// L8 recover summary after `maintenance run` (or GC recover step).
+///
+/// `Pack install intents recovered: C completed, A aborted`.
+pub fn run_pack_install_recover_line(completed: u64, aborted: u64) -> String {
+    format!("Pack install intents recovered: {completed} completed, {aborted} aborted")
+}
+
+/// L8 Option D unpaired-pack prune summary.
+///
+/// `Pruned N unpaired packs (freed B bytes)` / zero-friendly form.
+pub fn run_unpaired_packs_pruned_line(removed: u64, bytes_freed: u64) -> String {
+    if removed > 0 {
+        format!("Pruned {removed} unpaired packs (freed {bytes_freed} bytes)")
+    } else {
+        "No unpaired packs to prune".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +218,10 @@ mod tests {
             "Partial fetch: 5 missing blobs"
         );
         assert!(inspect_pull_planner_cache_line("ready", 1, 2).contains("manifests: 1"));
+        assert_eq!(
+            inspect_pack_install_line(1, 2),
+            "Pack install: 1 unpaired packs, 2 pending install intents"
+        );
     }
 
     #[test]
@@ -233,6 +262,18 @@ mod tests {
         assert_eq!(
             run_pull_planner_cache_now_line(1, 2),
             "Pull planner cache now has 1 manifests and 2 planner entries"
+        );
+        assert_eq!(
+            run_pack_install_recover_line(2, 1),
+            "Pack install intents recovered: 2 completed, 1 aborted"
+        );
+        assert_eq!(
+            run_unpaired_packs_pruned_line(0, 0),
+            "No unpaired packs to prune"
+        );
+        assert_eq!(
+            run_unpaired_packs_pruned_line(3, 99),
+            "Pruned 3 unpaired packs (freed 99 bytes)"
         );
     }
 }

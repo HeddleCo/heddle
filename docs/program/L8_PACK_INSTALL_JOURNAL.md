@@ -1,13 +1,12 @@
 # L8 — Pack install two-phase journal (A+)
 
-**Status:** **Shipped on program tip (A+ journal + Option D backstop)**  
+**Status:** **Shipped on program tip (A+ journal + Option D backstop + in-memory journal + TTL)**  
 **Module:** `crates/objects/src/store/fs/pack_install_journal.rs`  
-**Call site:** `FsStore::install_pack_files_streaming` → `install_pack_files_journaled`  
-**Recovery:** `FsStore::reload_packs` runs `recover_pack_install_intents` then
-`prune_unpaired_pack_files`.
-
-**Not a claim:** byte-array `install_pack_files` still dual-writes without journal
-(smaller in-memory path); can adopt the same API later.
+**Call sites:**
+- `FsStore::install_pack_files_streaming` → `install_pack_files_journaled`
+- `FsStore::install_pack_files` → `install_pack_bytes_journaled`  
+**Recovery:** `FsStore::reload_packs` runs `recover_pack_install_intents_with_ttl`
+(default 24h) then `prune_unpaired_pack_files`.
 
 Cross-check: `GAP_MAP.md` L7/L8, `fs_pack.rs`, `publish_file_durable`.
 
@@ -89,11 +88,21 @@ Every publish uses existing L6/L7 durability (`publish_file_durable`).
 
 | Item | Role |
 |------|------|
-| `install_pack_files_journaled(packs_dir, src_pack, src_idx, pack_name)` | Journaled install |
-| `recover_pack_install_intents(packs_dir) -> PackInstallRecoverReport` | Crash recovery |
+| `install_pack_files_journaled(packs_dir, src_pack, src_idx, pack_name)` | Journaled install from on-disk sources |
+| `install_pack_bytes_journaled(packs_dir, pack_data, index_data) -> pack_name` | Journaled install from in-memory bytes |
+| `recover_pack_install_intents(packs_dir) -> PackInstallRecoverReport` | Crash recovery (default 24h TTL) |
+| `recover_pack_install_intents_with_ttl(packs_dir, ttl_secs)` | Crash recovery with explicit TTL |
+| `DEFAULT_PACK_INSTALL_INTENT_TTL_SECS` | 86_400 (24h) |
 | `PackInstallIntent` / `PackInstallPhase` / `PackInstallRecoverReport` | Types |
 | `FsStore::prune_unpaired_packs` | Option D GC |
 | `FsStore::reload_packs` | recover + prune + load |
+
+### TTL recovery policy
+
+- If install can complete (final pack + staged idx, or both finals) → **complete/cleanup** regardless of TTL.
+- Else if `created_unix + ttl < now` → **abort** (drop partial + staging + intent).
+- Else normal recovery (abort incomplete prepared; complete pack_published when staged idx present).
+- Orphan `.staging/*` dirs with no matching intent and mtime older than TTL are swept (best-effort).
 
 ---
 
@@ -107,16 +116,19 @@ Every publish uses existing L6/L7 durability (`publish_file_durable`).
 | `recover_pack_published_without_staging_idx_aborts_orphan_pack` | Abort when cannot complete |
 | `recover_prepared_with_pack_and_staging_idx_completes` | Phase-flip crash window |
 | `journaled_install_idempotent_when_pair_exists` | CAS idempotency |
+| `install_pack_bytes_journaled_happy_path` | In-memory journaled install |
+| `ttl_aborts_old_prepared_intent` | TTL abort of stale prepared |
+| `complete_preferred_over_ttl_when_staging_idx_present` | Complete wins over TTL |
 | unpaired pack list/prune tests | Option D backstop |
 
 ---
 
 ## Remaining / follow-ups
 
-- [ ] Wire prune/recover summary lines into `heddle maintenance` human output (optional UX)
-- [ ] Journal the in-memory `install_pack_files` dual-write path (same API)
-- [ ] Hosted metrics counters for recover completed/aborted (when observability lands)
-- [ ] Intent TTL sweeper for abandoned staging under abuse (quota companion)
+- [x] Wire prune/recover summary lines into `heddle maintenance` / `gc` human+JSON output
+- [x] Journal the in-memory `install_pack_files` dual-write path (`install_pack_bytes_journaled`)
+- [ ] Hosted metrics counters for recover completed/aborted (when observability product lands)
+- [x] Intent TTL sweeper (24h default) + orphan staging sweep
 
 ---
 
@@ -127,3 +139,4 @@ Every publish uses existing L6/L7 durability (`publish_file_durable`).
 | 2026-07-11 | A+ chosen for long-term multi-user scale |
 | 2026-07-11 | **Implemented** journaled streaming install + recover on reload + Option D prune |
 | 2026-07-11 | Prepared-phase recovery completes when final pack + staged idx present |
+| 2026-07-11 | **Implemented** in-memory `install_pack_bytes_journaled` + default 24h intent/staging TTL |

@@ -12,12 +12,15 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use heddle_core::gc_plan::{
-    gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
-    gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
-    gc_status_token, plan_gc_dry_run,
+use heddle_core::{
+    gc_plan::{
+        gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
+        gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
+        gc_status_token, plan_gc_dry_run,
+    },
+    maintenance_plan::{run_pack_install_recover_line, run_unpaired_packs_pruned_line},
 };
-use objects::store::ObjectStore;
+use objects::store::{AnyStore, ObjectStore, recover_pack_install_intents};
 use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
@@ -35,6 +38,12 @@ struct GcOutput {
     bytes_saved: u64,
     pruned_loose: u64,
     bytes_freed: u64,
+    /// L8 Option D: unpaired `.pack` files removed (no matching `.idx`).
+    unpaired_packs_pruned: u64,
+    /// L8 install-intent recover: intents completed during this GC.
+    pack_install_intents_completed: u64,
+    /// L8 install-intent recover: intents aborted during this GC.
+    pack_install_intents_aborted: u64,
     pinned_redactions: usize,
     preserved_redactions: usize,
     #[cfg(feature = "git-overlay")]
@@ -137,6 +146,32 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         summary.bytes_freed = bytes_freed;
         if !json {
             println!("{}", gc_prune_loose_message(removed, bytes_freed));
+        }
+
+        // L8 residual: recover pack-install intents, then prune unpaired
+        // packs (Option D). Safe for correctness — loaders never open
+        // unpaired packs — and bounds crash-window disk leak. Prefer the
+        // public recover free-fn + FsStore::prune_unpaired_packs when the
+        // store is the filesystem backend.
+        let packs = repo.heddle_dir().join("packs");
+        let recover = recover_pack_install_intents(&packs)?;
+        summary.pack_install_intents_completed = recover.completed;
+        summary.pack_install_intents_aborted = recover.aborted;
+        if !json {
+            println!(
+                "{}",
+                run_pack_install_recover_line(recover.completed, recover.aborted)
+            );
+        }
+        let (unpaired_removed, unpaired_bytes) = match repo.store() {
+            AnyStore::Fs(fs) => fs.prune_unpaired_packs()?,
+        };
+        summary.unpaired_packs_pruned = unpaired_removed;
+        if !json {
+            println!(
+                "{}",
+                run_unpaired_packs_pruned_line(unpaired_removed, unpaired_bytes)
+            );
         }
 
         // Post-GC invariant: every redaction we saw at the start of

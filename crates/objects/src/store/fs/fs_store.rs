@@ -393,9 +393,13 @@ impl FsStore {
     ///
     /// Runs L8 install-intent recovery first so crash windows between pack
     /// and index publish are finished or aborted before packs are loaded.
+    /// Uses the default intent TTL so abandoned staging is swept.
     pub fn reload_packs(&self) -> Result<()> {
         let packs = packs_dir(&self.root);
-        let _ = super::pack_install_journal::recover_pack_install_intents(&packs)?;
+        let _ = super::pack_install_journal::recover_pack_install_intents_with_ttl(
+            &packs,
+            Some(super::pack_install_journal::DEFAULT_PACK_INSTALL_INTENT_TTL_SECS),
+        )?;
         // Option D backstop: remove any legacy unpaired packs without intent.
         let _ = super::fs_pack::prune_unpaired_pack_files(&packs)?;
         let mut manager = self.pack_manager.write().map_err(|_| {
@@ -497,6 +501,10 @@ impl FsStore {
         write_atomic(path, data, mode, Some(&self.pending_directory_syncs))
     }
 
+    /// Durable atomic write for pack/index bytes when not going through the
+    /// L8 journal (tests / rare call sites). Prefer
+    /// [`super::pack_install_journal::install_pack_bytes_journaled`].
+    #[allow(dead_code)]
     pub(super) fn write_pack_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
         write_atomic(path, data, AtomicWriteMode::Durable, None)
     }

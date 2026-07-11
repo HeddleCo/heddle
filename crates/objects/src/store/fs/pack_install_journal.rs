@@ -12,18 +12,21 @@
 //! ```
 //!
 //! Protocol (see `docs/program/L8_PACK_INSTALL_JOURNAL.md`):
-//! 1. Stream-hash source pack → content-addressed `pack_name`
-//! 2. Stage pack + index under `.staging/<id>/` via `publish_file_durable`
+//! 1. Hash pack bytes → content-addressed `pack_name`
+//! 2. Stage pack + index under `.staging/<id>/` (atomic write or publish)
 //! 3. Write intent `phase=prepared`
 //! 4. Publish pack → final; intent `pack_published`
 //! 5. Publish index → final; intent `completed`; remove staging + intent
 //!
 //! Recovery on store open / pack reload finishes or aborts incomplete installs.
+//! Intents older than [`DEFAULT_PACK_INSTALL_INTENT_TTL_SECS`] are aborted unless
+//! they can still complete quickly (final pack + staged index present).
+//! Orphan `.staging/*` dirs without a matching intent are swept past TTL.
 //! Unpaired final packs without intent are still GC'd via
 //! [`super::fs_pack::prune_unpaired_pack_files`].
 
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -34,6 +37,9 @@ use crate::fs_atomic::{create_dir_all_durable, publish_file_durable, write_file_
 
 /// Intent schema version.
 pub const PACK_INSTALL_INTENT_VERSION: u32 = 1;
+
+/// Default TTL for abandoned install intents / orphan staging (24 hours).
+pub const DEFAULT_PACK_INSTALL_INTENT_TTL_SECS: i64 = 86_400;
 
 const STAGING_DIR_NAME: &str = ".staging";
 const INTENT_DIR_NAME: &str = ".install-intent";
@@ -75,6 +81,8 @@ pub struct PackInstallRecoverReport {
     pub completed: u64,
     pub aborted: u64,
     pub cleaned_stale_completed: u64,
+    /// Orphan `.staging/<id>` directories removed (no matching intent, past TTL).
+    pub orphan_staging_swept: u64,
     pub errors: u64,
 }
 
@@ -199,7 +207,7 @@ pub(crate) fn abort_install(packs_dir: &Path, intent: &PackInstallIntent) -> std
 pub(crate) fn complete_from_staging(
     packs_dir: &Path,
     intent: &PackInstallIntent,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let staging_idx = intent.staging_idx_path();
     let dst_idx = intent.dst_idx_path();
     let dst_pack = intent.dst_pack_path();
@@ -221,89 +229,301 @@ pub(crate) fn complete_from_staging(
     Ok(())
 }
 
-/// Recover all intents under `packs_dir`. Idempotent.
-pub fn recover_pack_install_intents(packs_dir: &Path) -> std::io::Result<PackInstallRecoverReport> {
+/// True when recovery can finish the install without re-staging (prefer over TTL abort).
+fn can_complete_quickly(intent: &PackInstallIntent) -> bool {
+    let dst_pack = intent.dst_pack_path();
+    let dst_idx = intent.dst_idx_path();
+    let staging_idx = intent.staging_idx_path();
+    if dst_pack.exists() && dst_idx.exists() {
+        return true;
+    }
+    dst_pack.exists() && !dst_idx.exists() && staging_idx.exists()
+}
+
+fn intent_expired(intent: &PackInstallIntent, ttl_secs: Option<i64>, now: i64) -> bool {
+    match ttl_secs {
+        Some(ttl) if ttl >= 0 => intent.created_unix.saturating_add(ttl) < now,
+        _ => false,
+    }
+}
+
+/// Recover all intents under `packs_dir` with the default 24h TTL. Idempotent.
+pub fn recover_pack_install_intents(packs_dir: &Path) -> io::Result<PackInstallRecoverReport> {
+    recover_pack_install_intents_with_ttl(packs_dir, Some(DEFAULT_PACK_INSTALL_INTENT_TTL_SECS))
+}
+
+/// Recover install intents with an optional TTL (seconds).
+///
+/// Policy:
+/// - If the install can complete (final pack + staged idx, or both finals) →
+///   complete/cleanup **regardless of TTL**.
+/// - Else if `created_unix + ttl < now` → **abort** (drop partial + staging + intent).
+/// - Else apply normal recovery (abort incomplete prepared; complete pack_published
+///   when staging idx is present).
+///
+/// Also sweeps orphan `.staging/*` dirs with no matching intent file when older
+/// than the TTL (best-effort). `ttl_secs = None` disables expiry and orphan sweep.
+pub fn recover_pack_install_intents_with_ttl(
+    packs_dir: &Path,
+    ttl_secs: Option<i64>,
+) -> io::Result<PackInstallRecoverReport> {
     let mut report = PackInstallRecoverReport::default();
+    let now = unix_now();
     let intent_dir = intent_root(packs_dir);
-    if !intent_dir.exists() {
-        // Still prune legacy unpaired packs (Option D backstop).
-        return Ok(report);
+
+    if intent_dir.exists() {
+        let entries = match fs::read_dir(&intent_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                sweep_orphan_staging(packs_dir, ttl_secs, now, &mut report);
+                tracing::debug!(
+                    ?packs_dir,
+                    ?report,
+                    "pack install journal recovery (no intent dir)"
+                );
+                return Ok(report);
+            }
+            Err(e) => return Err(e),
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    report.errors += 1;
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            report.intents_seen += 1;
+            let intent = match load_intent(&path) {
+                Ok(i) if i.version == PACK_INSTALL_INTENT_VERSION => i,
+                Ok(_) | Err(_) => {
+                    // Unknown/corrupt: best-effort remove intent file only.
+                    let _ = fs::remove_file(&path);
+                    report.errors += 1;
+                    continue;
+                }
+            };
+
+            let expired = intent_expired(&intent, ttl_secs, now);
+            let result = recover_one_intent(packs_dir, &intent, expired, &mut report);
+            if result.is_err() {
+                report.errors += 1;
+            }
+        }
     }
 
-    let entries = match fs::read_dir(&intent_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
-        Err(e) => return Err(e),
-    };
+    sweep_orphan_staging(packs_dir, ttl_secs, now, &mut report);
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                report.errors += 1;
-                continue;
-            }
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        report.intents_seen += 1;
-        let intent = match load_intent(&path) {
-            Ok(i) if i.version == PACK_INSTALL_INTENT_VERSION => i,
-            Ok(_) | Err(_) => {
-                // Unknown/corrupt: best-effort remove intent file only.
-                let _ = fs::remove_file(&path);
-                report.errors += 1;
-                continue;
-            }
-        };
+    if report.intents_seen > 0
+        || report.orphan_staging_swept > 0
+        || report.errors > 0
+        || report.completed > 0
+        || report.aborted > 0
+    {
+        tracing::info!(
+            ?packs_dir,
+            intents_seen = report.intents_seen,
+            completed = report.completed,
+            aborted = report.aborted,
+            cleaned_stale_completed = report.cleaned_stale_completed,
+            orphan_staging_swept = report.orphan_staging_swept,
+            errors = report.errors,
+            "pack install journal recovery"
+        );
+    } else {
+        tracing::debug!(?packs_dir, "pack install journal recovery: nothing to do");
+    }
 
-        let result = match intent.phase {
-            PackInstallPhase::Prepared => {
+    Ok(report)
+}
+
+fn recover_one_intent(
+    packs_dir: &Path,
+    intent: &PackInstallIntent,
+    expired: bool,
+    report: &mut PackInstallRecoverReport,
+) -> io::Result<()> {
+    // Prefer complete over TTL abort when we can finish without re-staging.
+    if can_complete_quickly(intent) {
+        return match intent.phase {
+            PackInstallPhase::Prepared | PackInstallPhase::PackPublished => {
                 let dst_pack = intent.dst_pack_path();
                 let dst_idx = intent.dst_idx_path();
-                let staging_idx = intent.staging_idx_path();
-                // Crash after pack publish but before phase flip still leaves
-                // final pack + staged idx — complete rather than abort.
                 if dst_pack.exists() && dst_idx.exists() {
                     remove_staging(packs_dir, &intent.install_id);
-                    remove_intent(packs_dir, &intent.install_id).map(|_| {
-                        report.cleaned_stale_completed += 1;
-                    })
-                } else if dst_pack.exists() && !dst_idx.exists() && staging_idx.exists() {
-                    complete_from_staging(packs_dir, &intent).map(|_| {
-                        report.completed += 1;
-                    })
+                    remove_intent(packs_dir, &intent.install_id)?;
+                    report.cleaned_stale_completed += 1;
+                    Ok(())
                 } else {
-                    abort_install(packs_dir, &intent).map(|_| {
-                        report.aborted += 1;
-                    })
-                }
-            }
-            PackInstallPhase::PackPublished => {
-                complete_from_staging(packs_dir, &intent).map(|_| {
-                    // complete_from_staging either finishes or aborts.
+                    complete_from_staging(packs_dir, intent)?;
                     if intent.dst_pack_path().exists() && intent.dst_idx_path().exists() {
                         report.completed += 1;
                     } else {
                         report.aborted += 1;
                     }
-                })
+                    Ok(())
+                }
             }
             PackInstallPhase::Completed => {
                 remove_staging(packs_dir, &intent.install_id);
-                remove_intent(packs_dir, &intent.install_id).map(|_| {
-                    report.cleaned_stale_completed += 1;
-                })
+                remove_intent(packs_dir, &intent.install_id)?;
+                report.cleaned_stale_completed += 1;
+                Ok(())
             }
         };
-        if result.is_err() {
-            report.errors += 1;
-        }
     }
 
-    Ok(report)
+    if expired {
+        tracing::debug!(
+            install_id = %intent.install_id,
+            pack_name = %intent.pack_name,
+            phase = ?intent.phase,
+            created_unix = intent.created_unix,
+            "aborting expired pack install intent"
+        );
+        abort_install(packs_dir, intent)?;
+        report.aborted += 1;
+        return Ok(());
+    }
+
+    // Normal recovery (not expired, cannot complete quickly).
+    match intent.phase {
+        PackInstallPhase::Prepared => {
+            abort_install(packs_dir, intent)?;
+            report.aborted += 1;
+            Ok(())
+        }
+        PackInstallPhase::PackPublished => {
+            // Staging idx missing → abort orphan pack.
+            complete_from_staging(packs_dir, intent)?;
+            if intent.dst_pack_path().exists() && intent.dst_idx_path().exists() {
+                report.completed += 1;
+            } else {
+                report.aborted += 1;
+            }
+            Ok(())
+        }
+        PackInstallPhase::Completed => {
+            remove_staging(packs_dir, &intent.install_id);
+            remove_intent(packs_dir, &intent.install_id)?;
+            report.cleaned_stale_completed += 1;
+            Ok(())
+        }
+    }
+}
+
+/// Best-effort remove `.staging/<id>` dirs with no matching intent past TTL.
+fn sweep_orphan_staging(
+    packs_dir: &Path,
+    ttl_secs: Option<i64>,
+    now: i64,
+    report: &mut PackInstallRecoverReport,
+) {
+    let Some(ttl) = ttl_secs.filter(|t| *t >= 0) else {
+        return;
+    };
+    let staging = staging_root(packs_dir);
+    let entries = match fs::read_dir(&staging) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if intent_path(packs_dir, id).exists() {
+            continue;
+        }
+        let age_ok_to_sweep = path_mtime_unix(&path)
+            .map(|mtime| mtime.saturating_add(ttl) < now)
+            .unwrap_or(true);
+        if !age_ok_to_sweep {
+            continue;
+        }
+        tracing::debug!(staging = %path.display(), "sweeping orphan pack install staging");
+        remove_path_best_effort(&path);
+        report.orphan_staging_swept += 1;
+    }
+}
+
+fn path_mtime_unix(path: &Path) -> Option<i64> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    Some(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    )
+}
+
+/// Journaled in-memory install: stage pack+idx bytes, intent, publish pack then index.
+///
+/// Returns the content-addressed `pack_name` (blake3 hex of `pack_data`).
+/// On success both final files exist and staging/intent are gone.
+pub fn install_pack_bytes_journaled(
+    packs_dir: &Path,
+    pack_data: &[u8],
+    index_data: &[u8],
+) -> io::Result<String> {
+    create_dir_all_durable(packs_dir)?;
+
+    let pack_name = format!("{}", blake3::hash(pack_data).to_hex());
+    let dst_pack = packs_dir.join(format!("{pack_name}.pack"));
+    let dst_idx = packs_dir.join(format!("{pack_name}.idx"));
+
+    // Idempotent: already fully installed.
+    if dst_pack.exists() && dst_idx.exists() {
+        return Ok(pack_name);
+    }
+
+    // Partial final from pre-journal crash: remove orphan pack so we can
+    // reinstall cleanly from sources.
+    if dst_pack.exists() && !dst_idx.exists() {
+        let _ = fs::remove_file(&dst_pack);
+    }
+
+    let install_id = new_install_id();
+    let stage = staging_dir(packs_dir, &install_id);
+    create_dir_all_durable(&stage)?;
+
+    let staging_pack = stage.join(STAGED_PACK_NAME);
+    let staging_idx = stage.join(STAGED_IDX_NAME);
+
+    // Durable writes into staging (not yet published to final names).
+    write_file_atomic(&staging_pack, pack_data)?;
+    write_file_atomic(&staging_idx, index_data)?;
+
+    let mut intent = PackInstallIntent::new(
+        install_id.clone(),
+        pack_name.clone(),
+        staging_pack.clone(),
+        staging_idx.clone(),
+        dst_pack.clone(),
+        dst_idx.clone(),
+    );
+    write_intent(packs_dir, &intent)?;
+
+    publish_file_durable(&staging_pack, &dst_pack)?;
+    intent.phase = PackInstallPhase::PackPublished;
+    write_intent(packs_dir, &intent)?;
+
+    publish_file_durable(&staging_idx, &dst_idx)?;
+    intent.phase = PackInstallPhase::Completed;
+    write_intent(packs_dir, &intent)?;
+
+    remove_staging(packs_dir, &install_id);
+    remove_intent(packs_dir, &install_id)?;
+    Ok(pack_name)
 }
 
 /// Journaled streaming install: stage sources, intent, publish pack then index.
@@ -315,7 +535,7 @@ pub fn install_pack_files_journaled(
     src_pack_path: &Path,
     src_index_path: &Path,
     pack_name: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     create_dir_all_durable(packs_dir)?;
 
     let dst_pack = packs_dir.join(format!("{pack_name}.pack"));
@@ -581,5 +801,120 @@ mod tests {
 
         install_pack_files_journaled(&packs, &src_pack, &src_idx, name).unwrap();
         assert_eq!(fs::read(packs.join(format!("{name}.pack"))).unwrap(), b"p");
+    }
+
+    #[test]
+    fn install_pack_bytes_journaled_happy_path() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+
+        let pack_bytes = b"in-memory-pack-body-zzz";
+        let idx_bytes = b"in-memory-idx-body-zzz";
+        let expected_name = format!("{}", blake3::hash(pack_bytes).to_hex());
+
+        let name = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        assert_eq!(name, expected_name);
+        assert!(packs.join(format!("{name}.pack")).exists());
+        assert!(packs.join(format!("{name}.idx")).exists());
+        assert_eq!(
+            fs::read(packs.join(format!("{name}.pack"))).unwrap(),
+            pack_bytes
+        );
+        assert_eq!(
+            fs::read(packs.join(format!("{name}.idx"))).unwrap(),
+            idx_bytes
+        );
+        assert!(
+            !intent_root(&packs).exists()
+                || fs::read_dir(intent_root(&packs)).unwrap().count() == 0
+        );
+        assert!(
+            !staging_root(&packs).exists()
+                || fs::read_dir(staging_root(&packs))
+                    .map(|d| d.count() == 0)
+                    .unwrap_or(true)
+        );
+
+        // Idempotent second call.
+        let name2 = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        assert_eq!(name2, expected_name);
+    }
+
+    #[test]
+    fn ttl_aborts_old_prepared_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let install_id = "ttl-prep".to_string();
+        let stage = staging_dir(&packs, &install_id);
+        create_dir_all_durable(&stage).unwrap();
+        let staging_pack = stage.join(STAGED_PACK_NAME);
+        let staging_idx = stage.join(STAGED_IDX_NAME);
+        write_file_atomic(&staging_pack, b"stale-p").unwrap();
+        write_file_atomic(&staging_idx, b"stale-i").unwrap();
+
+        let mut intent = PackInstallIntent::new(
+            install_id.clone(),
+            "stale-name".into(),
+            staging_pack,
+            staging_idx,
+            packs.join("stale-name.pack"),
+            packs.join("stale-name.idx"),
+        );
+        // Far in the past relative to any positive TTL.
+        intent.created_unix = 1;
+        write_intent(&packs, &intent).unwrap();
+
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(60)).unwrap();
+        assert_eq!(report.intents_seen, 1);
+        assert_eq!(report.aborted, 1);
+        assert_eq!(report.completed, 0);
+        assert!(!intent_path(&packs, &install_id).exists());
+        assert!(!stage.exists());
+        assert!(!packs.join("stale-name.pack").exists());
+    }
+
+    #[test]
+    fn complete_preferred_over_ttl_when_staging_idx_present() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+
+        let name = "ttl-complete";
+        let install_id = "ttl-complete-1".to_string();
+        let stage = staging_dir(&packs, &install_id);
+        create_dir_all_durable(&stage).unwrap();
+        let staging_pack = stage.join(STAGED_PACK_NAME);
+        let staging_idx = stage.join(STAGED_IDX_NAME);
+        write_file_atomic(&staging_pack, b"pack-ttl").unwrap();
+        write_file_atomic(&staging_idx, b"idx-ttl").unwrap();
+
+        let dst_pack = packs.join(format!("{name}.pack"));
+        let dst_idx = packs.join(format!("{name}.idx"));
+        publish_file_durable(&staging_pack, &dst_pack).unwrap();
+
+        let intent = PackInstallIntent {
+            version: PACK_INSTALL_INTENT_VERSION,
+            install_id: install_id.clone(),
+            pack_name: name.to_string(),
+            staging_pack: staging_pack.display().to_string(),
+            staging_idx: staging_idx.display().to_string(),
+            dst_pack: dst_pack.display().to_string(),
+            dst_idx: dst_idx.display().to_string(),
+            phase: PackInstallPhase::PackPublished,
+            // Expired under any short TTL, but completable.
+            created_unix: 1,
+        };
+        write_intent(&packs, &intent).unwrap();
+
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
+        assert_eq!(report.intents_seen, 1);
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.aborted, 0);
+        assert!(dst_pack.exists());
+        assert!(dst_idx.exists());
+        assert_eq!(fs::read(&dst_idx).unwrap(), b"idx-ttl");
+        assert!(!intent_path(&packs, &install_id).exists());
     }
 }

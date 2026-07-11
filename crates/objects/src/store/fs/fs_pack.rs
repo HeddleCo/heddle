@@ -298,15 +298,12 @@ impl FsStore {
 
     pub(super) fn install_pack_files(&self, pack_data: &[u8], index_data: &[u8]) -> Result<()> {
         let packs = packs_dir(&self.root);
-        crate::fs_atomic::create_dir_all_durable(&packs)?;
-
-        let pack_hash = blake3::hash(pack_data);
-        let pack_name = format!("{}", pack_hash.to_hex());
-        let pack_path = packs.join(format!("{}.pack", pack_name));
-        let index_path = packs.join(format!("{}.idx", pack_name));
-
-        self.write_pack_atomic(&pack_path, pack_data)?;
-        self.write_pack_atomic(&index_path, index_data)?;
+        // L8 A+: durable staging + intent journal for in-memory pack install
+        // (same crash-safety as install_pack_files_streaming).
+        // Design: docs/program/L8_PACK_INSTALL_JOURNAL.md
+        let _pack_name = super::pack_install_journal::install_pack_bytes_journaled(
+            &packs, pack_data, index_data,
+        )?;
         // Pack manager picks up the new files. We do *not* clear the
         // recent-object caches here — every caller that follows this
         // with a destructive prune is responsible for clearing them
