@@ -7,6 +7,7 @@
 //! - security preflight flag assembly (no network I/O)
 //! - adopt start-path resolution and path-conflict policy
 //! - monorepo recursive clone: child selection, path anchoring, work order
+//! - monorepo per-node execution steps (validate dest, init, fetch, materialize, map)
 //!
 //! Filesystem mutations, hosted RPC, git import, and recovery-advice
 //! rendering stay CLI-owned. Callers gather cheap facts (path existence,
@@ -710,6 +711,136 @@ fn walk_monorepo_node(plan: &mut MonorepoClonePlan, node: &MonorepoNodeFacts, re
 }
 
 // ---------------------------------------------------------------------------
+// Monorepo per-node execution scaffolding (pure step list)
+// ---------------------------------------------------------------------------
+//
+// [`plan_monorepo_clone`] decides *which* nodes to place and *where*. The
+// helpers below decide *how* each selected node is materialized as an ordered
+// list of pure steps. CLI matches on each step and performs FS / hosted I/O
+// (create dirs, `Repository::init`, fetch_state, goto, origin mapping).
+
+/// One pure execution step for materializing a single monorepo node.
+///
+/// Order is fixed by [`plan_monorepo_node_steps`]. Fetch/materialize carry the
+/// content-state payload so the CLI does not re-branch on `Option`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonorepoNodeExecutionStep {
+    /// Ensure mount destination is usable (parent dirs, create dest path).
+    ValidateDest,
+    /// Initialize a Heddle repository at the mount (`Repository::init`).
+    InitRepo,
+    /// Hosted fetch of the node's content-state object closure.
+    FetchContent { state: ChangeId },
+    /// Materialize worktree from the fetched state
+    /// (`goto_from_materialized_state`).
+    MaterializeState { state: ChangeId },
+    /// Seed origin/remote mapping so the placed spool tracks its upstream.
+    RecordMapping,
+}
+
+impl MonorepoNodeExecutionStep {
+    /// Stable short label for tests and diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ValidateDest => "validate_dest",
+            Self::InitRepo => "init_repo",
+            Self::FetchContent { .. } => "fetch_content",
+            Self::MaterializeState { .. } => "materialize_state",
+            Self::RecordMapping => "record_mapping",
+        }
+    }
+}
+
+/// Mode flags that gate optional per-node monorepo materialize steps.
+///
+/// Fetch/materialize are gated by [`MonorepoNodePlan::content_state`] (not by
+/// these flags). First cut only toggles origin mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonorepoNodeStepOptions {
+    /// When true, emit [`MonorepoNodeExecutionStep::RecordMapping`] (default).
+    pub record_mapping: bool,
+}
+
+impl Default for MonorepoNodeStepOptions {
+    fn default() -> Self {
+        Self {
+            record_mapping: true,
+        }
+    }
+}
+
+/// One selected monorepo node plus its ordered pure execution steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoNodeExecution {
+    pub node: MonorepoNodePlan,
+    pub steps: Vec<MonorepoNodeExecutionStep>,
+}
+
+/// Aggregate monorepo execution plan: per-node steps in pre-order + skipped edges.
+///
+/// Built from a [`MonorepoClonePlan`] via [`plan_monorepo_execution`]. Preserves
+/// work order: parent node steps always complete before a child's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonorepoExecutionPlan {
+    /// Selected nodes with steps, same pre-order as [`MonorepoClonePlan::nodes`].
+    pub nodes: Vec<MonorepoNodeExecution>,
+    /// Child edges recorded but not descended (copied from the clone plan).
+    pub skipped: Vec<MonorepoSkippedChild>,
+}
+
+impl MonorepoExecutionPlan {
+    /// Number of selected nodes (placement count).
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+/// Plan ordered pure steps for one monorepo node.
+///
+/// Always emits ValidateDest → InitRepo. When `node.content_state` is set,
+/// appends FetchContent then MaterializeState with that state. When
+/// `options.record_mapping` is true (default), appends RecordMapping.
+/// Empty content still produces ValidateDest + InitRepo (+ optional mapping)
+/// so the mount is an initialized empty repo.
+pub fn plan_monorepo_node_steps(
+    node: &MonorepoNodePlan,
+    options: &MonorepoNodeStepOptions,
+) -> Vec<MonorepoNodeExecutionStep> {
+    let mut steps = vec![
+        MonorepoNodeExecutionStep::ValidateDest,
+        MonorepoNodeExecutionStep::InitRepo,
+    ];
+    if let Some(state) = node.content_state {
+        steps.push(MonorepoNodeExecutionStep::FetchContent { state });
+        steps.push(MonorepoNodeExecutionStep::MaterializeState { state });
+    }
+    if options.record_mapping {
+        steps.push(MonorepoNodeExecutionStep::RecordMapping);
+    }
+    steps
+}
+
+/// Expand a monorepo clone worklist into per-node pure execution steps.
+///
+/// Does not perform I/O. Skipped edges are copied through unchanged.
+pub fn plan_monorepo_execution(
+    clone_plan: &MonorepoClonePlan,
+    options: &MonorepoNodeStepOptions,
+) -> MonorepoExecutionPlan {
+    MonorepoExecutionPlan {
+        nodes: clone_plan
+            .nodes
+            .iter()
+            .map(|node| MonorepoNodeExecution {
+                node: node.clone(),
+                steps: plan_monorepo_node_steps(node, options),
+            })
+            .collect(),
+        skipped: clone_plan.skipped.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1272,5 +1403,154 @@ mod tests {
         assert_eq!(plan.nodes.len(), 2);
         assert!(plan.skipped.is_empty());
         assert_eq!(plan.nodes[1].spool_id, "acme/child");
+    }
+
+    // ---- monorepo per-node execution scaffolding ----
+
+    #[test]
+    fn plan_monorepo_node_steps_full_content_order() {
+        let node = MonorepoNodePlan {
+            spool_id: "acme/root".into(),
+            content_state: Some(cid(1)),
+            rel_path: PathBuf::new(),
+        };
+        let steps = plan_monorepo_node_steps(&node, &MonorepoNodeStepOptions::default());
+        assert_eq!(
+            steps
+                .iter()
+                .map(MonorepoNodeExecutionStep::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "validate_dest",
+                "init_repo",
+                "fetch_content",
+                "materialize_state",
+                "record_mapping",
+            ]
+        );
+        assert_eq!(
+            steps[2],
+            MonorepoNodeExecutionStep::FetchContent { state: cid(1) }
+        );
+        assert_eq!(
+            steps[3],
+            MonorepoNodeExecutionStep::MaterializeState { state: cid(1) }
+        );
+    }
+
+    #[test]
+    fn plan_monorepo_node_steps_empty_content_skips_fetch_and_materialize() {
+        let node = MonorepoNodePlan {
+            spool_id: "acme/empty".into(),
+            content_state: None,
+            rel_path: PathBuf::from("libs"),
+        };
+        let steps = plan_monorepo_node_steps(&node, &MonorepoNodeStepOptions::default());
+        assert_eq!(
+            steps,
+            vec![
+                MonorepoNodeExecutionStep::ValidateDest,
+                MonorepoNodeExecutionStep::InitRepo,
+                MonorepoNodeExecutionStep::RecordMapping,
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_monorepo_node_steps_can_omit_record_mapping() {
+        let node = MonorepoNodePlan {
+            spool_id: "acme/root".into(),
+            content_state: Some(cid(9)),
+            rel_path: PathBuf::new(),
+        };
+        let steps = plan_monorepo_node_steps(
+            &node,
+            &MonorepoNodeStepOptions {
+                record_mapping: false,
+            },
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(MonorepoNodeExecutionStep::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "validate_dest",
+                "init_repo",
+                "fetch_content",
+                "materialize_state",
+            ]
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, MonorepoNodeExecutionStep::RecordMapping))
+        );
+    }
+
+    #[test]
+    fn plan_monorepo_execution_preserves_preorder_and_skipped() {
+        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+
+        assert_eq!(exec.node_count(), 3);
+        assert_eq!(exec.nodes.len(), clone_plan.nodes.len());
+        assert_eq!(exec.skipped, clone_plan.skipped);
+
+        // Pre-order preserved: root → libs → libs/vendor
+        assert_eq!(exec.nodes[0].node.spool_id, "acme/root");
+        assert_eq!(exec.nodes[1].node.spool_id, "acme/child-a");
+        assert_eq!(exec.nodes[2].node.spool_id, "acme/grandchild");
+        assert_eq!(
+            exec.nodes[2].node.rel_path,
+            PathBuf::from("libs").join("vendor")
+        );
+
+        // Every content-bearing node gets the full five-step sequence.
+        for node_exec in &exec.nodes {
+            assert_eq!(
+                node_exec
+                    .steps
+                    .iter()
+                    .map(MonorepoNodeExecutionStep::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "validate_dest",
+                    "init_repo",
+                    "fetch_content",
+                    "materialize_state",
+                    "record_mapping",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn plan_monorepo_execution_empty_root_still_emits_scaffold_steps() {
+        let child = leaf("acme/child", 5);
+        let root = MonorepoNodeFacts {
+            spool_id: "acme/root".to_string(),
+            content_state: None,
+            edges: vec![selected_edge("sub", "acme/child", child)],
+        };
+        let clone_plan = plan_monorepo_clone(&root);
+        let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+
+        assert_eq!(exec.nodes[0].node.content_state, None);
+        assert_eq!(
+            exec.nodes[0].steps,
+            vec![
+                MonorepoNodeExecutionStep::ValidateDest,
+                MonorepoNodeExecutionStep::InitRepo,
+                MonorepoNodeExecutionStep::RecordMapping,
+            ]
+        );
+        // Child with content still gets fetch + materialize after parent.
+        assert!(
+            exec.nodes[1]
+                .steps
+                .iter()
+                .any(|s| matches!(s, MonorepoNodeExecutionStep::FetchContent { .. }))
+        );
     }
 }
