@@ -1,0 +1,25 @@
+timestamp_utc=20260711T155225Z
+commit=a5b1dc689c755228be15cefeaffd91dbb9dd18f3
+branch=codex/correctness-architecture-performance-program
+heddle_bin=/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10/artifacts/perf/bin/heddle
+heddle_version=heddle 0.10.0
+uname=Darwin Lukes-MacBook-Pro-3.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:56 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6000 arm64
+ProductName:		macOS
+ProductVersion:		26.5.1
+BuildVersion:		25F80
+cpu=Apple M1 Pro
+mem_bytes=34359738368
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+python3=Python 3.14.6
+trials=5
+warmup=1
+file_count=300
+thread_count=24
+absolute_json=/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10/artifacts/perf/20260711T155225Z-core-loop-absolute.json
+host_load_at_bench_start={ 12.76 19.12 23.76 }
+host_noise_note=moderately noisy; concurrent peer cargo/rustc finishing; not fully quiet-host
+binary_sha256=cfc991b427e21227539201615ce78bec7c43eecc0651031a3b66aaea671e6535
+profile_status=artifacts/perf/20260711T155225Z-profile-status.jsonl
+profile_verify=artifacts/perf/20260711T155225Z-profile-verify.jsonl
+build_cmd=CARGO_TARGET_DIR=/tmp/heddle-todo5-target cargo build --release -p heddle-cli --locked
