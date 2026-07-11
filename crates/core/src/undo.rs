@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Undo list / planning domain (inspection + batch selection).
+//! Undo list / planning domain (inspection + batch selection + apply preflight).
 //!
-//! Owns the **read-side** of `heddle undo`:
+//! Owns the **read-side** and **pure apply-path preflight** of `heddle undo`:
 //! - listing user-facing oplog batches for the current checkout scope
 //! - pure batch summarization for stable machine JSON field names
 //! - selecting the next N undo/redo batches
 //! - shared domain refusals for mode conflict and empty history
+//! - pure redaction / thread-worktree / state-reachability preflights given
+//!   caller-supplied batch facts (no FS / store I/O in the decision layer)
+//! - apply step order (reverse within batch for undo; forward for redo) and
+//!   preview / completed message strings
 //!
-//! Apply/mutation remains CLI-owned (`undo_apply/*`) until a later wave.
+//! Locks, store lookups, dirty-worktree checks, git-checkpoint simulation, and
+//! the apply engine remain CLI-owned (`undo.rs` + `undo_apply/*`).
+
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use objects::{HeddleError, RecoveryDetails};
-use oplog::OpBatch;
+use objects::{
+    HeddleError, RecoveryDetails,
+    object::{ChangeId, ContentHash},
+};
+use oplog::{OpBatch, RedactionUndoClass};
 use repo::Repository;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -251,10 +261,392 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Apply-path pure preflight + step plan
+// ---------------------------------------------------------------------------
+
+/// One entry as the apply engine will visit it (batch order fixed; entry order
+/// depends on undo vs redo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoApplyStep {
+    pub batch_id: u64,
+    pub entry_id: u64,
+    pub description: String,
+}
+
+/// Pure apply plan after batch selection: step order + stable messages.
+///
+/// Does not encode FS/store preflight outcomes — callers run
+/// [`check_redaction_undo_safe`], [`check_thread_worktree_undo_safe`], etc.
+/// before applying or advertising preview.
+#[derive(Debug, Clone)]
+pub struct UndoApplyPlan {
+    pub action: UndoHistoryAction,
+    pub preview: bool,
+    pub steps_requested: usize,
+    pub batches: Vec<OpBatch>,
+    /// Visit order for the apply engine (undo: reverse entries per batch).
+    pub steps: Vec<UndoApplyStep>,
+    /// Machine-oriented status line (`Would undo 2 batches` / `Undone 1 batch`).
+    pub message: String,
+    /// Human one-liner (`Would undo 2 saved changes` / `Undid 1 saved change`).
+    pub human_message: String,
+}
+
+impl UndoApplyPlan {
+    pub fn batch_summaries(&self) -> Vec<UndoBatchSummary> {
+        self.batches.iter().map(summarize_batch).collect()
+    }
+
+    pub fn batch_count(&self) -> usize {
+        self.batches.len()
+    }
+}
+
+/// Build an apply plan from a selected [`UndoPlan`] (pure; no preflight).
+pub fn plan_undo_apply(plan: UndoPlan, preview: bool) -> UndoApplyPlan {
+    let count = plan.batches.len();
+    let steps = match plan.action {
+        UndoHistoryAction::Undo => plan_undo_apply_steps(&plan.batches),
+        UndoHistoryAction::Redo => plan_redo_apply_steps(&plan.batches),
+    };
+    UndoApplyPlan {
+        action: plan.action,
+        preview,
+        steps_requested: plan.steps_requested,
+        batches: plan.batches,
+        steps,
+        message: machine_undo_redo_message(plan.action, count, preview),
+        human_message: human_undo_redo_message(plan.action, count, preview),
+    }
+}
+
+/// Undo apply order: each batch in selection order, entries reverse within batch.
+pub fn plan_undo_apply_steps(batches: &[OpBatch]) -> Vec<UndoApplyStep> {
+    let mut steps = Vec::new();
+    for batch in batches {
+        for entry in batch.entries.iter().rev() {
+            steps.push(UndoApplyStep {
+                batch_id: batch.id,
+                entry_id: entry.id,
+                description: entry.operation.description(),
+            });
+        }
+    }
+    steps
+}
+
+/// Redo apply order: each batch in selection order, entries forward within batch.
+pub fn plan_redo_apply_steps(batches: &[OpBatch]) -> Vec<UndoApplyStep> {
+    let mut steps = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            steps.push(UndoApplyStep {
+                batch_id: batch.id,
+                entry_id: entry.id,
+                description: entry.operation.description(),
+            });
+        }
+    }
+    steps
+}
+
+/// Machine JSON `message` field for undo/redo preview or completed payloads.
+pub fn machine_undo_redo_message(action: UndoHistoryAction, count: usize, preview: bool) -> String {
+    let noun = if count == 1 { "batch" } else { "batches" };
+    match (action, preview) {
+        (UndoHistoryAction::Undo, true) => format!("Would undo {count} {noun}"),
+        (UndoHistoryAction::Undo, false) => format!("Undone {count} {noun}"),
+        (UndoHistoryAction::Redo, true) => format!("Would redo {count} {noun}"),
+        (UndoHistoryAction::Redo, false) => format!("Redone {count} {noun}"),
+    }
+}
+
+/// Human text status line for undo/redo preview or completed output.
+pub fn human_undo_redo_message(action: UndoHistoryAction, count: usize, preview: bool) -> String {
+    let noun = if count == 1 {
+        "saved change"
+    } else {
+        "saved changes"
+    };
+    let verb = match (action, preview) {
+        (UndoHistoryAction::Undo, true) => "Would undo",
+        (UndoHistoryAction::Undo, false) => "Undid",
+        (UndoHistoryAction::Redo, true) => "Would redo",
+        (UndoHistoryAction::Redo, false) => "Redid",
+    };
+    format!("{verb} {count} {noun}")
+}
+
+/// A `Purge` op participating in undo redaction safety.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeOpRef {
+    pub op_id: u64,
+    pub redaction_id: ContentHash,
+}
+
+/// A `Redact` op participating in undo redaction safety.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactOpRef {
+    pub op_id: u64,
+    pub blob: ContentHash,
+    pub state: ChangeId,
+    pub path: String,
+}
+
+/// Batch-derived redaction facts (no store I/O).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RedactionUndoBatchFacts {
+    pub purges: Vec<PurgeOpRef>,
+    pub redacts: Vec<RedactOpRef>,
+}
+
+/// Collect purge/redact ops from a planned undo chain (pure scan).
+pub fn collect_redaction_undo_facts(batches: &[OpBatch]) -> RedactionUndoBatchFacts {
+    let mut facts = RedactionUndoBatchFacts::default();
+    for batch in batches {
+        for entry in &batch.entries {
+            match entry.operation.redaction_undo_class() {
+                RedactionUndoClass::Purge { redaction_id } => {
+                    facts.purges.push(PurgeOpRef {
+                        op_id: entry.id,
+                        redaction_id: *redaction_id,
+                    });
+                }
+                RedactionUndoClass::Redact { blob, state, path } => {
+                    facts.redacts.push(RedactOpRef {
+                        op_id: entry.id,
+                        blob: *blob,
+                        state: *state,
+                        path: path.to_string(),
+                    });
+                }
+                RedactionUndoClass::Other => {}
+            }
+        }
+    }
+    facts
+}
+
+/// Pure redaction-undo safety given batch facts + caller-resolved purge status.
+///
+/// Precedence (matches CLI):
+/// 1. Any purge op → refuse (`irreversible_purge_undo`)
+/// 2. Any redact whose bytes are purged → refuse (`redaction_bytes_purged`)
+/// 3. Any remaining redact without `--allow-redact-undo` → refuse
+///    (`redaction_undo_requires_confirmation`)
+pub fn check_redaction_undo_safe(
+    facts: &RedactionUndoBatchFacts,
+    // Op ids of redact entries whose blob bytes have already been purged.
+    purged_redact_op_ids: &[u64],
+    allow_redact_undo: bool,
+) -> Result<(), UndoApplyPreflightError> {
+    if !facts.purges.is_empty() {
+        return Err(UndoApplyPreflightError::IrreversiblePurge {
+            ops: facts.purges.clone(),
+        });
+    }
+    if facts.redacts.is_empty() {
+        return Ok(());
+    }
+    let purged: Vec<RedactOpRef> = facts
+        .redacts
+        .iter()
+        .filter(|r| purged_redact_op_ids.contains(&r.op_id))
+        .cloned()
+        .collect();
+    if !purged.is_empty() {
+        return Err(UndoApplyPreflightError::RedactionBytesPurged { ops: purged });
+    }
+    if !allow_redact_undo {
+        return Err(UndoApplyPreflightError::RedactionUndoRequiresConfirmation {
+            ops: facts.redacts.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Pure: whether a materialized worktree path still on disk blocks ThreadCreate undo.
+pub fn live_materialized_path_blocks_undo(path_exists: bool) -> bool {
+    path_exists
+}
+
+/// ThreadCreate in the undo chain that can orphan a materialized worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadWorktreeHazard {
+    pub op_id: u64,
+    pub thread_name: String,
+}
+
+/// Collect ThreadCreate worktree-orphan hazards from batches (pure; no FS).
+pub fn collect_thread_worktree_hazards(batches: &[OpBatch]) -> Vec<ThreadWorktreeHazard> {
+    let mut out = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            if let Some(name) = entry.operation.thread_worktree_undo_hazard_name() {
+                out.push(ThreadWorktreeHazard {
+                    op_id: entry.id,
+                    thread_name: name.to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A hazard whose materialized path still exists (caller-resolved FS fact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveThreadWorktree {
+    pub op_id: u64,
+    pub thread_name: String,
+    pub path: PathBuf,
+}
+
+/// Pure worktree-orphan preflight: refuse when any live materialized path remains.
+pub fn check_thread_worktree_undo_safe(
+    live: &[LiveThreadWorktree],
+) -> Result<(), UndoApplyPreflightError> {
+    if live.is_empty() {
+        Ok(())
+    } else {
+        Err(UndoApplyPreflightError::ThreadWorktreeUndoUnsafe {
+            live: live.to_vec(),
+        })
+    }
+}
+
+/// State the apply inverse/replay must load, tagged with the owning op id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredStateRef {
+    pub op_id: u64,
+    pub state: ChangeId,
+}
+
+/// Collect states required for undo reachability (pure scan of batches).
+pub fn collect_undo_required_states(batches: &[OpBatch]) -> Vec<RequiredStateRef> {
+    let mut out = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            for state in entry.operation.states_required_for_undo() {
+                out.push(RequiredStateRef {
+                    op_id: entry.id,
+                    state,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Collect states required for redo reachability (pure scan of batches).
+pub fn collect_redo_required_states(batches: &[OpBatch]) -> Vec<RequiredStateRef> {
+    let mut out = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            for state in entry.operation.states_required_for_redo() {
+                out.push(RequiredStateRef {
+                    op_id: entry.id,
+                    state,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Pure: refuse when caller-resolved missing states are non-empty.
+pub fn check_states_reachable(
+    action: UndoHistoryAction,
+    missing: &[RequiredStateRef],
+) -> Result<(), UndoApplyPreflightError> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    match action {
+        UndoHistoryAction::Undo => Err(UndoApplyPreflightError::UndoStateMissing {
+            missing: missing.to_vec(),
+        }),
+        UndoHistoryAction::Redo => Err(UndoApplyPreflightError::RedoStateMissing {
+            missing: missing.to_vec(),
+        }),
+    }
+}
+
+/// A redo-unsupported redaction-adjacent op (`Redact` / `Purge`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedRedoOp {
+    pub op_id: u64,
+    pub label: &'static str,
+}
+
+/// Collect redo-unsupported ops from batches (pure).
+pub fn collect_unsupported_redo_ops(batches: &[OpBatch]) -> Vec<UnsupportedRedoOp> {
+    let mut out = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            if let Some(label) = entry.operation.redo_unsupported_label() {
+                out.push(UnsupportedRedoOp {
+                    op_id: entry.id,
+                    label,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Pure redo redaction support preflight.
+pub fn check_redaction_redo_supported(batches: &[OpBatch]) -> Result<(), UndoApplyPreflightError> {
+    let blocking = collect_unsupported_redo_ops(batches);
+    if blocking.is_empty() {
+        Ok(())
+    } else {
+        Err(UndoApplyPreflightError::RedactionRedoUnsupported { ops: blocking })
+    }
+}
+
+/// Typed apply-path preflight refusals (CLI maps to recovery advice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoApplyPreflightError {
+    IrreversiblePurge { ops: Vec<PurgeOpRef> },
+    RedactionBytesPurged { ops: Vec<RedactOpRef> },
+    RedactionUndoRequiresConfirmation { ops: Vec<RedactOpRef> },
+    RedactionRedoUnsupported { ops: Vec<UnsupportedRedoOp> },
+    ThreadWorktreeUndoUnsafe { live: Vec<LiveThreadWorktree> },
+    UndoStateMissing { missing: Vec<RequiredStateRef> },
+    RedoStateMissing { missing: Vec<RequiredStateRef> },
+}
+
+impl UndoApplyPreflightError {
+    /// Stable recovery-advice `kind` string (matches existing CLI refusals).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::IrreversiblePurge { .. } => "irreversible_purge_undo",
+            Self::RedactionBytesPurged { .. } => "redaction_bytes_purged",
+            Self::RedactionUndoRequiresConfirmation { .. } => {
+                "redaction_undo_requires_confirmation"
+            }
+            Self::RedactionRedoUnsupported { .. } => "redaction_redo_unsupported",
+            Self::ThreadWorktreeUndoUnsafe { .. } => "thread_worktree_undo_unsafe",
+            Self::UndoStateMissing { .. } => "undo_state_missing",
+            Self::RedoStateMissing { .. } => "redo_state_missing",
+        }
+    }
+}
+
+impl std::fmt::Display for UndoApplyPreflightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.kind())
+    }
+}
+
+impl std::error::Error for UndoApplyPreflightError {}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use objects::object::{ChangeId, ContentHash};
     use oplog::OpRecord;
     use tempfile::TempDir;
 
@@ -412,5 +804,126 @@ mod tests {
         assert_eq!(plan.action, UndoHistoryAction::Undo);
         assert_eq!(plan.batches.len(), 1);
         assert_eq!(plan.batch_summaries().len(), 1);
+
+        let apply = plan_undo_apply(plan, true);
+        assert!(apply.preview);
+        assert_eq!(apply.action, UndoHistoryAction::Undo);
+        assert!(apply.message.starts_with("Would undo"));
+        assert!(apply.human_message.starts_with("Would undo"));
+        assert_eq!(apply.batch_count(), 1);
+        assert!(!apply.steps.is_empty());
+    }
+
+    fn batch_with_entries(id: u64, entry_ids: &[u64]) -> OpBatch {
+        OpBatch {
+            id,
+            entries: entry_ids
+                .iter()
+                .map(|&eid| sample_entry(eid, false))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn undo_apply_steps_reverse_entries_within_batch() {
+        let batches = vec![batch_with_entries(1, &[10, 11, 12])];
+        let steps = plan_undo_apply_steps(&batches);
+        assert_eq!(
+            steps.iter().map(|s| s.entry_id).collect::<Vec<_>>(),
+            vec![12, 11, 10]
+        );
+        let redo = plan_redo_apply_steps(&batches);
+        assert_eq!(
+            redo.iter().map(|s| s.entry_id).collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+    }
+
+    #[test]
+    fn redaction_undo_preflight_precedence() {
+        let blob = ContentHash::from_bytes([1u8; 32]);
+        let redaction_id = ContentHash::from_bytes([2u8; 32]);
+        let state = ChangeId::from_bytes([3u8; 16]);
+        let facts = RedactionUndoBatchFacts {
+            purges: vec![PurgeOpRef {
+                op_id: 1,
+                redaction_id,
+            }],
+            redacts: vec![RedactOpRef {
+                op_id: 2,
+                blob,
+                state,
+                path: "secret.txt".into(),
+            }],
+        };
+        // Purge wins even if allow + purged list would also fire.
+        let err = check_redaction_undo_safe(&facts, &[2], true).unwrap_err();
+        assert_eq!(err.kind(), "irreversible_purge_undo");
+
+        let facts_redact_only = RedactionUndoBatchFacts {
+            purges: vec![],
+            redacts: facts.redacts.clone(),
+        };
+        let err = check_redaction_undo_safe(&facts_redact_only, &[2], true).unwrap_err();
+        assert_eq!(err.kind(), "redaction_bytes_purged");
+
+        let err = check_redaction_undo_safe(&facts_redact_only, &[], false).unwrap_err();
+        assert_eq!(err.kind(), "redaction_undo_requires_confirmation");
+
+        assert!(check_redaction_undo_safe(&facts_redact_only, &[], true).is_ok());
+        assert!(check_redaction_undo_safe(&RedactionUndoBatchFacts::default(), &[], false).is_ok());
+    }
+
+    #[test]
+    fn thread_worktree_and_state_reachability_predicates() {
+        assert!(!live_materialized_path_blocks_undo(false));
+        assert!(live_materialized_path_blocks_undo(true));
+
+        assert!(check_thread_worktree_undo_safe(&[]).is_ok());
+        let live = vec![LiveThreadWorktree {
+            op_id: 9,
+            thread_name: "feature/x".into(),
+            path: PathBuf::from("/tmp/wt"),
+        }];
+        let err = check_thread_worktree_undo_safe(&live).unwrap_err();
+        assert_eq!(err.kind(), "thread_worktree_undo_unsafe");
+
+        assert!(check_states_reachable(UndoHistoryAction::Undo, &[]).is_ok());
+        let missing = vec![RequiredStateRef {
+            op_id: 3,
+            state: ChangeId::from_bytes([4u8; 16]),
+        }];
+        assert_eq!(
+            check_states_reachable(UndoHistoryAction::Undo, &missing)
+                .unwrap_err()
+                .kind(),
+            "undo_state_missing"
+        );
+        assert_eq!(
+            check_states_reachable(UndoHistoryAction::Redo, &missing)
+                .unwrap_err()
+                .kind(),
+            "redo_state_missing"
+        );
+    }
+
+    #[test]
+    fn machine_and_human_messages_match_cli_shapes() {
+        assert_eq!(
+            machine_undo_redo_message(UndoHistoryAction::Undo, 1, true),
+            "Would undo 1 batch"
+        );
+        assert_eq!(
+            machine_undo_redo_message(UndoHistoryAction::Undo, 2, false),
+            "Undone 2 batches"
+        );
+        assert_eq!(
+            human_undo_redo_message(UndoHistoryAction::Redo, 1, true),
+            "Would redo 1 saved change"
+        );
+        assert_eq!(
+            human_undo_redo_message(UndoHistoryAction::Redo, 3, false),
+            "Redid 3 saved changes"
+        );
     }
 }
