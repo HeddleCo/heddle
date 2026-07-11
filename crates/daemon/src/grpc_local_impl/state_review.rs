@@ -13,8 +13,8 @@ use ::state_review::{
 };
 use crypto::verify_payload_signature;
 use grpc::heddle::v1::{
-    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest, GetReviewProgressResponse,
-    ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
+    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest,
+    GetReviewProgressResponse, ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
     PathSymbolRef as ProtoPathSymbolRef, ReadingOrderPartition as ProtoReadingOrderPartition,
     RecordCheckAckRequest, RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse,
     ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,

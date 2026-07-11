@@ -4,7 +4,10 @@
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
+use heddle_core::{
+    GitScope, SavePlan, SaveVerb, commit_next_action_from_trust, execute_save, plan_git_scope,
+    tree_leaf_name,
+};
 use objects::{
     object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
@@ -901,7 +904,7 @@ fn import_index_blob(
 }
 
 fn leaf_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+    tree_leaf_name(path)
 }
 
 fn unmerged_git_index_advice(path: &str) -> RecoveryAdvice {
@@ -935,16 +938,11 @@ fn git_path_from_bstring(path: &GitBString) -> String {
 }
 
 fn commit_next_action(trust: &RepositoryVerificationState) -> Option<String> {
-    if !trust.recommended_action.trim().is_empty() {
-        return Some(trust.recommended_action.clone());
-    }
-    if !trust.verified {
-        return Some("heddle verify".to_string());
-    }
-    trust
-        .default_remote
-        .as_ref()
-        .map(|_| "heddle push".to_string())
+    commit_next_action_from_trust(
+        &trust.recommended_action,
+        trust.verified,
+        trust.default_remote.is_some(),
+    )
 }
 
 fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> {

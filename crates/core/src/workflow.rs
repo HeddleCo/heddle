@@ -386,6 +386,37 @@ pub fn integrated_land_next_action(
     }
 }
 
+/// Checkpoint / squash message for land write-through.
+///
+/// Precedence: explicit non-empty message → land subject when preferred →
+/// current intent → task → `Land <thread_id>`.
+pub fn land_checkpoint_message(
+    explicit: Option<&str>,
+    prefer_land_subject: bool,
+    thread_id: &str,
+    intent: Option<&str>,
+    task: Option<&str>,
+) -> String {
+    if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
+        return message.to_string();
+    }
+    if prefer_land_subject {
+        return format!("Land {thread_id}");
+    }
+    if let Some(intent) = intent.filter(|intent| !intent.trim().is_empty()) {
+        return intent.to_string();
+    }
+    if let Some(task) = task.filter(|task| !task.trim().is_empty()) {
+        return task.to_string();
+    }
+    format!("Land {thread_id}")
+}
+
+/// Whether a change id matches a short or full display form from operator text.
+pub fn change_id_matches_display(short: &str, full: &str, display: &str) -> bool {
+    short == display || full == display
+}
+
 #[cfg(test)]
 mod tests {
     use repo::{OperationKind, OperationScope};
@@ -721,5 +752,36 @@ mod tests {
         assert!(should_squash_land(false, true));
         assert!(!should_squash_land(true, true));
         assert!(!should_squash_land(false, false));
+    }
+
+    #[test]
+    fn land_checkpoint_message_precedence() {
+        assert_eq!(
+            land_checkpoint_message(Some("explicit"), false, "t", Some("intent"), Some("task")),
+            "explicit"
+        );
+        assert_eq!(
+            land_checkpoint_message(Some("  "), true, "t", Some("intent"), None),
+            "Land t"
+        );
+        assert_eq!(
+            land_checkpoint_message(None, false, "t", Some("intent"), Some("task")),
+            "intent"
+        );
+        assert_eq!(
+            land_checkpoint_message(None, false, "t", None, Some("task")),
+            "task"
+        );
+        assert_eq!(
+            land_checkpoint_message(None, false, "t", None, None),
+            "Land t"
+        );
+    }
+
+    #[test]
+    fn change_id_matches_short_or_full() {
+        assert!(change_id_matches_display("abc", "abcdef", "abc"));
+        assert!(change_id_matches_display("abc", "abcdef", "abcdef"));
+        assert!(!change_id_matches_display("abc", "abcdef", "zzz"));
     }
 }

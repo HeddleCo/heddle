@@ -9,7 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::status::next_action::canonical_adopt_ref_command;
+use heddle_core::{
+    parse_reflog_line, short_oid, status::next_action::canonical_adopt_ref_command, summarize_paths,
+};
 use objects::object::{
     Agent, ChangeId, State, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
     TimelineToolCallStatus,
@@ -218,6 +220,20 @@ struct ReflogEntry {
     actor: String,
     timestamp: Option<String>,
     message: String,
+}
+
+impl From<heddle_core::ReflogLine> for ReflogEntry {
+    fn from(line: heddle_core::ReflogLine) -> Self {
+        Self {
+            source: line.source,
+            reference: line.reference,
+            old_oid: line.old_oid,
+            new_oid: line.new_oid,
+            actor: line.actor,
+            timestamp: line.timestamp,
+            message: line.message,
+        }
+    }
 }
 
 impl From<&State> for StateEntry {
@@ -678,15 +694,6 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
     }
 }
 
-fn summarize_paths(paths: &[String]) -> String {
-    match paths {
-        [] => String::new(),
-        [one] => one.clone(),
-        [one, two] => format!("{one}, {two}"),
-        [one, two, rest @ ..] => format!("{one}, {two} +{}", rest.len()),
-    }
-}
-
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
@@ -827,38 +834,15 @@ fn read_reflog_file(
 ) -> Result<()> {
     let file = fs::File::open(path)?;
     for line in io::BufReader::new(file).lines() {
-        if let Some(entry) = parse_reflog_line(source, reference, &line?) {
+        if let Some(entry) = parse_reflog_entry(source, reference, &line?) {
             entries.push(entry);
         }
     }
     Ok(())
 }
 
-fn parse_reflog_line(source: &str, reference: &str, line: &str) -> Option<ReflogEntry> {
-    let (metadata, message) = line.split_once('\t').unwrap_or((line, ""));
-    let mut parts = metadata.split_whitespace();
-    let old_oid = parts.next()?.to_string();
-    let new_oid = parts.next()?.to_string();
-    let mut actor_parts = Vec::new();
-    let mut timestamp = None;
-
-    for part in parts {
-        if part.parse::<i64>().is_ok() {
-            timestamp = Some(part.to_string());
-            break;
-        }
-        actor_parts.push(part);
-    }
-
-    Some(ReflogEntry {
-        source: source.to_string(),
-        reference: reference.to_string(),
-        old_oid,
-        new_oid,
-        actor: actor_parts.join(" "),
-        timestamp,
-        message: message.to_string(),
-    })
+fn parse_reflog_entry(source: &str, reference: &str, line: &str) -> Option<ReflogEntry> {
+    parse_reflog_line(source, reference, line).map(ReflogEntry::from)
 }
 
 fn write_reflog_oneline<W: std::io::Write>(
@@ -929,10 +913,6 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
         }
     }
     Ok(())
-}
-
-fn short_oid(oid: &str) -> &str {
-    oid.get(..12).unwrap_or(oid)
 }
 
 fn write_oneline<W: std::io::Write>(

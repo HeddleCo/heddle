@@ -242,6 +242,29 @@ pub fn plan_writes_git_checkpoint(plan: &SavePlan, capability: RepositoryCapabil
     plan.git_scope != GitScope::None && capability == RepositoryCapability::GitOverlay
 }
 
+/// Leaf path component for Git index → Heddle tree entry names.
+pub fn tree_leaf_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// Next-action after a git-projection commit from verification facts only.
+///
+/// Precedence: explicit trust recommendation → verify when untrusted → push
+/// when a default remote is configured.
+pub fn commit_next_action_from_trust(
+    recommended_action: &str,
+    verified: bool,
+    has_default_remote: bool,
+) -> Option<String> {
+    if !recommended_action.trim().is_empty() {
+        return Some(recommended_action.to_string());
+    }
+    if !verified {
+        return Some("heddle verify".to_string());
+    }
+    has_default_remote.then(|| "heddle push".to_string())
+}
+
 /// Execute a save: optional Heddle snapshot + optional Git checkpoint write-through.
 ///
 /// Callers own clap validation (missing message/intent) and plain-Git refusal.
@@ -744,5 +767,24 @@ mod tests {
         assert_eq!(staged.git_scope, GitScope::Staged);
         assert!(!staged.require_clean_worktree);
         assert!(staged.reuse_current_state);
+    }
+
+    #[test]
+    fn tree_leaf_name_and_commit_next_action() {
+        assert_eq!(tree_leaf_name("a/b/c.rs"), "c.rs");
+        assert_eq!(tree_leaf_name("solo"), "solo");
+        assert_eq!(
+            commit_next_action_from_trust("heddle push", false, false).as_deref(),
+            Some("heddle push")
+        );
+        assert_eq!(
+            commit_next_action_from_trust("", false, true).as_deref(),
+            Some("heddle verify")
+        );
+        assert_eq!(
+            commit_next_action_from_trust("", true, true).as_deref(),
+            Some("heddle push")
+        );
+        assert_eq!(commit_next_action_from_trust("", true, false), None);
     }
 }

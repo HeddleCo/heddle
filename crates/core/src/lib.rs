@@ -10,9 +10,11 @@ pub mod contract;
 pub mod diff;
 pub mod fsck;
 pub mod harness_policy;
+pub mod log_plan;
 pub mod merge;
 pub mod query;
 pub mod remote;
+pub mod resolve_plan;
 pub mod save;
 pub mod status;
 pub mod thread;
@@ -83,6 +85,7 @@ pub use harness_policy::{
     detect_harness_kind, fingerprint_harness_from_hints, segment_rotation_policy,
     should_rotate_segment,
 };
+pub use log_plan::{ReflogLine, parse_reflog_line, short_oid, summarize_paths, timeline_label_str};
 pub use merge::{
     GitCommitInfo, GitCommitPreview, MergeAttemptPlan, MergeOptions, MergePlan, MergeRelation,
     MergeRelationKind, MergeReport, OperatorAction as MergeOperatorAction,
@@ -117,22 +120,29 @@ pub use remote::{
     heddle_pull_execution_facts, heddle_pull_execution_facts_from_hosted,
     heddle_pull_execution_facts_from_local, heddle_single_push_execution_facts,
     heddle_single_push_execution_facts_from_hosted, heddle_single_push_execution_facts_from_local,
-    list_plain_git_remotes, list_remotes, local_pull_changed, merged_remote_items,
+    hosted_path_contains_internal_user_namespace, hosted_spool_display_path,
+    list_plain_git_remotes, list_remotes, local_pull_changed, looks_like_git_remote_url,
+    looks_like_remote_location, merged_remote_items, message_indicates_already_exists,
     multi_ref_progress_from_hosted_thread, multi_ref_push_begin, multi_ref_thread_failed,
     multi_ref_thread_succeeded_hosted, multi_ref_thread_succeeded_local, multi_thread_failed_names,
     multi_thread_push_execution_facts, multi_thread_reported_refs,
     named_thread_tip_mismatch_failure, parse_hosted_pull_result, parse_hosted_push_result,
     plain_git_remote_items, plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree,
     pull_should_materialize, pull_status, pull_tip_changed, pull_will_materialize,
-    push_scope_label, push_status, refuse_named_thread_tip_overwrite, remote_advice_kind,
-    remote_missing_blocker, remote_pull_failure, remote_push_failure, resolve_default_remote_name,
-    resolved_default_remote_name, show_plain_git_remote, show_remote, summarize_pull_outcome,
-    summarize_push_outcome, transport_error_message, transport_mismatch_blocker,
-    uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
+    push_scope_label, push_status, redact_internal_hosted_paths, refuse_named_thread_tip_overwrite,
+    remote_advice_kind, remote_missing_blocker, remote_pull_failure, remote_push_failure,
+    remote_urls_match, resolve_default_remote_name, resolved_default_remote_name,
+    show_plain_git_remote, show_remote, summarize_pull_outcome, summarize_push_outcome,
+    transport_error_message, transport_mismatch_blocker, uses_git_overlay_mirror_rpc,
+    uses_local_git_overlay_transport,
+};
+pub use resolve_plan::{
+    ResolveSideSelection, contains_line_start_conflict_markers, path_is_active_conflict,
+    plan_resolve_side, resolve_requires_marker_check, unresolved_conflict_paths,
 };
 pub use save::{
-    GitScope, SavePlan, SaveReport, SaveVerb, execute_save, plan_creates_new_state, plan_git_scope,
-    plan_writes_git_checkpoint,
+    GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust, execute_save,
+    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, tree_leaf_name,
 };
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
@@ -222,11 +232,11 @@ pub use verify::{
 pub use workflow::{
     AUTO_LAND_CONFIDENCE_RECOVERY_ACTION, AUTO_LAND_CONFIDENCE_THRESHOLD, AutoLandPolicyInput,
     LandPushOptions, LandPushPlan, LandPushPlanError, ReadyDecision, ReadyDecisionInput,
-    auto_land_confidence_recovery_action, auto_land_policy_blockers, classify_ready_decision,
-    has_integration_target, integrated_land_next_action, integration_blocker_recommended_action,
-    integration_blockers, is_heavy_impact_advisory, is_integration_clear,
-    land_blockers_for_preview, land_performed_steps, land_skipped_steps, land_warnings_for_preview,
-    non_staleness_blockers, plan_land_push, ready_report_recommended_action,
-    ready_scoped_next_action, ready_verification_preflight_blocks,
+    auto_land_confidence_recovery_action, auto_land_policy_blockers, change_id_matches_display,
+    classify_ready_decision, has_integration_target, integrated_land_next_action,
+    integration_blocker_recommended_action, integration_blockers, is_heavy_impact_advisory,
+    is_integration_clear, land_blockers_for_preview, land_checkpoint_message, land_performed_steps,
+    land_skipped_steps, land_warnings_for_preview, non_staleness_blockers, plan_land_push,
+    ready_report_recommended_action, ready_scoped_next_action, ready_verification_preflight_blocks,
     ready_verification_status_blocks, recovery_scope_checkout, should_squash_land,
 };

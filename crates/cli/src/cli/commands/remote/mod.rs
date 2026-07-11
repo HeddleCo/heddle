@@ -12,16 +12,18 @@ use heddle_core::{
     first_multi_thread_push_failure, format_mirror_failure_text, format_mirror_success_text,
     format_multi_ref_push_progress, format_push_outcome_text, format_pushing_to,
     git_overlay_push_execution_facts, heddle_single_push_execution_facts_from_local,
-    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
-    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
-    refuse_named_thread_tip_overwrite, transport_error_message, uses_local_git_overlay_transport,
+    looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
+    multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
+    named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
+    remote_urls_match, transport_error_message, uses_local_git_overlay_transport,
 };
 #[cfg(feature = "client")]
 use heddle_core::{
     HostedPushPlan, HostedPushResult, HostedPushResultFields, all_threads_mirror_coverage_note,
     format_connected_to, format_remote_state_detail, heddle_single_push_execution_facts,
+    hosted_spool_display_path, message_indicates_already_exists,
     multi_ref_progress_from_hosted_thread, parse_hosted_push_result, plan_hosted_push,
-    remote_push_failure, uses_git_overlay_mirror_rpc,
+    redact_internal_hosted_paths, remote_push_failure, uses_git_overlay_mirror_rpc,
 };
 use objects::object::ThreadName;
 use refs::Head;
@@ -855,16 +857,6 @@ pub(super) fn is_local_git_repository(path: &Path) -> bool {
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
-fn looks_like_git_remote_url(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("ssh://")
-        || lower.starts_with("git://")
-        || lower.ends_with(".git")
-        || (value.contains('@') && value.contains(':'))
-}
-
 fn refresh_git_tracking_after_overlay_push(
     repo: &Repository,
     remote_name: &str,
@@ -1075,26 +1067,6 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
     git.apply_config_edit_plan(plan)
         .map_err(anyhow::Error::new)?;
     Ok(())
-}
-
-fn remote_urls_match(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let left_path = Path::new(left);
-    let right_path = Path::new(right);
-    match (left_path.canonicalize(), right_path.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn looks_like_remote_location(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.contains("://")
-        || value.contains('\\')
 }
 
 /// Resolve the state a `push` should upload for a single-thread push
@@ -1675,7 +1647,7 @@ async fn auto_provision_hosted_repo(
 
     if !should_output_json(options.cli, Some(repo.config())) {
         let display_full_path =
-            hosted_spool_display_path(&namespace, &slug, provisioned_repo.full_path());
+            hosted_spool_display_path(&namespace.slug, &slug, provisioned_repo.full_path());
         println!(
             "{} {} hosted spool {}",
             style::ok_marker(),
@@ -1743,11 +1715,6 @@ fn auto_provision_create_already_exists(err: &ProtocolError) -> bool {
 }
 
 #[cfg(feature = "client")]
-fn message_indicates_already_exists(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("already exists")
-}
-
-#[cfg(feature = "client")]
 fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> String {
     let error = match err {
         ProtocolError::Remote(_) | ProtocolError::LockError(_) => err.client_message(),
@@ -1756,39 +1723,6 @@ fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> Strin
     format!(
         "could not create hosted spool '{slug}': {error}. Pass a full hosted remote path or choose another local folder name"
     )
-}
-
-#[cfg(feature = "client")]
-fn hosted_spool_display_path(
-    namespace: &wire::HostedNamespaceInfo,
-    slug: &str,
-    full_path: &str,
-) -> String {
-    if hosted_path_contains_internal_user_namespace(full_path) && !namespace.slug.is_empty() {
-        format!("{}/{}", namespace.slug, slug)
-    } else {
-        full_path.to_string()
-    }
-}
-
-#[cfg(feature = "client")]
-fn redact_internal_hosted_paths(message: &str) -> String {
-    message
-        .split_whitespace()
-        .map(|part| {
-            if hosted_path_contains_internal_user_namespace(part) {
-                "[user namespace]"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(feature = "client")]
-fn hosted_path_contains_internal_user_namespace(value: &str) -> bool {
-    value.contains("__users/")
 }
 
 #[cfg(feature = "client")]
@@ -1992,7 +1926,7 @@ mod git_overlay_config_atomic_tests {
         };
 
         assert_eq!(
-            hosted_spool_display_path(&namespace, "demo-repo", "__users/user-1/demo-repo"),
+            hosted_spool_display_path(&namespace.slug, "demo-repo", "__users/user-1/demo-repo"),
             "alice/demo-repo"
         );
 

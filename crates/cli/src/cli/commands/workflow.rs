@@ -5,10 +5,12 @@ use anyhow::{Context, Result, anyhow};
 use heddle_core::{
     AutoLandPolicyInput, LandPushOptions, LandPushPlanError,
     auto_land_policy_blockers as core_auto_land_policy_blockers,
+    change_id_matches_display as core_change_id_matches_display,
     integrated_land_next_action as core_integrated_land_next_action,
     integration_blocker_recommended_action as core_integration_blocker_recommended_action,
     integration_blockers as core_integration_blockers,
     land_blockers_for_preview as core_land_blockers_for_preview,
+    land_checkpoint_message as core_land_checkpoint_message,
     land_performed_steps as core_land_performed_steps,
     land_skipped_steps as core_land_skipped_steps,
     land_warnings_for_preview as core_land_warnings_for_preview,
@@ -1126,30 +1128,19 @@ fn land_checkpoint_message(
     explicit: Option<&str>,
     prefer_land_subject: bool,
 ) -> String {
-    if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
-        return message.to_string();
-    }
-    if prefer_land_subject {
-        return format!("Land {}", thread.id);
-    }
-    if let Some(intent) = thread
+    let intent = thread
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
         .and_then(|state_id| repo.store().get_state(&state_id).ok().flatten())
-        .and_then(|state| state.intent)
-        .filter(|intent| !intent.trim().is_empty())
-    {
-        return intent;
-    }
-    if let Some(task) = thread
-        .task
-        .as_deref()
-        .filter(|task| !task.trim().is_empty())
-    {
-        return task.to_string();
-    }
-    format!("Land {}", thread.id)
+        .and_then(|state| state.intent);
+    core_land_checkpoint_message(
+        explicit,
+        prefer_land_subject,
+        &thread.id,
+        intent.as_deref(),
+        thread.task.as_deref(),
+    )
 }
 
 fn resolve_thread(
@@ -1324,7 +1315,7 @@ fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
 }
 
 fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {
-    id.short() == display || id.to_string_full() == display
+    core_change_id_matches_display(&id.short(), &id.to_string_full(), display)
 }
 
 fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {

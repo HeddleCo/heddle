@@ -2151,6 +2151,84 @@ fn is_local_git_repository(path: &Path) -> bool {
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
+// ---------------------------------------------------------------------------
+// Pure remote URL / location / hosted-path helpers (no network)
+// ---------------------------------------------------------------------------
+
+/// Whether a string looks like a Git remote URL rather than a Heddle remote name.
+pub fn looks_like_git_remote_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("git://")
+        || lower.ends_with(".git")
+        || (value.contains('@') && value.contains(':'))
+}
+
+/// Whether a remote arg looks like a path/URL location (not a short remote name).
+///
+/// Includes `~/` so home-relative local remotes classify as locations.
+pub fn looks_like_remote_location(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+        || value.contains("://")
+        || value.contains('\\')
+}
+
+/// Compare remote URLs, allowing local path canonicalization when both exist.
+pub fn remote_urls_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left_path = Path::new(left);
+    let right_path = Path::new(right);
+    match (left_path.canonicalize(), right_path.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Hosted error text that indicates the spool/repo already exists.
+pub fn message_indicates_already_exists(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("already exists")
+}
+
+/// Internal user-namespace segment that must not leak into operator text.
+pub fn hosted_path_contains_internal_user_namespace(value: &str) -> bool {
+    value.contains("__users/")
+}
+
+/// Redact internal `__users/` path segments from free-form hosted errors.
+pub fn redact_internal_hosted_paths(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|part| {
+            if hosted_path_contains_internal_user_namespace(part) {
+                "[user namespace]"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Prefer `namespace_slug/spool` when the full path leaks an internal user ns.
+pub fn hosted_spool_display_path(
+    namespace_slug: &str,
+    spool_slug: &str,
+    full_path: &str,
+) -> String {
+    if hosted_path_contains_internal_user_namespace(full_path) && !namespace_slug.is_empty() {
+        format!("{namespace_slug}/{spool_slug}")
+    } else {
+        full_path.to_string()
+    }
+}
+
 /// Error when a remote write would touch config outside the repo Git tree.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("Remote '{name}' is defined in an included Git config that heddle won't edit: {path}")]
@@ -3622,5 +3700,34 @@ mod tests {
         assert!(!pull_should_materialize(true, true));
         assert!(!pull_should_materialize(false, false));
         assert!(!pull_should_materialize(false, true));
+    }
+
+    #[test]
+    fn pure_remote_url_and_hosted_path_helpers() {
+        assert!(looks_like_git_remote_url("https://example.com/r.git"));
+        assert!(looks_like_git_remote_url("git@github.com:org/r.git"));
+        assert!(!looks_like_git_remote_url("origin"));
+        assert!(looks_like_remote_location("/tmp/repo"));
+        assert!(looks_like_remote_location("~/src/repo"));
+        assert!(looks_like_remote_location("ssh://host/path"));
+        assert!(!looks_like_remote_location("origin"));
+        assert!(remote_urls_match("same", "same"));
+        assert!(message_indicates_already_exists("Spool already exists"));
+        assert!(!message_indicates_already_exists("not found"));
+        assert!(hosted_path_contains_internal_user_namespace(
+            "__users/abc/spool"
+        ));
+        assert_eq!(
+            redact_internal_hosted_paths("fail __users/u1/x more"),
+            "fail [user namespace] more"
+        );
+        assert_eq!(
+            hosted_spool_display_path("ns", "slug", "__users/u/ns/slug"),
+            "ns/slug"
+        );
+        assert_eq!(
+            hosted_spool_display_path("ns", "slug", "ns/slug"),
+            "ns/slug"
+        );
     }
 }
