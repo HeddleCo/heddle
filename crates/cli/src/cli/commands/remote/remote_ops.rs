@@ -9,9 +9,8 @@ use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use heddle_core::{
-    GitConfigContext, RemoteInfo, RemoteListReport, default_pull_thread_name,
-    list_plain_git_remotes, list_remotes, merged_remote_items, show_plain_git_remote, show_remote,
-    uses_local_git_overlay_transport,
+    GitConfigContext, PullPlanRequest, RemoteInfo, RemoteListReport, list_plain_git_remotes,
+    list_remotes, merged_remote_items, plan_pull, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
@@ -182,6 +181,9 @@ fn pull_status(changed: bool) -> &'static str {
 }
 
 /// Execute pull command.
+///
+/// Pure orchestration (`plan_pull`) runs first; network / git I/O bodies stay
+/// here and consume plan fields (thread targets, clean-worktree policy, path).
 pub async fn cmd_pull(
     cli: &Cli,
     remote: Option<String>,
@@ -191,19 +193,36 @@ pub async fn cmd_pull(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
-        return Err(anyhow::anyhow!(RecoveryAdvice::remote_not_configured(
-            "pull"
-        )));
-    }
+    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
     let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
-    if uses_local_git_overlay_transport(
-        repo.capability(),
-        repo.hosted_enabled(),
-        pull_uses_hosted_network,
-    ) {
-        ensure_worktree_clean(&repo, "pull")?;
-        let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
+    // Match preflight_native_remote_transport: overlay capability never
+    // treats a git URL as a native-transport mismatch.
+    let transport_mismatch = repo.capability() != RepositoryCapability::GitOverlay
+        && matches!(
+            super::classify_remote_spec(&repo, remote.as_deref()),
+            Some(super::RemoteTransportKind::LocalGit | super::RemoteTransportKind::GitUrl)
+        );
+    let head = repo.head_ref()?;
+    let plan = plan_pull(&PullPlanRequest {
+        capability: repo.capability(),
+        hosted_enabled: repo.hosted_enabled(),
+        uses_hosted_network: pull_uses_hosted_network,
+        remote: remote.clone(),
+        has_default_remote,
+        thread: thread.clone(),
+        local_thread: local_thread.clone(),
+        head,
+        transport_mismatch,
+        lazy,
+    })
+    .map_err(|blocker| super::map_remote_preflight_blocker(blocker, "pull", remote.as_deref()))?;
+
+    if plan.uses_local_git_overlay {
+        // Dirty-worktree policy from plan; enforcement stays CLI-owned.
+        if plan.requires_clean_worktree {
+            ensure_worktree_clean(&repo, "pull")?;
+        }
+        let remote_name = resolve_default_remote_name(&repo, plan.remote.as_deref())?;
         let branch = repo.git_overlay_current_branch()?;
         let old_git_head = git_checkout_head_oid(repo.root());
         let old_state = repo.head()?;
@@ -289,30 +308,33 @@ pub async fn cmd_pull(
         return Ok(());
     }
 
-    super::preflight_native_remote_transport(&repo, remote.as_deref(), "pull")?;
+    // Transport mismatch already refused by plan_pull.
 
     let user_config = UserConfig::load_default()?;
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
-    let (target, server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
+    let (target, server_key) = resolve_remote_with_key(&repo, plan.remote.as_deref())?;
     #[cfg(not(feature = "client"))]
-    let (target, _server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
+    let (target, _server_key) = resolve_remote_with_key(&repo, plan.remote.as_deref())?;
 
-    let head_ref = repo.head_ref()?;
-    let remote_thread = default_pull_thread_name(thread.as_deref(), repo.capability(), &head_ref);
-    let local_thread_name = local_thread.as_deref();
-    let should_materialize = match &head_ref {
-        Head::Attached { thread } => local_thread_name.is_none_or(|local| thread == local),
-        Head::Detached { .. } => local_thread_name.is_none(),
-    };
-    if should_materialize {
+    let remote_thread = plan.remote_thread.as_str();
+    let local_thread_name = plan.local_thread.as_deref();
+    if plan.requires_clean_worktree {
         ensure_worktree_clean(&repo, "pull")?;
     }
 
     match target {
         RemoteTarget::Local(path) => {
-            pull_local(&repo, &path, &remote_thread, local_thread_name, cli, lazy).await?;
+            pull_local(
+                &repo,
+                &path,
+                remote_thread,
+                local_thread_name,
+                cli,
+                plan.lazy,
+            )
+            .await?;
         }
         RemoteTarget::Network { addr, repo_path } => {
             #[cfg(feature = "client")]
@@ -323,11 +345,11 @@ pub async fn cmd_pull(
                     repo_path: repo_path.as_deref(),
                     user_config: &user_config,
                     server_key,
-                    remote_thread: &remote_thread,
+                    remote_thread,
                     local_thread: local_thread_name,
-                    lazy,
+                    lazy: plan.lazy,
                     insecure: insecure
-                        || cli_shared::remote_allows_insecure(&repo, remote.as_deref()),
+                        || cli_shared::remote_allows_insecure(&repo, plan.remote.as_deref()),
                     cli,
                 },
             )

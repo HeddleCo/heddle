@@ -285,6 +285,327 @@ pub fn git_overlay_current_thread_push_ok(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Push / pull orchestration plans (pure; no network I/O)
+// ---------------------------------------------------------------------------
+
+/// Pure preflight refusals for push/pull orchestration.
+///
+/// Derived only from caller-supplied facts (flags, HEAD attachment, transport
+/// classification). CLI maps these to recovery advice / user-facing errors;
+/// dirty-worktree enforcement still runs via CLI `ensure_worktree_clean` when
+/// the plan's `requires_clean_worktree` policy is true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemotePreflightBlocker {
+    /// No remote argument and no configured default remote.
+    MissingRemote,
+    /// Native heddle repo targeting a Git URL or local Git remote.
+    TransportMismatch,
+    /// Git-overlay current-thread refs push requested a non-attached thread.
+    GitOverlayThreadMismatch {
+        requested: String,
+        attached: Option<String>,
+    },
+}
+
+impl std::fmt::Display for RemotePreflightBlocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRemote => write!(f, "no remote configured"),
+            Self::TransportMismatch => {
+                write!(f, "remote transport does not match repository capability")
+            }
+            Self::GitOverlayThreadMismatch {
+                requested,
+                attached,
+            } => {
+                let attached_label = attached
+                    .as_deref()
+                    .map(|t| format!("'{t}'"))
+                    .unwrap_or_else(|| "detached HEAD".to_string());
+                write!(
+                    f,
+                    "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RemotePreflightBlocker {}
+
+/// Caller-supplied facts for pure push planning (no repository I/O here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushPlanRequest {
+    pub capability: RepositoryCapability,
+    pub hosted_enabled: bool,
+    /// True when the resolved remote is a hosted heddle network endpoint.
+    pub uses_hosted_network: bool,
+    /// Explicit remote name/spec from the user; `None` means default.
+    pub remote: Option<String>,
+    /// Whether a configured default remote exists (when `remote` is `None`).
+    pub has_default_remote: bool,
+    /// Explicit thread from the user (`--thread` / positional).
+    pub thread: Option<String>,
+    pub all_threads: bool,
+    pub force: bool,
+    /// HEAD for default thread selection.
+    pub head: Head,
+    /// CLI-discovered: under local git-overlay transport, the remote is a
+    /// native heddle local path (local-sync path rather than refs push).
+    pub native_local_heddle_target: bool,
+    /// Native capability + git remote classification (CLI `classify_remote_spec`).
+    pub transport_mismatch: bool,
+}
+
+/// Execution path selected by [`plan_push`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushPath {
+    /// Local git-overlay refs push (`GitProjection` / current or all threads).
+    LocalGitOverlayRefs { all_threads: bool },
+    /// Local native heddle push to a path remote (under overlay eligibility).
+    LocalNativeHeddle { all_threads: bool },
+    /// Native heddle remote transport after `resolve_remote` (local path or network).
+    NativeRemote {
+        hosted: HostedPushPlan,
+        /// Network single-thread path uses git-overlay mirror RPC.
+        uses_mirror_rpc: bool,
+        /// `--all-threads` should fan out per thread (native #838), not collapse
+        /// to a single mirror ship.
+        native_all_threads_fanout: bool,
+    },
+}
+
+/// Pure push orchestration plan. CLI resolves remotes/state then executes I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushPlan {
+    /// Remote name resolution input (explicit or default still unresolved).
+    pub remote: Option<String>,
+    pub all_threads: bool,
+    pub force: bool,
+    /// Resolved track/thread name for single-thread pushes.
+    pub track_name: String,
+    /// True when taking the local git-overlay transport gate
+    /// ([`uses_local_git_overlay_transport`]).
+    pub uses_local_git_overlay: bool,
+    /// Hosted strategy composed from capability + `--all-threads`.
+    pub hosted: HostedPushPlan,
+    /// Whether a network push should use the git-overlay mirror RPC.
+    pub uses_git_overlay_mirror_rpc: bool,
+    /// Convenience: native per-thread fan-out for `--all-threads`.
+    pub native_all_threads_fanout: bool,
+    pub path: PushPath,
+}
+
+/// Caller-supplied facts for pure pull planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullPlanRequest {
+    pub capability: RepositoryCapability,
+    pub hosted_enabled: bool,
+    pub uses_hosted_network: bool,
+    pub remote: Option<String>,
+    pub has_default_remote: bool,
+    /// Explicit remote thread to pull.
+    pub thread: Option<String>,
+    /// Optional local destination thread (`--local-thread`).
+    pub local_thread: Option<String>,
+    pub head: Head,
+    pub transport_mismatch: bool,
+    pub lazy: bool,
+}
+
+/// Pure pull orchestration plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullPlan {
+    /// Remote name resolution input (explicit or default still unresolved).
+    pub remote: Option<String>,
+    /// Remote thread to fetch.
+    pub remote_thread: String,
+    /// Optional local destination thread name.
+    pub local_thread: Option<String>,
+    /// True when taking the local git-overlay pull path.
+    pub uses_local_git_overlay: bool,
+    /// Whether materialization would rewrite the current checkout.
+    pub will_materialize: bool,
+    /// Dirty-worktree policy: caller must refuse dirty trees when true.
+    pub requires_clean_worktree: bool,
+    pub lazy: bool,
+}
+
+/// Pure: missing remote when the user omitted it and no default is configured.
+pub fn remote_missing_blocker(
+    remote: Option<&str>,
+    has_default_remote: bool,
+) -> Option<RemotePreflightBlocker> {
+    if remote.is_none() && !has_default_remote {
+        Some(RemotePreflightBlocker::MissingRemote)
+    } else {
+        None
+    }
+}
+
+/// Pure: native-repo git-transport mismatch, only when not on local overlay path.
+pub fn transport_mismatch_blocker(
+    uses_local_git_overlay: bool,
+    transport_mismatch: bool,
+) -> Option<RemotePreflightBlocker> {
+    if !uses_local_git_overlay && transport_mismatch {
+        Some(RemotePreflightBlocker::TransportMismatch)
+    } else {
+        None
+    }
+}
+
+/// Pure: git-overlay refs push refuses a non-attached explicit thread.
+pub fn git_overlay_thread_mismatch_blocker(
+    all_threads: bool,
+    requested: Option<&str>,
+    attached: Option<&str>,
+) -> Option<RemotePreflightBlocker> {
+    if git_overlay_current_thread_push_ok(all_threads, requested, attached) {
+        None
+    } else {
+        Some(RemotePreflightBlocker::GitOverlayThreadMismatch {
+            requested: requested.unwrap_or("").to_string(),
+            attached: attached.map(str::to_string),
+        })
+    }
+}
+
+/// Whether a pull would materialize into the current checkout.
+///
+/// Matches CLI: materialize when no `--local-thread` or when it equals the
+/// attached HEAD thread (detached HEAD materializes only with no local override).
+pub fn pull_will_materialize(local_thread: Option<&str>, head: &Head) -> bool {
+    match head {
+        Head::Attached { thread } => local_thread.is_none_or(|local| thread == local),
+        Head::Detached { .. } => local_thread.is_none(),
+    }
+}
+
+/// Dirty-worktree policy for pull: clean required on local git-overlay path or
+/// when the pull will materialize the current checkout.
+pub fn pull_requires_clean_worktree(uses_local_git_overlay: bool, will_materialize: bool) -> bool {
+    uses_local_git_overlay || will_materialize
+}
+
+/// Plan a push from pure inputs. Composes existing routing helpers.
+pub fn plan_push(request: &PushPlanRequest) -> Result<PushPlan, RemotePreflightBlocker> {
+    if let Some(blocker) =
+        remote_missing_blocker(request.remote.as_deref(), request.has_default_remote)
+    {
+        return Err(blocker);
+    }
+
+    let uses_local = uses_local_git_overlay_transport(
+        request.capability,
+        request.hosted_enabled,
+        request.uses_hosted_network,
+    );
+    let track_name = default_push_thread_name(request.thread.as_deref(), &request.head);
+    let hosted = plan_hosted_push(request.capability, request.all_threads);
+    let uses_mirror = uses_git_overlay_mirror_rpc(request.capability);
+    let native_fanout = matches!(hosted, HostedPushPlan::NativePerThreadFanout);
+
+    if uses_local {
+        if request.native_local_heddle_target {
+            return Ok(PushPlan {
+                remote: request.remote.clone(),
+                all_threads: request.all_threads,
+                force: request.force,
+                track_name,
+                uses_local_git_overlay: true,
+                hosted,
+                uses_git_overlay_mirror_rpc: uses_mirror,
+                native_all_threads_fanout: native_fanout,
+                path: PushPath::LocalNativeHeddle {
+                    all_threads: request.all_threads,
+                },
+            });
+        }
+
+        let attached = match &request.head {
+            Head::Attached { thread } => Some(thread.as_str()),
+            Head::Detached { .. } => None,
+        };
+        if let Some(blocker) = git_overlay_thread_mismatch_blocker(
+            request.all_threads,
+            request.thread.as_deref(),
+            attached,
+        ) {
+            return Err(blocker);
+        }
+
+        return Ok(PushPlan {
+            remote: request.remote.clone(),
+            all_threads: request.all_threads,
+            force: request.force,
+            track_name,
+            uses_local_git_overlay: true,
+            hosted,
+            uses_git_overlay_mirror_rpc: uses_mirror,
+            native_all_threads_fanout: native_fanout,
+            path: PushPath::LocalGitOverlayRefs {
+                all_threads: request.all_threads,
+            },
+        });
+    }
+
+    if let Some(blocker) = transport_mismatch_blocker(false, request.transport_mismatch) {
+        return Err(blocker);
+    }
+
+    Ok(PushPlan {
+        remote: request.remote.clone(),
+        all_threads: request.all_threads,
+        force: request.force,
+        track_name,
+        uses_local_git_overlay: false,
+        hosted,
+        uses_git_overlay_mirror_rpc: uses_mirror,
+        native_all_threads_fanout: native_fanout,
+        path: PushPath::NativeRemote {
+            hosted,
+            uses_mirror_rpc: uses_mirror,
+            native_all_threads_fanout: native_fanout,
+        },
+    })
+}
+
+/// Plan a pull from pure inputs. Composes transport + thread + dirty policy.
+pub fn plan_pull(request: &PullPlanRequest) -> Result<PullPlan, RemotePreflightBlocker> {
+    if let Some(blocker) =
+        remote_missing_blocker(request.remote.as_deref(), request.has_default_remote)
+    {
+        return Err(blocker);
+    }
+
+    let uses_local = uses_local_git_overlay_transport(
+        request.capability,
+        request.hosted_enabled,
+        request.uses_hosted_network,
+    );
+
+    if let Some(blocker) = transport_mismatch_blocker(uses_local, request.transport_mismatch) {
+        return Err(blocker);
+    }
+
+    let remote_thread =
+        default_pull_thread_name(request.thread.as_deref(), request.capability, &request.head);
+    let will_materialize = pull_will_materialize(request.local_thread.as_deref(), &request.head);
+    let requires_clean = pull_requires_clean_worktree(uses_local, will_materialize);
+
+    Ok(PullPlan {
+        remote: request.remote.clone(),
+        remote_thread,
+        local_thread: request.local_thread.clone(),
+        uses_local_git_overlay: uses_local,
+        will_materialize,
+        requires_clean_worktree: requires_clean,
+        lazy: request.lazy,
+    })
+}
+
 /// Merged remote map: name → (url, source label).
 ///
 /// Heddle remotes from `.heddle/remotes.toml` win; git-overlay entries fill
@@ -939,5 +1260,311 @@ mod tests {
             Some("feature"),
             Some("main")
         ));
+    }
+
+    // --- Push / pull orchestration plan selection tables ---
+
+    fn attached_head(name: &str) -> Head {
+        Head::Attached {
+            thread: objects::object::ThreadName::new(name),
+        }
+    }
+
+    fn detached_head() -> Head {
+        Head::Detached {
+            state: objects::object::ChangeId::generate(),
+        }
+    }
+
+    fn base_push_request() -> PushPlanRequest {
+        PushPlanRequest {
+            capability: RepositoryCapability::NativeHeddle,
+            hosted_enabled: false,
+            uses_hosted_network: false,
+            remote: Some("origin".to_string()),
+            has_default_remote: true,
+            thread: None,
+            all_threads: false,
+            force: false,
+            head: attached_head("main"),
+            native_local_heddle_target: false,
+            transport_mismatch: false,
+        }
+    }
+
+    fn base_pull_request() -> PullPlanRequest {
+        PullPlanRequest {
+            capability: RepositoryCapability::NativeHeddle,
+            hosted_enabled: false,
+            uses_hosted_network: false,
+            remote: Some("origin".to_string()),
+            has_default_remote: true,
+            thread: None,
+            local_thread: None,
+            head: attached_head("main"),
+            transport_mismatch: false,
+            lazy: false,
+        }
+    }
+
+    #[test]
+    fn remote_missing_blocker_table() {
+        assert_eq!(
+            remote_missing_blocker(None, false),
+            Some(RemotePreflightBlocker::MissingRemote)
+        );
+        assert_eq!(remote_missing_blocker(None, true), None);
+        assert_eq!(remote_missing_blocker(Some("origin"), false), None);
+        assert_eq!(remote_missing_blocker(Some("origin"), true), None);
+    }
+
+    #[test]
+    fn transport_mismatch_blocker_table() {
+        assert_eq!(
+            transport_mismatch_blocker(false, true),
+            Some(RemotePreflightBlocker::TransportMismatch)
+        );
+        assert_eq!(transport_mismatch_blocker(true, true), None);
+        assert_eq!(transport_mismatch_blocker(false, false), None);
+        assert_eq!(transport_mismatch_blocker(true, false), None);
+    }
+
+    #[test]
+    fn pull_clean_worktree_policy_table() {
+        // (uses_local_overlay, will_materialize) → requires_clean
+        let cases = [
+            (true, true, true),
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ];
+        for (overlay, materialize, expected) in cases {
+            assert_eq!(
+                pull_requires_clean_worktree(overlay, materialize),
+                expected,
+                "overlay={overlay} materialize={materialize}"
+            );
+        }
+    }
+
+    #[test]
+    fn pull_will_materialize_table() {
+        let attached = attached_head("feature");
+        let detached = detached_head();
+        assert!(pull_will_materialize(None, &attached));
+        assert!(pull_will_materialize(Some("feature"), &attached));
+        assert!(!pull_will_materialize(Some("other"), &attached));
+        assert!(pull_will_materialize(None, &detached));
+        assert!(!pull_will_materialize(Some("feature"), &detached));
+    }
+
+    #[test]
+    fn plan_push_missing_remote() {
+        let mut req = base_push_request();
+        req.remote = None;
+        req.has_default_remote = false;
+        assert_eq!(plan_push(&req), Err(RemotePreflightBlocker::MissingRemote));
+    }
+
+    #[test]
+    fn plan_push_transport_mismatch_on_native_path() {
+        let mut req = base_push_request();
+        req.transport_mismatch = true;
+        assert_eq!(
+            plan_push(&req),
+            Err(RemotePreflightBlocker::TransportMismatch)
+        );
+    }
+
+    #[test]
+    fn plan_push_ignores_transport_mismatch_on_local_overlay() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.transport_mismatch = true;
+        let plan = plan_push(&req).expect("overlay path skips mismatch");
+        assert!(plan.uses_local_git_overlay);
+        assert!(matches!(plan.path, PushPath::LocalGitOverlayRefs { .. }));
+    }
+
+    #[test]
+    fn plan_push_git_overlay_thread_mismatch() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.thread = Some("feature".to_string());
+        req.head = attached_head("main");
+        assert_eq!(
+            plan_push(&req),
+            Err(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                requested: "feature".to_string(),
+                attached: Some("main".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn plan_push_native_local_heddle_skips_thread_mismatch() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.thread = Some("feature".to_string());
+        req.head = attached_head("main");
+        req.native_local_heddle_target = true;
+        let plan = plan_push(&req).expect("native local skips overlay thread gate");
+        assert!(matches!(
+            plan.path,
+            PushPath::LocalNativeHeddle { all_threads: false }
+        ));
+        assert_eq!(plan.track_name, "feature");
+    }
+
+    #[test]
+    fn plan_push_hosted_and_fanout_selection_table() {
+        // (capability, all_threads) → path fields
+        let cases = [
+            (
+                RepositoryCapability::NativeHeddle,
+                true,
+                HostedPushPlan::NativePerThreadFanout,
+                true,
+                false,
+            ),
+            (
+                RepositoryCapability::GitOverlay,
+                true,
+                HostedPushPlan::GitOverlayMirror,
+                false,
+                true,
+            ),
+            (
+                RepositoryCapability::GitOverlay,
+                false,
+                HostedPushPlan::GitOverlayMirror,
+                false,
+                true,
+            ),
+            (
+                RepositoryCapability::NativeHeddle,
+                false,
+                HostedPushPlan::NativeSingleThread,
+                false,
+                false,
+            ),
+        ];
+        for (capability, all_threads, hosted, fanout, mirror) in cases {
+            let mut req = base_push_request();
+            req.capability = capability;
+            req.all_threads = all_threads;
+            // Force native remote path (hosted network disables local overlay).
+            req.uses_hosted_network = capability == RepositoryCapability::GitOverlay;
+            req.hosted_enabled = capability == RepositoryCapability::GitOverlay;
+            let plan = plan_push(&req).expect("plan");
+            assert_eq!(plan.hosted, hosted, "capability={capability:?}");
+            assert_eq!(plan.native_all_threads_fanout, fanout);
+            assert_eq!(plan.uses_git_overlay_mirror_rpc, mirror);
+            assert!(matches!(
+                plan.path,
+                PushPath::NativeRemote {
+                    hosted: h,
+                    uses_mirror_rpc: m,
+                    native_all_threads_fanout: f,
+                } if h == hosted && m == mirror && f == fanout
+            ));
+        }
+    }
+
+    #[test]
+    fn plan_push_local_overlay_refs_path() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.all_threads = true;
+        let plan = plan_push(&req).unwrap();
+        assert!(plan.uses_local_git_overlay);
+        assert_eq!(
+            plan.path,
+            PushPath::LocalGitOverlayRefs { all_threads: true }
+        );
+        assert_eq!(plan.track_name, "main");
+    }
+
+    #[test]
+    fn plan_push_track_name_from_head() {
+        let mut req = base_push_request();
+        req.remote = Some("origin".into());
+        req.head = attached_head("feature");
+        let plan = plan_push(&req).unwrap();
+        assert_eq!(plan.track_name, "feature");
+
+        req.thread = Some("release".into());
+        let plan = plan_push(&req).unwrap();
+        assert_eq!(plan.track_name, "release");
+    }
+
+    #[test]
+    fn plan_pull_missing_remote() {
+        let mut req = base_pull_request();
+        req.remote = None;
+        req.has_default_remote = false;
+        assert_eq!(plan_pull(&req), Err(RemotePreflightBlocker::MissingRemote));
+    }
+
+    #[test]
+    fn plan_pull_transport_mismatch() {
+        let mut req = base_pull_request();
+        req.transport_mismatch = true;
+        assert_eq!(
+            plan_pull(&req),
+            Err(RemotePreflightBlocker::TransportMismatch)
+        );
+    }
+
+    #[test]
+    fn plan_pull_local_overlay_requires_clean() {
+        let mut req = base_pull_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.local_thread = Some("other".into());
+        let plan = plan_pull(&req).unwrap();
+        assert!(plan.uses_local_git_overlay);
+        // will_materialize is false (local_thread != attached), but overlay still requires clean
+        assert!(!plan.will_materialize);
+        assert!(plan.requires_clean_worktree);
+        assert_eq!(plan.remote_thread, "main");
+    }
+
+    #[test]
+    fn plan_pull_native_materialize_policy() {
+        let mut req = base_pull_request();
+        req.head = attached_head("feature");
+        // no explicit thread → native default remote_thread is "main"
+        let plan = plan_pull(&req).unwrap();
+        assert!(!plan.uses_local_git_overlay);
+        assert!(plan.will_materialize);
+        assert!(plan.requires_clean_worktree);
+        assert_eq!(plan.remote_thread, "main");
+
+        req.local_thread = Some("scratch".into());
+        let plan = plan_pull(&req).unwrap();
+        assert!(!plan.will_materialize);
+        assert!(!plan.requires_clean_worktree);
+    }
+
+    #[test]
+    fn plan_pull_thread_defaults_table() {
+        let attached = attached_head("master");
+        // git-overlay uses attached HEAD
+        let mut req = base_pull_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.head = attached.clone();
+        let plan = plan_pull(&req).unwrap();
+        assert_eq!(plan.remote_thread, "master");
+
+        req.thread = Some("release".into());
+        let plan = plan_pull(&req).unwrap();
+        assert_eq!(plan.remote_thread, "release");
+
+        // native keeps historical main default
+        req.capability = RepositoryCapability::NativeHeddle;
+        req.thread = None;
+        req.head = attached_head("feature");
+        let plan = plan_pull(&req).unwrap();
+        assert_eq!(plan.remote_thread, "main");
     }
 }

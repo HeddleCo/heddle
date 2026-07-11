@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_core::{HostedPushPlan, plan_hosted_push, uses_git_overlay_mirror_rpc};
 use heddle_core::{
-    default_push_thread_name, git_overlay_current_thread_push_ok, uses_local_git_overlay_transport,
+    PushPath, PushPlanRequest, RemotePreflightBlocker, plan_push, uses_local_git_overlay_transport,
 };
 use objects::object::ThreadName;
 use refs::Head;
@@ -179,6 +179,9 @@ struct GitUpstreamConfiguredOutput {
 
 /// Execute push command.
 ///
+/// Pure orchestration (`plan_push`) runs first; network / git I/O bodies stay
+/// in this module and consume plan fields.
+///
 /// `mirror` is an ad-hoc dual-push escape hatch (heddle#25): after the
 /// primary push to the Heddle/git-overlay remote succeeds, also push to
 /// the named Git remote. Best-effort — mirror failure surfaces
@@ -195,12 +198,51 @@ pub async fn cmd_push(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
-        return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
-    }
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }
+
+    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
+    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
+    let uses_local_overlay = uses_local_git_overlay_transport(
+        repo.capability(),
+        repo.hosted_enabled(),
+        push_uses_hosted_network,
+    );
+    // Discover native-heddle local target under local overlay (I/O fact for plan).
+    let native_local_path = if uses_local_overlay {
+        let default_remote_name = if remote.is_none() {
+            resolved_default_remote_name(&repo)?
+        } else {
+            None
+        };
+        let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
+        native_heddle_local_push_target(&repo, remote_arg)?
+    } else {
+        None
+    };
+    // Match preflight_native_remote_transport: overlay capability never
+    // treats a git URL as a native-transport mismatch.
+    let transport_mismatch = repo.capability() != RepositoryCapability::GitOverlay
+        && matches!(
+            classify_remote_spec(&repo, remote.as_deref()),
+            Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl)
+        );
+    let head = repo.head_ref()?;
+    let plan = plan_push(&PushPlanRequest {
+        capability: repo.capability(),
+        hosted_enabled: repo.hosted_enabled(),
+        uses_hosted_network: push_uses_hosted_network,
+        remote: remote.clone(),
+        has_default_remote,
+        thread: thread.clone(),
+        all_threads,
+        force,
+        head,
+        native_local_heddle_target: native_local_path.is_some(),
+        transport_mismatch,
+    })
+    .map_err(|blocker| map_remote_preflight_blocker(blocker, "push", remote.as_deref()))?;
 
     // `pre_push` JSON-protocol hook fires before any push work, on every
     // path (git-overlay local target, git-overlay refs push, and native
@@ -228,27 +270,30 @@ pub async fn cmd_push(
         auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Push)?;
     }
 
-    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
-
-    if uses_local_git_overlay_transport(
-        repo.capability(),
-        repo.hosted_enabled(),
-        push_uses_hosted_network,
-    ) {
-        let default_remote_name = if remote.is_none() {
-            resolved_default_remote_name(&repo)?
-        } else {
-            None
-        };
-        let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
-        if let Some(target_path) = native_heddle_local_push_target(&repo, remote_arg)? {
-            if all_threads {
-                push_local_all_threads(&repo, &target_path, force, cli).await?;
+    match &plan.path {
+        PushPath::LocalNativeHeddle {
+            all_threads: path_all_threads,
+        } => {
+            let target_path = native_local_path.expect("plan selected local native heddle path");
+            if *path_all_threads {
+                push_local_all_threads(&repo, &target_path, plan.force, cli).await?;
             } else {
-                let state_id =
-                    resolve_push_state_id(&repo, &user_config, state, thread.as_deref(), force)?;
-                let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
-                push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
+                let state_id = resolve_push_state_id(
+                    &repo,
+                    &user_config,
+                    state,
+                    thread.as_deref(),
+                    plan.force,
+                )?;
+                push_local(
+                    &repo,
+                    &target_path,
+                    &state_id,
+                    &plan.track_name,
+                    plan.force,
+                    cli,
+                )
+                .await?;
             }
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
@@ -260,110 +305,92 @@ pub async fn cmd_push(
             run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
             return Ok(());
         }
-        // The git-overlay refs path pushes whatever's attached to HEAD
-        // when scope is CurrentThread. If the user named a different
-        // thread explicitly (positional or `--thread`) we must NOT
-        // silently push the wrong branch — refuse and tell them to
-        // switch first or use `--all-threads`.
-        if let Some(requested) = thread.as_deref() {
-            let attached = match repo.head_ref()? {
-                Head::Attached { thread } => Some(thread.to_string()),
-                Head::Detached { .. } => None,
-            };
-            if !git_overlay_current_thread_push_ok(
-                all_threads,
-                Some(requested),
-                attached.as_deref(),
-            ) {
-                let attached_label = attached
-                    .as_deref()
-                    .map(|t| format!("'{t}'"))
-                    .unwrap_or_else(|| "detached HEAD".to_string());
-                return Err(anyhow!(
-                    "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}.\nNext: heddle thread switch {requested} && heddle push, or pass --all-threads"
-                ));
-            }
-        }
-        let (remote_name, scope, current_thread, tracking_refresh, refs_written, trust) =
-            push_git_overlay_refs(&repo, remote.as_deref(), all_threads, force)?;
-        if should_output_json(cli, Some(repo.config())) {
-            let output = git_overlay_push_output(
-                remote_name,
-                scope,
-                current_thread,
-                tracking_refresh,
-                refs_written,
-                force,
-                trust,
-            );
-            crate::cli::render::write_json_stdout(&output)?;
-        } else {
-            println!(
-                "{} pushed {} to {} ({})",
-                style::ok_marker(),
-                match scope {
-                    GitPushScope::CurrentThread => current_thread
-                        .as_deref()
-                        .map(|thread| format!("thread {}", style::bold(thread)))
-                        .unwrap_or_else(|| "current thread".to_string()),
-                    GitPushScope::AllThreads => "all threads".to_string(),
-                },
-                style::bold(&remote_name),
-                match scope {
-                    GitPushScope::CurrentThread => "branch + refs/notes/heddle; tags skipped",
-                    GitPushScope::AllThreads => "all threads + Git tags + refs/notes/heddle",
-                }
-            );
-            if force {
-                println!(
-                    "Force: remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded."
+        PushPath::LocalGitOverlayRefs {
+            all_threads: path_all_threads,
+        } => {
+            // Thread mismatch already refused by plan_push.
+            let (remote_name, scope, current_thread, tracking_refresh, refs_written, trust) =
+                push_git_overlay_refs(&repo, remote.as_deref(), *path_all_threads, plan.force)?;
+            if should_output_json(cli, Some(repo.config())) {
+                let output = git_overlay_push_output(
+                    remote_name,
+                    scope,
+                    current_thread,
+                    tracking_refresh,
+                    refs_written,
+                    plan.force,
+                    trust,
                 );
-            }
-            println!(
-                "Git interop: published {}; ordinary `git log --all` may show Heddle metadata commits.",
-                style::bold("refs/notes/heddle")
-            );
-            if let Some(refresh) = tracking_refresh.as_ref() {
-                if let Some(configured) = &refresh.configured_remote {
+                crate::cli::render::write_json_stdout(&output)?;
+            } else {
+                println!(
+                    "{} pushed {} to {} ({})",
+                    style::ok_marker(),
+                    match scope {
+                        GitPushScope::CurrentThread => current_thread
+                            .as_deref()
+                            .map(|thread| format!("thread {}", style::bold(thread)))
+                            .unwrap_or_else(|| "current thread".to_string()),
+                        GitPushScope::AllThreads => "all threads".to_string(),
+                    },
+                    style::bold(&remote_name),
+                    match scope {
+                        GitPushScope::CurrentThread => "branch + refs/notes/heddle; tags skipped",
+                        GitPushScope::AllThreads => "all threads + Git tags + refs/notes/heddle",
+                    }
+                );
+                if plan.force {
                     println!(
-                        "Git tracking: configured remote {} -> {} for future fetch/push.",
-                        style::bold(&configured.name),
-                        style::dim(&configured.url)
+                        "Force: remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded."
                     );
                 }
-                if let Some(branch) = &refresh.upstream_branch {
-                    println!(
-                        "Git tracking: branch {} tracks {}/{}.",
-                        style::bold(branch),
-                        style::bold(&refresh.remote_name),
-                        branch
-                    );
+                println!(
+                    "Git interop: published {}; ordinary `git log --all` may show Heddle metadata commits.",
+                    style::bold("refs/notes/heddle")
+                );
+                if let Some(refresh) = tracking_refresh.as_ref() {
+                    if let Some(configured) = &refresh.configured_remote {
+                        println!(
+                            "Git tracking: configured remote {} -> {} for future fetch/push.",
+                            style::bold(&configured.name),
+                            style::dim(&configured.url)
+                        );
+                    }
+                    if let Some(branch) = &refresh.upstream_branch {
+                        println!(
+                            "Git tracking: branch {} tracks {}/{}.",
+                            style::bold(branch),
+                            style::bold(&refresh.remote_name),
+                            branch
+                        );
+                    }
+                }
+                println!(
+                    "Workspace: {}",
+                    if trust.verified {
+                        style::accent("verified")
+                    } else {
+                        style::warn(&trust.status)
+                    }
+                );
+                if !trust.recommended_action.is_empty() {
+                    print_next(&trust.recommended_action);
                 }
             }
-            println!(
-                "Workspace: {}",
-                if trust.verified {
-                    style::accent("verified")
-                } else {
-                    style::warn(&trust.status)
-                }
-            );
-            if !trust.recommended_action.is_empty() {
-                print_next(&trust.recommended_action);
+            // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
+            // `--mirror` fires here too, best-effort, after the primary push.
+            if let Some(mirror_remote) = mirror.as_deref() {
+                let mut bridge = GitProjection::new(&repo);
+                let outcome = bridge.push(mirror_remote);
+                render_mirror_outcome(cli, &repo, mirror_remote, outcome);
             }
+            run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
+            return Ok(());
         }
-        // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
-        // `--mirror` fires here too, best-effort, after the primary push.
-        if let Some(mirror_remote) = mirror.as_deref() {
-            let mut bridge = GitProjection::new(&repo);
-            let outcome = bridge.push(mirror_remote);
-            render_mirror_outcome(cli, &repo, mirror_remote, outcome);
+        PushPath::NativeRemote { .. } => {
+            // Transport mismatch already refused by plan_push.
         }
-        run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
-        return Ok(());
     }
-
-    preflight_native_remote_transport(&repo, remote.as_deref(), "push")?;
 
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
@@ -399,7 +426,7 @@ pub async fn cmd_push(
     // a mismatched existing named thread (heddle#837). `--all-threads`
     // supersedes an explicit single-thread `--state`/`[THREAD]` — it pushes
     // everything.
-    let single_state_id = if all_threads {
+    let single_state_id = if plan.all_threads {
         None
     } else {
         Some(resolve_push_state_id(
@@ -407,21 +434,21 @@ pub async fn cmd_push(
             &user_config,
             state,
             thread.as_deref(),
-            force,
+            plan.force,
         )?)
     };
 
-    let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
+    let track_name = plan.track_name.as_str();
 
     match target {
         RemoteTarget::Local(path) => {
-            if all_threads {
-                push_local_all_threads(&repo, &path, force, cli).await?;
+            if plan.all_threads {
+                push_local_all_threads(&repo, &path, plan.force, cli).await?;
             } else {
                 let state_id = single_state_id
                     .as_ref()
                     .expect("single-thread push resolves a state");
-                push_local(&repo, &path, state_id, &track_name, force, cli).await?;
+                push_local(&repo, &path, state_id, track_name, plan.force, cli).await?;
             }
         }
         RemoteTarget::Network { addr, repo_path } => {
@@ -436,9 +463,9 @@ pub async fn cmd_push(
                         .as_ref()
                         .context("network client config was not prevalidated")?,
                     state_id: single_state_id.as_ref(),
-                    track_name: &track_name,
-                    force,
-                    all_threads,
+                    track_name,
+                    force: plan.force,
+                    all_threads: plan.all_threads,
                     cli,
                 },
             )
@@ -462,6 +489,33 @@ pub async fn cmd_push(
     run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
 
     Ok(())
+}
+
+pub(super) fn map_remote_preflight_blocker(
+    blocker: RemotePreflightBlocker,
+    action: &str,
+    remote_arg: Option<&str>,
+) -> anyhow::Error {
+    match blocker {
+        RemotePreflightBlocker::MissingRemote => {
+            anyhow!(RecoveryAdvice::remote_not_configured(action))
+        }
+        RemotePreflightBlocker::TransportMismatch => anyhow!(
+            RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
+        ),
+        RemotePreflightBlocker::GitOverlayThreadMismatch {
+            requested,
+            attached,
+        } => {
+            let attached_label = attached
+                .as_deref()
+                .map(|t| format!("'{t}'"))
+                .unwrap_or_else(|| "detached HEAD".to_string());
+            anyhow!(
+                "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}.\nNext: heddle thread switch {requested} && heddle push, or pass --all-threads"
+            )
+        }
+    }
 }
 
 /// `post_push` JSON-protocol hook. Best-effort; fires after a successful
@@ -1076,10 +1130,6 @@ fn looks_like_remote_location(value: &str) -> bool {
         || value.starts_with("../")
         || value.contains("://")
         || value.contains('\\')
-}
-
-fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Result<String> {
-    Ok(default_push_thread_name(requested, &repo.head_ref()?))
 }
 
 /// Resolve the state a `push` should upload for a single-thread push
