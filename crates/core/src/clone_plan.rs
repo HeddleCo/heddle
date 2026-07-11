@@ -6,13 +6,16 @@
 //! - remote mode selection (local path vs network hosted vs git-overlay URL)
 //! - security preflight flag assembly (no network I/O)
 //! - adopt start-path resolution and path-conflict policy
+//! - monorepo recursive clone: child selection, path anchoring, work order
 //!
 //! Filesystem mutations, hosted RPC, git import, and recovery-advice
 //! rendering stay CLI-owned. Callers gather cheap facts (path existence,
-//! RemoteTarget parse result, git/.heddle probes), invoke these helpers,
-//! then execute I/O from the plan.
+//! RemoteTarget parse result, git/.heddle probes, resolved monorepo trees),
+//! invoke these helpers, then execute I/O from the plan.
 
 use std::path::{Path, PathBuf};
+
+use objects::object::ChangeId;
 
 // ---------------------------------------------------------------------------
 // Clone options / facts
@@ -543,6 +546,170 @@ pub fn plan_adopt(options: &AdoptPlanOptions) -> Result<AdoptPlan, AdoptPlanErro
 }
 
 // ---------------------------------------------------------------------------
+// Monorepo clone planning (recursive hosted)
+// ---------------------------------------------------------------------------
+//
+// After the CLI calls ResolveMonorepo, it maps the transport tree into pure
+// [`MonorepoNodeFacts`] and invokes [`plan_monorepo_clone`]. Placement rules:
+// - Root node at relative path `""` (the clone destination itself).
+// - Each selected child edge mounts at `<parent_rel>/<mount_name>`.
+// - Edges with a child subtree are selected and walked; edges without a child
+//   are recorded as skipped (unreadable / cycle / depth-bounded / unspecified)
+//   and are never fatal.
+// - A node with no content state still yields a materialize step (empty
+//   checkout) so the monorepo layout stays coherent.
+// Work order is pre-order: a parent's node always precedes its children.
+// Hosted RPC and per-node materialize I/O stay CLI-owned.
+
+/// Why a monorepo child edge was not selected for materialization.
+///
+/// Transport-free mirror of hosted `EdgeSkip`. Labels are stable for JSON and
+/// human reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonorepoEdgeSkipReason {
+    Unspecified,
+    Unreadable,
+    Cycle,
+    DepthBounded,
+}
+
+impl MonorepoEdgeSkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Unreadable => "unreadable",
+            Self::Cycle => "cycle",
+            Self::DepthBounded => "depth-bounded",
+        }
+    }
+}
+
+/// Pure facts for one edge under a monorepo node (caller-mapped from ResolveMonorepo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoEdgeFacts {
+    /// Mount name inside the parent (directory segment under the parent path).
+    pub mount_name: String,
+    /// Child spool id the edge points at.
+    pub child_spool_id: String,
+    /// When `Some`, the edge is selected and the subtree is walked. When `None`,
+    /// the edge is withheld (see [`skip_reason`]).
+    pub child: Option<MonorepoNodeFacts>,
+    /// Reason recorded when `child` is `None`. Ignored when `child` is present.
+    /// Missing reason with no child maps to [`MonorepoEdgeSkipReason::Unspecified`].
+    pub skip_reason: Option<MonorepoEdgeSkipReason>,
+}
+
+/// Pure facts for one resolved monorepo node (no gRPC / network types).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoNodeFacts {
+    pub spool_id: String,
+    /// Content-facet state to materialize. `None` = empty checkout at the mount.
+    /// For the root this is the spool's content head; for descendants the server
+    /// already pins the parent's edge-anchored state into this field.
+    pub content_state: Option<ChangeId>,
+    pub edges: Vec<MonorepoEdgeFacts>,
+}
+
+/// One per-node materialize step in monorepo work order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoNodePlan {
+    pub spool_id: String,
+    pub content_state: Option<ChangeId>,
+    /// Destination path relative to the clone root. Root is `""`.
+    pub rel_path: PathBuf,
+}
+
+impl MonorepoNodePlan {
+    /// Absolute destination for this node given the clone root.
+    pub fn dest_path(&self, clone_root: &Path) -> PathBuf {
+        if self.rel_path.as_os_str().is_empty() {
+            clone_root.to_path_buf()
+        } else {
+            clone_root.join(&self.rel_path)
+        }
+    }
+}
+
+/// A child edge that was not selected, with the reason. Reported; never fatal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoSkippedChild {
+    pub child_spool_id: String,
+    pub mount_name: String,
+    /// Path the child would have mounted at (relative to clone root).
+    pub rel_path: PathBuf,
+    pub reason: MonorepoEdgeSkipReason,
+}
+
+impl MonorepoSkippedChild {
+    pub fn reason_label(&self) -> &'static str {
+        self.reason.as_str()
+    }
+}
+
+/// Ordered monorepo clone plan: selected nodes (pre-order) plus withheld edges.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonorepoClonePlan {
+    /// Selected nodes in pre-order (root first). Parent always precedes children.
+    pub nodes: Vec<MonorepoNodePlan>,
+    /// Child edges recorded but not descended.
+    pub skipped: Vec<MonorepoSkippedChild>,
+}
+
+/// Reject `--depth` / `--lazy` / `--filter` for recursive monorepo clones.
+///
+/// These knobs change single-spool pull semantics and do not compose across the
+/// anchored-state monorepo walk in the first cut.
+pub fn validate_monorepo_clone_options(
+    depth: Option<u32>,
+    lazy: bool,
+    filter: Option<&str>,
+) -> Result<(), ClonePlanError> {
+    validate_clone_mode_options(
+        &CloneMode::NetworkHosted { recursive: true },
+        depth,
+        lazy,
+        filter,
+    )
+}
+
+/// Plan monorepo materialize order from pure child-tree facts.
+///
+/// Applies path anchoring and child selection rules. Does not perform hosted
+/// RPC or write to disk.
+pub fn plan_monorepo_clone(root: &MonorepoNodeFacts) -> MonorepoClonePlan {
+    let mut plan = MonorepoClonePlan::default();
+    walk_monorepo_node(&mut plan, root, PathBuf::new());
+    plan
+}
+
+fn walk_monorepo_node(plan: &mut MonorepoClonePlan, node: &MonorepoNodeFacts, rel_path: PathBuf) {
+    // Always emit a node plan (including empty content) so the mount exists.
+    plan.nodes.push(MonorepoNodePlan {
+        spool_id: node.spool_id.clone(),
+        content_state: node.content_state,
+        rel_path: rel_path.clone(),
+    });
+
+    for edge in &node.edges {
+        let child_rel = rel_path.join(&edge.mount_name);
+        match &edge.child {
+            Some(child) => walk_monorepo_node(plan, child, child_rel),
+            None => {
+                let reason = edge
+                    .skip_reason
+                    .unwrap_or(MonorepoEdgeSkipReason::Unspecified);
+                plan.skipped.push(MonorepoSkippedChild {
+                    child_spool_id: edge.child_spool_id.clone(),
+                    mount_name: edge.mount_name.clone(),
+                    rel_path: child_rel,
+                    reason,
+                });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -891,5 +1058,219 @@ mod tests {
             assemble_clone_security_preflight(&CloneMode::NetworkHosted { recursive: false }, true);
         assert!(net.allow_insecure);
         assert!(net.requires_network_session);
+    }
+
+    // ---- monorepo pure planning ----
+
+    fn cid(seed: u8) -> ChangeId {
+        ChangeId::from_bytes([seed; 16])
+    }
+
+    fn leaf(spool_id: &str, content: u8) -> MonorepoNodeFacts {
+        MonorepoNodeFacts {
+            spool_id: spool_id.to_string(),
+            content_state: Some(cid(content)),
+            edges: vec![],
+        }
+    }
+
+    fn selected_edge(mount: &str, child_id: &str, child: MonorepoNodeFacts) -> MonorepoEdgeFacts {
+        MonorepoEdgeFacts {
+            mount_name: mount.to_string(),
+            child_spool_id: child_id.to_string(),
+            child: Some(child),
+            skip_reason: None,
+        }
+    }
+
+    fn skipped_edge(
+        mount: &str,
+        child_id: &str,
+        reason: MonorepoEdgeSkipReason,
+    ) -> MonorepoEdgeFacts {
+        MonorepoEdgeFacts {
+            mount_name: mount.to_string(),
+            child_spool_id: child_id.to_string(),
+            child: None,
+            skip_reason: Some(reason),
+        }
+    }
+
+    /// root (c1)
+    ///  ├─ libs/  -> child-a (c2)
+    ///  │            └─ vendor/ -> grandchild (c3)
+    ///  └─ secret/ -> child-b  [SKIPPED: unreadable]
+    fn fixture_tree() -> MonorepoNodeFacts {
+        let grandchild = leaf("acme/grandchild", 3);
+        let child_a = MonorepoNodeFacts {
+            spool_id: "acme/child-a".to_string(),
+            content_state: Some(cid(2)),
+            edges: vec![selected_edge("vendor", "acme/grandchild", grandchild)],
+        };
+        MonorepoNodeFacts {
+            spool_id: "acme/root".to_string(),
+            content_state: Some(cid(1)),
+            edges: vec![
+                selected_edge("libs", "acme/child-a", child_a),
+                skipped_edge("secret", "acme/child-b", MonorepoEdgeSkipReason::Unreadable),
+            ],
+        }
+    }
+
+    #[test]
+    fn plan_monorepo_places_nodes_at_mount_paths_in_preorder() {
+        let plan = plan_monorepo_clone(&fixture_tree());
+
+        assert_eq!(plan.nodes.len(), 3, "root + child-a + grandchild");
+
+        assert_eq!(plan.nodes[0].spool_id, "acme/root");
+        assert_eq!(plan.nodes[0].rel_path, PathBuf::new());
+        assert_eq!(plan.nodes[0].content_state, Some(cid(1)));
+
+        assert_eq!(plan.nodes[1].spool_id, "acme/child-a");
+        assert_eq!(plan.nodes[1].rel_path, PathBuf::from("libs"));
+        assert_eq!(plan.nodes[1].content_state, Some(cid(2)));
+
+        assert_eq!(plan.nodes[2].spool_id, "acme/grandchild");
+        assert_eq!(plan.nodes[2].rel_path, PathBuf::from("libs").join("vendor"));
+        assert_eq!(plan.nodes[2].content_state, Some(cid(3)));
+    }
+
+    #[test]
+    fn plan_monorepo_records_skipped_children_and_does_not_select_them() {
+        let plan = plan_monorepo_clone(&fixture_tree());
+
+        assert_eq!(plan.skipped.len(), 1);
+        let sk = &plan.skipped[0];
+        assert_eq!(sk.child_spool_id, "acme/child-b");
+        assert_eq!(sk.mount_name, "secret");
+        assert_eq!(sk.rel_path, PathBuf::from("secret"));
+        assert_eq!(sk.reason, MonorepoEdgeSkipReason::Unreadable);
+        assert_eq!(sk.reason_label(), "unreadable");
+
+        assert!(
+            plan.nodes.iter().all(|n| n.spool_id != "acme/child-b"),
+            "skipped child must not appear as a materialize node"
+        );
+    }
+
+    #[test]
+    fn monorepo_node_dest_path_joins_root() {
+        let plan = plan_monorepo_clone(&fixture_tree());
+        let root = Path::new("/tmp/mono");
+
+        assert_eq!(plan.nodes[0].dest_path(root), PathBuf::from("/tmp/mono"));
+        assert_eq!(
+            plan.nodes[1].dest_path(root),
+            PathBuf::from("/tmp/mono/libs")
+        );
+        assert_eq!(
+            plan.nodes[2].dest_path(root),
+            PathBuf::from("/tmp/mono/libs/vendor")
+        );
+    }
+
+    #[test]
+    fn plan_monorepo_empty_content_still_walks_children() {
+        let child = leaf("acme/child", 5);
+        let root = MonorepoNodeFacts {
+            spool_id: "acme/root".to_string(),
+            content_state: None,
+            edges: vec![selected_edge("sub", "acme/child", child)],
+        };
+        let plan = plan_monorepo_clone(&root);
+
+        assert_eq!(plan.nodes.len(), 2);
+        assert_eq!(plan.nodes[0].spool_id, "acme/root");
+        assert_eq!(plan.nodes[0].content_state, None);
+        assert_eq!(plan.nodes[1].spool_id, "acme/child");
+        assert_eq!(plan.nodes[1].rel_path, PathBuf::from("sub"));
+        assert_eq!(plan.nodes[1].content_state, Some(cid(5)));
+    }
+
+    #[test]
+    fn plan_monorepo_missing_skip_reason_defaults_to_unspecified() {
+        let root = MonorepoNodeFacts {
+            spool_id: "root".to_string(),
+            content_state: Some(cid(1)),
+            edges: vec![MonorepoEdgeFacts {
+                mount_name: "m".into(),
+                child_spool_id: "child".into(),
+                child: None,
+                skip_reason: None,
+            }],
+        };
+        let plan = plan_monorepo_clone(&root);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].reason, MonorepoEdgeSkipReason::Unspecified);
+        assert_eq!(plan.skipped[0].reason_label(), "unspecified");
+    }
+
+    #[test]
+    fn monorepo_edge_skip_labels_are_stable() {
+        for (reason, label) in [
+            (MonorepoEdgeSkipReason::Unreadable, "unreadable"),
+            (MonorepoEdgeSkipReason::Cycle, "cycle"),
+            (MonorepoEdgeSkipReason::DepthBounded, "depth-bounded"),
+        ] {
+            assert_eq!(reason.as_str(), label);
+            let root = MonorepoNodeFacts {
+                spool_id: "root".to_string(),
+                content_state: Some(cid(1)),
+                edges: vec![skipped_edge("m", "child", reason)],
+            };
+            let plan = plan_monorepo_clone(&root);
+            assert_eq!(plan.skipped[0].reason_label(), label);
+        }
+    }
+
+    #[test]
+    fn validate_monorepo_clone_options_refuses_filter_lazy_depth() {
+        assert!(validate_monorepo_clone_options(None, false, None).is_ok());
+
+        assert!(matches!(
+            validate_monorepo_clone_options(None, false, Some("blob:none")),
+            Err(ClonePlanError::UnsupportedOption {
+                flag: UnsupportedCloneFlag::Filter,
+                mode: "monorepo",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_monorepo_clone_options(None, true, None),
+            Err(ClonePlanError::UnsupportedOption {
+                flag: UnsupportedCloneFlag::Lazy,
+                mode: "monorepo",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_monorepo_clone_options(Some(1), false, None),
+            Err(ClonePlanError::UnsupportedOption {
+                flag: UnsupportedCloneFlag::Depth,
+                mode: "monorepo",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn selected_edge_with_skip_reason_still_descends() {
+        // Selection is driven by presence of child facts, not skip_reason.
+        let child = leaf("acme/child", 2);
+        let root = MonorepoNodeFacts {
+            spool_id: "root".to_string(),
+            content_state: Some(cid(1)),
+            edges: vec![MonorepoEdgeFacts {
+                mount_name: "sub".into(),
+                child_spool_id: "acme/child".into(),
+                child: Some(child),
+                skip_reason: Some(MonorepoEdgeSkipReason::Unreadable),
+            }],
+        };
+        let plan = plan_monorepo_clone(&root);
+        assert_eq!(plan.nodes.len(), 2);
+        assert!(plan.skipped.is_empty());
+        assert_eq!(plan.nodes[1].spool_id, "acme/child");
     }
 }

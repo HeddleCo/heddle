@@ -18,6 +18,11 @@ use heddle_core::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     UnsupportedCloneFlag, plan_clone, status::next_action::canonical_git_import_ref_command,
 };
+#[cfg(feature = "client")]
+use heddle_core::{
+    MonorepoClonePlan, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeFacts,
+    MonorepoNodePlan, plan_monorepo_clone, validate_monorepo_clone_options,
+};
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -1425,19 +1430,16 @@ async fn clone_network(
 /// 1. Connect to the hosted server and `ResolveMonorepo(root_path)` — the
 ///    server returns the caller's coherent visible slice (per-child
 ///    visibility, cycle guard, depth bound).
-/// 2. [`MonorepoClonePlan::from_resolved`] walks that tree into a flat, ordered
-///    set of per-spool clone ops (root at the destination root, each child at
-///    `<parent>/<mount_name>`, each pinned to its resolved `content_state`)
-///    plus the set of withheld (EdgeSkip) child edges.
-/// 3. For each op, reuse the per-spool hosted-content path to materialize that
-///    spool at its anchored state into its mount path.
+/// 2. Map the transport tree into pure [`MonorepoNodeFacts`], then
+///    [`plan_monorepo_clone`] selects children, anchors mount paths, and
+///    orders per-node work (root first, pre-order) plus withheld edges.
+/// 3. For each planned node, reuse the per-spool hosted-content path to
+///    materialize that spool at its anchored state into its mount path.
 /// 4. Report skipped children — unreadable / cycle / depth-bounded edges are
 ///    surfaced, never fatal.
 ///
-/// The plan-walk (step 2) is unit-proven in `heddle_client::grpc_hosted::monorepo`.
-/// The per-node fetch/materialize (step 3) reuses the existing single-spool
-/// hosted-clone machinery; a full live end-to-end clone against a running weft
-/// is a manual/dev-image check.
+/// Pure planning (step 2) lives in `heddle_core::clone_plan` and is unit-tested
+/// there. This function owns hosted RPC and per-node materialize I/O.
 #[cfg(feature = "client")]
 async fn clone_monorepo(
     cli: &Cli,
@@ -1448,8 +1450,6 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use heddle_client::grpc_hosted::MonorepoClonePlan;
-
     use crate::{
         client::{HostedAuthMode, HostedSession},
         config::UserConfig,
@@ -1486,9 +1486,10 @@ async fn clone_monorepo(
     }
 
     // Resolve the whole child tree into the caller's coherent visible slice,
-    // then translate it into per-spool clone ops + skipped edges.
+    // then pure-plan placement + work order (no FS yet).
     let resolved = client.resolve_monorepo(root_path, None).await?;
-    let plan = MonorepoClonePlan::from_resolved(&resolved);
+    let facts = monorepo_node_facts_from_resolved(&resolved);
+    let plan = plan_monorepo_clone(&facts);
 
     // Guard the destination: remove it on any failure so a partial monorepo
     // isn't left behind (armed only if it didn't already exist).
@@ -1496,8 +1497,8 @@ async fn clone_monorepo(
     fs::create_dir_all(local_path)?;
 
     let mut cloned_ops = 0usize;
-    for op in &plan.ops {
-        let dest = op.dest_path(local_path);
+    for node in &plan.nodes {
+        let dest = node.dest_path(local_path);
         // Children mount under the root, whose directory already exists; create
         // any intermediate mount directories.
         if let Some(parent) = dest.parent() {
@@ -1505,8 +1506,8 @@ async fn clone_monorepo(
         }
         clone_one_spool_op(
             &mut client,
-            &op.spool_id,
-            op.content_state,
+            &node.spool_id,
+            node.content_state,
             &dest,
             &endpoint_spec,
         )
@@ -1514,7 +1515,7 @@ async fn clone_monorepo(
         .with_context(|| {
             format!(
                 "failed to clone spool '{}' into {}",
-                op.spool_id,
+                node.spool_id,
                 dest.display()
             )
         })?;
@@ -1535,13 +1536,9 @@ async fn clone_monorepo(
             cloned_ops,
             if cloned_ops == 1 { "" } else { "s" },
         );
-        for op in &plan.ops {
-            let rel = if op.rel_path.as_os_str().is_empty() {
-                ".".to_string()
-            } else {
-                op.rel_path.display().to_string()
-            };
-            println!("  {} <- {}", style::dim(&rel), op.spool_id);
+        for node in &plan.nodes {
+            let rel = monorepo_node_rel_display(node);
+            println!("  {} <- {}", style::dim(&rel), node.spool_id);
         }
         if plan.skipped.is_empty() {
             // No withheld edges — the slice is the full monorepo.
@@ -1564,20 +1561,70 @@ async fn clone_monorepo(
     Ok(())
 }
 
-/// JSON envelope for a monorepo clone: the placed ops + the skipped edges.
+/// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
+///
+/// Parses content-state bytes into [`ChangeId`]; malformed/absent states map
+/// to `None` (empty checkout), matching prior client planner policy.
 #[cfg(feature = "client")]
-fn monorepo_clone_output_json(
-    local_path: &Path,
-    plan: &heddle_client::grpc_hosted::MonorepoClonePlan,
-) -> serde_json::Value {
+fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
+    use grpc::heddle::v1::EdgeSkip;
+    use objects::object::ChangeId;
+
+    let content_state = node
+        .content_state
+        .as_deref()
+        .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
+    let edges =
+        node.edges
+            .iter()
+            .map(|edge| {
+                let skip_reason = edge.skipped.and_then(|s| EdgeSkip::try_from(s).ok()).map(
+                    |reason| match reason {
+                        EdgeSkip::Unspecified => MonorepoEdgeSkipReason::Unspecified,
+                        EdgeSkip::Unreadable => MonorepoEdgeSkipReason::Unreadable,
+                        EdgeSkip::Cycle => MonorepoEdgeSkipReason::Cycle,
+                        EdgeSkip::DepthBounded => MonorepoEdgeSkipReason::DepthBounded,
+                    },
+                );
+                MonorepoEdgeFacts {
+                    mount_name: edge.mount_name.clone(),
+                    child_spool_id: edge.child_spool_id.clone(),
+                    child: edge
+                        .subtree
+                        .as_ref()
+                        .map(|subtree| monorepo_node_facts_from_resolved(subtree)),
+                    skip_reason,
+                }
+            })
+            .collect();
+    MonorepoNodeFacts {
+        spool_id: node.spool_id.clone(),
+        content_state,
+        edges,
+    }
+}
+
+/// Relative path label for text-mode monorepo placement lines.
+#[cfg(feature = "client")]
+fn monorepo_node_rel_display(node: &MonorepoNodePlan) -> String {
+    if node.rel_path.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        node.rel_path.display().to_string()
+    }
+}
+
+/// JSON envelope for a monorepo clone: the placed nodes + the skipped edges.
+#[cfg(feature = "client")]
+fn monorepo_clone_output_json(local_path: &Path, plan: &MonorepoClonePlan) -> serde_json::Value {
     let placed: Vec<_> = plan
-        .ops
+        .nodes
         .iter()
-        .map(|op| {
+        .map(|node| {
             serde_json::json!({
-                "spool_id": op.spool_id,
-                "path": op.rel_path.display().to_string(),
-                "content_state": op.content_state.map(|s| s.to_string()),
+                "spool_id": node.spool_id,
+                "path": node.rel_path.display().to_string(),
+                "content_state": node.content_state.map(|s| s.to_string()),
             })
         })
         .collect();
@@ -1635,17 +1682,12 @@ async fn clone_one_spool_op(
 }
 
 /// Reject `--depth`/`--lazy`/`--filter` for monorepo clones. Pure validation
-/// lives in `heddle_core::validate_clone_mode_options`; this wrapper maps
+/// lives in `heddle_core::validate_monorepo_clone_options`; this wrapper maps
 /// errors for the monorepo execution path.
 #[cfg(feature = "client")]
 fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {
-    heddle_core::validate_clone_mode_options(
-        &CloneMode::NetworkHosted { recursive: true },
-        options.depth,
-        options.lazy,
-        options.filter.as_deref(),
-    )
-    .map_err(clone_plan_error_to_anyhow)
+    validate_monorepo_clone_options(options.depth, options.lazy, options.filter.as_deref())
+        .map_err(clone_plan_error_to_anyhow)
 }
 
 fn monorepo_requires_hosted_remote_advice(remote: &str) -> RecoveryAdvice {
