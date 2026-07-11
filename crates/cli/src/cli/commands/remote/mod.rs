@@ -6,11 +6,13 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    GitOverlayPushTracking, GitRemoteConfigured, PushExecutionFacts, PushOutcome, PushPath,
+    PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome, plan_push,
+    uses_local_git_overlay_transport,
+};
 #[cfg(feature = "client")]
 use heddle_core::{HostedPushPlan, plan_hosted_push, uses_git_overlay_mirror_rpc};
-use heddle_core::{
-    PushPath, PushPlanRequest, RemotePreflightBlocker, plan_push, uses_local_git_overlay_transport,
-};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
@@ -109,52 +111,11 @@ pub(crate) struct GitOverlayConfiguredRemote {
     url: String,
 }
 
+/// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
 #[derive(Debug, Clone, Serialize)]
 struct PushOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    pushed: bool,
-    changed: bool,
-    transport: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    push_scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ref_scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_notes_ref: Option<&'static str>,
-    /// The refs this push actually wrote at the destination. On the
-    /// Git-overlay refs path (`transport: "git"`) these are full Git ref
-    /// names — `refs/heads/<thread>`, `refs/notes/heddle`, `refs/tags/<tag>`
-    /// — sorted, empty for a no-op push, verifiable with `git ls-remote`.
-    /// On the native Heddle transport it is omitted for a single-thread push
-    /// but, for `--all-threads` (heddle#838), lists the Heddle thread names
-    /// that were pushed so the caller can see exactly which threads landed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refs_written: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_notes_visibility_warning: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_tracking_remote: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_remote_configured: Option<GitRemoteConfiguredOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_upstream_configured: Option<GitUpstreamConfiguredOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tags_included: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    force_discard_warning: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objects: Option<usize>,
+    #[serde(flatten)]
+    outcome: PushOutcome,
     next_action: Option<String>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
@@ -165,16 +126,19 @@ struct PushOutput {
     trust: RepositoryVerificationState,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct GitRemoteConfiguredOutput {
-    name: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GitUpstreamConfiguredOutput {
-    branch: String,
-    remote: String,
+fn push_output_from_outcome(
+    outcome: PushOutcome,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let action = ActionFields::from_action(&trust.recommended_action);
+    PushOutput {
+        outcome,
+        next_action: action.action.clone(),
+        next_action_template: action.template.clone(),
+        recommended_action: action.action,
+        recommended_action_template: action.template,
+        trust,
+    }
 }
 
 /// Execute push command.
@@ -276,7 +240,7 @@ pub async fn cmd_push(
         } => {
             let target_path = native_local_path.expect("plan selected local native heddle path");
             if *path_all_threads {
-                push_local_all_threads(&repo, &target_path, plan.force, cli).await?;
+                push_local_all_threads(&repo, &target_path, &plan, cli).await?;
             } else {
                 let state_id = resolve_push_state_id(
                     &repo,
@@ -285,15 +249,7 @@ pub async fn cmd_push(
                     thread.as_deref(),
                     plan.force,
                 )?;
-                push_local(
-                    &repo,
-                    &target_path,
-                    &state_id,
-                    &plan.track_name,
-                    plan.force,
-                    cli,
-                )
-                .await?;
+                push_local(&repo, &target_path, &state_id, &plan.track_name, &plan, cli).await?;
             }
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
@@ -313,12 +269,11 @@ pub async fn cmd_push(
                 push_git_overlay_refs(&repo, remote.as_deref(), *path_all_threads, plan.force)?;
             if should_output_json(cli, Some(repo.config())) {
                 let output = git_overlay_push_output(
+                    &plan,
                     remote_name,
-                    scope,
                     current_thread,
                     tracking_refresh,
                     refs_written,
-                    plan.force,
                     trust,
                 );
                 crate::cli::render::write_json_stdout(&output)?;
@@ -443,12 +398,12 @@ pub async fn cmd_push(
     match target {
         RemoteTarget::Local(path) => {
             if plan.all_threads {
-                push_local_all_threads(&repo, &path, plan.force, cli).await?;
+                push_local_all_threads(&repo, &path, &plan, cli).await?;
             } else {
                 let state_id = single_state_id
                     .as_ref()
                     .expect("single-thread push resolves a state");
-                push_local(&repo, &path, state_id, track_name, plan.force, cli).await?;
+                push_local(&repo, &path, state_id, track_name, &plan, cli).await?;
             }
         }
         RemoteTarget::Network { addr, repo_path } => {
@@ -466,6 +421,7 @@ pub async fn cmd_push(
                     track_name,
                     force: plan.force,
                     all_threads: plan.all_threads,
+                    plan: &plan,
                     cli,
                 },
             )
@@ -592,110 +548,41 @@ fn render_mirror_outcome(
 }
 
 fn git_overlay_push_output(
+    plan: &PushPlan,
     remote_name: String,
-    scope: GitPushScope,
     current_thread: Option<String>,
     tracking_refresh: Option<GitOverlayTrackingRefresh>,
     refs_written: Vec<String>,
-    force: bool,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    let tracking_remote = tracking_refresh
-        .as_ref()
-        .map(|refresh| refresh.remote_name.clone());
-    let configured_remote = tracking_refresh
-        .as_ref()
-        .and_then(|refresh| refresh.configured_remote.as_ref())
-        .map(|remote| GitRemoteConfiguredOutput {
-            name: remote.name.clone(),
-            url: remote.url.clone(),
-        });
-    let upstream_configured = tracking_refresh
-        .as_ref()
-        .and_then(|refresh| refresh.upstream_branch.as_ref())
-        .map(|branch| GitUpstreamConfiguredOutput {
-            branch: branch.clone(),
-            remote: tracking_remote
-                .clone()
-                .unwrap_or_else(|| "origin".to_string()),
-        });
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: "pushed",
-        success: true,
-        pushed: true,
-        changed: true,
-        transport: "git",
-        remote: Some(remote_name),
-        push_scope: Some(match scope {
-            GitPushScope::CurrentThread => "current_thread",
-            GitPushScope::AllThreads => "all_threads",
+    let tracking = tracking_refresh.map(|refresh| GitOverlayPushTracking {
+        remote_name: refresh.remote_name,
+        configured_remote: refresh.configured_remote.map(|remote| GitRemoteConfigured {
+            name: remote.name,
+            url: remote.url,
         }),
-        ref_scope: Some(match scope {
-            GitPushScope::CurrentThread => "branch_and_heddle_notes",
-            GitPushScope::AllThreads => "all_threads_tags_and_heddle_notes",
-        }),
-        git_notes_ref: Some("refs/notes/heddle"),
-        refs_written: Some(refs_written),
-        git_notes_visibility_warning: Some(
-            "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
-        ),
-        git_tracking_remote: tracking_remote,
-        git_remote_configured: configured_remote,
-        git_upstream_configured: upstream_configured,
-        tags_included: Some(matches!(scope, GitPushScope::AllThreads)),
-        force: Some(force),
-        force_discard_warning: force.then_some(
-            "remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded",
-        ),
-        thread: current_thread,
-        state: None,
-        objects: None,
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+        upstream_branch: refresh.upstream_branch,
+    });
+    let outcome = build_push_outcome(
+        plan,
+        PushExecutionFacts::GitOverlayRefs {
+            remote_name,
+            current_thread,
+            refs_written,
+            tracking,
+        },
+    );
+    push_output_from_outcome(outcome, trust)
 }
 
 fn heddle_push_output(
+    plan: &PushPlan,
     state: Option<String>,
     objects: Option<usize>,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: "pushed",
-        success: true,
-        pushed: true,
-        changed: true,
-        transport: "heddle",
-        remote: None,
-        push_scope: None,
-        ref_scope: None,
-        git_notes_ref: None,
-        refs_written: None,
-        git_notes_visibility_warning: None,
-        git_tracking_remote: None,
-        git_remote_configured: None,
-        git_upstream_configured: None,
-        tags_included: None,
-        force: None,
-        force_discard_warning: None,
-        thread: None,
-        state,
-        objects,
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+    let outcome = build_push_outcome(plan, PushExecutionFacts::HeddleSingle { state, objects });
+    push_output_from_outcome(outcome, trust)
 }
 
 /// JSON output for a native `--all-threads` push (heddle#838). `refs_written`
@@ -703,43 +590,22 @@ fn heddle_push_output(
 /// sorted; `success`/`pushed` are false if any thread failed. `push_scope`
 /// mirrors the git-overlay path's `"all_threads"`.
 fn heddle_all_threads_push_output(
-    mut pushed: Vec<String>,
+    plan: &PushPlan,
+    pushed: Vec<String>,
     failures: &[(String, String)],
     objects: usize,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    let ok = failures.is_empty();
-    pushed.sort();
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: if ok { "pushed" } else { "partial" },
-        success: ok,
-        pushed: ok,
-        changed: true,
-        transport: "heddle",
-        remote: None,
-        push_scope: Some("all_threads"),
-        ref_scope: None,
-        git_notes_ref: None,
-        refs_written: Some(pushed),
-        git_notes_visibility_warning: None,
-        git_tracking_remote: None,
-        git_remote_configured: None,
-        git_upstream_configured: None,
-        tags_included: None,
-        force: None,
-        force_discard_warning: None,
-        thread: None,
-        state: None,
-        objects: Some(objects),
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+    let failed_threads = failures.iter().map(|(thread, _)| thread.clone()).collect();
+    let outcome = build_push_outcome(
+        plan,
+        PushExecutionFacts::HeddleAllThreads {
+            pushed_threads: pushed,
+            failed_threads,
+            objects,
+        },
+    );
+    push_output_from_outcome(outcome, trust)
 }
 
 fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()> {
@@ -1205,7 +1071,7 @@ async fn push_local(
     target_path: &std::path::Path,
     state_id: &objects::object::ChangeId,
     track_name: &str,
-    _force: bool,
+    plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
     if !should_output_json(cli, Some(repo.config())) {
@@ -1227,7 +1093,12 @@ async fn push_local(
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_push_output(Some(state_id.to_string()), Some(objects_copied), trust);
+        let output = heddle_push_output(
+            plan,
+            Some(state_id.to_string()),
+            Some(objects_copied),
+            trust,
+        );
         crate::cli::render::write_json_stdout(&output)?;
     } else {
         println!(
@@ -1282,7 +1153,7 @@ fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
 async fn push_local_all_threads(
     repo: &Repository,
     target_path: &std::path::Path,
-    _force: bool,
+    plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
     let json = should_output_json(cli, Some(repo.config()));
@@ -1340,7 +1211,7 @@ async fn push_local_all_threads(
 
     if json {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_all_threads_push_output(pushed, &failures, total_objects, trust);
+        let output = heddle_all_threads_push_output(plan, pushed, &failures, total_objects, trust);
         crate::cli::render::write_json_stdout(&output)?;
     }
 
@@ -1425,7 +1296,12 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
             let trust = build_repository_verification_state(repo);
-            let output = heddle_push_output(result.new_state.map(|s| s.to_string()), None, trust);
+            let output = heddle_push_output(
+                options.plan,
+                result.new_state.map(|s| s.to_string()),
+                None,
+                trust,
+            );
             crate::cli::render::write_json_stdout(&output)?;
         } else {
             println!(
@@ -1569,7 +1445,7 @@ async fn push_network_all_threads(
 
     if json {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_all_threads_push_output(pushed, &failures, 0, trust);
+        let output = heddle_all_threads_push_output(options.plan, pushed, &failures, 0, trust);
         crate::cli::render::write_json_stdout(&output)?;
     }
 
@@ -1828,6 +1704,8 @@ struct PushNetworkOptions<'a> {
     /// heddle#838: fan out over every pushable thread instead of the single
     /// `track_name`/`state_id`.
     all_threads: bool,
+    /// Pure orchestration plan (outcome assembly + routing policy).
+    plan: &'a PushPlan,
     cli: &'a Cli,
 }
 

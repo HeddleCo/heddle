@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use heddle_core::{
-    GitConfigContext, PullPlanRequest, RemoteInfo, RemoteListReport, list_plain_git_remotes,
-    list_remotes, merged_remote_items, plan_pull, show_plain_git_remote, show_remote,
+    GitConfigContext, PullExecutionFacts, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
+    RemoteListReport, build_pull_outcome, list_plain_git_remotes, list_remotes,
+    merged_remote_items, plan_pull, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
@@ -57,44 +58,11 @@ struct RemoteMutationOutput {
     trust: RepositoryVerificationState,
 }
 
+/// CLI machine envelope: domain [`PullOutcome`] plus skipped verification state.
 #[derive(Serialize)]
 struct PullOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    pulled: bool,
-    changed: bool,
-    transport: &'static str,
-    remote: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    old_git_head: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_git_head: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    old_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    states_created: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commits_seen: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commits_seen_scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    materialized_checkout: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changed_path_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    changed_paths: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objects: Option<usize>,
+    #[serde(flatten)]
+    outcome: PullOutcome,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
@@ -102,6 +70,7 @@ struct PullOutput {
 }
 
 struct GitOverlayPullOutputInput {
+    plan: PullPlan,
     remote: String,
     branch: Option<String>,
     old_git_head: Option<String>,
@@ -114,34 +83,30 @@ struct GitOverlayPullOutputInput {
 }
 
 fn git_overlay_pull_output(input: GitOverlayPullOutputInput) -> PullOutput {
+    let outcome = build_pull_outcome(
+        Some(&input.plan),
+        PullExecutionFacts::GitOverlay {
+            remote: input.remote,
+            branch: input.branch,
+            old_git_head: input.old_git_head,
+            new_git_head: input.new_git_head,
+            old_state: input.old_state.map(|state| state.to_string()),
+            new_state: input.new_state.map(|state| state.to_string()),
+            changed: input.outcome.changed,
+            states_created: input.outcome.states_created,
+            commits_seen: input.outcome.commits_seen,
+            materialized_checkout: input.outcome.materialized_checkout,
+            changed_paths: input.changed_paths,
+        },
+    );
     PullOutput {
-        output_kind: "pull",
-        action: "pull",
-        status: pull_status(input.outcome.changed),
-        success: true,
-        pulled: input.outcome.changed,
-        changed: input.outcome.changed,
-        transport: "git",
-        remote: input.remote,
-        branch: input.branch,
-        old_git_head: input.old_git_head,
-        new_git_head: input.new_git_head,
-        old_state: input.old_state.map(|state| state.to_string()),
-        new_state: input.new_state.map(|state| state.to_string()),
-        states_created: Some(input.outcome.states_created),
-        commits_seen: Some(input.outcome.commits_seen),
-        commits_seen_scope: Some("branches_and_heddle_notes"),
-        materialized_checkout: Some(input.outcome.materialized_checkout),
-        changed_path_count: Some(input.changed_paths.len()),
-        changed_paths: Some(input.changed_paths),
-        thread: None,
-        state: None,
-        objects: None,
+        outcome,
         trust: input.trust,
     }
 }
 
 fn heddle_pull_output(
+    plan: Option<&PullPlan>,
     changed: bool,
     remote: String,
     thread: String,
@@ -149,35 +114,17 @@ fn heddle_pull_output(
     objects: Option<usize>,
     trust: RepositoryVerificationState,
 ) -> PullOutput {
-    PullOutput {
-        output_kind: "pull",
-        action: "pull",
-        status: pull_status(changed),
-        success: true,
-        pulled: changed,
-        changed,
-        transport: "heddle",
-        remote,
-        branch: None,
-        old_git_head: None,
-        new_git_head: None,
-        old_state: None,
-        new_state: None,
-        states_created: None,
-        commits_seen: None,
-        commits_seen_scope: None,
-        materialized_checkout: None,
-        changed_path_count: None,
-        changed_paths: None,
-        thread: Some(thread),
-        state,
-        objects,
-        trust,
-    }
-}
-
-fn pull_status(changed: bool) -> &'static str {
-    if changed { "updated" } else { "up_to_date" }
+    let outcome = build_pull_outcome(
+        plan,
+        PullExecutionFacts::Heddle {
+            changed,
+            remote,
+            thread,
+            state,
+            objects,
+        },
+    );
+    PullOutput { outcome, trust }
 }
 
 /// Execute pull command.
@@ -235,6 +182,7 @@ pub async fn cmd_pull(
         let verification = build_repository_verification_state(&repo);
         if should_output_json(cli, Some(repo.config())) {
             let output = git_overlay_pull_output(GitOverlayPullOutputInput {
+                plan: plan.clone(),
                 remote: remote_name,
                 branch,
                 old_git_head,
@@ -331,6 +279,7 @@ pub async fn cmd_pull(
                 &path,
                 remote_thread,
                 local_thread_name,
+                &plan,
                 cli,
                 plan.lazy,
             )
@@ -350,6 +299,7 @@ pub async fn cmd_pull(
                     lazy: plan.lazy,
                     insecure: insecure
                         || cli_shared::remote_allows_insecure(&repo, plan.remote.as_deref()),
+                    plan: &plan,
                     cli,
                 },
             )
@@ -369,6 +319,7 @@ async fn pull_local(
     source_path: &std::path::Path,
     remote_thread: &str,
     local_thread: Option<&str>,
+    plan: &PullPlan,
     cli: &Cli,
     lazy: bool,
 ) -> Result<()> {
@@ -435,6 +386,7 @@ async fn pull_local(
 
     if should_output_json(cli, Some(repo.config())) {
         let output = heddle_pull_output(
+            Some(plan),
             changed,
             source_path.display().to_string(),
             track_to_update.to_string(),
@@ -574,6 +526,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         }
         if should_output_json(options.cli, Some(repo.config())) {
             let output = heddle_pull_output(
+                Some(options.plan),
                 changed,
                 options.remote_thread.to_string(),
                 track_to_update.to_string(),
@@ -913,6 +866,8 @@ struct PullNetworkOptions<'a> {
     local_thread: Option<&'a str>,
     lazy: bool,
     insecure: bool,
+    /// Pure orchestration plan (outcome assembly + dirty-worktree policy).
+    plan: &'a PullPlan,
     cli: &'a Cli,
 }
 

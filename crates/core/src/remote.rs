@@ -606,6 +606,463 @@ pub fn plan_pull(request: &PullPlanRequest) -> Result<PullPlan, RemotePreflightB
     })
 }
 
+// ---------------------------------------------------------------------------
+// Push / pull typed outcomes (pure; assembled from plan + execution facts)
+// ---------------------------------------------------------------------------
+
+/// Stable notes ref published on the git-overlay refs push path.
+pub const GIT_NOTES_REF: &str = "refs/notes/heddle";
+
+/// Warning that ordinary `git log --all` may surface Heddle notes commits.
+pub const GIT_NOTES_VISIBILITY_WARNING: &str =
+    "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle";
+
+/// Warning when a forced git-overlay push may discard remote-only history.
+pub const FORCE_DISCARD_WARNING: &str = "remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded";
+
+/// Scope label for commits scanned during a git-overlay pull import.
+pub const COMMITS_SEEN_SCOPE: &str = "branches_and_heddle_notes";
+
+/// Git remote name/url pair for machine JSON (`git_remote_configured`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GitRemoteConfigured {
+    pub name: String,
+    pub url: String,
+}
+
+/// Upstream branch binding for machine JSON (`git_upstream_configured`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GitUpstreamConfigured {
+    pub branch: String,
+    pub remote: String,
+}
+
+/// Tracking refresh facts after a git-overlay refs push (CLI-discovered).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOverlayPushTracking {
+    pub remote_name: String,
+    pub configured_remote: Option<GitRemoteConfigured>,
+    pub upstream_branch: Option<String>,
+}
+
+/// Machine JSON body for a successful (or partial) push.
+///
+/// Field names match the CLI `heddle push --output json` contract. CLI may
+/// flatten this and attach verification-derived `next_action*` fields.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PushOutcome {
+    pub output_kind: &'static str,
+    pub action: &'static str,
+    pub status: &'static str,
+    pub success: bool,
+    pub pushed: bool,
+    pub changed: bool,
+    pub transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_notes_ref: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs_written: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_notes_visibility_warning: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_tracking_remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_remote_configured: Option<GitRemoteConfigured>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_upstream_configured: Option<GitUpstreamConfigured>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags_included: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_discard_warning: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objects: Option<usize>,
+}
+
+/// Machine JSON body for a successful pull.
+///
+/// Field names match the CLI `heddle pull --output json` contract.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PullOutcome {
+    pub output_kind: &'static str,
+    pub action: &'static str,
+    pub status: &'static str,
+    pub success: bool,
+    pub pulled: bool,
+    pub changed: bool,
+    pub transport: &'static str,
+    pub remote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_git_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_git_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub states_created: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_seen: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_seen_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_checkout: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_path_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_paths: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objects: Option<usize>,
+}
+
+/// Post-transport facts for assembling a [`PushOutcome`] (no network I/O).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushExecutionFacts {
+    /// Local git-overlay refs push (`GitProjection` path).
+    GitOverlayRefs {
+        remote_name: String,
+        current_thread: Option<String>,
+        refs_written: Vec<String>,
+        tracking: Option<GitOverlayPushTracking>,
+    },
+    /// Native single-thread push (local path or network).
+    HeddleSingle {
+        state: Option<String>,
+        objects: Option<usize>,
+    },
+    /// Native `--all-threads` fan-out (heddle#838).
+    HeddleAllThreads {
+        /// Thread names that landed (unsorted; builder sorts for JSON).
+        pushed_threads: Vec<String>,
+        /// Thread names that failed (presence drives `status: "partial"`).
+        failed_threads: Vec<String>,
+        objects: usize,
+    },
+}
+
+/// Post-transport facts for assembling a [`PullOutcome`] (no network I/O).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullExecutionFacts {
+    /// Local git-overlay pull / import path.
+    GitOverlay {
+        remote: String,
+        branch: Option<String>,
+        old_git_head: Option<String>,
+        new_git_head: Option<String>,
+        old_state: Option<String>,
+        new_state: Option<String>,
+        changed: bool,
+        states_created: usize,
+        commits_seen: usize,
+        materialized_checkout: bool,
+        changed_paths: Vec<String>,
+    },
+    /// Native heddle pull (local path or network).
+    Heddle {
+        changed: bool,
+        remote: String,
+        thread: String,
+        state: Option<String>,
+        objects: Option<usize>,
+    },
+}
+
+/// `push_scope` machine label for all-threads vs current-thread.
+pub fn push_scope_label(all_threads: bool) -> &'static str {
+    if all_threads {
+        "all_threads"
+    } else {
+        "current_thread"
+    }
+}
+
+/// `ref_scope` machine label for git-overlay refs push.
+pub fn git_overlay_ref_scope(all_threads: bool) -> &'static str {
+    if all_threads {
+        "all_threads_tags_and_heddle_notes"
+    } else {
+        "branch_and_heddle_notes"
+    }
+}
+
+/// Machine `status` for push: full success vs partial multi-thread failure.
+pub fn push_status(ok: bool) -> &'static str {
+    if ok { "pushed" } else { "partial" }
+}
+
+/// Machine `status` for pull: updated vs already up to date.
+pub fn pull_status(changed: bool) -> &'static str {
+    if changed { "updated" } else { "up_to_date" }
+}
+
+/// Assemble a push outcome from the orchestration plan and post-I/O facts.
+///
+/// Pure: no repository or network access. `plan` supplies force / all-threads
+/// policy; `facts` supply refs written, object counts, and partial failures.
+pub fn build_push_outcome(plan: &PushPlan, facts: PushExecutionFacts) -> PushOutcome {
+    match facts {
+        PushExecutionFacts::GitOverlayRefs {
+            remote_name,
+            current_thread,
+            refs_written,
+            tracking,
+        } => {
+            let all_threads = plan.all_threads;
+            let force = plan.force;
+            let tracking_remote = tracking.as_ref().map(|t| t.remote_name.clone());
+            let configured_remote = tracking.as_ref().and_then(|t| t.configured_remote.clone());
+            let upstream_configured = tracking.as_ref().and_then(|t| {
+                t.upstream_branch
+                    .as_ref()
+                    .map(|branch| GitUpstreamConfigured {
+                        branch: branch.clone(),
+                        remote: tracking_remote
+                            .clone()
+                            .unwrap_or_else(|| "origin".to_string()),
+                    })
+            });
+            PushOutcome {
+                output_kind: "push",
+                action: "push",
+                status: push_status(true),
+                success: true,
+                pushed: true,
+                changed: true,
+                transport: "git",
+                remote: Some(remote_name),
+                push_scope: Some(push_scope_label(all_threads)),
+                ref_scope: Some(git_overlay_ref_scope(all_threads)),
+                git_notes_ref: Some(GIT_NOTES_REF),
+                refs_written: Some(refs_written),
+                git_notes_visibility_warning: Some(GIT_NOTES_VISIBILITY_WARNING),
+                git_tracking_remote: tracking_remote,
+                git_remote_configured: configured_remote,
+                git_upstream_configured: upstream_configured,
+                tags_included: Some(all_threads),
+                force: Some(force),
+                force_discard_warning: force.then_some(FORCE_DISCARD_WARNING),
+                thread: current_thread,
+                state: None,
+                objects: None,
+            }
+        }
+        PushExecutionFacts::HeddleSingle { state, objects } => PushOutcome {
+            output_kind: "push",
+            action: "push",
+            status: push_status(true),
+            success: true,
+            pushed: true,
+            changed: true,
+            transport: "heddle",
+            remote: None,
+            push_scope: None,
+            ref_scope: None,
+            git_notes_ref: None,
+            refs_written: None,
+            git_notes_visibility_warning: None,
+            git_tracking_remote: None,
+            git_remote_configured: None,
+            git_upstream_configured: None,
+            tags_included: None,
+            force: None,
+            force_discard_warning: None,
+            thread: None,
+            state,
+            objects,
+        },
+        PushExecutionFacts::HeddleAllThreads {
+            mut pushed_threads,
+            failed_threads,
+            objects,
+        } => {
+            let ok = failed_threads.is_empty();
+            pushed_threads.sort();
+            PushOutcome {
+                output_kind: "push",
+                action: "push",
+                status: push_status(ok),
+                success: ok,
+                pushed: ok,
+                changed: true,
+                transport: "heddle",
+                remote: None,
+                push_scope: Some(push_scope_label(true)),
+                ref_scope: None,
+                git_notes_ref: None,
+                refs_written: Some(pushed_threads),
+                git_notes_visibility_warning: None,
+                git_tracking_remote: None,
+                git_remote_configured: None,
+                git_upstream_configured: None,
+                tags_included: None,
+                force: None,
+                force_discard_warning: None,
+                thread: None,
+                state: None,
+                objects: Some(objects),
+            }
+        }
+    }
+}
+
+/// Assemble a pull outcome from post-I/O facts (and optional plan context).
+///
+/// `plan` is currently unused for field selection but reserved so callers can
+/// pass the orchestration plan without a second signature later. Pure: no I/O.
+pub fn build_pull_outcome(_plan: Option<&PullPlan>, facts: PullExecutionFacts) -> PullOutcome {
+    match facts {
+        PullExecutionFacts::GitOverlay {
+            remote,
+            branch,
+            old_git_head,
+            new_git_head,
+            old_state,
+            new_state,
+            changed,
+            states_created,
+            commits_seen,
+            materialized_checkout,
+            changed_paths,
+        } => {
+            let path_count = changed_paths.len();
+            PullOutcome {
+                output_kind: "pull",
+                action: "pull",
+                status: pull_status(changed),
+                success: true,
+                pulled: changed,
+                changed,
+                transport: "git",
+                remote,
+                branch,
+                old_git_head,
+                new_git_head,
+                old_state,
+                new_state,
+                states_created: Some(states_created),
+                commits_seen: Some(commits_seen),
+                commits_seen_scope: Some(COMMITS_SEEN_SCOPE),
+                materialized_checkout: Some(materialized_checkout),
+                changed_path_count: Some(path_count),
+                changed_paths: Some(changed_paths),
+                thread: None,
+                state: None,
+                objects: None,
+            }
+        }
+        PullExecutionFacts::Heddle {
+            changed,
+            remote,
+            thread,
+            state,
+            objects,
+        } => PullOutcome {
+            output_kind: "pull",
+            action: "pull",
+            status: pull_status(changed),
+            success: true,
+            pulled: changed,
+            changed,
+            transport: "heddle",
+            remote,
+            branch: None,
+            old_git_head: None,
+            new_git_head: None,
+            old_state: None,
+            new_state: None,
+            states_created: None,
+            commits_seen: None,
+            commits_seen_scope: None,
+            materialized_checkout: None,
+            changed_path_count: None,
+            changed_paths: None,
+            thread: Some(thread),
+            state,
+            objects,
+        },
+    }
+}
+
+/// Short human-readable summary of a push outcome (for logs / text shells).
+pub fn summarize_push_outcome(outcome: &PushOutcome) -> String {
+    let remote = outcome.remote.as_deref().unwrap_or("remote");
+    match outcome.transport {
+        "git" => {
+            let scope = outcome.push_scope.unwrap_or("current_thread");
+            let refs = outcome.refs_written.as_ref().map(|r| r.len()).unwrap_or(0);
+            if outcome.force == Some(true) {
+                format!("force-pushed {scope} ({refs} refs) to {remote}")
+            } else {
+                format!("pushed {scope} ({refs} refs) to {remote}")
+            }
+        }
+        "heddle" if outcome.push_scope == Some("all_threads") => {
+            let n = outcome.refs_written.as_ref().map(|r| r.len()).unwrap_or(0);
+            if outcome.success {
+                format!("pushed {n} threads")
+            } else {
+                format!("partial push: {n} threads landed")
+            }
+        }
+        "heddle" => match (&outcome.state, outcome.objects) {
+            (Some(state), Some(objects)) => {
+                format!("pushed state {state} ({objects} objects)")
+            }
+            (Some(state), None) => format!("pushed state {state}"),
+            (None, Some(objects)) => format!("pushed ({objects} objects)"),
+            (None, None) => "pushed".to_string(),
+        },
+        other => format!("pushed via {other}"),
+    }
+}
+
+/// Short human-readable summary of a pull outcome (for logs / text shells).
+pub fn summarize_pull_outcome(outcome: &PullOutcome) -> String {
+    if !outcome.changed {
+        return format!("already up to date with {}", outcome.remote);
+    }
+    match outcome.transport {
+        "git" => {
+            let paths = outcome.changed_path_count.unwrap_or(0);
+            let states = outcome.states_created.unwrap_or(0);
+            format!(
+                "pulled from {} ({states} new states, {paths} changed paths)",
+                outcome.remote
+            )
+        }
+        "heddle" => {
+            let thread = outcome.thread.as_deref().unwrap_or("thread");
+            match (&outcome.state, outcome.objects) {
+                (Some(state), Some(objects)) => {
+                    format!("pulled {thread} -> {state} ({objects} objects)")
+                }
+                (Some(state), None) => format!("pulled {thread} -> {state}"),
+                (None, Some(objects)) => format!("pulled {thread} ({objects} objects)"),
+                (None, None) => format!("pulled {thread} from {}", outcome.remote),
+            }
+        }
+        other => format!("pulled via {other} from {}", outcome.remote),
+    }
+}
+
 /// Merged remote map: name → (url, source label).
 ///
 /// Heddle remotes from `.heddle/remotes.toml` win; git-overlay entries fill
@@ -1566,5 +2023,153 @@ mod tests {
         req.head = attached_head("feature");
         let plan = plan_pull(&req).unwrap();
         assert_eq!(plan.remote_thread, "main");
+    }
+
+    // --- Push / pull outcome assembly ---
+
+    #[test]
+    fn build_git_overlay_push_outcome_matches_success_json_fields() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.force = true;
+        req.all_threads = false;
+        let plan = plan_push(&req).unwrap();
+        let outcome = build_push_outcome(
+            &plan,
+            PushExecutionFacts::GitOverlayRefs {
+                remote_name: "origin".into(),
+                current_thread: Some("main".into()),
+                refs_written: vec!["refs/heads/main".into(), "refs/notes/heddle".into()],
+                tracking: Some(GitOverlayPushTracking {
+                    remote_name: "origin".into(),
+                    configured_remote: Some(GitRemoteConfigured {
+                        name: "origin".into(),
+                        url: "https://example.com/repo.git".into(),
+                    }),
+                    upstream_branch: Some("main".into()),
+                }),
+            },
+        );
+        assert_eq!(outcome.output_kind, "push");
+        assert_eq!(outcome.transport, "git");
+        assert_eq!(outcome.status, "pushed");
+        assert!(outcome.success && outcome.pushed && outcome.changed);
+        assert_eq!(outcome.push_scope, Some("current_thread"));
+        assert_eq!(outcome.ref_scope, Some("branch_and_heddle_notes"));
+        assert_eq!(outcome.git_notes_ref, Some(GIT_NOTES_REF));
+        assert_eq!(outcome.force, Some(true));
+        assert_eq!(outcome.force_discard_warning, Some(FORCE_DISCARD_WARNING));
+        assert_eq!(outcome.tags_included, Some(false));
+        assert_eq!(outcome.thread.as_deref(), Some("main"));
+        assert_eq!(
+            outcome.git_upstream_configured,
+            Some(GitUpstreamConfigured {
+                branch: "main".into(),
+                remote: "origin".into(),
+            })
+        );
+        let summary = summarize_push_outcome(&outcome);
+        assert!(summary.contains("force-pushed"), "{summary}");
+        assert!(summary.contains("2 refs"), "{summary}");
+    }
+
+    #[test]
+    fn build_heddle_all_threads_push_outcome_partial_and_sorts_refs() {
+        let mut req = base_push_request();
+        req.all_threads = true;
+        let plan = plan_push(&req).unwrap();
+        let outcome = build_push_outcome(
+            &plan,
+            PushExecutionFacts::HeddleAllThreads {
+                pushed_threads: vec!["z".into(), "a".into()],
+                failed_threads: vec!["b".into()],
+                objects: 4,
+            },
+        );
+        assert_eq!(outcome.status, "partial");
+        assert!(!outcome.success);
+        assert!(!outcome.pushed);
+        assert_eq!(outcome.push_scope, Some("all_threads"));
+        assert_eq!(
+            outcome.refs_written.as_deref(),
+            Some(["a".to_string(), "z".to_string()].as_slice())
+        );
+        assert_eq!(outcome.objects, Some(4));
+        let summary = summarize_push_outcome(&outcome);
+        assert!(summary.contains("partial"), "{summary}");
+    }
+
+    #[test]
+    fn build_heddle_single_push_outcome() {
+        let plan = plan_push(&base_push_request()).unwrap();
+        let outcome = build_push_outcome(
+            &plan,
+            PushExecutionFacts::HeddleSingle {
+                state: Some("abc123".into()),
+                objects: Some(7),
+            },
+        );
+        assert_eq!(outcome.transport, "heddle");
+        assert_eq!(outcome.state.as_deref(), Some("abc123"));
+        assert_eq!(outcome.objects, Some(7));
+        assert!(outcome.refs_written.is_none());
+        assert!(summarize_push_outcome(&outcome).contains("abc123"));
+    }
+
+    #[test]
+    fn build_git_overlay_and_heddle_pull_outcomes() {
+        let plan = plan_pull(&base_pull_request()).unwrap();
+        let git = build_pull_outcome(
+            Some(&plan),
+            PullExecutionFacts::GitOverlay {
+                remote: "origin".into(),
+                branch: Some("main".into()),
+                old_git_head: Some("old".into()),
+                new_git_head: Some("new".into()),
+                old_state: Some("s0".into()),
+                new_state: Some("s1".into()),
+                changed: true,
+                states_created: 2,
+                commits_seen: 5,
+                materialized_checkout: true,
+                changed_paths: vec!["a.rs".into(), "b.rs".into()],
+            },
+        );
+        assert_eq!(git.status, "updated");
+        assert_eq!(git.transport, "git");
+        assert_eq!(git.changed_path_count, Some(2));
+        assert_eq!(git.commits_seen_scope, Some(COMMITS_SEEN_SCOPE));
+        assert!(git.pulled && git.changed);
+        assert!(summarize_pull_outcome(&git).contains("2 changed paths"));
+
+        let heddle = build_pull_outcome(
+            Some(&plan),
+            PullExecutionFacts::Heddle {
+                changed: false,
+                remote: "/tmp/src".into(),
+                thread: "main".into(),
+                state: Some("s1".into()),
+                objects: Some(0),
+            },
+        );
+        assert_eq!(heddle.status, "up_to_date");
+        assert!(!heddle.pulled);
+        assert_eq!(heddle.thread.as_deref(), Some("main"));
+        assert!(summarize_pull_outcome(&heddle).contains("up to date"));
+    }
+
+    #[test]
+    fn push_and_pull_status_helpers() {
+        assert_eq!(push_status(true), "pushed");
+        assert_eq!(push_status(false), "partial");
+        assert_eq!(pull_status(true), "updated");
+        assert_eq!(pull_status(false), "up_to_date");
+        assert_eq!(push_scope_label(true), "all_threads");
+        assert_eq!(push_scope_label(false), "current_thread");
+        assert_eq!(
+            git_overlay_ref_scope(true),
+            "all_threads_tags_and_heddle_notes"
+        );
+        assert_eq!(git_overlay_ref_scope(false), "branch_and_heddle_notes");
     }
 }
