@@ -37,10 +37,17 @@ enum ReviewKind {
 
 // State publication status. Captures whether a state is in-progress
 // (`DRAFT`) or pinned as the published shape of the work (`PUBLISHED`).
+// The failure/terminal statuses (`ABANDONED`/`ABORTED`/`SUPERSEDED`) are
+// author/gate-driven (weft#469) and orthogonal to reviewer verdicts —
+// `RecordVerdict` never sets them. `FAILED` is intentionally absent: it is
+// derivable from `verification.tests_failed > 0`.
 enum StateStatus {
   STATE_STATUS_UNSPECIFIED = 0;
   STATE_STATUS_DRAFT = 1;
   STATE_STATUS_PUBLISHED = 2;
+  STATE_STATUS_ABANDONED = 3;   // +weft#469: author gave up on the task
+  STATE_STATUS_ABORTED = 4;     // +weft#469: hard merge-gate/policy killed it
+  STATE_STATUS_SUPERSEDED = 5;  // +weft#469: replaced by a successor attempt
 }
 
 // Grants are scoped to either a namespace or a repository — never both,

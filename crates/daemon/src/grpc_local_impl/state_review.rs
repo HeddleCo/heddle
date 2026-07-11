@@ -13,11 +13,12 @@ use ::state_review::{
 };
 use crypto::verify_payload_signature;
 use grpc::heddle::v1::{
-    AnchoredDiscussion, GetReviewPayloadRequest, ListSignaturesRequest, ListSignaturesResponse,
-    MergeRequirement, PathSymbolRef as ProtoPathSymbolRef,
-    ReadingOrderPartition as ProtoReadingOrderPartition, ReviewPayload,
-    ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature, ReviewSummary,
-    RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
+    AnchoredDiscussion, GetReviewPayloadRequest, GetReviewProgressRequest, GetReviewProgressResponse,
+    ListSignaturesRequest, ListSignaturesResponse, MergeRequirement,
+    PathSymbolRef as ProtoPathSymbolRef, ReadingOrderPartition as ProtoReadingOrderPartition,
+    RecordCheckAckRequest, RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse,
+    ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
+    ReviewSummary, RiskSignal as ProtoRiskSignal, SignStateRequest, SignStateResponse,
     SignalAnchor as ProtoSignalAnchor, SigningFooter,
     state_review_service_server::StateReviewService,
 };
@@ -315,6 +316,37 @@ impl StateReviewService for LocalStateReviewService {
 
         Ok(Response::new(ListSignaturesResponse { signatures }))
     }
+
+    // The verdict (weft#481) and review-progress (weft#482) RPCs are defined
+    // on the wire in heddle-grpc 0.19 but implemented server-side in weft
+    // (the verdict blob append + the `review_check_acks` table). Local mode
+    // does not back these; the handlers land with the weft impl.
+    async fn record_verdict(
+        &self,
+        _request: Request<RecordVerdictRequest>,
+    ) -> Result<Response<RecordVerdictResponse>, Status> {
+        Err(Status::unimplemented(
+            "RecordVerdict is not available in local mode (weft#481)",
+        ))
+    }
+
+    async fn record_check_ack(
+        &self,
+        _request: Request<RecordCheckAckRequest>,
+    ) -> Result<Response<RecordCheckAckResponse>, Status> {
+        Err(Status::unimplemented(
+            "RecordCheckAck is not available in local mode (weft#482)",
+        ))
+    }
+
+    async fn get_review_progress(
+        &self,
+        _request: Request<GetReviewProgressRequest>,
+    ) -> Result<Response<GetReviewProgressResponse>, Status> {
+        Err(Status::unimplemented(
+            "GetReviewProgress is not available in local mode (weft#482)",
+        ))
+    }
 }
 
 /// Body of [`LocalStateReviewService::sign_state`]. Lifted out of the trait
@@ -523,6 +555,10 @@ fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> Prot
         algorithm: sig.algorithm,
         public_key: hex::decode(&sig.public_key).unwrap_or_default(),
         signature: hex::decode(&sig.signature).unwrap_or_default(),
+        // Legacy positive signatures predate the verdict surface (weft#481):
+        // VERDICT_UNSPECIFIED (treated as SIGN) with no decline reason.
+        verdict: grpc::heddle::v1::Verdict::Unspecified as i32,
+        reason: String::new(),
     }
 }
 

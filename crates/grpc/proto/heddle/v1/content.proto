@@ -50,6 +50,9 @@ message ListStatesRequest {
   string repo_path = 1;
   string ref = 2;
   uint32 limit = 3;
+  // +weft#469: server-side filter to non-published statuses. Empty = no
+  // filter (all statuses returned).
+  repeated StateStatus status_filter = 4;
 }
 
 message GetStateRequest {

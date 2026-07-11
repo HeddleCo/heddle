@@ -98,8 +98,9 @@ macro_rules! authed_call {
 
 fn default_spool_settings_request() -> grpc::heddle::v1::SpoolSettings {
     use grpc::heddle::v1::{
-        SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolInitialTooling,
-        SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior, SpoolVisibility, SpoolWritePolicy,
+        SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
+        SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior, SpoolVisibility,
+        SpoolWritePolicy,
     };
 
     SpoolSettings {
@@ -113,6 +114,8 @@ fn default_spool_settings_request() -> grpc::heddle::v1::SpoolSettings {
         sync_behavior: SpoolSyncBehavior::Manual as i32,
         bootstrap_sync_direction: SpoolBootstrapSyncDirection::Pull as i32,
         description: String::new(),
+        // UNSPECIFIED = inherit; effective root default is EXPLICIT_SUPERSESSION.
+        hold_lifecycle: SpoolHoldLifecycle::Unspecified as i32,
     }
 }
 

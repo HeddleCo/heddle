@@ -25,6 +25,34 @@ service StateReviewService {
   rpc GetReviewPayload(GetReviewPayloadRequest) returns (ReviewPayload);
   rpc SignState(SignStateRequest) returns (SignStateResponse);
   rpc ListSignatures(ListSignaturesRequest) returns (ListSignaturesResponse);
+  // +weft#481: record a signed SIGN/HOLD/REJECT reviewer verdict. Fully
+  // DECOUPLED from `StateStatus` — a verdict is reviewer opinion appended to
+  // the content-addressed signature blob and NEVER changes status or mints a
+  // successor. REJECT authz = repo Write parity (same gate as a positive SIGN).
+  rpc RecordVerdict(RecordVerdictRequest) returns (RecordVerdictResponse);
+  // +weft#482: server-side review-check progress. `RecordCheckAck` records a
+  // signed per-file / per-risk-signal ack; `GetReviewProgress` returns the
+  // acks (optionally filtered by user) so clients render "N/M reviewed" from
+  // real evidence. Backed by a dedicated table; the wire is storage-invisible.
+  rpc RecordCheckAck(RecordCheckAckRequest) returns (RecordCheckAckResponse);
+  rpc GetReviewProgress(GetReviewProgressRequest) returns (GetReviewProgressResponse);
+}
+
+// Reviewer verdict (weft#481). Opinion-only — orthogonal to `StateStatus`.
+// A HOLD/REJECT never changes task fate; `RecordVerdict` returns the SAME
+// state_id. Legacy positive signatures decode as UNSPECIFIED (treat as SIGN).
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_SIGN = 1;    // positive (also reachable via existing SignState)
+  VERDICT_HOLD = 2;    // "iterate on this change" — non-terminal opinion
+  VERDICT_REJECT = 3;  // "this attempt declined; rethink the approach" — NOT abort, no status change
+}
+
+// Kind of review-progress check (weft#482).
+enum CheckKind {
+  CHECK_KIND_UNSPECIFIED = 0;
+  CHECK_KIND_FILE_REVIEWED = 1;    // per-file checkmark; check_ref = file path
+  CHECK_KIND_RISK_SIGNAL_ACK = 2;  // per-risk-signal ack; check_ref = signal id
 }
 
 message GetReviewPayloadRequest {
@@ -203,4 +231,84 @@ message ReviewSignature {
   string algorithm = 8;
   bytes public_key = 9;
   bytes signature = 10;
+  // +weft#481: surfaces a recorded verdict through the existing ListSignatures
+  // path. UNSPECIFIED/SIGN for legacy positive sigs; HOLD/REJECT for verdicts.
+  Verdict verdict = 11;
+  // +weft#481: the required decline reason (empty for positive signatures).
+  string reason = 12;
+}
+
+// +weft#481: record a signed reviewer verdict. Mirrors the SignStateRequest
+// signing model (canonical payload, algorithm, public_key, signature,
+// signed_at). DECOUPLED from status.
+message RecordVerdictRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  Verdict verdict = 3;
+  ReviewScope scope = 4;
+  // REQUIRED for HOLD/REJECT (server-validated non-empty).
+  string reason = 5;
+  string algorithm = 6;
+  bytes public_key = 7;
+  // Raw signature bytes over the v2 canonical signing payload (incl. verdict).
+  bytes signature = 8;
+  google.protobuf.Timestamp signed_at = 9;
+  string client_operation_id = 15;
+}
+
+message RecordVerdictResponse {
+  // The appended attestation's id.
+  string signature_id = 1;
+  // Unchanged — the SAME state. A verdict never mints a successor, moves the
+  // tip, or changes status (decoupling). No status field by design.
+  bytes state_id = 2;
+}
+
+// +weft#482: a signed review-progress ack, keyed by
+// (state_id, actor, check_kind, check_ref). Acks are auditable attestations
+// (mirror the SignState signing fields).
+message ReviewCheckAck {
+  string actor_name = 1;
+  string actor_email = 2;
+  CheckKind check_kind = 3;
+  // The file path (FILE_REVIEWED) or risk-signal id (RISK_SIGNAL_ACK).
+  string check_ref = 4;
+  bool acked = 5;
+  google.protobuf.Timestamp acked_at = 6;
+  string algorithm = 7;
+  bytes public_key = 8;
+  bytes signature = 9;
+}
+
+message RecordCheckAckRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  CheckKind check_kind = 3;
+  string check_ref = 4;
+  bool acked = 5;
+  string algorithm = 6;
+  bytes public_key = 7;
+  bytes signature = 8;
+  google.protobuf.Timestamp acked_at = 9;
+  string client_operation_id = 15;
+}
+
+message RecordCheckAckResponse {
+  ReviewCheckAck ack = 1;
+}
+
+message GetReviewProgressRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  // Optional: restrict to a single reviewer's acks. Empty = all users.
+  string actor_name = 3;
+  // Pagination (table-backed).
+  uint32 limit = 4;
+  // Opaque cursor (row id).
+  string page_token = 5;
+}
+
+message GetReviewProgressResponse {
+  repeated ReviewCheckAck acks = 1;
+  string next_page_token = 2;
 }
