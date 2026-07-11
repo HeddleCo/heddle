@@ -670,46 +670,9 @@ impl GitIndexPlan {
     }
 }
 
-/// True when `root` is itself the top of a Git worktree, not merely
-/// nested inside one. A Heddle thread checkout now lives under the parent
-/// repo's `.heddle/threads/` (heddle#572); it's a *native* isolated
-/// checkout that shares the parent's object store but is NOT a Git
-/// worktree of its own. Bare git discovery walks up the directory tree,
-/// so from inside such a checkout it would find the PARENT repo's `.git`
-/// and read its index/HEAD as though they belonged to the checkout.
-/// Requiring the discovered worktree to equal `root` keeps git-index
-/// inspection scoped to genuine git-overlay roots — and matches the
-/// pre-#572 behaviour where a sibling checkout had no git above it at all.
-fn git_worktree_rooted_at(root: &Path) -> bool {
-    match SleyRepository::discover(root) {
-        Ok(git) => git_worktree_matches_root(&git, root),
-        Err(_) => false,
-    }
-}
-
-fn git_worktree_matches_root(git: &SleyRepository, root: &Path) -> bool {
-    git.workdir()
-        .is_some_and(|workdir| paths_equal(&workdir, root))
-}
-
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize();
-    let right = right.canonicalize();
-    match (left, right) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan>> {
-    if !git_worktree_rooted_at(root) {
-        return Ok(None);
-    }
-    Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent_for_root(root)?,
-        false,
-    )))
-}
+// Plain-Git observe-path index planning lives in
+// `heddle_core::git_index_plan_for_root` / `plain_git_status_report`. Overlay
+// commit paths below use repo-scoped `git_index_intent_for_repo`.
 
 fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
     let mut unstaged_paths = Vec::new();
@@ -747,20 +710,6 @@ fn git_index_intent_for_repo(repo: &Repository) -> Result<GitIndexIntent> {
         .git_overlay_sley_repository()?
         .ok_or_else(|| anyhow!("failed to inspect Git index before commit"))?;
     git_index_intent(repo, &git)
-}
-
-pub(crate) fn git_index_intent_for_root(root: &Path) -> Result<GitIndexIntent> {
-    let ignore_patterns = git_ignore_patterns_for_root(root)?;
-    git_index_intent_for_root_with_ignore(root, &ignore_patterns)
-}
-
-fn git_index_intent_for_root_with_ignore(
-    root: &Path,
-    ignore_patterns: &[String],
-) -> Result<GitIndexIntent> {
-    let git =
-        SleyRepository::discover(root).context("failed to inspect Git index before commit")?;
-    git_index_intent_for_root_with_ignore_and_repo(root, ignore_patterns, &git)
 }
 
 fn git_index_intent_for_root_with_ignore_and_repo(
@@ -821,33 +770,6 @@ fn status_row_is_gitlink_worktree_only(entry: ShortStatusRow<'_>) -> bool {
         && (entry.index_mode == Some(GIT_MODE_COMMIT)
             || entry.head_mode == Some(GIT_MODE_COMMIT)
             || entry.worktree_mode == Some(GIT_MODE_COMMIT))
-}
-
-fn git_ignore_patterns_for_root(root: &Path) -> Result<Vec<String>> {
-    let git = SleyRepository::discover(root)
-        .context("failed to inspect Git ignore files before commit")?;
-    let mut patterns = Vec::new();
-    append_ignore_file_patterns(&mut patterns, &root.join(".gitignore"))?;
-    append_ignore_file_patterns(&mut patterns, &git.git_dir().join("info").join("exclude"))?;
-    Ok(patterns)
-}
-
-fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read ignore file {}", path.display()))?;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if !patterns.iter().any(|pattern| pattern == trimmed) {
-            patterns.push(trimmed.to_string());
-        }
-    }
-    Ok(())
 }
 
 fn git_index_tree(repo: &Repository) -> Result<Tree> {
