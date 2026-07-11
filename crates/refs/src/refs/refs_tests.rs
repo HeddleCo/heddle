@@ -18,6 +18,42 @@ fn create_ref_manager() -> (TempDir, RefManager) {
     (temp_dir, refs)
 }
 
+/// Product-path packed-refs stress below the ~10k degradation threshold.
+///
+/// Keeps CI honest that `pack_refs` + cold load remain correct as ref count
+/// grows into the low thousands. Full 10k/50k/100k scale lives in Criterion
+/// (`reftable_vs_packed`) — see `docs/program/PACKED_REFS_STRESS.md`.
+#[test]
+fn packed_refs_product_stress_two_thousand_threads() {
+    let (temp, refs) = create_ref_manager();
+    const N: usize = 2_000;
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let id = ChangeId::generate();
+        let name = ThreadName::new(format!("stress/thread-{i:05}"));
+        refs.set_thread(&name, &id).unwrap();
+        ids.push((name, id));
+    }
+    refs.pack_refs().unwrap();
+
+    // Cold load via a new manager on the same heddle dir.
+    let heddle_dir = temp.path().join(".heddle");
+    let reloaded = RefManager::new(&heddle_dir);
+    for (name, id) in &ids {
+        let got = reloaded
+            .get_thread(name)
+            .unwrap()
+            .expect("packed thread must resolve after pack_refs");
+        assert_eq!(&got, id);
+    }
+    let listed = reloaded.list_threads().unwrap();
+    assert!(
+        listed.len() >= N,
+        "expected at least {N} threads after pack, got {}",
+        listed.len()
+    );
+}
+
 #[test]
 fn test_head_default() {
     let (_temp, refs) = create_ref_manager();

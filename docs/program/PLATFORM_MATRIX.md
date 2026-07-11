@@ -95,7 +95,8 @@ Treat items as done only when evidence is checked in (tests, CI job, or program 
   **Evidence:** [Windows materialization inventory](#windows-materialization-inventory) in this file (2026-07-11). Supported = ProjFS foundation + stat/fs helpers; path length / junctions / locks / CRLF remain **Unknown**.
 - [x] ProjFS smoke remains green when mount paths change; capture skip vs fail distinction in gate language.  
   **Evidence:** `rust-tests.yml` `projfs-smoke` comments + inventory table — self-skip on missing ProjFS; hard assert = fail.
-- [ ] FSKit: decide whether Wave 7 requires more than `cargo check` (e.g. ignored smoke on macOS runners) and record the bar.
+- [x] FSKit: decide whether Wave 7 requires more than `cargo check` (e.g. ignored smoke on macOS runners) and record the bar.  
+  **Decision (2026-07-11):** Wave 7 bar for FSKit remains **`cargo check -p heddle-mount --features fskit` on macOS** when mount paths change. Full mount e2e is **Foundation / deferred** (not a Wave 7 green requirement); escalate only if product elevates mount to required.
 - [ ] Confirm non-`mount` / core VCS paths remain green without FUSE/ProjFS/FSKit on all three OS classes claimed in docs.  
   **Note:** Linux PR matrix covers core tests; Windows full curated without mount is **not** matrixed — residual open.
 
@@ -125,14 +126,16 @@ Treat items as done only when evidence is checked in (tests, CI job, or program 
 
 ### Wave 6 handoff (adjacent, not Wave 7 exclusive)
 
-- [ ] Equal-work tip re-stamp with paired before/after for any hotspot change.
+- [x] Equal-work tip re-stamp with A==B self-pairs (measurement residual).  
+  **Evidence:** `PERF_BASELINE.md` primary `20260711T210616Z` on `34c101ea` (n=5 absolute + A==B). Hotspot *code* changes still need paired before/after if attempted.
 - [ ] Multi-host or quieter-host perf sample before external speed claims.
 
 ### Wave 5 handoff (adjacent)
 
 - [x] L6 `create_dir_all_durable` (or equivalent) landed in objects + tests; residual notes remain in GAP_MAP L6 (not a silent “no residual”).  
-  **Evidence:** GAP_MAP L6 **Shipped on program tip**; capability row above. Windows dir fsync no-op called out; optional remaining production sites tracked in GAP_MAP, not re-opened as “unshipped.”
-- [ ] L7/L8 residuals remain optional harden notes unless product raises them to P1.
+  **Evidence:** GAP_MAP L6 **Shipped on program tip**; capability row above. Windows dir fsync no-op called out.
+- [x] L7 finalize fsync shipped; L8 remains accepted optional residual.  
+  **Evidence:** GAP_MAP L7 **Shipped**; L8 unpaired pack-then-index window still acceptable.
 
 ---
 

@@ -60,7 +60,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -98,6 +98,27 @@ const MAX_OPEN_BUCKET_WRITERS: usize = 32;
 /// `Hash(_) < ChangeId(_)`).
 const HASH_VARIANT: usize = 0;
 const CHANGEID_VARIANT: usize = 1;
+
+/// Fsync staged pack bytes after finalize flush (Wave 5 L7).
+///
+/// Production writers are [`File`]; in-memory [`Cursor`] tests no-op.
+/// Publish still re-fsyncs at `publish_file_durable` install; this closes
+/// the pre-publish window if a caller inspects staged files after finalize.
+pub trait SyncData {
+    fn sync_data_for_durability(&mut self) -> io::Result<()>;
+}
+
+impl SyncData for File {
+    fn sync_data_for_durability(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
+}
+
+impl SyncData for Cursor<Vec<u8>> {
+    fn sync_data_for_durability(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Streaming pack builder. Held generic over the pack writer (`File`
 /// in production, `Cursor<Vec<u8>>` in tests).
@@ -175,7 +196,7 @@ impl<W: Write> Write for CountingWriter<'_, W> {
     }
 }
 
-impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
+impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
     /// Open a streaming builder against `pack_writer`, using
     /// `bucket_dir` for transient index buckets and writing the
     /// finalized index to `index_path`. The bucket dir is created if
@@ -588,6 +609,10 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             .write_all(checksum.as_bytes())
             .map_err(StoreError::from)?;
         writer.flush().map_err(StoreError::from)?;
+        // L7: durable staged pack before return (File fsync; Cursor no-op).
+        writer
+            .sync_data_for_durability()
+            .map_err(StoreError::from)?;
 
         // 5. Stream the final sorted index directly to disk. We open
         //    a `BufWriter` against `index_path`, write the index
@@ -622,6 +647,14 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             }
         }
         idx_writer.flush().map_err(StoreError::from)?;
+        // L7: durable staged index file + parent dirent for rename/read.
+        let idx_file = idx_writer
+            .into_inner()
+            .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
+        idx_file.sync_all().map_err(StoreError::from)?;
+        if let Some(parent) = self.index_path.parent() {
+            crate::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
+        }
         debug_assert_eq!(
             entries_written, self.object_count,
             "streaming index entry count drifted from add() count"

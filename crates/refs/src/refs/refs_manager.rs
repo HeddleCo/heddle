@@ -25,7 +25,7 @@ use super::{
     refs_storage::RefsLock,
     resolve_refspec,
 };
-use crate::fs_atomic::sync_directory;
+use crate::fs_atomic::{create_dir_all_durable, sync_directory};
 
 /// Sentinel meaning "no batch has been reconciled yet" — distinct from a real
 /// `head_id` so the first read after a reconciler is injected always reconciles.
@@ -702,9 +702,9 @@ impl RefManager {
     }
 
     pub fn init(&self) -> Result<()> {
-        std::fs::create_dir_all(self.threads_dir())?;
-        std::fs::create_dir_all(self.markers_dir())?;
-        std::fs::create_dir_all(self.remotes_dir())?;
+        create_dir_all_durable(&self.threads_dir())?;
+        create_dir_all_durable(&self.markers_dir())?;
+        create_dir_all_durable(&self.remotes_dir())?;
         Ok(())
     }
 
@@ -955,7 +955,7 @@ impl RefManager {
                 remote, thread
             ))
         })?;
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
         self.write_string(&path, &content)?;
         if self.rebuild_ref_summary_index_with_lock(lock).is_err() {
             self.invalidate_ref_summary_index();

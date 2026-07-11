@@ -21,7 +21,7 @@ use heddle_schema::op_record::{
 };
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{sync_directory, temp_path, write_file_atomic},
+    fs_atomic::{create_dir_all_durable, sync_directory, temp_path, write_file_atomic},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -710,7 +710,7 @@ impl PackedOpLogIndex {
         )?;
 
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_durable(parent)?;
         let tmp = temp_path(&self.path);
         let write_result = self.write_appended_tmp(
             &tmp,

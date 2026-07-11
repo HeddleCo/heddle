@@ -9,6 +9,7 @@ refs). Labels follow program truth rules.
 | Criterion scale bench (10k / 50k / 100k) | **Shipped** as stress tool (not a CI oracle gate) |
 | Reftable binary format in product `RefManager` | **Planned** / not implemented |
 | Continuous CI gate at 10k+ refs | **Unknown** / not claimed |
+| Product-path unit stress (2k threads pack+reload) | **Shipped** as CI unit test (`packed_refs_product_stress_two_thousand_threads`) |
 
 Cross-check: `AGENTS.md` known limitations, `GAP_MAP.md` **L2**,
 `PLATFORM_MATRIX.md`, `docs/design/reftable-spike.md`.

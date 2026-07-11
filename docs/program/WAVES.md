@@ -46,7 +46,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
 **Focus:** property tests, fault injection suites already present  
-**Status (2026-07-11):** **Mostly complete on program tip (optional harden residual)** — L7 pack publish durability via `publish_file_durable` landed; **L6** grandparent-dirent durability **shipped** and extended to lock dir ensure, agent registry dirs, streaming pack bucket dirs, and private-dir create (`create_private_dir_all` fsyncs new ancestors while keeping Unix `0o700`). Residual: tests-only bare `create_dir_all`, Windows dir fsync platform no-op, **L7** optional finalize fsync, **L8** unpaired pack-then-index window (accepted). Not a Wave 8 tip-correctness gate blocker.
+**Status (2026-07-11):** **Mostly complete on program tip (L8 residual only)** — **L6** grandparent-dirent durability shipped across objects + production refs/oplog dir creates; **L7** finalize fsyncs staged pack/index (`SyncData` + index parent dirent); publish still re-fsyncs at install. Residual: tests-only bare `create_dir_all`, Windows dir fsync platform no-op, **L8** unpaired pack-then-index window (accepted). Not a Wave 8 tip-correctness gate blocker.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 
