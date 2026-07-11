@@ -14,7 +14,9 @@ use heddle_core::{
     ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
     ThreadStartOptions, WorkspaceModeRequest, active_reservation_blocks_start,
     active_reservation_path_matches, check_explicit_path_isolation, list_threads,
-    plan_thread_create, plan_thread_mode, plan_thread_start, select_thread_base,
+    plan_checkout_path, plan_shared_target_redirect, plan_thread_create, plan_thread_materialize,
+    plan_thread_mode, plan_thread_start, select_thread_base, shared_target_redirect_applies,
+    should_advise_shared_target, should_warn_materialized_without_reflink,
     status::next_action::{
         canonical_git_repair_ref_preview_command,
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
@@ -967,9 +969,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // they know why their disk usage will be higher than the design-
     // doc promises. Fires once per `thread start` invocation, goes
     // to stderr so JSON consumers on stdout are unaffected.
-    if args.workspace == WorkspaceModeArg::Materialized
-        && !objects::fs_clone::filesystem_supports_reflink(repo.root())
-    {
+    // Pure warn decision lives in heddle-core; CLI still owns the message.
+    if should_warn_materialized_without_reflink(
+        args.workspace == WorkspaceModeArg::Materialized,
+        objects::fs_clone::filesystem_supports_reflink(repo.root()),
+    ) {
         eprintln!(
             "{}: this filesystem doesn't support reflinks/clonefile, so \
              `--workspace materialized` will fall back to per-file copies — \
@@ -979,27 +983,16 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             style::warn("note"),
         );
     }
-    let path = match thread_mode {
-        // Bytes-on-disk modes honour an explicit `--path`. Clonefile
-        // (`Materialized`) doesn't care where the destination lives;
-        // full-copy (`Solid`) doesn't either. Default to a managed
-        // path when `--path` is absent — heddle-internal layout for
-        // Materialized so we can sweep it cleanly; the top-level
-        // `default_thread_path` for Solid because users typically
-        // want a navigable sibling directory.
-        ThreadMode::Materialized => args
-            .path
-            .clone()
-            .unwrap_or_else(|| default_lightweight_thread_path(repo, &args.name)),
-        ThreadMode::Solid => args
-            .path
-            .clone()
-            .unwrap_or_else(|| default_thread_path(repo, &args.name)),
-        // Virtualised mounts must live at a Heddle-managed path so a
-        // user-named directory never gets shadowed by a kernel mount.
-        ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
-    };
-    if args.path.is_some() {
+    // Pure path layout: explicit `--path` for solid/materialized, managed
+    // default otherwise. Virtualized always uses the managed layout so a
+    // user-named directory is never shadowed by a kernel mount.
+    let path_plan = plan_checkout_path(
+        &thread_mode,
+        args.path.clone(),
+        default_thread_checkout_path(repo, &args.name),
+    );
+    let path = path_plan.path;
+    if path_plan.from_explicit_path {
         ensure_explicit_start_path_outside_tracked_tree(repo, &args.name, &path)?;
     }
     // The retry-stable idempotency key, resolved BEFORE the fresh-start preflight
@@ -1045,40 +1038,44 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the new checkout's `target/` to a workspace-shared dir so
     // parallel threads don't multiply cargo target trees on disk.
     //
-    // We compute this *before* materialization so the heads-up
-    // advisory below can reflect what would have happened, and we
-    // apply the redirect *after* materialization (only the `cargo
-    // config.toml` writer touches the checkout; the materializer
-    // populates the rest).
+    // Pure redirect / advisory decisions live in heddle-core. We resolve
+    // the shared dir *before* materialization so the heads-up advisory
+    // below can reflect what would have happened, and we apply the
+    // redirect *after* materialization (only the cargo config.toml
+    // writer touches the checkout; the materializer populates the rest).
     //
     // `--shared-target` in a non-Rust repo is a harmless no-op rather
     // than an error: automation that passes the flag unconditionally
     // across mixed-language repos shouldn't have to special-case
     // every non-cargo project. We log a debug-level note so a curious
     // operator can still see it landed silently.
-    let shared_target_dir_path: Option<PathBuf> = if args.shared_target
-        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
-    {
-        if shared_target::workspace_root_is_rust(repo) {
+    let is_rust_workspace = shared_target::workspace_root_is_rust(repo);
+    let shared_target_decision =
+        plan_shared_target_redirect(args.shared_target, &thread_mode, is_rust_workspace);
+    let shared_target_dir_path: Option<PathBuf> = match shared_target_decision {
+        heddle_core::SharedTargetRedirectDecision::Apply => {
             Some(shared_target::shared_target_dir(repo)?)
-        } else {
+        }
+        heddle_core::SharedTargetRedirectDecision::SkipNonRustWorkspace => {
             tracing::debug!(
                 repo = %repo.root().display(),
                 "--shared-target requested in a non-Rust repo (no top-level Cargo.toml); skipping"
             );
             None
         }
-    } else {
-        None
+        heddle_core::SharedTargetRedirectDecision::NotApplicable => None,
     };
 
     // Heads-up advisory: when starting a second-or-later materialized
     // thread in a Rust workspace without `--shared-target`, nudge the
     // user toward the flag. Doesn't fail the start; just stderr.
-    if !args.shared_target
-        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
-        && shared_target::should_advise_shared_target(repo)
-    {
+    // Pure gate (requested + mode) lives in heddle-core; rust/busy I/O
+    // stays in shared_target so the pre-start population is counted once.
+    if should_advise_shared_target(
+        args.shared_target,
+        &thread_mode,
+        shared_target::should_advise_shared_target(repo),
+    ) {
         shared_target::print_advisory(&args.name);
     }
 
@@ -1157,10 +1154,22 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // precise directory + symlink rewind, back to the exact pre-start state;
     // the oplog `ThreadCreate` is the staged commit record appended once at
     // the single commit point. See `start_atomic::StartThread`.
+    //
+    // Pure step sequence / hydrate / shared-target flags come from
+    // heddle-core; the transaction still owns FS clonefile/copy and mounts.
     let mount_ownership = mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     // `scope` + `transaction_id` were resolved above the commit-detection gate.
-    let hydrate_requested =
-        args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
+    let materialize_plan = plan_thread_materialize(
+        &thread_mode,
+        shared_target_redirect_applies(shared_target_decision),
+        args.hydrate,
+    );
+    let hydrate_requested = materialize_plan.hydrate;
+    debug_assert_eq!(
+        materialize_plan.apply_shared_target,
+        shared_target_dir_path.is_some(),
+        "shared-target plan and resolved dir must agree before execute"
+    );
     let start_output = repo::atomic::execute(
         repo,
         start_atomic::StartThread {
@@ -2771,22 +2780,6 @@ fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
     }
 
     Ok(normalized)
-}
-
-/// Lightweight (materialized) checkout path:
-/// `<repo>/.heddle/threads/<name>/<repo-name>`.
-fn default_lightweight_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    default_thread_checkout_path(repo, name)
-}
-
-/// Mount-point path for a virtualized thread:
-/// `<repo>/.heddle/threads/<name>/<repo-name>`. Shares the same managed
-/// `.heddle/threads/<name>/<repo-name>` layout as solid/lightweight checkouts
-/// (thread names are unique per repo), keeping the per-thread
-/// `manifest.toml` sidecar a sibling of the mount point rather than a
-/// stray entry inside it.
-fn default_virtualized_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    default_thread_checkout_path(repo, name)
 }
 
 fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {

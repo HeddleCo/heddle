@@ -2,6 +2,7 @@
 //! Embeddable Heddle facade scaffolding.
 
 pub mod actor;
+pub mod clone_plan;
 pub mod context;
 pub mod contract;
 pub mod diff;
@@ -13,6 +14,7 @@ pub mod save;
 pub mod status;
 pub mod thread;
 pub mod thread_lifecycle;
+pub mod thread_materialize;
 pub mod thread_plan;
 pub mod thread_shaping;
 pub mod undo;
@@ -26,6 +28,14 @@ pub use actor::{
     default_actor_thread_name, filter_actors, filter_actors_ref, is_explicit_identity, list_actors,
     list_actors_from_registry, mark_actor_done, nonempty_attr, plan_actor_done, plan_actor_spawn,
     resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
+};
+pub use clone_plan::{
+    AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
+    ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight,
+    UnsupportedCloneFlag, absolute_path, assemble_clone_security_preflight,
+    looks_like_git_overlay_url, looks_like_local_path, normalize_clone_depth, plan_adopt,
+    plan_clone, resolve_adopt_start_path, resolve_clone_destination, select_clone_mode,
+    validate_clone_destination, validate_clone_mode_options,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -55,15 +65,19 @@ pub use objects::{
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use remote::{
-    GitConfigContext, HostedPushPlan, IncludedGitRemoteConfigError, PullPlan, PullPlanRequest,
-    PushPath, PushPlan, PushPlanRequest, RemoteInfo, RemoteListReport, RemotePreflightBlocker,
-    all_threads_uses_single_mirror_push, default_pull_thread_name, default_push_thread_name,
-    git_overlay_current_thread_push_ok, git_overlay_thread_mismatch_blocker,
+    COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF, GIT_NOTES_VISIBILITY_WARNING,
+    GitConfigContext, GitOverlayPushTracking, GitRemoteConfigured, GitUpstreamConfigured,
+    HostedPushPlan, IncludedGitRemoteConfigError, PullExecutionFacts, PullOutcome, PullPlan,
+    PullPlanRequest, PushExecutionFacts, PushOutcome, PushPath, PushPlan, PushPlanRequest,
+    RemoteInfo, RemoteListReport, RemotePreflightBlocker, all_threads_uses_single_mirror_push,
+    build_pull_outcome, build_push_outcome, default_pull_thread_name, default_push_thread_name,
+    git_overlay_current_thread_push_ok, git_overlay_ref_scope, git_overlay_thread_mismatch_blocker,
     list_plain_git_remotes, list_remotes, merged_remote_items, plain_git_remote_items,
-    plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree, pull_will_materialize,
-    remote_missing_blocker, resolve_default_remote_name, resolved_default_remote_name,
-    show_plain_git_remote, show_remote, transport_mismatch_blocker, uses_git_overlay_mirror_rpc,
-    uses_local_git_overlay_transport,
+    plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree, pull_status,
+    pull_will_materialize, push_scope_label, push_status, remote_missing_blocker,
+    resolve_default_remote_name, resolved_default_remote_name, show_plain_git_remote, show_remote,
+    summarize_pull_outcome, summarize_push_outcome, transport_mismatch_blocker,
+    uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
 };
 pub use save::{
     GitScope, SavePlan, SaveReport, SaveVerb, execute_save, plan_creates_new_state, plan_git_scope,
@@ -96,6 +110,14 @@ pub use thread_lifecycle::{
     promote_in_place_conversion_candidate, resolve_promote_target_path,
     should_materialize_refresh_conflict_markers, thread_mode_requires_unmount,
 };
+pub use thread_materialize::{
+    ADVISORY_ACTIVE_HEAVY_THREAD_THRESHOLD, CheckoutCopyPolicy, CheckoutPathPlan, MaterializeStep,
+    SharedTargetRedirectDecision, ThreadMaterializePlan, mode_is_bytes_on_disk,
+    plan_checkout_copy_policy, plan_checkout_path, plan_hydrate, plan_materialize_steps,
+    plan_shared_target_redirect, plan_thread_materialize, plan_write_manifest,
+    shared_target_redirect_applies, shared_target_workspace_is_busy, should_advise_shared_target,
+    should_warn_materialized_without_reflink,
+};
 pub use thread_plan::{
     AutoWorkspaceDefault, ExplicitPathPlacement, ThreadBaseError, ThreadBaseSelection,
     ThreadCreateOptions, ThreadCreatePlan, ThreadPathIsolationError, ThreadPlanError,
@@ -110,9 +132,16 @@ pub use thread_shaping::{
     ThreadShapingError, capture_split, thread_move,
 };
 pub use undo::{
-    UndoBatchSummary, UndoHistoryAction, UndoListReport, UndoOperationSummary, UndoPlan,
-    batch_status, empty_history_refusal, list_undo_history, list_undo_history_ctx,
-    plan_redo_batches, plan_undo_batches, require_nonempty_history, summarize_batch,
+    LiveThreadWorktree, PurgeOpRef, RedactOpRef, RedactionUndoBatchFacts, RequiredStateRef,
+    ThreadWorktreeHazard, UndoApplyPlan, UndoApplyPreflightError, UndoApplyStep, UndoBatchSummary,
+    UndoHistoryAction, UndoListReport, UndoOperationSummary, UndoPlan, UnsupportedRedoOp,
+    batch_status, check_redaction_redo_supported, check_redaction_undo_safe,
+    check_states_reachable, check_thread_worktree_undo_safe, collect_redaction_undo_facts,
+    collect_redo_required_states, collect_thread_worktree_hazards, collect_undo_required_states,
+    collect_unsupported_redo_ops, empty_history_refusal, human_undo_redo_message,
+    list_undo_history, list_undo_history_ctx, live_materialized_path_blocks_undo,
+    machine_undo_redo_message, plan_redo_apply_steps, plan_redo_batches, plan_undo_apply,
+    plan_undo_apply_steps, plan_undo_batches, require_nonempty_history, summarize_batch,
     undo_mode_conflict, validate_undo_list_preview_modes,
 };
 pub use verify::{
