@@ -396,7 +396,7 @@ fn diagnose_thread(summary: &ThreadSummary) -> DiagnoseThreadOutput {
     DiagnoseThreadOutput {
         name: summary.name.clone(),
         visibility: summary.visibility.clone(),
-        coordination_status: summary.coordination_status.clone(),
+        coordination_status: summary.coordination_status,
         is_isolated: summary.is_isolated,
         mode: summary.thread_mode.clone(),
         state: summary.thread_state.clone(),

@@ -298,7 +298,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     )?;
     // Core reports 0 for injected repos; fold the shell open into the profile
     // so `repo_open_ms` reflects real work on this path.
-    output.profile.repo_open_ms = cli_repo_open_ms + output.profile.repo_open_ms;
+    output.profile.repo_open_ms += cli_repo_open_ms;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,
         body_ms = output.profile.build_total_ms,
