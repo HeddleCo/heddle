@@ -1,0 +1,204 @@
+{
+  "jobs": 19,
+  "counts": {
+    "pass": 19,
+    "fail": 0
+  },
+  "results": [
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 49,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "pass",
+      "duration_ms": 3670,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 3027,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 8857,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 5708,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-projection-engine",
+      "status": "pass",
+      "duration_ms": 289625,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-objects",
+      "status": "pass",
+      "duration_ms": 104875,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-refs",
+      "status": "pass",
+      "duration_ms": 16461,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-oplog",
+      "status": "pass",
+      "duration_ms": 9266,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-merge",
+      "status": "pass",
+      "duration_ms": 12187,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-format",
+      "status": "pass",
+      "duration_ms": 2025,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-crypto",
+      "status": "pass",
+      "duration_ms": 9834,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 23528,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-repo",
+      "status": "pass",
+      "duration_ms": 98550,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-ingest",
+      "status": "pass",
+      "duration_ms": 25300,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-git-projection",
+      "status": "pass",
+      "duration_ms": 4209,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-core-functionality",
+      "status": "pass",
+      "duration_ms": 47638,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-state-management",
+      "status": "pass",
+      "duration_ms": 47355,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "formal-specs",
+      "status": "pass",
+      "duration_ms": 3194,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ],
+  "gates": {
+    "clippy_d_warnings": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings",
+      "status": "pass",
+      "exit_code": 0,
+      "note": "clean on tip e6145058",
+      "log": "logs/clippy-d-warnings.log"
+    },
+    "clippy_soft": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "warnings": 0,
+      "note": "no clippy warnings",
+      "log": "logs/clippy-soft.log"
+    },
+    "cargo_doc": {
+      "command": "cargo doc -p heddle-core --no-deps --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "note": "1 rustdoc::broken_intra_doc_links warning (skip_reason) \u2014 not a fail",
+      "log": "logs/cargo-doc.log"
+    }
+  },
+  "certification": {
+    "label": "wave-e614-full-curated-recert",
+    "wave": 8,
+    "commit": "e6145058bc214d8681e94dd449adff4620dfb281",
+    "branch": "codex/correctness-architecture-performance-program",
+    "isolation": "git worktree (detached HEAD) at /tmp/heddle-w-cert; artifacts written to main workspace",
+    "worktree_path": "/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10",
+    "cert_checkout_path": "/tmp/heddle-w-cert",
+    "cargo_target_dir": "/tmp/heddle-w-t3",
+    "timestamp_utc": "20260711T175858Z",
+    "note": "Full curated 19-job suite via single run-baseline.sh --suite curated on clean tip e6145058 (detached worktree dirty=0). Clippy -D warnings + soft + cargo doc all green. Prior n=5 perf stamp retained (not re-run). First attempt aborted by poisoned Swift clang-module-cache after mv of CARGO_TARGET_DIR from /tmp/heddle-n5-t3 -> /tmp/heddle-w-t3; after wiping clang-module-cache + heddle-mount rebuild, authoritative re-run is green.",
+    "method": "git worktree add --detach /tmp/heddle-w-cert e6145058; BASELINE_OUT_DIR=.../wave-e614-cert; full --suite curated; CARGO_TARGET_DIR=/tmp/heddle-w-t3",
+    "oracle_jobs_pass": [
+      "git-process-lint",
+      "roundtrip-fidelity",
+      "commit-conformance",
+      "git-projection-engine",
+      "lib-git-projection",
+      "formal-specs"
+    ],
+    "release_gate_checklist": {
+      "curated_19": "pass",
+      "oracles": "pass",
+      "fmt_check": "pass",
+      "clippy_d_warnings": "pass",
+      "cargo_doc": "pass",
+      "perf_n5": "prior_recorded_not_rerun"
+    },
+    "blockers": [],
+    "environment": {
+      "host": "Darwin MacBookPro 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:56 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6000 arm64",
+      "cpu": "Apple M1 Pro",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+      "git": "git version 2.55.0",
+      "dirty": "0"
+    }
+  }
+}
