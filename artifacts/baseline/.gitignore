@@ -1,13 +1,7 @@
-# Keep summaries and READMEs; ignore bulky per-run trees and logs.
+# Default-deny bulky per-run trees; allow summaries and README.
 *
 !.gitignore
 !README.md
+!**/
 !**/summary.json
-!wave0-merged/
-!wave0-merged/**
-wave0-merged/logs/
 **/logs/
-**/environment.txt
-**/manifest.toml
-**/jobs.json
-**/results.jsonl
