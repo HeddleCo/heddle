@@ -239,14 +239,21 @@ fn repository_verification_allows_success_claim(
     false
 }
 
-pub(crate) fn blocked_operator_exit_code(status: &str) -> Option<i32> {
-    matches!(status, "blocked" | "failed").then_some(1)
+/// True when an operator envelope's `status` is a non-success terminal
+/// outcome that scripts must observe as a non-zero process exit.
+pub(crate) fn is_blocked_operator_status(status: &str) -> bool {
+    matches!(status, "blocked" | "failed")
 }
 
-pub(crate) fn exit_if_blocked_operator_status(status: &str) {
-    if let Some(code) = blocked_operator_exit_code(status) {
-        std::process::exit(code);
+/// After the command has rendered its operator envelope, convert a blocked
+/// or failed status into a typed error so `main` can map it through
+/// [`crate::exit::HeddleExitCode::from_error`] without a second envelope
+/// (see [`crate::exit::OutcomeExit`]).
+pub(crate) fn fail_if_blocked_operator_status(status: &str) -> Result<()> {
+    if is_blocked_operator_status(status) {
+        return Err(anyhow::anyhow!(crate::exit::OutcomeExit::data_err()));
     }
+    Ok(())
 }
 
 impl Serialize for OperatorCommandOutput {

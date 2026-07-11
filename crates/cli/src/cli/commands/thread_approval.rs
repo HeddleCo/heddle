@@ -306,14 +306,15 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         })
         .collect();
 
+    let allowed = resp.allowed;
     if should_output_json(cli, Some(repo.config())) {
         let out = EligibilityOutput {
-            allowed: resp.allowed,
+            allowed,
             unmet,
             valid_approvals,
         };
         println!("{}", serde_json::to_string(&out)?);
-    } else if resp.allowed {
+    } else if allowed {
         println!("{} -> {} can merge.", args.source, args.target);
         if !valid_approvals.is_empty() {
             println!("  ({} approval(s) counted)", valid_approvals.len());
@@ -325,7 +326,7 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             args.target,
             unmet.len()
         );
-        for u in unmet {
+        for u in &unmet {
             println!(
                 "  [{kind}] {reason} (have {have}/{needed})",
                 kind = u.kind,
@@ -334,8 +335,12 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
                 needed = u.needed,
             );
         }
-        // Non-zero exit code so scripts can branch on it.
-        std::process::exit(2);
+    }
+    // Non-zero exit so scripts can branch. Use DataErr (65) — exit 2 is
+    // reserved for panic / set -e fallout and must not be intentional.
+    // Report already rendered; main maps OutcomeExit without a second envelope.
+    if !allowed {
+        return Err(anyhow!(crate::exit::OutcomeExit::data_err()));
     }
     Ok(())
 }

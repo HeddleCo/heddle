@@ -20,7 +20,7 @@ use super::{
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
-        exit_if_blocked_operator_status,
+        fail_if_blocked_operator_status,
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -1691,8 +1691,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             print_next(next);
         }
     }
-    exit_if_blocked_operator_status(&output.operator.status);
-    Ok(())
+    fail_if_blocked_operator_status(&output.operator.status)
 }
 
 fn land_text_step(step: &str) -> String {

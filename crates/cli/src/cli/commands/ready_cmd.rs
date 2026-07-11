@@ -21,7 +21,7 @@ use super::{
     next_action::{NextActionValidationContext, normalized_action, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
-        exit_if_blocked_operator_status,
+        fail_if_blocked_operator_status,
     },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
@@ -518,8 +518,7 @@ fn write_ready_output_inner(
             write_preview_report(output, output.operator.recommended_action.as_deref());
         }
     }
-    exit_if_blocked_operator_status(&output.operator.status);
-    Ok(())
+    fail_if_blocked_operator_status(&output.operator.status)
 }
 
 fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {

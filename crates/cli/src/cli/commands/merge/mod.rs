@@ -28,13 +28,14 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     next_action::{NextActionValidationContext, write_command_json},
-    operator_core::blocked_operator_exit_code,
+    operator_core::is_blocked_operator_status,
     snapshot::ensure_current_state,
     verification_health::repository_verification_blocked_advice,
 };
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style},
     config::UserConfig,
+    exit::OutcomeExit,
 };
 
 /// Historical wire name for the merge report type.
@@ -126,19 +127,23 @@ pub fn cmd_merge(
         return Err(anyhow!(merge_preview_blocked_advice(&output)));
     }
 
-    let exit_code = merge_output_exit_code(&output);
+    let should_fail = merge_output_should_fail(&output);
     render_merge_output(cli, &repo, output)?;
-    if let Some(code) = exit_code {
-        std::process::exit(code);
+    if should_fail {
+        // Envelope already on stdout/stderr; map to DataErr (65) via main.
+        return Err(anyhow!(OutcomeExit::data_err()));
     }
     Ok(())
 }
 
-fn merge_output_exit_code(output: &MergeOutput) -> Option<i32> {
+/// Preview that ran successfully stays exit 0 even when the report would
+/// block an apply. Apply / failed-preview paths fail when the operator
+/// status is blocked or failed (catalogued as DataErr 65 for conflicts).
+fn merge_output_should_fail(output: &MergeOutput) -> bool {
     if output.preview_only && !preview_did_not_run(output) {
-        return None;
+        return false;
     }
-    blocked_operator_exit_code(&output.operator.status)
+    is_blocked_operator_status(&output.operator.status)
 }
 
 /// Core builds `heddle land ... --no-push` recommendations because it can't
