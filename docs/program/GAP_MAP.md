@@ -24,7 +24,7 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 
 | ID | Gap | Owner | Contract | Fix direction |
 |----|-----|-------|----------|---------------|
-| A1 | Large domain still in CLI (`thread`, `clone`, `workflow`, remotes, undo) | cli → core/repo | Thin delivery layer | Wave extractions by command family |
+| A1 | Large domain still in CLI (`thread`, `clone`, `workflow`, remotes, undo) | cli → core/repo | Thin delivery layer | **High-value pure plans extracted (2026-07-11)**; remaining residual is I/O/render/catalog (`cli-domain-residual.md`) |
 | A2 | Dual status paths (CLI status.rs + core status) | core + cli | Single ownership | CLI render-only over `heddle_core::status` |
 | A3 | Ambient OnceLocks block multi-repo embed | cli, repo, semantic | DI facade | Migrate to ExecutionContext services |
 | A4 | `process::exit` inside command handlers | cli | Result-only domain | Return typed errors; exit only in main |

@@ -34,13 +34,13 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `crates/core/src/save*`, thread-shaping, CLI `workflow`/`start`/`ready`/`land` adapters only  
 **Focus:** typed `*Options`/`*Report`; CLI becomes render/dispatch  
-**Status (2026-07-11):** **In progress / partial** — facade extraction slices and mid-handler exit cleanup integrated on program tip; `facade-render-free` + `lib-core` **pass** on post-wave23 re-cert. Full save/thread/workflow adapter surface not claimed complete; remaining cmd residual tracked via `docs/program/cli-domain-residual.md`.
+**Status (2026-07-11):** **High-value complete on program tip** — pure plan/report/decision ownership for capture safety, ready/land accounting, land text, undo human labels, thread resolve blockers, operator verification claims, harness relay JSON, monorepo/fanout preflight, git commit index planning, resolve markers, and related helpers live in `heddle-core`. CLI retains I/O, RecoveryAdvice, hooks, and render. Full thin-CLI for every `cmd_*` is **not** claimed; long-tail residual tracked in `docs/program/cli-domain-residual.md` (schemas/doctor/watch/redact/etc.).
 
 ## Wave 4 — Remotes / projection command extraction
 
 **Paths:** CLI remote modules → core/repo ops; push/pull/sync capability routing  
 **Keep:** wire protocol changes minimal unless contract broken  
-**Status:** **Not started** as a dedicated wave on this cert pass.
+**Status (2026-07-11):** **High-value complete on program tip** — remote list/show, push/pull plans/outcomes, transport mismatch, URL/location/hosted path helpers, hosted result field parsing, and git-projection commit index / next-action pure pieces are in core. Network bodies and Sley overlay I/O remain CLI.
 
 ## Wave 5 — Concurrency / crash consistency
 

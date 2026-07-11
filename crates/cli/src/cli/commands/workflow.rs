@@ -14,7 +14,8 @@ use heddle_core::{
     land_performed_steps as core_land_performed_steps,
     land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
     land_warnings_for_preview as core_land_warnings_for_preview,
-    non_staleness_blockers as core_non_staleness_blockers, plan_land_push,
+    non_staleness_blockers as core_non_staleness_blockers,
+    op_targets_merge_state as core_op_targets_merge_state, plan_land_push,
     recovery_scope_checkout as core_recovery_scope_checkout,
     should_squash_land as core_should_squash_land,
 };
@@ -1281,37 +1282,7 @@ fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) ->
 }
 
 fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
-    match op {
-        OpRecord::Snapshot { new_state, .. } => change_id_matches_display(new_state, merge_state),
-        OpRecord::Checkpoint { state, .. } => change_id_matches_display(state, merge_state),
-        OpRecord::Goto { target, .. } => change_id_matches_display(target, merge_state),
-        OpRecord::FastForward { post_target_id, .. } => {
-            change_id_matches_display(post_target_id, merge_state)
-        }
-        // These records don't advance HEAD/thread to a merge target the land
-        // flow tracks. Enumerated explicitly (no wildcard) so a new
-        // state-advancing variant must be considered as a possible merge
-        // target here (heddle#354 r9).
-        OpRecord::ThreadCreate { .. }
-        | OpRecord::ThreadDelete { .. }
-        | OpRecord::ThreadUpdate { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::MarkerCreate { .. }
-        | OpRecord::MarkerDelete { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::EphemeralThreadCollapse { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::GitCheckpoint { .. }
-        | OpRecord::RemoteThreadUpdate { .. }
-        | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => false,
-    }
+    core_op_targets_merge_state(op, merge_state)
 }
 
 fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {

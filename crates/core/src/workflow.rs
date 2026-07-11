@@ -14,6 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
+use objects::object::ChangeId;
+use oplog::OpRecord;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus, shell_quote};
 
 use crate::{
@@ -400,6 +402,49 @@ pub fn ready_merge_type_label(result: &str) -> String {
     }
 }
 
+/// Ready status line for operator text (`clean` vs thread health).
+pub fn ready_status_summary(
+    merge_relation: &str,
+    blockers_empty: bool,
+    thread_health: &str,
+) -> String {
+    if merge_relation == "no_target" && blockers_empty {
+        "clean".to_string()
+    } else {
+        thread_health.replace('_', " ")
+    }
+}
+
+/// Integration column for ready summary.
+pub fn ready_integration_summary(merge_relation: &str) -> String {
+    match merge_relation {
+        "no_target" => "n/a (no integration target configured)".to_string(),
+        "not_checked" => "not checked (readiness checks did not run)".to_string(),
+        "blocked" => "not checked (repository verification is blocked)".to_string(),
+        _ => "configured".to_string(),
+    }
+}
+
+/// Freshness column for ready summary.
+pub fn ready_freshness_summary(merge_relation: &str, freshness: &str) -> String {
+    match merge_relation {
+        "no_target" => "n/a (no integration target configured)".to_string(),
+        "not_checked" => "not checked (readiness checks did not run)".to_string(),
+        "blocked" => "not checked (repository verification is blocked)".to_string(),
+        _ => freshness.replace('_', " "),
+    }
+}
+
+/// Merge-type column for ready summary.
+pub fn ready_merge_type_summary(merge_relation: &str) -> String {
+    match merge_relation {
+        "no_target" => "n/a (no integration target configured)".to_string(),
+        "not_checked" => "not checked (readiness checks did not run)".to_string(),
+        "blocked" => "not checked (repository verification is blocked)".to_string(),
+        other => ready_merge_type_label(other),
+    }
+}
+
 /// Steps that actually ran during land.
 pub fn land_performed_steps(
     captured: bool,
@@ -489,6 +534,52 @@ pub fn land_checkpoint_message(
 /// Whether a change id matches a short or full display form from operator text.
 pub fn change_id_matches_display(short: &str, full: &str, display: &str) -> bool {
     short == display || full == display
+}
+
+/// Whether an oplog record advances HEAD/thread to a land merge target.
+pub fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
+    match op {
+        OpRecord::Snapshot { new_state, .. } => {
+            change_id_matches_display(&new_state.short(), &new_state.to_string_full(), merge_state)
+        }
+        OpRecord::Checkpoint { state, .. } => {
+            change_id_matches_display(&state.short(), &state.to_string_full(), merge_state)
+        }
+        OpRecord::Goto { target, .. } => {
+            change_id_matches_display(&target.short(), &target.to_string_full(), merge_state)
+        }
+        OpRecord::FastForward { post_target_id, .. } => change_id_matches_display(
+            &post_target_id.short(),
+            &post_target_id.to_string_full(),
+            merge_state,
+        ),
+        // Enumerated explicitly (no wildcard) so a new state-advancing variant
+        // must be considered here (heddle#354 r9).
+        OpRecord::ThreadCreate { .. }
+        | OpRecord::ThreadDelete { .. }
+        | OpRecord::ThreadUpdate { .. }
+        | OpRecord::Fork { .. }
+        | OpRecord::Collapse { .. }
+        | OpRecord::MarkerCreate { .. }
+        | OpRecord::MarkerDelete { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::EphemeralThreadCollapse { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::Redact { .. }
+        | OpRecord::Purge { .. }
+        | OpRecord::GitCheckpoint { .. }
+        | OpRecord::RemoteThreadUpdate { .. }
+        | OpRecord::RemoteThreadDelete { .. }
+        | OpRecord::UndoRecoveryUpdate { .. }
+        | OpRecord::StateVisibilitySet { .. }
+        | OpRecord::StateVisibilityPromote { .. } => false,
+    }
+}
+
+/// Convenience: match a [`ChangeId`] against operator display text.
+pub fn change_id_matches_op_display(id: &ChangeId, display: &str) -> bool {
+    change_id_matches_display(&id.short(), &id.to_string_full(), display)
 }
 
 #[cfg(test)]

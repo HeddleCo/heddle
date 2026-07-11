@@ -5,9 +5,13 @@ use anyhow::Result;
 use chrono::Utc;
 use heddle_core::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
+    ready_freshness_summary as core_ready_freshness_summary,
+    ready_integration_summary as core_ready_integration_summary,
     ready_merge_type_label as core_ready_merge_type_label,
+    ready_merge_type_summary as core_ready_merge_type_summary,
     ready_report_recommended_action as core_ready_report_recommended_action,
-    ready_scoped_next_action as core_ready_scoped_next_action, ready_verification_preflight_blocks,
+    ready_scoped_next_action as core_ready_scoped_next_action,
+    ready_status_summary as core_ready_status_summary, ready_verification_preflight_blocks,
     status::next_action::non_empty_action,
 };
 use objects::object::Tree;
@@ -742,11 +746,11 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
 }
 
 fn ready_status_summary(report: &ThreadPreviewReport) -> String {
-    if report.merge_relation == "no_target" && report.blockers.is_empty() {
-        "clean".to_string()
-    } else {
-        report.thread_health.replace('_', " ")
-    }
+    core_ready_status_summary(
+        &report.merge_relation,
+        report.blockers.is_empty(),
+        &report.thread_health,
+    )
 }
 
 fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
@@ -774,33 +778,15 @@ fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
 }
 
 fn ready_integration_summary(report: &ThreadPreviewReport) -> String {
-    if report.merge_relation == "no_target" {
-        "n/a (no integration target configured)".to_string()
-    } else if report.merge_relation == "not_checked" {
-        "not checked (readiness checks did not run)".to_string()
-    } else if report.merge_relation == "blocked" {
-        "not checked (repository verification is blocked)".to_string()
-    } else {
-        "configured".to_string()
-    }
+    core_ready_integration_summary(&report.merge_relation)
 }
 
 fn ready_freshness_summary(report: &ThreadPreviewReport) -> String {
-    match report.merge_relation.as_str() {
-        "no_target" => "n/a (no integration target configured)".to_string(),
-        "not_checked" => "not checked (readiness checks did not run)".to_string(),
-        "blocked" => "not checked (repository verification is blocked)".to_string(),
-        _ => report.freshness.replace('_', " "),
-    }
+    core_ready_freshness_summary(&report.merge_relation, &report.freshness)
 }
 
 fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
-    match report.merge_relation.as_str() {
-        "no_target" => "n/a (no integration target configured)".to_string(),
-        "not_checked" => "not checked (readiness checks did not run)".to_string(),
-        "blocked" => "not checked (repository verification is blocked)".to_string(),
-        other => ready_merge_type_label(other),
-    }
+    core_ready_merge_type_summary(&report.merge_relation)
 }
 
 fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
