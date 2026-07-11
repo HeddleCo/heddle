@@ -503,6 +503,80 @@ pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
 }
 
+/// Publish an existing on-disk file at `src` to `dst` with the same
+/// crash-consistency contract as [`write_file_atomic`]:
+///
+/// 1. `fsync` the source so its data blocks are stable before any directory
+///    entry is updated (`rename` moves a dirent; it does not re-write bytes).
+/// 2. `rename(src, dst)` when both paths share a filesystem — atomic dirent
+///    publish.
+/// 3. On `EXDEV`, stream-copy into a *same-directory* temp, `fsync` the temp,
+///    `rename` over `dst`, then remove `src`. Never write the final path in
+///    place: a crash mid-copy must not leave a torn content-addressed object
+///    under its final name.
+/// 4. `fsync` the destination parent so the new dirent is durable.
+///
+/// If `dst` already exists and rename reports `AlreadyExists` (Windows;
+/// POSIX `rename` replaces files), the source is removed and `Ok(())` is
+/// returned — content-addressed install idempotency.
+///
+/// Non-`EXDEV` rename failures propagate. Callers must not silently fall
+/// through to a raw in-place copy on unrelated errors (the previous
+/// streaming-pack install path did exactly that).
+pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+
+    // Data-block durability before publishing the dirent. Required even on
+    // the same-filesystem rename path: StreamingPackBuilder (and similar
+    // staged writers) only `flush` buffered writers; without this fsync a
+    // crash after rename can lose the published object.
+    {
+        let file = File::open(src).map_err(|e| enrich_fs_error(src, "opening", e))?;
+        file.sync_all()
+            .map_err(|e| enrich_fs_error(src, "syncing", e))?;
+    }
+
+    match fs::rename(src, dst) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Content-addressed install: destination already present.
+            let _ = fs::remove_file(src);
+        }
+        Err(e) if is_cross_device_link(&e) => {
+            publish_file_via_copy_durable(src, dst)?;
+        }
+        Err(e) => return Err(enrich_rename_error(src, dst, e)),
+    }
+
+    sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+}
+
+/// Cross-device publish path: copy to a same-dir temp, fsync, rename over
+/// `dst`. Exposed to unit tests so the no-torn-final-path contract is
+/// exercised without needing a real multi-mount layout.
+fn publish_file_via_copy_durable(src: &Path, dst: &Path) -> io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+
+    let tmp = temp_path(dst);
+    let result = (|| -> io::Result<()> {
+        fs::copy(src, &tmp).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
+        {
+            let file = File::open(&tmp).map_err(|e| enrich_fs_error(&tmp, "opening", e))?;
+            file.sync_all()
+                .map_err(|e| enrich_fs_error(&tmp, "syncing", e))?;
+        }
+        fs::rename(&tmp, dst).map_err(|e| enrich_rename_error(&tmp, dst, e))?;
+        let _ = fs::remove_file(src);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,5 +960,110 @@ mod tests {
             );
         }
         result.expect("write_file_atomic");
+    }
+
+    #[test]
+    fn publish_file_durable_renames_and_removes_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("objects/packs/final.pack");
+        fs::write(&src, b"pack-bytes").unwrap();
+
+        publish_file_durable(&src, &dst).unwrap();
+
+        assert!(!src.exists(), "source must be consumed by publish");
+        assert_eq!(fs::read(&dst).unwrap(), b"pack-bytes");
+    }
+
+    #[test]
+    fn publish_file_via_copy_durable_never_writes_final_path_directly() {
+        // Regression for streaming pack install: the EXDEV fallback used
+        // `fs::copy(src, dst)` straight into the content-addressed final
+        // path. A crash mid-copy left a torn pack under its BLAKE3 name
+        // (readers treat that name as authoritative). The durable path
+        // must land bytes at a temp sibling first, then rename.
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("final.pack");
+        // Pre-existing destination simulates a previous torn install that
+        // a naive in-place copy would non-atomically overwrite.
+        fs::write(&dst, b"TORN-OLD-CONTENT!!!!!!!!!!!!!").unwrap();
+        fs::write(&src, b"complete-new-pack-bytes").unwrap();
+
+        publish_file_via_copy_durable(&src, &dst).unwrap();
+
+        assert!(!src.exists(), "source must be removed after copy publish");
+        assert_eq!(fs::read(&dst).unwrap(), b"complete-new-pack-bytes");
+        // No leftover temps in the destination directory.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "durable copy must not leave temp siblings: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn publish_file_via_copy_durable_cleans_temp_when_rename_cannot_publish() {
+        // If the final rename cannot complete, the temp sibling must be
+        // removed so a crash/retry path doesn't accumulate junk — and the
+        // pre-existing destination must be left untouched (atomic replace
+        // failed → old bytes still authoritative).
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst_dir = dir.path().join("final.pack");
+        fs::write(&src, b"new-bytes").unwrap();
+        // Make `dst` a directory so `rename(temp, dst)` fails (EISDIR /
+        // ERROR_ACCESS_DENIED class). The copy-into-temp step succeeds;
+        // only the publish rename fails.
+        fs::create_dir(&dst_dir).unwrap();
+
+        let err = publish_file_via_copy_durable(&src, &dst_dir).expect_err("rename over dir");
+        assert!(
+            err.kind() == io::ErrorKind::AlreadyExists
+                || err.raw_os_error().is_some()
+                || is_permission_denied(&err)
+                || err.kind() == io::ErrorKind::Other
+                || err.kind() == io::ErrorKind::IsADirectory
+                || err.kind() == io::ErrorKind::DirectoryNotEmpty,
+            "unexpected error kind for rename-over-dir: {err:?}"
+        );
+        assert!(src.exists(), "failed publish must leave source intact");
+        assert!(dst_dir.is_dir(), "destination directory must be untouched");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed publish must clean temp siblings: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn publish_file_durable_propagates_non_exdev_rename_failures() {
+        // The previous install_pack_files_streaming path treated *any*
+        // rename failure as "try fs::copy into the final path". A
+        // permission / type error must surface, not be laundered into a
+        // second write attempt against the content-addressed name.
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.pack");
+        let dst = dir.path().join("final.pack");
+        fs::write(&src, b"pack-bytes").unwrap();
+        fs::create_dir(&dst).unwrap();
+
+        let err = publish_file_durable(&src, &dst).expect_err("rename over directory");
+        assert!(
+            !is_cross_device_link(&err),
+            "failure must not be misclassified as EXDEV: {err}"
+        );
+        // Source remains for the caller to retry / clean up.
+        assert!(src.exists());
     }
 }

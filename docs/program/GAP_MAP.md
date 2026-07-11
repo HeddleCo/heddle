@@ -50,6 +50,9 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 | L3 | Partial clone | wire/repo | Planned |
 | L4 | Semantic merge language matrix opt-in | semantic | First-class Rust/Py/JS/TS |
 | L5 | Hosted collaboration sync maturity | client/weft | Foundation |
+| L6 | `create_dir_all` without grandparent dirent fsync | objects `fs_atomic` / `fs_io` | After first write into a new shard (`blobs/ab/…`), parent dir is fsynced but the grandparent holding the new shard dirent may not be. Crash can drop an entire new shard tree despite per-file durability. Fix: `create_dir_all_durable` that fsyncs newly created ancestors + deepest pre-existing parent; wire into `write_file_atomic` + `write_atomic`. Cost is once-per-shard. |
+| L7 | `StreamingPackBuilder::finalize` flushes but does not fsync pack/index | objects pack | Publish path now fsyncs at `publish_file_durable` install boundary (Wave 5 fix). Residual: staged files are not durable *before* install returns control if a caller reads them without publishing. Optional harden: fsync in finalize. |
+| L8 | Pack-without-index window between two durable publishes | objects `install_pack_files_streaming` | Pack then index are separate durable renames; crash between leaves an unpaired `.pack` that `reload_packs` ignores. Acceptable; optional journal/two-phase if unpaired packs become a disk-leak concern. |
 
 ## Failure cluster methodology
 

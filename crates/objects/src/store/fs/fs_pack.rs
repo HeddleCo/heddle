@@ -9,6 +9,7 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
+    fs_atomic::publish_file_durable,
     object::ContentHash,
     store::{
         HeddleError, ObjectStore, Result, codec,
@@ -274,10 +275,11 @@ impl FsStore {
     /// installation step never load the full pack or index into
     /// memory.
     ///
-    /// Both source files are `rename(2)`'d into place; the index is
-    /// no longer copied through memory the way `install_pack_files`
-    /// did via `write_pack_atomic`. Cross-device renames fall back to
-    /// copy + remove for the rare EXDEV case.
+    /// Both source files are published via [`publish_file_durable`]:
+    /// fsync source data, atomic rename into the packs directory, and
+    /// parent-directory fsync. Cross-device renames fall back to
+    /// temp+fsync+rename in the destination directory — never an
+    /// in-place `fs::copy` into the content-addressed final path.
     pub(super) fn install_pack_files_streaming(
         &self,
         src_pack_path: &std::path::Path,
@@ -306,41 +308,12 @@ impl FsStore {
         let pack_path = packs.join(format!("{}.pack", pack_name));
         let index_path = packs.join(format!("{}.idx", pack_name));
 
-        // Move the staged pack file into the store. `rename` is
-        // atomic on POSIX when both paths are on the same filesystem;
-        // the heddle store keeps its staging dir under the same root,
-        // so this should always satisfy that constraint.
-        match fs::rename(src_pack_path, &pack_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Same pack already installed (content-addressed).
-                // Drop the staging copy so it doesn't accumulate.
-                let _ = fs::remove_file(src_pack_path);
-            }
-            Err(e) => {
-                // Fall back to copy + remove for the (rare) case of
-                // a cross-device rename. EXDEV is not on a stable
-                // ErrorKind variant; match by raw_os_error if needed
-                // on Linux.
-                let _ = fs::copy(src_pack_path, &pack_path)?;
-                let _ = fs::remove_file(src_pack_path);
-                let _ = e; // silence unused-var if EXDEV path didn't fire
-            }
-        }
+        // Publish pack then index. Each call fsyncs data + parent dir;
+        // a crash between the two can leave a pack without its index,
+        // which `reload_packs` ignores (unpaired packs are not loaded).
+        publish_file_durable(src_pack_path, &pack_path)?;
+        publish_file_durable(src_index_path, &index_path)?;
 
-        // Move the index file alongside the pack. Same rename
-        // semantics as the pack: atomic on same-filesystem POSIX,
-        // copy+remove fallback for cross-device.
-        match fs::rename(src_index_path, &index_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(src_index_path);
-            }
-            Err(_) => {
-                let _ = fs::copy(src_index_path, &index_path)?;
-                let _ = fs::remove_file(src_index_path);
-            }
-        }
         self.clear_recent_object_caches();
         self.reload_packs()?;
         Ok(())

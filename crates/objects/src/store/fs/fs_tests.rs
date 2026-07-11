@@ -256,6 +256,43 @@ fn put_blobs_packed_with_empty_input_is_a_noop() {
 }
 
 #[test]
+fn install_pack_streaming_publishes_via_durable_rename_and_loads_objects() {
+    // Regression for streaming pack install crash-consistency: the old
+    // path raw-renamed staged files without fsync and fell back to
+    // in-place `fs::copy` on *any* rename error. The durable path must
+    // still consume the stage files and make objects readable.
+    let (_temp, store) = create_test_store();
+    let stage = TempDir::new().unwrap();
+
+    let blob = Blob::from("streaming durable pack blob");
+    let blob_hash = blob.hash();
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(blob_hash, PackObjectType::Blob, blob.clone().into_content());
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let staged_pack = stage.path().join("staged.pack");
+    let staged_index = stage.path().join("staged.idx");
+    std::fs::write(&staged_pack, &pack_data).unwrap();
+    std::fs::write(&staged_index, &index_data).unwrap();
+
+    let ids = store
+        .install_pack_streaming(&staged_pack, &staged_index)
+        .expect("streaming install");
+    assert!(ids.contains(&PackObjectId::Hash(blob_hash)));
+    assert!(
+        !staged_pack.exists(),
+        "durable publish must consume pack stage"
+    );
+    assert!(
+        !staged_index.exists(),
+        "durable publish must consume index stage"
+    );
+
+    let loaded = store.get_blob(&blob_hash).unwrap().expect("packed blob");
+    assert_eq!(loaded.content(), blob.content());
+}
+
+#[test]
 fn install_pack_rejects_hash_mismatch_without_partial_commit() {
     let (_temp, store) = create_test_store();
 
