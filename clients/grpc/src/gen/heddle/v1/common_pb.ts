@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file heddle/v1/common.proto.
  */
 export const file_heddle_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChZoZWRkbGUvdjEvY29tbW9uLnByb3RvEgloZWRkbGUudjEiWAoIUmVmRW50cnkSDAoEbmFtZRgBIAEoCRIRCgljaGFuZ2VfaWQYAiABKAwSEQoJaXNfdGhyZWFkGAMgASgIEhgKEHJldmlzaW9uX2FkZHJlc3MYBCABKAkiSQoOR3JhbnRUYXJnZXRSZWYSGAoObmFtZXNwYWNlX3BhdGgYASABKAlIABITCglyZXBvX3BhdGgYAiABKAlIAEIICgZ0YXJnZXQiIQoORGVsZXRlUmVzcG9uc2USDwoHZGVsZXRlZBgBIAEoCCL2AQoMVXNhZ2VTdW1tYXJ5EhkKDGlucHV0X3Rva2VucxgBIAEoBEgAiAEBEhoKDW91dHB1dF90b2tlbnMYAiABKARIAYgBARIdChByZWFzb25pbmdfdG9rZW5zGAMgASgESAKIAQESFwoKdG9vbF9jYWxscxgEIAEoBEgDiAEBEhwKD2Nvc3RfbWljcm9zX3VzZBgFIAEoBEgEiAEBQg8KDV9pbnB1dF90b2tlbnNCEAoOX291dHB1dF90b2tlbnNCEwoRX3JlYXNvbmluZ190b2tlbnNCDQoLX3Rvb2xfY2FsbHNCEgoQX2Nvc3RfbWljcm9zX3VzZCqmAQoKSG9zdGVkUm9sZRIbChdIT1NURURfUk9MRV9VTlNQRUNJRklFRBAAEhYKEkhPU1RFRF9ST0xFX1JFQURFUhABEhkKFUhPU1RFRF9ST0xFX0RFVkVMT1BFUhACEhoKFkhPU1RFRF9ST0xFX01BSU5UQUlORVIQAxIVChFIT1NURURfUk9MRV9BRE1JThAEEhUKEUhPU1RFRF9ST0xFX09XTkVSEAUqfwoKUmV2aWV3S2luZBIbChdSRVZJRVdfS0lORF9VTlNQRUNJRklFRBAAEhQKEFJFVklFV19LSU5EX1JFQUQQARIdChlSRVZJRVdfS0lORF9BR0VOVF9QUkVWSUVXEAISHwobUkVWSUVXX0tJTkRfQUdFTlRfQ09fUkVWSUVXEAMqsgEKC1N0YXRlU3RhdHVzEhwKGFNUQVRFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKElNUQVRFX1NUQVRVU19EUkFGVBABEhoKFlNUQVRFX1NUQVRVU19QVUJMSVNIRUQQAhIaChZTVEFURV9TVEFUVVNfQUJBTkRPTkVEEAMSGAoUU1RBVEVfU1RBVFVTX0FCT1JURUQQBBIbChdTVEFURV9TVEFUVVNfU1VQRVJTRURFRBAFYgZwcm90bzM");
+  fileDesc("ChZoZWRkbGUvdjEvY29tbW9uLnByb3RvEgloZWRkbGUudjEiWAoIUmVmRW50cnkSDAoEbmFtZRgBIAEoCRIRCgljaGFuZ2VfaWQYAiABKAwSEQoJaXNfdGhyZWFkGAMgASgIEhgKEHJldmlzaW9uX2FkZHJlc3MYBCABKAkiSQoOR3JhbnRUYXJnZXRSZWYSGAoObmFtZXNwYWNlX3BhdGgYASABKAlIABITCglyZXBvX3BhdGgYAiABKAlIAEIICgZ0YXJnZXQiIQoORGVsZXRlUmVzcG9uc2USDwoHZGVsZXRlZBgBIAEoCCL2AQoMVXNhZ2VTdW1tYXJ5EhkKDGlucHV0X3Rva2VucxgBIAEoBEgAiAEBEhoKDW91dHB1dF90b2tlbnMYAiABKARIAYgBARIdChByZWFzb25pbmdfdG9rZW5zGAMgASgESAKIAQESFwoKdG9vbF9jYWxscxgEIAEoBEgDiAEBEhwKD2Nvc3RfbWljcm9zX3VzZBgFIAEoBEgEiAEBQg8KDV9pbnB1dF90b2tlbnNCEAoOX291dHB1dF90b2tlbnNCEwoRX3JlYXNvbmluZ190b2tlbnNCDQoLX3Rvb2xfY2FsbHNCEgoQX2Nvc3RfbWljcm9zX3VzZCqmAQoKSG9zdGVkUm9sZRIbChdIT1NURURfUk9MRV9VTlNQRUNJRklFRBAAEhYKEkhPU1RFRF9ST0xFX1JFQURFUhABEhkKFUhPU1RFRF9ST0xFX0RFVkVMT1BFUhACEhoKFkhPU1RFRF9ST0xFX01BSU5UQUlORVIQAxIVChFIT1NURURfUk9MRV9BRE1JThAEEhUKEUhPU1RFRF9ST0xFX09XTkVSEAUqfwoKUmV2aWV3S2luZBIbChdSRVZJRVdfS0lORF9VTlNQRUNJRklFRBAAEhQKEFJFVklFV19LSU5EX1JFQUQQARIdChlSRVZJRVdfS0lORF9BR0VOVF9QUkVWSUVXEAISHwobUkVWSUVXX0tJTkRfQUdFTlRfQ09fUkVWSUVXEAMqsgEKC1N0YXRlU3RhdHVzEhwKGFNUQVRFX1NUQVRVU19VTlNQRUNJRklFRBAAEhYKElNUQVRFX1NUQVRVU19EUkFGVBABEhoKFlNUQVRFX1NUQVRVU19QVUJMSVNIRUQQAhIaChZTVEFURV9TVEFUVVNfQUJBTkRPTkVEEAMSGAoUU1RBVEVfU1RBVFVTX0FCT1JURUQQBBIbChdTVEFURV9TVEFUVVNfU1VQRVJTRURFRBAFKt0BCgtJbXBvcnRQaGFzZRIcChhJTVBPUlRfUEhBU0VfVU5TUEVDSUZJRUQQABIXChNJTVBPUlRfUEhBU0VfUVVFVUVEEAESGAoUSU1QT1JUX1BIQVNFX0NMT05JTkcQAhIaChZJTVBPUlRfUEhBU0VfTUlSUk9SSU5HEAMSGQoVSU1QT1JUX1BIQVNFX01FVEFEQVRBEAQSFgoSSU1QT1JUX1BIQVNFX1NUQVJTEAUSFQoRSU1QT1JUX1BIQVNFX0RPTkUQBhIXChNJTVBPUlRfUEhBU0VfRkFJTEVEEAcqggIKD0ltcG9ydEVycm9yQ29kZRIcChhJTVBPUlRfRVJST1JfVU5TUEVDSUZJRUQQABIfChtJTVBPUlRfRVJST1JfSU5WQUxJRF9TT1VSQ0UQARIjCh9JTVBPUlRfRVJST1JfU09VUkNFX05PVF9BTExPV0VEEAISHAoYSU1QT1JUX0VSUk9SX0FVVEhfRkFJTEVEEAMSGgoWSU1QT1JUX0VSUk9SX05PVF9GT1VORBAEEhoKFklNUE9SVF9FUlJPUl9UT09fTEFSR0UQBRIaChZJTVBPUlRfRVJST1JfVElNRURfT1VUEAYSGQoVSU1QT1JUX0VSUk9SX0lOVEVSTkFMEAdiBnByb3RvMw");
 
 /**
  * @generated from message heddle.v1.RefEntry
@@ -49,11 +49,6 @@ export const RefEntrySchema: GenMessage<RefEntry> = /*@__PURE__*/
   messageDesc(file_heddle_v1_common, 0);
 
 /**
- * Grants are scoped to either a namespace or a repository — never both,
- * never neither. The `target` oneof is the wire-level form of that
- * "exactly one of" guarantee. Server-side `classify_grant_target`
- * translates it to a `GrantTarget` enum without runtime branching.
- *
  * @generated from message heddle.v1.GrantTargetRef
  */
 export type GrantTargetRef = Message<"heddle.v1.GrantTargetRef"> & {
@@ -270,4 +265,131 @@ export enum StateStatus {
  */
 export const StateStatusSchema: GenEnum<StateStatus> = /*@__PURE__*/
   enumDesc(file_heddle_v1_common, 2);
+
+/**
+ * Grants are scoped to either a namespace or a repository — never both,
+ * never neither. The `target` oneof is the wire-level form of that
+ * "exactly one of" guarantee. Server-side `classify_grant_target`
+ * translates it to a `GrantTarget` enum without runtime branching.
+ * Lifecycle phases of a git-provider import job (weft#489). Mirrors the
+ * `import_jobs` status column. Defined here (not import.proto) so both the
+ * import stream and hosted.proto's `ImportJobSummary` can reuse it without a
+ * circular file import (import.proto already imports hosted.proto for
+ * SpoolVisibility, so hosted.proto cannot import import.proto back).
+ *
+ * @generated from enum heddle.v1.ImportPhase
+ */
+export enum ImportPhase {
+  /**
+   * @generated from enum value: IMPORT_PHASE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_QUEUED = 1;
+   */
+  QUEUED = 1,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_CLONING = 2;
+   */
+  CLONING = 2,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_MIRRORING = 3;
+   */
+  MIRRORING = 3,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_METADATA = 4;
+   */
+  METADATA = 4,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_STARS = 5;
+   */
+  STARS = 5,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_DONE = 6;
+   */
+  DONE = 6,
+
+  /**
+   * @generated from enum value: IMPORT_PHASE_FAILED = 7;
+   */
+  FAILED = 7,
+}
+
+/**
+ * Describes the enum heddle.v1.ImportPhase.
+ */
+export const ImportPhaseSchema: GenEnum<ImportPhase> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_common, 3);
+
+/**
+ * Terminal failure classification for an import job (weft#489/#490). Set at
+ * `fail()` time from the durable row, NOT regexed from the error string at
+ * stream time. `SOURCE_NOT_ALLOWED` stays deliberately generic (no SSRF
+ * oracle); `AUTH_FAILED` is only for the credentialed modes.
+ *
+ * @generated from enum heddle.v1.ImportErrorCode
+ */
+export enum ImportErrorCode {
+  /**
+   * @generated from enum value: IMPORT_ERROR_UNSPECIFIED = 0;
+   */
+  IMPORT_ERROR_UNSPECIFIED = 0,
+
+  /**
+   * malformed URL / full_name
+   *
+   * @generated from enum value: IMPORT_ERROR_INVALID_SOURCE = 1;
+   */
+  IMPORT_ERROR_INVALID_SOURCE = 1,
+
+  /**
+   * SSRF-blocked (generic on purpose)
+   *
+   * @generated from enum value: IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2;
+   */
+  IMPORT_ERROR_SOURCE_NOT_ALLOWED = 2,
+
+  /**
+   * token/installation rejected by provider
+   *
+   * @generated from enum value: IMPORT_ERROR_AUTH_FAILED = 3;
+   */
+  IMPORT_ERROR_AUTH_FAILED = 3,
+
+  /**
+   * repo 404 / private without creds
+   *
+   * @generated from enum value: IMPORT_ERROR_NOT_FOUND = 4;
+   */
+  IMPORT_ERROR_NOT_FOUND = 4,
+
+  /**
+   * byte/object cap hit
+   *
+   * @generated from enum value: IMPORT_ERROR_TOO_LARGE = 5;
+   */
+  IMPORT_ERROR_TOO_LARGE = 5,
+
+  /**
+   * @generated from enum value: IMPORT_ERROR_TIMED_OUT = 6;
+   */
+  IMPORT_ERROR_TIMED_OUT = 6,
+
+  /**
+   * @generated from enum value: IMPORT_ERROR_INTERNAL = 7;
+   */
+  IMPORT_ERROR_INTERNAL = 7,
+}
+
+/**
+ * Describes the enum heddle.v1.ImportErrorCode.
+ */
+export const ImportErrorCodeSchema: GenEnum<ImportErrorCode> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_common, 4);
 

@@ -2,23 +2,113 @@
 // @generated from file heddle/v1/import.proto (package heddle.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { SpoolVisibility } from "./hosted_pb.js";
 import { file_heddle_v1_hosted } from "./hosted_pb.js";
+import type { ImportErrorCode, ImportPhase } from "./common_pb.js";
+import { file_heddle_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file heddle/v1/import.proto.
  */
 export const file_heddle_v1_import: GenFile = /*@__PURE__*/
-  fileDesc("ChZoZWRkbGUvdjEvaW1wb3J0LnByb3RvEgloZWRkbGUudjEiswEKFkNyZWF0ZUltcG9ydEpvYlJlcXVlc3QSFwoPaW5zdGFsbGF0aW9uX2lkGAEgASgDEhgKEHByb3ZpZGVyX3JlcG9faWQYAiABKAMSEQoJZnVsbF9uYW1lGAMgASgJEjgKFHJlcXVlc3RlZF92aXNpYmlsaXR5GAQgASgOMhouaGVkZGxlLnYxLlNwb29sVmlzaWJpbGl0eRIZChFhZG9wdF9vbl9jb21wbGV0ZRgFIAEoCCIpChdDcmVhdGVJbXBvcnRKb2JSZXNwb25zZRIOCgZqb2JfaWQYASABKAkyaQoNSW1wb3J0U2VydmljZRJYCg9DcmVhdGVJbXBvcnRKb2ISIS5oZWRkbGUudjEuQ3JlYXRlSW1wb3J0Sm9iUmVxdWVzdBoiLmhlZGRsZS52MS5DcmVhdGVJbXBvcnRKb2JSZXNwb25zZWIGcHJvdG8z", [file_heddle_v1_hosted]);
+  fileDesc("ChZoZWRkbGUvdjEvaW1wb3J0LnByb3RvEgloZWRkbGUudjEiVwoPR2l0SHViQXBwU291cmNlEhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCSJVChNQcm92aWRlclRva2VuU291cmNlEisKCHByb3ZpZGVyGAEgASgOMhkuaGVkZGxlLnYxLkltcG9ydFByb3ZpZGVyEhEKCWZ1bGxfbmFtZRgCIAEoCSIeCg9QdWJsaWNVcmxTb3VyY2USCwoDdXJsGAEgASgJIpMDChZDcmVhdGVJbXBvcnRKb2JSZXF1ZXN0EhcKD2luc3RhbGxhdGlvbl9pZBgBIAEoAxIYChBwcm92aWRlcl9yZXBvX2lkGAIgASgDEhEKCWZ1bGxfbmFtZRgDIAEoCRI4ChRyZXF1ZXN0ZWRfdmlzaWJpbGl0eRgEIAEoDjIaLmhlZGRsZS52MS5TcG9vbFZpc2liaWxpdHkSGQoRYWRvcHRfb25fY29tcGxldGUYBSABKAgSMAoKZ2l0aHViX2FwcBgGIAEoCzIaLmhlZGRsZS52MS5HaXRIdWJBcHBTb3VyY2VIABI4Cg5wcm92aWRlcl90b2tlbhgHIAEoCzIeLmhlZGRsZS52MS5Qcm92aWRlclRva2VuU291cmNlSAASMAoKcHVibGljX3VybBgIIAEoCzIaLmhlZGRsZS52MS5QdWJsaWNVcmxTb3VyY2VIABIZChF0YXJnZXRfc3Bvb2xfcGF0aBgJIAEoCRIbChNjbGllbnRfb3BlcmF0aW9uX2lkGAogASgJQggKBnNvdXJjZSIpChdDcmVhdGVJbXBvcnRKb2JSZXNwb25zZRIOCgZqb2JfaWQYASABKAkiLgobU3RyZWFtSW1wb3J0UHJvZ3Jlc3NSZXF1ZXN0Eg8KB2pvYl9pZHMYASADKAkiewoNSW1wb3J0T3V0Y29tZRIKCgJvaxgBIAEoCBIXCg9zcG9vbF9mdWxsX3BhdGgYAiABKAkSLgoKZXJyb3JfY29kZRgDIAEoDjIaLmhlZGRsZS52MS5JbXBvcnRFcnJvckNvZGUSFQoNZXJyb3JfbWVzc2FnZRgEIAEoCSLXAQoTSW1wb3J0UHJvZ3Jlc3NFdmVudBIOCgZqb2JfaWQYASABKAkSCwoDc2VxGAIgASgEEiUKBXBoYXNlGAMgASgOMhYuaGVkZGxlLnYxLkltcG9ydFBoYXNlEg8KB21lc3NhZ2UYBCABKAkSFgoOYnl0ZXNfcmVjZWl2ZWQYBSABKAQSFwoPb2JqZWN0c19pbmRleGVkGAYgASgEEg8KB2F0dGVtcHQYByABKA0SKQoHb3V0Y29tZRgIIAEoCzIYLmhlZGRsZS52MS5JbXBvcnRPdXRjb21lKmkKDkltcG9ydFByb3ZpZGVyEh8KG0lNUE9SVF9QUk9WSURFUl9VTlNQRUNJRklFRBAAEhoKFklNUE9SVF9QUk9WSURFUl9HSVRIVUIQARIaChZJTVBPUlRfUFJPVklERVJfR0lUTEFCEAIyywEKDUltcG9ydFNlcnZpY2USWAoPQ3JlYXRlSW1wb3J0Sm9iEiEuaGVkZGxlLnYxLkNyZWF0ZUltcG9ydEpvYlJlcXVlc3QaIi5oZWRkbGUudjEuQ3JlYXRlSW1wb3J0Sm9iUmVzcG9uc2USYAoUU3RyZWFtSW1wb3J0UHJvZ3Jlc3MSJi5oZWRkbGUudjEuU3RyZWFtSW1wb3J0UHJvZ3Jlc3NSZXF1ZXN0Gh4uaGVkZGxlLnYxLkltcG9ydFByb2dyZXNzRXZlbnQwAWIGcHJvdG8z", [file_heddle_v1_hosted, file_heddle_v1_common]);
+
+/**
+ * Existing GitHub-App mode, now shaped as a nested source. Mirrors the legacy
+ * top-level CreateImportJobRequest fields 1-3.
+ *
+ * @generated from message heddle.v1.GitHubAppSource
+ */
+export type GitHubAppSource = Message<"heddle.v1.GitHubAppSource"> & {
+  /**
+   * GitHub App installation that grants access
+   *
+   * @generated from field: int64 installation_id = 1;
+   */
+  installationId: bigint;
+
+  /**
+   * provider's numeric repo id (stable across renames)
+   *
+   * @generated from field: int64 provider_repo_id = 2;
+   */
+  providerRepoId: bigint;
+
+  /**
+   * e.g. "owner/repo"
+   *
+   * @generated from field: string full_name = 3;
+   */
+  fullName: string;
+};
+
+/**
+ * Describes the message heddle.v1.GitHubAppSource.
+ * Use `create(GitHubAppSourceSchema)` to create a new message.
+ */
+export const GitHubAppSourceSchema: GenMessage<GitHubAppSource> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 0);
+
+/**
+ * OAuth-token mode (weft#378): the server resolves a stored provider token for
+ * the caller. No installation id — access is the user's own grant.
+ *
+ * @generated from message heddle.v1.ProviderTokenSource
+ */
+export type ProviderTokenSource = Message<"heddle.v1.ProviderTokenSource"> & {
+  /**
+   * @generated from field: heddle.v1.ImportProvider provider = 1;
+   */
+  provider: ImportProvider;
+
+  /**
+   * "owner/repo" (or "group/sub/repo" for GitLab)
+   *
+   * @generated from field: string full_name = 2;
+   */
+  fullName: string;
+};
+
+/**
+ * Describes the message heddle.v1.ProviderTokenSource.
+ * Use `create(ProviderTokenSourceSchema)` to create a new message.
+ */
+export const ProviderTokenSourceSchema: GenMessage<ProviderTokenSource> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 1);
+
+/**
+ * Public, credential-free clone (weft#378). https only, SSRF-guarded
+ * server-side; deliberately no "owner/repo" shorthand — one unambiguous shape.
+ *
+ * @generated from message heddle.v1.PublicUrlSource
+ */
+export type PublicUrlSource = Message<"heddle.v1.PublicUrlSource"> & {
+  /**
+   * https clone URL; userinfo rejected
+   *
+   * @generated from field: string url = 1;
+   */
+  url: string;
+};
+
+/**
+ * Describes the message heddle.v1.PublicUrlSource.
+ * Use `create(PublicUrlSourceSchema)` to create a new message.
+ */
+export const PublicUrlSourceSchema: GenMessage<PublicUrlSource> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 2);
 
 /**
  * @generated from message heddle.v1.CreateImportJobRequest
  */
 export type CreateImportJobRequest = Message<"heddle.v1.CreateImportJobRequest"> & {
   /**
+   * Legacy fields (1-5) kept verbatim for wire compat; used as the GitHub-App
+   * form when `source` is absent. New callers set `source` instead.
+   *
    * GitHub App installation that grants access
    *
    * @generated from field: int64 installation_id = 1;
@@ -52,6 +142,47 @@ export type CreateImportJobRequest = Message<"heddle.v1.CreateImportJobRequest">
    * @generated from field: bool adopt_on_complete = 5;
    */
   adoptOnComplete: boolean;
+
+  /**
+   * Additive source selector (weft#485). Exactly one of the three modes; the
+   * legacy fields 1-3 remain the fallback GitHub-App form for old clients.
+   *
+   * @generated from oneof heddle.v1.CreateImportJobRequest.source
+   */
+  source: {
+    /**
+     * @generated from field: heddle.v1.GitHubAppSource github_app = 6;
+     */
+    value: GitHubAppSource;
+    case: "githubApp";
+  } | {
+    /**
+     * @generated from field: heddle.v1.ProviderTokenSource provider_token = 7;
+     */
+    value: ProviderTokenSource;
+    case: "providerToken";
+  } | {
+    /**
+     * @generated from field: heddle.v1.PublicUrlSource public_url = 8;
+     */
+    value: PublicUrlSource;
+    case: "publicUrl";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * Import INTO this existing (empty) spool. "" = the worker derives/creates
+   * one (the #379 personal-namespace behavior, kept for CLI callers).
+   *
+   * @generated from field: string target_spool_path = 9;
+   */
+  targetSpoolPath: string;
+
+  /**
+   * Idempotency key. A retry-safe double-submit returns the SAME job_id.
+   *
+   * @generated from field: string client_operation_id = 10;
+   */
+  clientOperationId: string;
 };
 
 /**
@@ -59,7 +190,7 @@ export type CreateImportJobRequest = Message<"heddle.v1.CreateImportJobRequest">
  * Use `create(CreateImportJobRequestSchema)` to create a new message.
  */
 export const CreateImportJobRequestSchema: GenMessage<CreateImportJobRequest> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_import, 0);
+  messageDesc(file_heddle_v1_import, 3);
 
 /**
  * @generated from message heddle.v1.CreateImportJobResponse
@@ -78,7 +209,164 @@ export type CreateImportJobResponse = Message<"heddle.v1.CreateImportJobResponse
  * Use `create(CreateImportJobResponseSchema)` to create a new message.
  */
 export const CreateImportJobResponseSchema: GenMessage<CreateImportJobResponse> = /*@__PURE__*/
-  messageDesc(file_heddle_v1_import, 1);
+  messageDesc(file_heddle_v1_import, 4);
+
+/**
+ * @generated from message heddle.v1.StreamImportProgressRequest
+ */
+export type StreamImportProgressRequest = Message<"heddle.v1.StreamImportProgressRequest"> & {
+  /**
+   * All ids must belong to the caller (permission_denied otherwise).
+   *
+   * @generated from field: repeated string job_ids = 1;
+   */
+  jobIds: string[];
+};
+
+/**
+ * Describes the message heddle.v1.StreamImportProgressRequest.
+ * Use `create(StreamImportProgressRequestSchema)` to create a new message.
+ */
+export const StreamImportProgressRequestSchema: GenMessage<StreamImportProgressRequest> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 5);
+
+/**
+ * Terminal result of an import job. Set ONLY on the terminal event.
+ *
+ * @generated from message heddle.v1.ImportOutcome
+ */
+export type ImportOutcome = Message<"heddle.v1.ImportOutcome"> & {
+  /**
+   * @generated from field: bool ok = 1;
+   */
+  ok: boolean;
+
+  /**
+   * where the repo landed (ok = true)
+   *
+   * @generated from field: string spool_full_path = 2;
+   */
+  spoolFullPath: string;
+
+  /**
+   * reuses the common.proto enum
+   *
+   * @generated from field: heddle.v1.ImportErrorCode error_code = 3;
+   */
+  errorCode: ImportErrorCode;
+
+  /**
+   * sanitized, human-readable
+   *
+   * @generated from field: string error_message = 4;
+   */
+  errorMessage: string;
+};
+
+/**
+ * Describes the message heddle.v1.ImportOutcome.
+ * Use `create(ImportOutcomeSchema)` to create a new message.
+ */
+export const ImportOutcomeSchema: GenMessage<ImportOutcome> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 6);
+
+/**
+ * An idempotent state snapshot for one import job (weft#489). NOT a delta — a
+ * reattaching client gets the current state (with its stored `seq`), then
+ * tails. No `percent`: smart-HTTP has no up-front total, so the contract is
+ * phase + bytes + human message.
+ *
+ * @generated from message heddle.v1.ImportProgressEvent
+ */
+export type ImportProgressEvent = Message<"heddle.v1.ImportProgressEvent"> & {
+  /**
+   * @generated from field: string job_id = 1;
+   */
+  jobId: string;
+
+  /**
+   * per-job monotonic; reattach dedup/ordering
+   *
+   * @generated from field: uint64 seq = 2;
+   */
+  seq: bigint;
+
+  /**
+   * reuses the common.proto enum
+   *
+   * @generated from field: heddle.v1.ImportPhase phase = 3;
+   */
+  phase: ImportPhase;
+
+  /**
+   * human line (sanitized sideband / phase_detail)
+   *
+   * @generated from field: string message = 4;
+   */
+  message: string;
+
+  /**
+   * wire bytes so far (0 = unknown)
+   *
+   * @generated from field: uint64 bytes_received = 5;
+   */
+  bytesReceived: bigint;
+
+  /**
+   * @generated from field: uint64 objects_indexed = 6;
+   */
+  objectsIndexed: bigint;
+
+  /**
+   * >1 ⇒ lease was reclaimed and the job restarted
+   *
+   * @generated from field: uint32 attempt = 7;
+   */
+  attempt: number;
+
+  /**
+   * set ONLY on the terminal event
+   *
+   * @generated from field: heddle.v1.ImportOutcome outcome = 8;
+   */
+  outcome?: ImportOutcome | undefined;
+};
+
+/**
+ * Describes the message heddle.v1.ImportProgressEvent.
+ * Use `create(ImportProgressEventSchema)` to create a new message.
+ */
+export const ImportProgressEventSchema: GenMessage<ImportProgressEvent> = /*@__PURE__*/
+  messageDesc(file_heddle_v1_import, 7);
+
+/**
+ * Which provider a token-authed import targets (weft#485). GitHub App imports
+ * use GitHubAppSource; public-URL imports carry no provider.
+ *
+ * @generated from enum heddle.v1.ImportProvider
+ */
+export enum ImportProvider {
+  /**
+   * @generated from enum value: IMPORT_PROVIDER_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: IMPORT_PROVIDER_GITHUB = 1;
+   */
+  GITHUB = 1,
+
+  /**
+   * @generated from enum value: IMPORT_PROVIDER_GITLAB = 2;
+   */
+  GITLAB = 2,
+}
+
+/**
+ * Describes the enum heddle.v1.ImportProvider.
+ */
+export const ImportProviderSchema: GenEnum<ImportProvider> = /*@__PURE__*/
+  enumDesc(file_heddle_v1_import, 0);
 
 /**
  * @generated from service heddle.v1.ImportService
@@ -96,6 +384,21 @@ export const ImportService: GenService<{
     methodKind: "unary";
     input: typeof CreateImportJobRequestSchema;
     output: typeof CreateImportJobResponseSchema;
+  },
+  /**
+   * Detached + reattachable live progress for one or more import jobs
+   * (weft#489). Emits a snapshot event per job immediately, then tails the
+   * durable row. Multiplexed over N jobs — one stream for a whole import
+   * batch. A client disconnect cancels only the stream, never the job (the
+   * worker owns the job via its lease). Mirrors the planned StreamAdoptProgress
+   * (weft#386) shape.
+   *
+   * @generated from rpc heddle.v1.ImportService.StreamImportProgress
+   */
+  streamImportProgress: {
+    methodKind: "server_streaming";
+    input: typeof StreamImportProgressRequestSchema;
+    output: typeof ImportProgressEventSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_heddle_v1_import, 0);
