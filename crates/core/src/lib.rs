@@ -46,10 +46,13 @@ pub use save::{
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,
-    RepositoryVerificationCheck, RepositoryVerificationHealth, StateInfo, StatusDetail,
-    StatusOptions, StatusProfile, StatusReport, StatusThreadSummary, assess_materialized_threads,
-    build_repository_verification_health_with_worktree_status, changes_from_worktree_status,
-    changes_path_count, changes_paths, fast_short_status_report, status,
+    RepositoryVerificationCheck, RepositoryVerificationHealth, StateInfo, StatusCombinedVerdict,
+    StatusDetail, StatusOptions, StatusProfile, StatusReport, StatusThreadSummary,
+    assess_materialized_threads, build_repository_verification_health_with_worktree_status,
+    changes_from_worktree_status, changes_path_count, changes_paths, combined_verdict_axes,
+    coordination_axis_clean, coordination_label, coordination_severity, fast_short_status_report,
+    health_severity, human_thread_health, resolve_coordination_with_trust, status,
+    status_combined_verdict,
 };
 pub use thread_shaping::{
     CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
@@ -57,11 +60,13 @@ pub use thread_shaping::{
 };
 pub use verify::{
     ActionAudience, ActionTemplate, MachineContractCoverage, MachineContractInput,
-    PlainGitVerifyProbe, RepositoryContextInfo, RepositoryPresentation,
-    RepositoryVerificationState, VerificationCheck, VerifyOptions, VerifyProfile, VerifyReport,
-    build_plain_git_verification_probe, build_plain_git_verification_probe_with_machine_contract,
-    build_repository_verification_state, build_repository_verification_state_with_machine_contract,
+    PlainGitVerifyProbe, RepositoryContextInfo, RepositoryPresentation, RepositorySetupActionKind,
+    RepositorySetupGuidance, RepositoryVerificationState, VerificationCheck, VerifyOptions,
+    VerifyProfile, VerifyReport, build_plain_git_verification_probe,
+    build_plain_git_verification_probe_with_machine_contract, build_repository_verification_state,
+    build_repository_verification_state_with_machine_contract,
     build_repository_verification_state_with_worktree_status,
     build_repository_verification_state_with_worktree_status_and_machine_contract,
-    dirty_path_count, repository_mode_label, repository_presentation, verify,
+    dirty_path_count, repository_mode_label, repository_presentation, repository_setup_action_kind,
+    repository_setup_guidance, verify,
 };

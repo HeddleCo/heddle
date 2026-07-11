@@ -1683,3 +1683,156 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
 pub fn dirty_path_count(status: &WorktreeStatus) -> usize {
     status.modified.len() + status.added.len() + status.deleted.len()
 }
+
+/// Classifies the primary recommended setup action for plain-Git / import
+/// onboarding guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositorySetupActionKind {
+    Init,
+    Adopt,
+    GitImport,
+    Other,
+}
+
+/// Human-facing setup guidance derived from Repository Verification State.
+///
+/// Owned by core so status, verify, doctor, and mutation refusal text cannot
+/// drift on setup-line / effect wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySetupGuidance {
+    pub setup_line: String,
+    pub effect: String,
+}
+
+/// Classify a recommended action string into a setup-action kind.
+pub fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
+    if action == "heddle init" {
+        RepositorySetupActionKind::Init
+    } else if action.starts_with("heddle adopt") {
+        RepositorySetupActionKind::Adopt
+    } else if action.starts_with("heddle import git") {
+        RepositorySetupActionKind::GitImport
+    } else {
+        RepositorySetupActionKind::Other
+    }
+}
+
+/// Build setup guidance when verification reports `needs_init` / `needs_import`.
+pub fn repository_setup_guidance(
+    trust: &RepositoryVerificationState,
+) -> Option<RepositorySetupGuidance> {
+    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
+        return None;
+    }
+    let action = trust.recommended_action.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let kind = repository_setup_action_kind(action);
+    let setup_line = match kind {
+        RepositorySetupActionKind::Init => {
+            format!("Git repo detected; initialize Heddle with {action}")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!("Git repo detected; connect this branch with {action}")
+        }
+        RepositorySetupActionKind::GitImport => {
+            format!("Git history not imported; import it with {action}")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("Run {action} to clear the primary setup blocker")
+        }
+    };
+    let worktree_tail = if trust.worktree_state == "clean" {
+        "and the Git worktree stays clean"
+    } else {
+        "and existing Git worktree changes stay untouched"
+    };
+    let effect = match kind {
+        RepositorySetupActionKind::Init => format!(
+            ".heddle metadata will be created; Git commits stay in Git storage, {worktree_tail}."
+        ),
+        RepositorySetupActionKind::Adopt
+            if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
+        {
+            format!(".heddle metadata will be created, Git history imported, {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
+        }
+        RepositorySetupActionKind::GitImport => {
+            format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("The recommended setup command runs {worktree_tail}.")
+        }
+    };
+    Some(RepositorySetupGuidance { setup_line, effect })
+}
+
+#[cfg(test)]
+mod setup_guidance_tests {
+    use super::*;
+
+    fn bare_verification_state(
+        status: &str,
+        recommended_action: &str,
+    ) -> RepositoryVerificationState {
+        RepositoryVerificationState {
+            verified: false,
+            status: status.to_string(),
+            repository_mode: "plain-git".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            heddle_thread: None,
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "needs_import".to_string(),
+            mapping_state: "needs_import".to_string(),
+            remote_drift: "not_checked".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: "not_checked".to_string(),
+            machine_contract_coverage: MachineContractCoverage::not_checked(),
+            workflow_status: "not_checked".to_string(),
+            workflow_summary: String::new(),
+            summary: status.to_string(),
+            recommended_action: recommended_action.to_string(),
+            recommended_action_template: None,
+            recovery_commands: vec![recommended_action.to_string()],
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repository_setup_guidance_distinguishes_init_from_adopt() {
+        let mut init = bare_verification_state("needs_init", "heddle init");
+        init.import_state = "git_backed".to_string();
+        init.mapping_state = "git_backed".to_string();
+
+        let guidance = repository_setup_guidance(&init).expect("init guidance");
+        assert!(guidance.setup_line.contains("initialize Heddle"));
+        assert!(guidance.setup_line.contains("heddle init"));
+        assert!(guidance.effect.contains("Git commits stay in Git storage"));
+
+        let mut convert = bare_verification_state("needs_import", "heddle adopt --ref main");
+        convert.repository_mode = "git-overlay".to_string();
+        convert.heddle_initialized = true;
+
+        let guidance = repository_setup_guidance(&convert).expect("conversion guidance");
+        assert!(
+            guidance
+                .setup_line
+                .contains("connect this branch with heddle adopt --ref main")
+        );
+        assert!(guidance.effect.contains("adoption imports Git history"));
+    }
+
+    #[test]
+    fn repository_setup_guidance_skips_non_setup_statuses() {
+        let state = bare_verification_state("dirty_worktree", "heddle commit -m \"...\"");
+        assert!(repository_setup_guidance(&state).is_none());
+    }
+}

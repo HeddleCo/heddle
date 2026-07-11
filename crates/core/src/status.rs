@@ -2,6 +2,7 @@
 //! Status facade and report contract.
 
 pub mod next_action;
+pub mod verdict;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,6 +33,11 @@ use serde_json::Value;
 use sley::{
     Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
     StreamControl,
+};
+pub use verdict::{
+    StatusCombinedVerdict, combined_verdict_axes, coordination_axis_clean, coordination_label,
+    coordination_severity, health_severity, human_thread_health, resolve_coordination_with_trust,
+    status_combined_verdict,
 };
 
 use self::next_action::{
@@ -2969,32 +2975,6 @@ fn remote_tracking_with_verification_action(
         remote.next_action = trust.recommended_action.clone();
     }
     remote
-}
-
-fn resolve_coordination_with_trust(
-    pre_override: CoordinationStatus,
-    blocked_by_trust: bool,
-    needs_checkpoint: bool,
-) -> (CoordinationStatus, bool) {
-    let pre_override_clean = coordination_axis_clean(&pre_override, false);
-    let trust_override = blocked_by_trust && !needs_checkpoint;
-    let mask_as_trust = trust_override && pre_override_clean;
-    let coordination_status = if mask_as_trust {
-        CoordinationStatus::Blocked
-    } else {
-        pre_override
-    };
-    (coordination_status, mask_as_trust)
-}
-
-fn coordination_axis_clean(coordination: &CoordinationStatus, blocked_by_trust: bool) -> bool {
-    match coordination {
-        CoordinationStatus::Clean => true,
-        CoordinationStatus::Blocked => blocked_by_trust,
-        CoordinationStatus::Ahead
-        | CoordinationStatus::Diverged
-        | CoordinationStatus::MergeReady => false,
-    }
 }
 
 #[cfg(test)]

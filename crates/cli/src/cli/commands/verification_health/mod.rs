@@ -20,7 +20,7 @@ use heddle_core::status::next_action::{
 pub(crate) use heddle_core::{
     ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
     RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
-    verify::serialize_empty_action_as_null,
+    repository_setup_guidance, verify::serialize_empty_action_as_null,
 };
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
@@ -38,20 +38,6 @@ use super::{
 };
 
 pub(crate) type PlainGitVerificationProbe = PlainGitVerifyProbe;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RepositorySetupActionKind {
-    Init,
-    Adopt,
-    GitImport,
-    Other,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RepositorySetupGuidance {
-    pub setup_line: String,
-    pub effect: String,
-}
 
 pub(crate) fn primary_recovery_command(health: &RepositoryVerificationHealth) -> Option<&str> {
     health.recovery_commands.first().map(String::as_str)
@@ -653,68 +639,6 @@ pub(crate) fn repository_verification_recovery_commands(
         vec![primary_command.to_string()]
     } else {
         trust.recovery_commands.clone()
-    }
-}
-pub(crate) fn repository_setup_guidance(
-    trust: &RepositoryVerificationState,
-) -> Option<RepositorySetupGuidance> {
-    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
-        return None;
-    }
-    let action = trust.recommended_action.trim();
-    if action.is_empty() {
-        return None;
-    }
-    let kind = repository_setup_action_kind(action);
-    let setup_line = match kind {
-        RepositorySetupActionKind::Init => {
-            format!("Git repo detected; initialize Heddle with {action}")
-        }
-        RepositorySetupActionKind::Adopt => {
-            format!("Git repo detected; connect this branch with {action}")
-        }
-        RepositorySetupActionKind::GitImport => {
-            format!("Git history not imported; import it with {action}")
-        }
-        RepositorySetupActionKind::Other => {
-            format!("Run {action} to clear the primary setup blocker")
-        }
-    };
-    let worktree_tail = if trust.worktree_state == "clean" {
-        "and the Git worktree stays clean"
-    } else {
-        "and existing Git worktree changes stay untouched"
-    };
-    let effect = match kind {
-        RepositorySetupActionKind::Init => format!(
-            ".heddle metadata will be created; Git commits stay in Git storage, {worktree_tail}."
-        ),
-        RepositorySetupActionKind::Adopt
-            if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
-        {
-            format!(".heddle metadata will be created, Git history imported, {worktree_tail}.")
-        }
-        RepositorySetupActionKind::Adopt => {
-            format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
-        }
-        RepositorySetupActionKind::GitImport => {
-            format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
-        }
-        RepositorySetupActionKind::Other => {
-            format!("The recommended setup command runs {worktree_tail}.")
-        }
-    };
-    Some(RepositorySetupGuidance { setup_line, effect })
-}
-fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
-    if action == "heddle init" {
-        RepositorySetupActionKind::Init
-    } else if action.starts_with("heddle adopt") {
-        RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle import git") {
-        RepositorySetupActionKind::GitImport
-    } else {
-        RepositorySetupActionKind::Other
     }
 }
 pub(crate) fn plain_git_mutation_advice(
