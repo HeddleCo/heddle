@@ -5,19 +5,21 @@
 //! working on a thread. They are user-facing handles over the lightweight
 //! registry stored in `.heddle/agents/`.
 //!
-//! List/show domain assembly lives in `heddle_core::actor`. This module owns
-//! spawn/done mutation, implicit session resolution, and human/JSON render.
+//! List/show/spawn/done domain assembly and pure planning live in
+//! `heddle_core::actor`. This module owns implicit session resolution,
+//! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use chrono::Utc;
 use heddle_core::{
-    ActorEntryReport, ActorListReport, assemble_actor_entry, list_actors, show_actor_from_entry,
+    ActorEntryReport, ActorListReport, ActorSpawnError, ActorSpawnOptions, assemble_actor_entry,
+    build_spawn_entry, list_actors, mark_actor_done, plan_actor_done, plan_actor_spawn,
+    show_actor_from_entry,
 };
 use objects::{
     object::ThreadName,
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
+    store::{AgentEntry, AgentRegistry, AgentStatus},
 };
-use repo::{Repository, ThreadId};
+use repo::Repository;
 use serde::Serialize;
 
 use super::{
@@ -157,13 +159,6 @@ pub async fn cmd_actor_spawn(
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
-    // A user-supplied `--thread` name is a creation boundary (spawn mints or
-    // attaches the named thread), so reject an unsafe name before any ref is
-    // written. The generated `actor/<session>` fallback is safe by construction.
-    // (heddle#464 close-the-class.)
-    if let Some(name) = thread.as_deref() {
-        ThreadId::new(name).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
-    }
     let repo = cli.open_repo()?;
 
     let base_state = repo.head()?.ok_or_else(|| {
@@ -172,120 +167,55 @@ pub async fn cmd_actor_spawn(
         ))
     })?;
 
-    // `--no-thread` attaches the actor to the current lane rather than minting
-    // a fresh `actor/<session>` thread. `current_lane()` is the single source
-    // of truth for "is there a lane to attach to?": it consults the git-overlay
-    // HEAD state, so a detached Git HEAD reports no lane even when `.heddle/HEAD`
-    // still names a stale attached thread. Resolve it up front so we fail
-    // cleanly before creating any registry entry. The same predicate drives the
-    // `actor explain` recommendation, so recommend and execute never disagree.
-    let attach_thread = if no_thread {
-        match repo.current_lane()? {
-            Some(lane) => Some(ThreadName::new(lane)),
-            None => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
-        }
-    } else {
-        None
-    };
+    // `current_lane()` is the single source of truth for "is there a lane to
+    // attach to?": it consults the git-overlay HEAD state, so a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale
+    // attached thread. The same predicate drives the `actor explain`
+    // recommendation, so recommend and execute never disagree.
+    let current_lane = repo.current_lane()?;
 
-    let explicit_identity = provider
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty())
-        || model.as_ref().is_some_and(|value| !value.trim().is_empty());
     let probe = crate::harness::probe_current_process_harness(
         &repo,
         provider.clone().filter(|value| !value.trim().is_empty()),
         model.clone().filter(|value| !value.trim().is_empty()),
         None,
     )?;
-    let resolved_provider = provider
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| probe.provider.clone());
-    let resolved_model = model
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| probe.model.clone());
-    let probe_source = if explicit_identity {
-        Some("explicit_payload".to_string())
-    } else {
-        probe.probe_source.clone()
-    };
-    let probe_confidence = if explicit_identity {
-        Some(1.0)
-    } else {
-        probe.confidence
-    };
+
+    let plan = plan_actor_spawn(&ActorSpawnOptions {
+        thread,
+        no_thread,
+        current_lane,
+        provider,
+        model,
+        probe_provider: probe.provider.clone(),
+        probe_model: probe.model.clone(),
+        harness: probe.harness.clone(),
+        thinking_level: probe.thinking_level.clone(),
+        probe_source: probe.probe_source.clone(),
+        probe_confidence: probe.confidence,
+        base_state_full: base_state.to_string_full(),
+        base_state_short: base_state.short(),
+    })
+    .map_err(map_actor_spawn_error)?;
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let thread_name = match &attach_thread {
-            Some(current) => current.clone(),
-            None => ThreadName::new(
-                thread
-                    .clone()
-                    .unwrap_or_else(|| format!("actor/{session_id}")),
-            ),
-        };
+        let entry = build_spawn_entry(
+            &plan,
+            session_id,
+            Some(std::process::id()),
+            Some(objects::store::generate_agent_id()),
+            chrono::Utc::now(),
+        );
+        let thread_name = ThreadName::new(entry.thread.clone());
 
         // In `--no-thread` mode we attach to the existing current thread
         // and never create a ref, so no stray thread is left behind.
-        if attach_thread.is_none() && repo.refs().get_thread(&thread_name)?.is_none() {
+        if plan.mint_thread_if_missing && repo.refs().get_thread(&thread_name)?.is_none() {
             repo.refs().set_thread(&thread_name, &base_state)?;
         }
 
-        Ok(AgentEntry {
-            session_id: session_id.to_string(),
-            client_instance_id: None,
-            native_actor_key: None,
-            native_parent_actor_key: None,
-            native_instance_key: None,
-            heddle_session_id: None,
-            thread_id: None,
-            thread: thread_name.to_string(),
-            pid: Some(std::process::id()),
-            boot_id: None,
-            liveness_path: None,
-            heartbeat_at: Some(Utc::now()),
-            anchor_state: Some(base_state.to_string_full()),
-            anchor_root: None,
-            reservation_token: Some(objects::store::generate_agent_id()),
-            path: None,
-            base_state: base_state.short(),
-            started_at: Utc::now(),
-            provider: resolved_provider.clone(),
-            model: resolved_model.clone(),
-            harness: probe.harness.clone(),
-            thinking_level: probe.thinking_level.clone(),
-            usage_summary: AgentUsageSummary::default(),
-            last_progress_at: None,
-            report_flush_state: None,
-            attach_reason: Some(if attach_thread.is_some() {
-                format!(
-                    "actor {session_id} was attached to the current thread {thread_name} without minting a new thread"
-                )
-            } else {
-                format!("actor {session_id} was spawned explicitly on thread {thread_name}")
-            }),
-            task_assignment_id: None,
-            attach_precedence: vec![
-                if attach_thread.is_some() {
-                    "no-thread-attach".to_string()
-                } else {
-                    "explicit-actor-spawn".to_string()
-                },
-            ],
-            winning_attach_rule: Some(if attach_thread.is_some() {
-                "no-thread-attach".to_string()
-            } else {
-                "explicit-actor-spawn".to_string()
-            }),
-            probe_source: probe_source.clone(),
-            probe_confidence,
-            status: AgentStatus::Active,
-            completed_at: None,
-            context_queries: vec![],
-        })
+        Ok(entry)
     })?;
 
     if should_output_json(cli, None) {
@@ -311,6 +241,13 @@ pub async fn cmd_actor_spawn(
     }
 
     Ok(())
+}
+
+fn map_actor_spawn_error(err: ActorSpawnError) -> anyhow::Error {
+    match err {
+        ActorSpawnError::InvalidThreadName(err) => anyhow!(thread_name_invalid_advice(&err)),
+        ActorSpawnError::NoCurrentLane => anyhow!(actor_spawn_no_thread_detached_advice()),
+    }
 }
 
 pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
@@ -435,8 +372,9 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
-    registry.update_status(&entry.session_id, AgentStatus::Complete)?;
-    let summary = find_thread_summary(&repo, &entry.thread)?;
+    let plan = plan_actor_done(&entry);
+    mark_actor_done(&registry, &plan.session_id)?;
+    let summary = find_thread_summary(&repo, &plan.thread)?;
     let recommended_action = summary.as_ref().and_then(|thread| {
         actor_done_recommended_action(&thread.name, &thread.coordination_status.to_string())
     });
@@ -445,9 +383,9 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
     if should_output_json(cli, None) {
         let output = ActorDoneOutput {
             output_kind: "actor_done",
-            session_id: entry.session_id,
+            session_id: plan.session_id.clone(),
             status: "complete",
-            thread: entry.thread,
+            thread: plan.thread.clone(),
             coordination_status: summary
                 .as_ref()
                 .map(|thread| thread.coordination_status.to_string()),
@@ -457,7 +395,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor '{}' marked as complete.", entry.session_id);
+        println!("Actor '{}' marked as complete.", plan.session_id);
         if let Some(thread) = summary {
             println!(
                 "Thread '{}' is {}.",
