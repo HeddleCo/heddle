@@ -53,7 +53,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
 **Required evidence:** before/after paired timings, p95/p99, correctness held  
-**Status (2026-07-11):** **Open with active measurement residual** — n=5 equal-work core-loop absolute + A==B self-pairs recorded (see `PERF_BASELINE.md`); still **not** a Git win claim. **Equal-work re-stamp delegated** (refresh tip timings with before/after paired evidence on correct paths). **Multi-host** / quieter-host matrix still **open**. Wave 2–3 / Wave 8 high-signal correctness green for proceeding on correct-path hotspots only.
+**Status (2026-07-11):** **Open with active measurement residual** — tip re-stamp **n=5 absolute** on `c422950f` recorded in `PERF_BASELINE.md` (`20260711T195417Z`; absolute-only, no A==B this run); still **not** a Git win claim. Prior A==B samples retained historically. **Multi-host** / quieter-host matrix still **open**. Correct-path hotspot work remains unblocked with equal-work evidence required for any win claim.
 
 ## Wave 7 — Platform matrix & long-tail
 
