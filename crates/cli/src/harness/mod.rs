@@ -9,6 +9,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
+use heddle_core::{
+    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
+    WorktreeSessionFact, decide_session_attach,
+    should_rotate_segment as pure_should_rotate_segment,
+};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -2214,35 +2219,35 @@ fn resolve_actor_attachment(
         probe,
         token_claims,
     } = input;
-    let mut precedence = Vec::new();
+
+    // CLI owns FS/registry/session I/O; pure core owns attach/create precedence.
+    let mut sessions_by_id: BTreeMap<String, Session> = BTreeMap::new();
+    let mut matched_by_session: BTreeMap<String, AgentEntry> = BTreeMap::new();
+    let mut facts = SessionAttachFacts {
+        root_actor: probe.attach_hints.root_actor,
+        ..SessionAttachFacts::default()
+    };
+
     if let Some(entry) = requested_entry
         && let Some(bound_session_id) = entry.heddle_session_id.as_deref()
     {
-        precedence.push(format!(
-            "explicit-agent-session:{}:matched",
-            entry.session_id
-        ));
         let session = sessions
             .get_session(bound_session_id)?
             .ok_or_else(|| anyhow!("session not found: {bound_session_id}"))?;
         if !session.is_active() {
             return Err(anyhow!("session is not active: {bound_session_id}"));
         }
-        return Ok(ResolvedAttachment {
-            target: AttachTarget::ExistingSession(session),
-            matched_entry: Some(entry.clone()),
-            attach_reason: format!(
-                "reattached actor {} to existing Heddle session {}",
-                entry.session_id, bound_session_id
-            ),
-            precedence,
-            winning_rule: "explicit-agent-session".to_string(),
+        matched_by_session.insert(session.id.clone(), entry.clone());
+        sessions_by_id.insert(session.id.clone(), session);
+        facts.explicit_agent = Some(ExplicitAgentBind {
+            agent_session_id: entry.session_id.clone(),
+            heddle_session_id: bound_session_id.to_string(),
         });
     }
-    precedence.push("explicit-agent-session:miss".to_string());
 
-    if let Some(session_id) = explicit_heddle_session_id {
-        precedence.push(format!("explicit-heddle-session:{session_id}:matched"));
+    if facts.explicit_agent.is_none()
+        && let Some(session_id) = explicit_heddle_session_id
+    {
         ensure_requested_entry_matches_session(requested_entry, session_id)?;
         let session = sessions
             .get_session(session_id)?
@@ -2250,15 +2255,9 @@ fn resolve_actor_attachment(
         if !session.is_active() {
             return Err(anyhow!("session is not active: {session_id}"));
         }
-        return Ok(ResolvedAttachment {
-            target: AttachTarget::ExistingSession(session),
-            matched_entry: None,
-            attach_reason: format!("attached to explicit Heddle session {session_id}"),
-            precedence,
-            winning_rule: "explicit-heddle-session".to_string(),
-        });
+        sessions_by_id.insert(session.id.clone(), session);
+        facts.explicit_heddle_session_id = Some(session_id.to_string());
     }
-    precedence.push("explicit-heddle-session:miss".to_string());
 
     if client_instance_id.is_none()
         && let Some(native_actor_key) = probe.native_actor_key.as_deref()
@@ -2267,77 +2266,52 @@ fn resolve_actor_attachment(
             && claude_actor_compatible(&entry, probe, repo.root())
             && let Some(bound_session_id) = entry.heddle_session_id.clone()
         {
-            precedence.push(format!("native-actor-key:{native_actor_key}:matched"));
             let session = sessions
                 .get_session(&bound_session_id)?
                 .ok_or_else(|| anyhow!("session not found: {bound_session_id}"))?;
             if session.is_active() {
-                return Ok(ResolvedAttachment {
-                    target: AttachTarget::ExistingSession(session),
-                    matched_entry: Some(entry),
-                    attach_reason: format!(
-                        "reattached native actor {} to Heddle session {}",
-                        native_actor_key, bound_session_id
-                    ),
-                    precedence,
-                    winning_rule: "native-actor-key".to_string(),
-                });
+                matched_by_session.insert(session.id.clone(), entry);
+                sessions_by_id.insert(session.id.clone(), session);
+                facts.native_actor = SessionLookupFact::Hit {
+                    key: native_actor_key.to_string(),
+                    session_id: bound_session_id,
+                };
+            } else {
+                facts.native_actor = SessionLookupFact::Miss {
+                    key: native_actor_key.to_string(),
+                };
             }
+        } else {
+            facts.native_actor = SessionLookupFact::Miss {
+                key: native_actor_key.to_string(),
+            };
         }
-        precedence.push(format!("native-actor-key:{native_actor_key}:miss"));
-    } else {
-        precedence.push("native-actor-key:miss".to_string());
     }
 
     if let Some(client_instance_id) = client_instance_id {
         if let Some(entry) = registry.find_active_by_client_instance_id(client_instance_id)?
             && let Some(bound_session_id) = entry.heddle_session_id.clone()
         {
-            precedence.push(format!("client-instance-id:{client_instance_id}:matched"));
             let session = sessions
                 .get_session(&bound_session_id)?
                 .ok_or_else(|| anyhow!("session not found: {bound_session_id}"))?;
             if session.is_active() {
-                return Ok(ResolvedAttachment {
-                    target: AttachTarget::ExistingSession(session),
-                    matched_entry: Some(entry),
-                    attach_reason: format!(
-                        "reattached client instance {client_instance_id} to Heddle session {bound_session_id}"
-                    ),
-                    precedence,
-                    winning_rule: "client-instance-id".to_string(),
-                });
+                matched_by_session.insert(session.id.clone(), entry);
+                sessions_by_id.insert(session.id.clone(), session);
+                facts.client_instance = SessionLookupFact::Hit {
+                    key: client_instance_id.to_string(),
+                    session_id: bound_session_id,
+                };
+            } else {
+                facts.client_instance = SessionLookupFact::Miss {
+                    key: client_instance_id.to_string(),
+                };
             }
+        } else {
+            facts.client_instance = SessionLookupFact::Miss {
+                key: client_instance_id.to_string(),
+            };
         }
-        precedence.push(format!("client-instance-id:{client_instance_id}:miss"));
-        return Ok(ResolvedAttachment {
-            target: AttachTarget::CreateNew {
-                _because_claimed: false,
-            },
-            matched_entry: None,
-            attach_reason: format!(
-                "started new Heddle session for distinct client instance {client_instance_id}"
-            ),
-            precedence,
-            winning_rule: "create-new-session".to_string(),
-        });
-    } else {
-        precedence.push("client-instance-id:miss".to_string());
-    }
-
-    if client_instance_id.is_none() && probe.native_actor_key.is_some() {
-        precedence.push("native-instance-key:skipped-strong-native-key".to_string());
-        return Ok(ResolvedAttachment {
-            target: AttachTarget::CreateNew {
-                _because_claimed: false,
-            },
-            matched_entry: None,
-            attach_reason:
-                "started new Heddle session because no compatible native actor match was found"
-                    .to_string(),
-            precedence,
-            winning_rule: "create-new-session".to_string(),
-        });
     }
 
     if let Some(native_instance_key) = probe.native_instance_key.as_deref() {
@@ -2346,26 +2320,26 @@ fn resolve_actor_attachment(
             && claude_actor_compatible(&entry, probe, repo.root())
             && let Some(bound_session_id) = entry.heddle_session_id.clone()
         {
-            precedence.push(format!("native-instance-key:{native_instance_key}:matched"));
             let session = sessions
                 .get_session(&bound_session_id)?
                 .ok_or_else(|| anyhow!("session not found: {bound_session_id}"))?;
             if session.is_active() {
-                return Ok(ResolvedAttachment {
-                    target: AttachTarget::ExistingSession(session),
-                    matched_entry: Some(entry),
-                    attach_reason: format!(
-                        "reattached native instance {} to Heddle session {}",
-                        native_instance_key, bound_session_id
-                    ),
-                    precedence,
-                    winning_rule: "native-instance-key".to_string(),
-                });
+                matched_by_session.insert(session.id.clone(), entry);
+                sessions_by_id.insert(session.id.clone(), session);
+                facts.native_instance = SessionLookupFact::Hit {
+                    key: native_instance_key.to_string(),
+                    session_id: bound_session_id,
+                };
+            } else {
+                facts.native_instance = SessionLookupFact::Miss {
+                    key: native_instance_key.to_string(),
+                };
             }
+        } else {
+            facts.native_instance = SessionLookupFact::Miss {
+                key: native_instance_key.to_string(),
+            };
         }
-        precedence.push(format!("native-instance-key:{native_instance_key}:miss"));
-    } else {
-        precedence.push("native-instance-key:miss".to_string());
     }
 
     if probe.attach_hints.root_actor
@@ -2379,28 +2353,19 @@ fn resolve_actor_attachment(
             client_instance_id,
             probe.native_actor_key.as_deref(),
         )?;
-        if !claimed {
-            precedence.push(format!("current-worktree-session:{}:matched", current.id));
-            return Ok(ResolvedAttachment {
-                target: AttachTarget::ExistingSession(current.clone()),
-                matched_entry: None,
-                attach_reason: format!("attached to active worktree Heddle session {}", current.id),
-                precedence,
-                winning_rule: "current-worktree-session".to_string(),
-            });
-        }
-        precedence.push(format!("current-worktree-session:{}:claimed", current.id));
-        return Ok(ResolvedAttachment {
-            target: AttachTarget::CreateNew {
-                _because_claimed: true,
-            },
-            matched_entry: None,
-            attach_reason: "started a new Heddle session because the current session was already claimed by another active actor".to_string(),
-            precedence,
-            winning_rule: "create-new-session".to_string(),
-        });
+        sessions_by_id
+            .entry(current.id.clone())
+            .or_insert_with(|| current.clone());
+        facts.current_worktree = if claimed {
+            WorktreeSessionFact::Claimed {
+                session_id: current.id.clone(),
+            }
+        } else {
+            WorktreeSessionFact::Available {
+                session_id: current.id.clone(),
+            }
+        };
     }
-    precedence.push("current-worktree-session:miss".to_string());
 
     if let Some(claims) = token_claims
         && let Some(token_sid) = claims.sid.as_deref()
@@ -2414,40 +2379,42 @@ fn resolve_actor_attachment(
             client_instance_id,
             probe.native_actor_key.as_deref(),
         )?;
-        if !claimed {
-            precedence.push(format!("token-sid:{token_sid}:matched"));
-            return Ok(ResolvedAttachment {
+        let session_id = session.id.clone();
+        sessions_by_id.insert(session_id.clone(), session);
+        facts.token_sid = if claimed {
+            TokenSidFact::Claimed { session_id }
+        } else {
+            TokenSidFact::Available { session_id }
+        };
+    }
+
+    let decision = decide_session_attach(&facts);
+    match decision.policy {
+        SessionPolicy::AttachExisting { session_id, .. } => {
+            let session = sessions_by_id
+                .remove(&session_id)
+                .or_else(|| sessions.get_session(&session_id).ok().flatten())
+                .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+            Ok(ResolvedAttachment {
                 target: AttachTarget::ExistingSession(session),
-                matched_entry: None,
-                attach_reason: format!(
-                    "attached to Heddle session {token_sid} from auth token sid"
-                ),
-                precedence,
-                winning_rule: "token-sid".to_string(),
-            });
+                matched_entry: matched_by_session.remove(&session_id),
+                attach_reason: decision.attach_reason,
+                precedence: decision.precedence,
+                winning_rule: decision.winning_rule.to_string(),
+            })
         }
-        precedence.push(format!("token-sid:{token_sid}:claimed"));
-        return Ok(ResolvedAttachment {
+        SessionPolicy::CreateNew {
+            because_claimed, ..
+        } => Ok(ResolvedAttachment {
             target: AttachTarget::CreateNew {
-                _because_claimed: true,
+                _because_claimed: because_claimed,
             },
             matched_entry: None,
-            attach_reason: "started a new Heddle session because the current session was already claimed by another active actor".to_string(),
-            precedence,
-            winning_rule: "create-new-session".to_string(),
-        });
+            attach_reason: decision.attach_reason,
+            precedence: decision.precedence,
+            winning_rule: decision.winning_rule.to_string(),
+        }),
     }
-    precedence.push("token-sid:miss".to_string());
-
-    Ok(ResolvedAttachment {
-        target: AttachTarget::CreateNew {
-            _because_claimed: false,
-        },
-        matched_entry: None,
-        attach_reason: "started new Heddle session".to_string(),
-        precedence,
-        winning_rule: "create-new-session".to_string(),
-    })
 }
 
 fn claude_actor_compatible(
@@ -2511,15 +2478,12 @@ fn should_rotate_segment(session: &objects::object::Session, identity: &Resolved
     let Some(segment) = session.current_segment() else {
         return false;
     };
-    let provider_changed = identity
-        .provider
-        .as_deref()
-        .is_some_and(|provider| provider != segment.provider);
-    let model_changed = identity
-        .model
-        .as_deref()
-        .is_some_and(|model| model != segment.model);
-    provider_changed || model_changed
+    pure_should_rotate_segment(
+        Some(segment.provider.as_str()),
+        Some(segment.model.as_str()),
+        identity.provider.as_deref(),
+        identity.model.as_deref(),
+    )
 }
 
 fn thread_id_for_name(repo: &Repository, thread_name: Option<&str>) -> Result<Option<String>> {

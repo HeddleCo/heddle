@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use heddle_core::decide_harness_probe;
 use wire::{TranscriptAttachmentRef, UsageTotals};
 
 use crate::attribution::clean_attribution_value;
@@ -79,9 +80,19 @@ pub(crate) fn probe_harness_actor(input: &HarnessProbeInput) -> Result<HarnessPr
 }
 
 fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
-    let fingerprint = fingerprint_from_hints(input.argv.as_deref(), &input.env_hints);
+    let decision = decide_harness_probe(
+        input.explicit_harness.as_deref(),
+        input.argv.as_deref(),
+        &input.env_hints,
+    );
+    let fingerprint = decision.fingerprint;
+    let probe_source = if input.explicit_harness.is_some() {
+        ProbeSource::ExplicitPayload
+    } else {
+        ProbeSource::ArgvEnv
+    };
     HarnessProbeResult {
-        harness: input.explicit_harness.clone().or(fingerprint.harness),
+        harness: fingerprint.harness,
         provider: input
             .explicit_provider
             .clone()
@@ -101,16 +112,8 @@ fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
             .clone()
             .or(fingerprint.policy)
             .or_else(|| input.current_policy.clone()),
-        confidence: Some(if input.explicit_harness.is_some() {
-            1.0
-        } else {
-            0.4
-        }),
-        probe_source: Some(if input.explicit_harness.is_some() {
-            ProbeSource::ExplicitPayload.as_str().to_string()
-        } else {
-            ProbeSource::ArgvEnv.as_str().to_string()
-        }),
+        confidence: Some(decision.confidence),
+        probe_source: Some(probe_source.as_str().to_string()),
         ..HarnessProbeResult::default()
     }
 }
@@ -139,75 +142,6 @@ impl ProbeSource {
             Self::ConfigOverride => "config_override",
         }
     }
-}
-
-#[derive(Default)]
-struct FingerprintedIdentity {
-    harness: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
-    thinking_level: Option<String>,
-    policy: Option<String>,
-}
-
-fn fingerprint_from_hints(
-    argv: Option<&[String]>,
-    env_hints: &BTreeMap<String, String>,
-) -> FingerprintedIdentity {
-    let mut fingerprint = FingerprintedIdentity::default();
-    let program = argv
-        .and_then(|args| args.first())
-        .map(|arg| arg.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    if program.contains("claude")
-        || env_hints.contains_key("CLAUDECODE")
-        || env_hints.contains_key("CLAUDE_CODE")
-    {
-        fingerprint.harness = Some("claude-code".to_string());
-        fingerprint.provider = Some("anthropic".to_string());
-    } else if program.contains("codex")
-        || env_hints.contains_key("CODEX_SANDBOX")
-        || env_hints.contains_key("CODEX_THREAD_ID")
-        || env_hints.contains_key("CODEX_CI")
-    {
-        fingerprint.harness = Some("codex".to_string());
-        fingerprint.provider = Some("openai".to_string());
-    } else if program.contains("opencode") || env_hints.contains_key("OPENCODE_CLIENT") {
-        fingerprint.harness = Some("opencode".to_string());
-    } else if program.contains("aider") {
-        fingerprint.harness = Some("aider".to_string());
-    }
-
-    fingerprint.provider = fingerprint.provider.or_else(|| {
-        env_hints
-            .get("HEDDLE_AGENT_PROVIDER")
-            .cloned()
-            .and_then(clean_attribution_value)
-    });
-    fingerprint.model = env_hints
-        .get("HEDDLE_AGENT_MODEL")
-        .cloned()
-        .and_then(clean_attribution_value)
-        .or_else(|| env_hints.get("CODEX_MODEL").cloned())
-        .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
-        .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENCODE_MODEL").cloned())
-        .or_else(|| env_hints.get("AIDER_MODEL").cloned())
-        .or_else(|| env_hints.get("MODEL").cloned());
-    fingerprint.thinking_level = env_hints
-        .get("THINKING_LEVEL")
-        .cloned()
-        .or_else(|| env_hints.get("CODEX_REASONING_EFFORT").cloned())
-        .or_else(|| env_hints.get("REASONING_EFFORT").cloned())
-        .or_else(|| env_hints.get("OPENAI_REASONING_EFFORT").cloned());
-    fingerprint.policy = env_hints
-        .get("HEDDLE_AGENT_POLICY")
-        .cloned()
-        .and_then(clean_attribution_value)
-        .or_else(|| env_hints.get("PROMPT_POLICY").cloned());
-    fingerprint
 }
 
 pub(crate) fn attribution_env_hint(
