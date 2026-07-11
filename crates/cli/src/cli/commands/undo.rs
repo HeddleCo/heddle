@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
+//!
+//! Domain list/planning lives in [`heddle_core::undo`]; this module owns lock
+//! acquisition, apply, text/json render, and mutation-side RecoveryAdvice.
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    UndoBatchSummary, UndoListReport, list_undo_history, plan_redo_batches, plan_undo_batches,
+    summarize_batch, validate_undo_list_preview_modes,
+};
 use objects::{
     object::{ChangeId, ContentHash},
     store::ObjectStore,
@@ -47,35 +54,12 @@ use crate::cli::{Cli, should_output_json, style};
 const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
 #[derive(Serialize)]
-struct OpListOutput {
-    output_kind: &'static str,
-    batches: Vec<OpBatchOutput>,
-}
-
-#[derive(Serialize)]
-struct OpBatchOutput {
-    batch_id: u64,
-    timestamp: String,
-    undone: bool,
-    partial: bool,
-    operations: Vec<OpListEntry>,
-}
-
-#[derive(Serialize)]
-struct OpListEntry {
-    id: u64,
-    description: String,
-    timestamp: String,
-    undone: bool,
-}
-
-#[derive(Serialize)]
 struct UndoRedoOutput {
     output_kind: &'static str,
     status: &'static str,
     action: String,
     message: String,
-    batches: Vec<OpBatchOutput>,
+    batches: Vec<UndoBatchSummary>,
     next_action: Option<String>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
@@ -103,24 +87,12 @@ pub fn cmd_undo(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
 
-    if list && preview {
-        return Err(anyhow!(undo_mode_conflict_advice()));
-    }
+    validate_undo_list_preview_modes(list, preview).map_err(|e| anyhow!(e))?;
 
     if list {
-        let scope = repo.op_scope();
-        // Count only user-facing batches toward `depth`, dropping the record-less
-        // commit sentinels (an `undo`/`redo`'s marker-only batch) BEFORE the
-        // limit applies. Filtering after a fixed-count fetch made `--depth 1`
-        // return empty whenever the latest op was itself an undo/redo, whose
-        // marker is the newest batch (heddle#355 cid 3330867777).
-        let batches: Vec<OpBatch> = repo
-            .oplog()
-            .recent_user_batches_scoped(depth, Some(&scope))?;
-        let output = OpListOutput {
-            output_kind: "undo_list",
-            batches: batches.iter().map(build_batch_output).collect(),
-        };
+        // Domain filtering (user batches, checkout scope, depth before markers)
+        // lives in heddle_core::list_undo_history (heddle#355 cid 3330867777).
+        let output: UndoListReport = list_undo_history(&repo, depth)?;
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
@@ -144,12 +116,9 @@ pub fn cmd_undo(
     // command returns, covering the `--preview` short-circuit and the commit.
     let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
+    let plan = plan_undo_batches(&repo, steps)?;
+    let batches = plan.batches;
     let scope = repo.op_scope();
-    let batches = repo.oplog().undo_batches_scoped(steps, Some(&scope))?;
-
-    if batches.is_empty() {
-        return Err(anyhow!(empty_history_advice("undo", "undo")));
-    }
 
     // Run safety pre-flights before the `--preview` short-circuit so
     // preview output is honest about refusals. Preview must not
@@ -169,7 +138,7 @@ pub fn cmd_undo(
                 batches.len(),
                 if batches.len() == 1 { "" } else { "es" }
             ),
-            batches: batches.iter().map(build_batch_output).collect(),
+            batches: batches.iter().map(summarize_batch).collect(),
             next_action: None,
             next_action_template: None,
             recommended_action: None,
@@ -234,7 +203,7 @@ pub fn cmd_undo(
             updated_batches.len(),
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
-        batches: updated_batches.iter().map(build_batch_output).collect(),
+        batches: updated_batches.iter().map(summarize_batch).collect(),
         next_action: recommended_action.action.clone(),
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
@@ -280,12 +249,9 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     // cid 3330867776).
     let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
+    let plan = plan_redo_batches(&repo, steps)?;
+    let batches = plan.batches;
     let scope = repo.op_scope();
-    let batches = repo.oplog().redo_batches_scoped(steps, Some(&scope))?;
-
-    if batches.is_empty() {
-        return Err(anyhow!(empty_history_advice("redo", "redo")));
-    }
 
     // Same preview-honesty rule as `cmd_undo`: run pre-flight refusals
     // before the `--preview` short-circuit so preview surfaces the
@@ -304,7 +270,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
                 batches.len(),
                 if batches.len() == 1 { "" } else { "es" }
             ),
-            batches: batches.iter().map(build_batch_output).collect(),
+            batches: batches.iter().map(summarize_batch).collect(),
             next_action: None,
             next_action_template: None,
             recommended_action: None,
@@ -352,7 +318,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             updated_batches.len(),
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
-        batches: updated_batches.iter().map(build_batch_output).collect(),
+        batches: updated_batches.iter().map(summarize_batch).collect(),
         next_action: recommended_action.action.clone(),
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
@@ -380,78 +346,6 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     Ok(())
 }
 
-fn undo_mode_conflict_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "undo_mode_conflict",
-        "Use either --list or --preview, not both",
-        "Run `heddle undo --list` to inspect history, or `heddle undo --preview` to preview the next undo.",
-        "--list and --preview are mutually exclusive undo modes",
-        "combining them would make the command output ambiguous between history listing and undo preview",
-        "repository state was left unchanged",
-        "heddle undo --list",
-        vec![
-            "heddle undo --list".to_string(),
-            "heddle undo --preview".to_string(),
-        ],
-    )
-}
-
-fn empty_history_advice(action: &str, noun: &str) -> RecoveryAdvice {
-    let kind = if action == "undo" {
-        "nothing_to_undo"
-    } else {
-        "nothing_to_redo"
-    };
-    RecoveryAdvice::safety_refusal(
-        kind,
-        format!("Nothing to {action}"),
-        "Inspect recent undo history with `heddle undo --list`.",
-        format!("there are no {noun} entries in the current checkout lane"),
-        format!("{action} would need to move Heddle and Git state, but no eligible batch exists"),
-        "repository state was left unchanged",
-        "heddle undo --list",
-        vec!["heddle undo --list".to_string()],
-    )
-}
-
-fn build_batch_output(batch: &OpBatch) -> OpBatchOutput {
-    let (undone, partial) = batch_status(batch);
-    let timestamp = batch
-        .entries
-        .iter()
-        .map(|entry| entry.timestamp)
-        .max()
-        .map(format_timestamp)
-        .unwrap_or_else(|| "unknown".to_string());
-
-    OpBatchOutput {
-        batch_id: batch.id,
-        timestamp,
-        undone,
-        partial,
-        operations: batch
-            .entries
-            .iter()
-            .map(|entry| OpListEntry {
-                id: entry.id,
-                description: entry.operation.description(),
-                timestamp: format_timestamp(entry.timestamp),
-                undone: entry.undone,
-            })
-            .collect(),
-    }
-}
-
-fn batch_status(batch: &OpBatch) -> (bool, bool) {
-    let any_undone = batch.entries.iter().any(|entry| entry.undone);
-    let all_undone = batch.entries.iter().all(|entry| entry.undone);
-    (all_undone, any_undone && !all_undone)
-}
-
-fn format_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> String {
-    timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
-}
-
 fn human_undo_redo_message(action: &str, count: usize, preview: bool) -> String {
     let noun = if count == 1 {
         "saved change"
@@ -469,7 +363,7 @@ fn human_undo_redo_message(action: &str, count: usize, preview: bool) -> String 
     format!("{verb} {count} {noun}")
 }
 
-fn print_human_history(batches: &[OpBatchOutput]) {
+fn print_human_history(batches: &[UndoBatchSummary]) {
     for batch in batches {
         let status = if batch.undone {
             " undone"
@@ -497,7 +391,7 @@ fn human_operation_description(description: &str) -> String {
     description.to_string()
 }
 
-fn print_batches(batches: &[OpBatchOutput]) {
+fn print_batches(batches: &[UndoBatchSummary]) {
     for batch in batches {
         let status = if batch.undone {
             " (undone)"

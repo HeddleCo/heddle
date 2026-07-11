@@ -7,9 +7,11 @@ pub mod diff;
 pub mod fsck;
 pub mod merge;
 pub mod query;
+pub mod remote;
 pub mod save;
 pub mod status;
 pub mod thread_shaping;
+pub mod undo;
 pub mod verify;
 
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
@@ -39,6 +41,11 @@ pub use objects::{
     TaskId, Warning, WarningSink,
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
+pub use remote::{
+    GitConfigContext, IncludedGitRemoteConfigError, RemoteInfo, RemoteListReport,
+    list_plain_git_remotes, list_remotes, merged_remote_items, plain_git_remote_items,
+    resolve_default_remote_name, resolved_default_remote_name, show_plain_git_remote, show_remote,
+};
 pub use save::{
     GitScope, SavePlan, SaveReport, SaveVerb, execute_save, plan_creates_new_state, plan_git_scope,
     plan_writes_git_checkpoint,
@@ -58,6 +65,12 @@ pub use status::{
 pub use thread_shaping::{
     CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
     ThreadShapingError, capture_split, thread_move,
+};
+pub use undo::{
+    UndoBatchSummary, UndoHistoryAction, UndoListReport, UndoOperationSummary, UndoPlan,
+    batch_status, empty_history_refusal, list_undo_history, list_undo_history_ctx,
+    plan_redo_batches, plan_undo_batches, require_nonempty_history, summarize_batch,
+    undo_mode_conflict, validate_undo_list_preview_modes,
 };
 pub use verify::{
     ActionAudience, ActionTemplate, MachineContractCoverage, MachineContractInput,
