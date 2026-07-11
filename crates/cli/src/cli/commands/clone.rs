@@ -20,9 +20,10 @@ use heddle_core::{
 };
 #[cfg(feature = "client")]
 use heddle_core::{
-    MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoExecutionPlan, MonorepoNodeExecution,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodePlan, MonorepoNodeStepOptions,
-    plan_monorepo_clone, plan_monorepo_execution, validate_monorepo_clone_options,
+    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
+    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
+    assemble_monorepo_clone_result_summary, monorepo_execution_progress, plan_monorepo_clone,
+    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
 };
 use ingest::ImportOptions;
 use objects::{
@@ -1435,13 +1436,14 @@ async fn clone_network(
 ///    [`plan_monorepo_clone`] selects children, anchors mount paths, and
 ///    orders per-node work (root first, pre-order) plus withheld edges.
 /// 3. Expand each selected node into pure [`MonorepoNodeExecutionStep`]s via
-///    [`plan_monorepo_execution`], then execute FS / hosted I/O per step.
-/// 4. Report skipped children — unreadable / cycle / depth-bounded edges are
-///    surfaced, never fatal.
+///    [`plan_monorepo_execution`], validate ordering invariants, then execute
+///    FS / hosted I/O per step (progress labels stay pure in core).
+/// 4. Assemble placed/skipped summary and report — unreadable / cycle /
+///    depth-bounded edges are surfaced, never fatal.
 ///
-/// Pure planning (steps 2–3) lives in `heddle_core::clone_plan` and is
-/// unit-tested there. This function owns hosted RPC and per-node materialize
-/// I/O.
+/// Pure planning, validation, progress labels, and result summary (steps 2–4
+/// facts) live in `heddle_core::clone_plan` and are unit-tested there. This
+/// function owns hosted RPC and per-node materialize I/O.
 #[cfg(feature = "client")]
 async fn clone_monorepo(
     cli: &Cli,
@@ -1493,53 +1495,65 @@ async fn clone_monorepo(
     let facts = monorepo_node_facts_from_resolved(&resolved);
     let clone_plan = plan_monorepo_clone(&facts);
     let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+    // Ordering invariants (Init before Fetch, paired fetch/materialize, …)
+    // before any irreversible per-node I/O.
+    validate_monorepo_execution(&exec).map_err(|err| anyhow!(err))?;
 
     // Guard the destination: remove it on any failure so a partial monorepo
     // isn't left behind (armed only if it didn't already exist).
     let mut cleanup = CloneDestinationCleanup::new(local_path);
     fs::create_dir_all(local_path)?;
 
-    let mut cloned_ops = 0usize;
-    for node_exec in &exec.nodes {
+    let total_nodes = exec.node_count();
+    for (node_index, node_exec) in exec.nodes.iter().enumerate() {
         let dest = node_exec.node.dest_path(local_path);
-        execute_monorepo_node_steps(&mut client, node_exec, &dest, &endpoint_spec)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to clone spool '{}' into {}",
-                    node_exec.node.spool_id,
-                    dest.display()
-                )
-            })?;
-        cloned_ops += 1;
+        execute_monorepo_node_steps(
+            &mut client,
+            node_exec,
+            &dest,
+            &endpoint_spec,
+            node_index,
+            total_nodes,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to clone spool '{}' into {}",
+                node_exec.node.spool_id,
+                dest.display()
+            )
+        })?;
     }
 
     cleanup.disarm();
 
+    let summary = assemble_monorepo_clone_result_summary(&exec);
+
     // Report the outcome, including every withheld child edge.
     if json_output {
-        let output = monorepo_clone_output_json(local_path, &exec);
+        let output = monorepo_clone_output_json(local_path, &summary);
         crate::cli::render::write_json_stdout(&output)?;
     } else {
+        // Counts/copy from pure summary; CLI owns markers and bold root.
+        let unit = if summary.placed_count == 1 {
+            "spool"
+        } else {
+            "spools"
+        };
         println!(
-            "{} Cloned monorepo {} ({} spool{} placed).",
+            "{} Cloned monorepo {} ({} {} placed).",
             style::ok_marker(),
             style::bold(root_path),
-            cloned_ops,
-            if cloned_ops == 1 { "" } else { "s" },
+            summary.placed_count,
+            unit,
         );
-        for node_exec in &exec.nodes {
-            let rel = monorepo_node_rel_display(&node_exec.node);
-            println!("  {} <- {}", style::dim(&rel), node_exec.node.spool_id);
+        for placed in &summary.placed {
+            let rel = monorepo_rel_display(&placed.rel_path);
+            println!("  {} <- {}", style::dim(&rel), placed.spool_id);
         }
-        if exec.skipped.is_empty() {
-            // No withheld edges — the slice is the full monorepo.
-        } else {
-            println!(
-                "  {} child spool(s) skipped (not part of your coherent slice):",
-                exec.skipped.len()
-            );
-            for sk in &exec.skipped {
+        if let Some(header) = summary.skipped_header() {
+            println!("  {header}");
+            for sk in &summary.skipped {
                 println!(
                     "    {} ({}) at {} — {}",
                     sk.mount_name,
@@ -1596,27 +1610,26 @@ fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> M
     }
 }
 
-/// Relative path label for text-mode monorepo placement lines.
+/// Relative path label for text-mode monorepo placement lines (`""` → `.`).
 #[cfg(feature = "client")]
-fn monorepo_node_rel_display(node: &MonorepoNodePlan) -> String {
-    if node.rel_path.as_os_str().is_empty() {
+fn monorepo_rel_display(rel_path: &Path) -> String {
+    if rel_path.as_os_str().is_empty() {
         ".".to_string()
     } else {
-        node.rel_path.display().to_string()
+        rel_path.display().to_string()
     }
 }
 
-/// JSON envelope for a monorepo clone: the placed nodes + the skipped edges.
+/// JSON envelope for a monorepo clone from the pure result summary.
 #[cfg(feature = "client")]
 fn monorepo_clone_output_json(
     local_path: &Path,
-    plan: &MonorepoExecutionPlan,
+    summary: &MonorepoCloneResultSummary,
 ) -> serde_json::Value {
-    let placed: Vec<_> = plan
-        .nodes
+    let placed: Vec<_> = summary
+        .placed
         .iter()
-        .map(|node_exec| {
-            let node = &node_exec.node;
+        .map(|node| {
             serde_json::json!({
                 "spool_id": node.spool_id,
                 "path": node.rel_path.display().to_string(),
@@ -1624,7 +1637,7 @@ fn monorepo_clone_output_json(
             })
         })
         .collect();
-    let skipped: Vec<_> = plan
+    let skipped: Vec<_> = summary
         .skipped
         .iter()
         .map(|sk| {
@@ -1650,56 +1663,83 @@ fn monorepo_clone_output_json(
 
 /// Execute pure per-node monorepo steps with hosted/FS I/O helpers.
 ///
-/// Step order and gating come from [`plan_monorepo_node_steps`]; this only
-/// performs side effects. Empty content plans omit fetch/materialize so the
-/// mount is an initialized empty repo (layout stays coherent).
+/// Step order and gating come from [`plan_monorepo_node_steps`]; ordering is
+/// pre-validated by [`validate_monorepo_execution`]. This only performs side
+/// effects. Empty content plans omit fetch/materialize so the mount is an
+/// initialized empty repo (layout stays coherent).
 #[cfg(feature = "client")]
 async fn execute_monorepo_node_steps(
     client: &mut heddle_client::grpc_hosted::HostedGrpcClient,
     node_exec: &MonorepoNodeExecution,
     dest: &Path,
     endpoint_spec: &str,
+    node_index: usize,
+    total_nodes: usize,
 ) -> Result<()> {
     let spool_id = node_exec.node.spool_id.as_str();
     // Repository is opened by InitRepo and reused by later steps.
     let mut repo: Option<Repository> = None;
 
     for step in &node_exec.steps {
+        let progress = monorepo_execution_progress(node_index, total_nodes, step);
         match step {
             MonorepoNodeExecutionStep::ValidateDest => {
                 // Children mount under the root, whose directory already exists;
                 // create any intermediate mount directories and the dest itself.
                 if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed at {}", progress.label()))?;
                 }
-                fs::create_dir_all(dest)?;
+                fs::create_dir_all(dest)
+                    .with_context(|| format!("failed at {}", progress.label()))?;
             }
             MonorepoNodeExecutionStep::InitRepo => {
-                repo = Some(Repository::init(dest)?);
+                repo = Some(
+                    Repository::init(dest)
+                        .with_context(|| format!("failed at {}", progress.label()))?,
+                );
             }
             MonorepoNodeExecutionStep::FetchContent { state } => {
-                let repo = repo
-                    .as_ref()
-                    .context("monorepo FetchContent requires InitRepo first")?;
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo FetchContent requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
                 // Fetch the exact resolved state's object closure. A
                 // `target_state` pull is thread-agnostic on the server (see
                 // `locally_complete_*`), so the anchored state — not a thread
                 // tip — is what gets materialized.
-                client.fetch_state(repo, spool_id, "main", *state).await?;
+                client
+                    .fetch_state(repo, spool_id, "main", *state)
+                    .await
+                    .with_context(|| format!("failed at {}", progress.label()))?;
             }
             MonorepoNodeExecutionStep::MaterializeState { state } => {
-                let repo = repo
-                    .as_ref()
-                    .context("monorepo MaterializeState requires InitRepo first")?;
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo MaterializeState requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
                 repo.goto_from_materialized_state(state, None)
-                    .context("failed to materialize monorepo node worktree")?;
+                    .with_context(|| {
+                        format!(
+                            "failed to materialize monorepo node worktree ({})",
+                            progress.label()
+                        )
+                    })?;
             }
             MonorepoNodeExecutionStep::RecordMapping => {
-                let repo = repo
-                    .as_ref()
-                    .context("monorepo RecordMapping requires InitRepo first")?;
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo RecordMapping requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
                 // Seed origin so each placed spool tracks its own hosted upstream.
-                configure_hosted_clone_origin(repo, endpoint_spec, spool_id)?;
+                configure_hosted_clone_origin(repo, endpoint_spec, spool_id)
+                    .with_context(|| format!("failed at {}", progress.label()))?;
             }
         }
     }

@@ -8,6 +8,7 @@
 //! - adopt start-path resolution and path-conflict policy
 //! - monorepo recursive clone: child selection, path anchoring, work order
 //! - monorepo per-node execution steps (validate dest, init, fetch, materialize, map)
+//! - monorepo step ordering validation, progress labels, and result summary
 //!
 //! Filesystem mutations, hosted RPC, git import, and recovery-advice
 //! rendering stay CLI-owned. Callers gather cheap facts (path existence,
@@ -841,6 +842,315 @@ pub fn plan_monorepo_execution(
 }
 
 // ---------------------------------------------------------------------------
+// Monorepo step validation, progress labels, result summary (pure)
+// ---------------------------------------------------------------------------
+//
+// [`plan_monorepo_node_steps`] emits ordered steps; the helpers below check
+// ordering invariants before I/O, name unstyled progress labels for a step
+// inside a multi-node walk, and assemble placed/skipped counts for the
+// clone result. CLI still owns FS / hosted RPC and TTY styling.
+
+/// Failures from pure monorepo node step ordering validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonorepoNodeExecutionError {
+    /// Step list is empty (planner always emits at least ValidateDest + InitRepo).
+    EmptySteps,
+    /// Required scaffold step missing.
+    MissingStep { step: &'static str },
+    /// A step appeared before its prerequisites or after a later-ranked step.
+    OutOfOrder {
+        step: &'static str,
+        detail: &'static str,
+    },
+    /// [`MonorepoNodeExecutionStep::MaterializeState`] without a prior Fetch.
+    MaterializeWithoutFetch,
+    /// [`MonorepoNodeExecutionStep::FetchContent`] not followed by Materialize.
+    FetchWithoutMaterialize,
+    /// Fetch and Materialize carry different content-state ids.
+    FetchMaterializeStateMismatch {
+        fetch: ChangeId,
+        materialize: ChangeId,
+    },
+}
+
+impl std::fmt::Display for MonorepoNodeExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySteps => write!(f, "monorepo node execution steps are empty"),
+            Self::MissingStep { step } => {
+                write!(f, "monorepo node execution missing required step '{step}'")
+            }
+            Self::OutOfOrder { step, detail } => {
+                write!(
+                    f,
+                    "monorepo node execution step '{step}' out of order: {detail}"
+                )
+            }
+            Self::MaterializeWithoutFetch => {
+                write!(f, "monorepo MaterializeState requires FetchContent first")
+            }
+            Self::FetchWithoutMaterialize => write!(
+                f,
+                "monorepo FetchContent requires a following MaterializeState"
+            ),
+            Self::FetchMaterializeStateMismatch { fetch, materialize } => write!(
+                f,
+                "monorepo FetchContent state {fetch} does not match MaterializeState {materialize}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MonorepoNodeExecutionError {}
+
+/// Rank used only for ordering checks (lower must not follow higher).
+fn monorepo_step_rank(step: &MonorepoNodeExecutionStep) -> u8 {
+    match step {
+        MonorepoNodeExecutionStep::ValidateDest => 0,
+        MonorepoNodeExecutionStep::InitRepo => 1,
+        MonorepoNodeExecutionStep::FetchContent { .. } => 2,
+        MonorepoNodeExecutionStep::MaterializeState { .. } => 3,
+        MonorepoNodeExecutionStep::RecordMapping => 4,
+    }
+}
+
+/// Validate ordering invariants for one node's pure monorepo steps.
+///
+/// Invariants:
+/// - Non-empty; must include ValidateDest then InitRepo (scaffold).
+/// - Steps appear at most once and in rank order (ValidateDest → InitRepo →
+///   optional FetchContent → optional MaterializeState → optional RecordMapping).
+/// - InitRepo precedes Fetch / Materialize / RecordMapping.
+/// - FetchContent and MaterializeState are paired with the same [`ChangeId`].
+///
+/// Does not perform I/O. Plans from [`plan_monorepo_node_steps`] always pass.
+pub fn validate_monorepo_node_execution(
+    steps: &[MonorepoNodeExecutionStep],
+) -> Result<(), MonorepoNodeExecutionError> {
+    if steps.is_empty() {
+        return Err(MonorepoNodeExecutionError::EmptySteps);
+    }
+
+    let mut seen_validate = false;
+    let mut seen_init = false;
+    let mut pending_fetch: Option<ChangeId> = None;
+    let mut last_rank: Option<u8> = None;
+
+    for step in steps {
+        let rank = monorepo_step_rank(step);
+        if let Some(prev) = last_rank
+            && rank <= prev
+        {
+            return Err(MonorepoNodeExecutionError::OutOfOrder {
+                step: step.as_str(),
+                detail: "steps must be unique and strictly increasing in rank",
+            });
+        }
+        last_rank = Some(rank);
+
+        match step {
+            MonorepoNodeExecutionStep::ValidateDest => {
+                seen_validate = true;
+            }
+            MonorepoNodeExecutionStep::InitRepo => {
+                if !seen_validate {
+                    return Err(MonorepoNodeExecutionError::OutOfOrder {
+                        step: step.as_str(),
+                        detail: "InitRepo requires ValidateDest first",
+                    });
+                }
+                seen_init = true;
+            }
+            MonorepoNodeExecutionStep::FetchContent { state } => {
+                if !seen_init {
+                    return Err(MonorepoNodeExecutionError::OutOfOrder {
+                        step: step.as_str(),
+                        detail: "Init before Fetch",
+                    });
+                }
+                pending_fetch = Some(*state);
+            }
+            MonorepoNodeExecutionStep::MaterializeState { state } => {
+                if !seen_init {
+                    return Err(MonorepoNodeExecutionError::OutOfOrder {
+                        step: step.as_str(),
+                        detail: "Init before Materialize",
+                    });
+                }
+                match pending_fetch {
+                    None => return Err(MonorepoNodeExecutionError::MaterializeWithoutFetch),
+                    Some(fetch) if fetch != *state => {
+                        return Err(MonorepoNodeExecutionError::FetchMaterializeStateMismatch {
+                            fetch,
+                            materialize: *state,
+                        });
+                    }
+                    Some(_) => {
+                        pending_fetch = None;
+                    }
+                }
+            }
+            MonorepoNodeExecutionStep::RecordMapping => {
+                if !seen_init {
+                    return Err(MonorepoNodeExecutionError::OutOfOrder {
+                        step: step.as_str(),
+                        detail: "Init before RecordMapping",
+                    });
+                }
+                if pending_fetch.is_some() {
+                    return Err(MonorepoNodeExecutionError::FetchWithoutMaterialize);
+                }
+            }
+        }
+    }
+
+    if !seen_validate {
+        return Err(MonorepoNodeExecutionError::MissingStep {
+            step: MonorepoNodeExecutionStep::ValidateDest.as_str(),
+        });
+    }
+    if !seen_init {
+        return Err(MonorepoNodeExecutionError::MissingStep {
+            step: MonorepoNodeExecutionStep::InitRepo.as_str(),
+        });
+    }
+    if pending_fetch.is_some() {
+        return Err(MonorepoNodeExecutionError::FetchWithoutMaterialize);
+    }
+
+    Ok(())
+}
+
+/// Validate every selected node's step list in a monorepo execution plan.
+pub fn validate_monorepo_execution(
+    plan: &MonorepoExecutionPlan,
+) -> Result<(), MonorepoNodeExecutionError> {
+    for node_exec in &plan.nodes {
+        validate_monorepo_node_execution(&node_exec.steps)?;
+    }
+    Ok(())
+}
+
+/// Pure progress label for one step inside a multi-node monorepo clone walk.
+///
+/// CLI owns TTY styling; this is unstyled display data only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoExecutionProgress {
+    /// 0-based index into [`MonorepoExecutionPlan::nodes`].
+    pub node_index: usize,
+    /// Total selected nodes in the plan.
+    pub total_nodes: usize,
+    /// 1-based human node ordinal (`node_index + 1`, floored at 1 when total is 0).
+    pub node_display: usize,
+    /// Stable step id from [`MonorepoNodeExecutionStep::as_str`].
+    pub step: &'static str,
+}
+
+impl MonorepoExecutionProgress {
+    /// Compact unstyled label, e.g. `[1/3] init_repo`.
+    pub fn label(&self) -> String {
+        format!("[{}/{}] {}", self.node_display, self.total_nodes, self.step)
+    }
+}
+
+/// Build pure display labels for a monorepo node step at `node_index` of `total`.
+///
+/// `node_index` is 0-based. `total` is the plan's selected node count.
+pub fn monorepo_execution_progress(
+    node_index: usize,
+    total: usize,
+    step: &MonorepoNodeExecutionStep,
+) -> MonorepoExecutionProgress {
+    MonorepoExecutionProgress {
+        node_index,
+        total_nodes: total,
+        node_display: node_index.saturating_add(1),
+        step: step.as_str(),
+    }
+}
+
+/// One successfully planned placement for monorepo clone result assembly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonorepoPlacedNodeSummary {
+    pub spool_id: String,
+    /// Destination path relative to the clone root. Root is `""`.
+    pub rel_path: PathBuf,
+    pub content_state: Option<ChangeId>,
+    /// True when the node plan included fetch + materialize (had content).
+    pub materialized_content: bool,
+}
+
+/// Aggregate placed/skipped summary for a monorepo clone result (pure).
+///
+/// Assembled from a validated execution plan after all selected nodes succeed.
+/// Skipped edges are never fatal; they are reported here for text/JSON output.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonorepoCloneResultSummary {
+    pub placed_count: usize,
+    pub skipped_count: usize,
+    pub placed: Vec<MonorepoPlacedNodeSummary>,
+    pub skipped: Vec<MonorepoSkippedChild>,
+}
+
+impl MonorepoCloneResultSummary {
+    /// Unstyled headline, e.g. `Cloned monorepo org/root (2 spools placed).`
+    pub fn headline(&self, root_path: &str) -> String {
+        let unit = if self.placed_count == 1 {
+            "spool"
+        } else {
+            "spools"
+        };
+        format!(
+            "Cloned monorepo {root_path} ({} {unit} placed).",
+            self.placed_count
+        )
+    }
+
+    /// Unstyled skip section header when any edges were withheld; `None` if empty.
+    pub fn skipped_header(&self) -> Option<String> {
+        if self.skipped_count == 0 {
+            None
+        } else {
+            Some(format!(
+                "{} child spool(s) skipped (not part of your coherent slice):",
+                self.skipped_count
+            ))
+        }
+    }
+}
+
+/// Assemble placed/skipped summary from a monorepo execution plan (no I/O).
+///
+/// Call after every selected node has been materialized successfully. Counts
+/// reflect plan size (success path), not partial progress mid-walk.
+pub fn assemble_monorepo_clone_result_summary(
+    plan: &MonorepoExecutionPlan,
+) -> MonorepoCloneResultSummary {
+    let placed: Vec<MonorepoPlacedNodeSummary> = plan
+        .nodes
+        .iter()
+        .map(|node_exec| {
+            let materialized_content = node_exec
+                .steps
+                .iter()
+                .any(|step| matches!(step, MonorepoNodeExecutionStep::MaterializeState { .. }));
+            MonorepoPlacedNodeSummary {
+                spool_id: node_exec.node.spool_id.clone(),
+                rel_path: node_exec.node.rel_path.clone(),
+                content_state: node_exec.node.content_state,
+                materialized_content,
+            }
+        })
+        .collect();
+    MonorepoCloneResultSummary {
+        placed_count: placed.len(),
+        skipped_count: plan.skipped.len(),
+        placed,
+        skipped: plan.skipped.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1552,5 +1862,217 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, MonorepoNodeExecutionStep::FetchContent { .. }))
         );
+    }
+
+    // ---- monorepo step validation / progress / result summary ----
+
+    #[test]
+    fn validate_monorepo_node_execution_accepts_planner_output() {
+        let full = MonorepoNodePlan {
+            spool_id: "acme/root".into(),
+            content_state: Some(cid(1)),
+            rel_path: PathBuf::new(),
+        };
+        let empty = MonorepoNodePlan {
+            spool_id: "acme/empty".into(),
+            content_state: None,
+            rel_path: PathBuf::from("libs"),
+        };
+        assert!(
+            validate_monorepo_node_execution(&plan_monorepo_node_steps(
+                &full,
+                &MonorepoNodeStepOptions::default()
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_monorepo_node_execution(&plan_monorepo_node_steps(
+                &empty,
+                &MonorepoNodeStepOptions::default()
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_monorepo_node_execution(&plan_monorepo_node_steps(
+                &full,
+                &MonorepoNodeStepOptions {
+                    record_mapping: false
+                }
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_monorepo_node_execution_rejects_empty_and_missing_scaffold() {
+        assert_eq!(
+            validate_monorepo_node_execution(&[]),
+            Err(MonorepoNodeExecutionError::EmptySteps)
+        );
+        assert_eq!(
+            validate_monorepo_node_execution(&[MonorepoNodeExecutionStep::InitRepo]),
+            Err(MonorepoNodeExecutionError::OutOfOrder {
+                step: "init_repo",
+                detail: "InitRepo requires ValidateDest first",
+            })
+        );
+        assert_eq!(
+            validate_monorepo_node_execution(&[MonorepoNodeExecutionStep::ValidateDest]),
+            Err(MonorepoNodeExecutionError::MissingStep { step: "init_repo" })
+        );
+    }
+
+    #[test]
+    fn validate_monorepo_node_execution_requires_init_before_fetch() {
+        let steps = vec![
+            MonorepoNodeExecutionStep::ValidateDest,
+            MonorepoNodeExecutionStep::FetchContent { state: cid(1) },
+            MonorepoNodeExecutionStep::MaterializeState { state: cid(1) },
+        ];
+        assert_eq!(
+            validate_monorepo_node_execution(&steps),
+            Err(MonorepoNodeExecutionError::OutOfOrder {
+                step: "fetch_content",
+                detail: "Init before Fetch",
+            })
+        );
+    }
+
+    #[test]
+    fn validate_monorepo_node_execution_pairs_fetch_and_materialize() {
+        let fetch_only = vec![
+            MonorepoNodeExecutionStep::ValidateDest,
+            MonorepoNodeExecutionStep::InitRepo,
+            MonorepoNodeExecutionStep::FetchContent { state: cid(1) },
+        ];
+        assert_eq!(
+            validate_monorepo_node_execution(&fetch_only),
+            Err(MonorepoNodeExecutionError::FetchWithoutMaterialize)
+        );
+
+        let materialize_only = vec![
+            MonorepoNodeExecutionStep::ValidateDest,
+            MonorepoNodeExecutionStep::InitRepo,
+            MonorepoNodeExecutionStep::MaterializeState { state: cid(1) },
+        ];
+        assert_eq!(
+            validate_monorepo_node_execution(&materialize_only),
+            Err(MonorepoNodeExecutionError::MaterializeWithoutFetch)
+        );
+
+        let mismatch = vec![
+            MonorepoNodeExecutionStep::ValidateDest,
+            MonorepoNodeExecutionStep::InitRepo,
+            MonorepoNodeExecutionStep::FetchContent { state: cid(1) },
+            MonorepoNodeExecutionStep::MaterializeState { state: cid(2) },
+        ];
+        assert_eq!(
+            validate_monorepo_node_execution(&mismatch),
+            Err(MonorepoNodeExecutionError::FetchMaterializeStateMismatch {
+                fetch: cid(1),
+                materialize: cid(2),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_monorepo_node_execution_rejects_duplicate_or_reordered_steps() {
+        let dup = vec![
+            MonorepoNodeExecutionStep::ValidateDest,
+            MonorepoNodeExecutionStep::InitRepo,
+            MonorepoNodeExecutionStep::InitRepo,
+        ];
+        assert!(matches!(
+            validate_monorepo_node_execution(&dup),
+            Err(MonorepoNodeExecutionError::OutOfOrder {
+                step: "init_repo",
+                ..
+            })
+        ));
+
+        let reordered = vec![
+            MonorepoNodeExecutionStep::InitRepo,
+            MonorepoNodeExecutionStep::ValidateDest,
+        ];
+        assert!(matches!(
+            validate_monorepo_node_execution(&reordered),
+            Err(MonorepoNodeExecutionError::OutOfOrder { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_monorepo_execution_accepts_full_plan() {
+        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+        assert!(validate_monorepo_execution(&exec).is_ok());
+    }
+
+    #[test]
+    fn monorepo_execution_progress_labels_are_stable() {
+        let step = MonorepoNodeExecutionStep::InitRepo;
+        let progress = monorepo_execution_progress(0, 3, &step);
+        assert_eq!(progress.node_index, 0);
+        assert_eq!(progress.total_nodes, 3);
+        assert_eq!(progress.node_display, 1);
+        assert_eq!(progress.step, "init_repo");
+        assert_eq!(progress.label(), "[1/3] init_repo");
+
+        let fetch = MonorepoNodeExecutionStep::FetchContent { state: cid(9) };
+        let p2 = monorepo_execution_progress(2, 3, &fetch);
+        assert_eq!(p2.label(), "[3/3] fetch_content");
+    }
+
+    #[test]
+    fn assemble_monorepo_clone_result_summary_counts_placed_and_skipped() {
+        let clone_plan = plan_monorepo_clone(&fixture_tree());
+        let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+        let summary = assemble_monorepo_clone_result_summary(&exec);
+
+        assert_eq!(summary.placed_count, 3);
+        assert_eq!(summary.skipped_count, 1);
+        assert_eq!(summary.placed.len(), 3);
+        assert_eq!(summary.skipped.len(), 1);
+        assert_eq!(summary.placed[0].spool_id, "acme/root");
+        assert!(summary.placed[0].materialized_content);
+        assert_eq!(summary.skipped[0].child_spool_id, "acme/child-b");
+
+        assert_eq!(
+            summary.headline("acme/root"),
+            "Cloned monorepo acme/root (3 spools placed)."
+        );
+        assert_eq!(
+            summary.skipped_header().as_deref(),
+            Some("1 child spool(s) skipped (not part of your coherent slice):")
+        );
+
+        // Singular headline.
+        let single = MonorepoCloneResultSummary {
+            placed_count: 1,
+            skipped_count: 0,
+            placed: vec![],
+            skipped: vec![],
+        };
+        assert_eq!(
+            single.headline("solo"),
+            "Cloned monorepo solo (1 spool placed)."
+        );
+        assert!(single.skipped_header().is_none());
+    }
+
+    #[test]
+    fn assemble_summary_marks_empty_content_nodes_not_materialized() {
+        let root = MonorepoNodeFacts {
+            spool_id: "acme/root".to_string(),
+            content_state: None,
+            edges: vec![],
+        };
+        let exec = plan_monorepo_execution(
+            &plan_monorepo_clone(&root),
+            &MonorepoNodeStepOptions::default(),
+        );
+        let summary = assemble_monorepo_clone_result_summary(&exec);
+        assert_eq!(summary.placed_count, 1);
+        assert!(!summary.placed[0].materialized_content);
+        assert_eq!(summary.placed[0].content_state, None);
     }
 }
