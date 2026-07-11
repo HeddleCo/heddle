@@ -1870,7 +1870,7 @@ fn test_merge_apply_with_diff_echoes_landed_changes() {
 // These exercise the optional git-commit coordination: `--git-commit`
 // makes a heddle merge also write a git commit on top of HEAD. The
 // default (no flag) is preserved — heddle state advances and git is
-// unaware. See `crates/cli/src/cli/commands/merge/git_commit.rs`.
+// unaware. See `crates/core/src/merge/git_commit.rs`.
 
 fn git(args: &[&str], cwd: &std::path::Path) {
     let status = Command::new("git")
