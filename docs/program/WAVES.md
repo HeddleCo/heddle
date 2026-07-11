@@ -46,7 +46,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
 **Focus:** property tests, fault injection suites already present  
-**Status (2026-07-11):** **Mostly complete on program tip (L8 residual mitigated by design + GC foundation)** — **L6**/**L7** shipped; **L8** install window documented in [`L8_PACK_INSTALL_JOURNAL.md`](L8_PACK_INSTALL_JOURNAL.md) with Option D helpers (`prune_unpaired_packs`). Full intent journal still optional. Residual: tests-only bare `create_dir_all`, Windows dir fsync no-op, journal not implemented. Not a Wave 8 tip-correctness gate blocker.
+**Status (2026-07-11):** **L6/L7/L8 A+ shipped on program tip** — grandparent durable creates, finalize fsync, and **L8 A+ pack install journal** (staging + intent + recover on reload + unpaired prune). Residual: tests-only bare `create_dir_all`, Windows dir fsync no-op, in-memory pack install path not journaled, optional maintenance CLI lines. Not a Wave 8 tip-correctness gate blocker.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 

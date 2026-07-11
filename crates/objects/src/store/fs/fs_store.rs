@@ -390,7 +390,14 @@ impl FsStore {
     }
 
     /// Reload pack files from disk.
+    ///
+    /// Runs L8 install-intent recovery first so crash windows between pack
+    /// and index publish are finished or aborted before packs are loaded.
     pub fn reload_packs(&self) -> Result<()> {
+        let packs = packs_dir(&self.root);
+        let _ = super::pack_install_journal::recover_pack_install_intents(&packs)?;
+        // Option D backstop: remove any legacy unpaired packs without intent.
+        let _ = super::fs_pack::prune_unpaired_pack_files(&packs)?;
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;

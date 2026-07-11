@@ -25,7 +25,10 @@ pub use agent_task::{
     AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
     generate_agent_task_id, validate_task_id,
 };
-pub use fs::FsStore;
+pub use fs::{
+    FsStore, PackInstallIntent, PackInstallPhase, PackInstallRecoverReport,
+    recover_pack_install_intents,
+};
 pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
 #[cfg(any(test, feature = "memory-backend"))]

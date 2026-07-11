@@ -12,7 +12,6 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
 };
 use crate::{
-    fs_atomic::publish_file_durable,
     object::ContentHash,
     store::{
         HeddleError, ObjectStore, Result, codec,
@@ -325,11 +324,9 @@ impl FsStore {
     /// installation step never load the full pack or index into
     /// memory.
     ///
-    /// Both source files are published via [`publish_file_durable`]:
-    /// fsync source data, atomic rename into the packs directory, and
-    /// parent-directory fsync. Cross-device renames fall back to
-    /// temp+fsync+rename in the destination directory — never an
-    /// in-place `fs::copy` into the content-addressed final path.
+    /// Sources are staged then published via the L8 A+ install journal
+    /// ([`super::pack_install_journal`]): durable staging + intent, then
+    /// pack/index publish with crash recovery on reload.
     pub(super) fn install_pack_files_streaming(
         &self,
         src_pack_path: &std::path::Path,
@@ -355,16 +352,16 @@ impl FsStore {
         drop(file);
         let pack_hash = hasher.finalize();
         let pack_name = format!("{}", pack_hash.to_hex());
-        let pack_path = packs.join(format!("{}.pack", pack_name));
-        let index_path = packs.join(format!("{}.idx", pack_name));
 
-        // Publish pack then index. Each call fsyncs data + parent dir;
-        // a crash between the two can leave a pack without its index,
-        // which `reload_packs` ignores (unpaired packs are not loaded).
-        // L8 design / recovery: docs/program/L8_PACK_INSTALL_JOURNAL.md;
-        // orphan cleanup: `prune_unpaired_pack_files`.
-        publish_file_durable(src_pack_path, &pack_path)?;
-        publish_file_durable(src_index_path, &index_path)?;
+        // L8 A+: durable staging + intent journal, then pack/index publish.
+        // Recovery on reload finishes or aborts incomplete installs.
+        // Design: docs/program/L8_PACK_INSTALL_JOURNAL.md
+        super::pack_install_journal::install_pack_files_journaled(
+            &packs,
+            src_pack_path,
+            src_index_path,
+            &pack_name,
+        )?;
 
         self.clear_recent_object_caches();
         self.reload_packs()?;
