@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Embeddable Heddle facade scaffolding.
 
+pub mod actor;
 pub mod context;
 pub mod contract;
 pub mod diff;
@@ -10,11 +11,18 @@ pub mod query;
 pub mod remote;
 pub mod save;
 pub mod status;
+pub mod thread;
+pub mod thread_plan;
 pub mod thread_shaping;
 pub mod undo;
 pub mod verify;
 pub mod workflow;
 
+pub use actor::{
+    ActorChainEntry, ActorEntryReport, ActorListReport, ActorShowReport, assemble_actor_entry,
+    filter_actors, filter_actors_ref, list_actors, list_actors_from_registry,
+    show_actor_by_session, show_actor_from_entry,
+};
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
@@ -65,6 +73,21 @@ pub use status::{
     coordination_label, coordination_severity, fast_short_status_report, git_index_plan_for_root,
     health_severity, human_thread_health, plain_git_status_report, resolve_coordination_with_trust,
     status, status_combined_verdict,
+};
+pub use thread::{
+    AvailableGitRef, ThreadActorInfo, ThreadListEntry, ThreadListOptions, ThreadListReport,
+    ThreadSummary, ThreadTaskSummary, collect_thread_summaries, find_thread_summary, list_threads,
+    split_available_git_refs, thread_is_available_git_ref, thread_is_imported_git_ref,
+    visibility_label,
+};
+pub use thread_plan::{
+    AutoWorkspaceDefault, ExplicitPathPlacement, ThreadBaseError, ThreadBaseSelection,
+    ThreadCreateOptions, ThreadCreatePlan, ThreadPathIsolationError, ThreadPlanError,
+    ThreadStartOptions, ThreadStartPlan, WorkspaceModeRequest, active_reservation_blocks_start,
+    active_reservation_path_matches, check_explicit_path_isolation,
+    classify_explicit_path_placement, explicit_path_allowed_for_git_overlay,
+    mode_honors_explicit_path, path_isolation_enforced, plan_thread_create, plan_thread_mode,
+    plan_thread_start, select_thread_base, start_requires_clean_worktree, validate_thread_name,
 };
 pub use thread_shaping::{
     CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
