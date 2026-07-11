@@ -7,6 +7,9 @@
 //! - ordered materialize step sequence (create dir, copy tree, manifest, …)
 //! - typed start-transaction effect kinds and reverse cleanup lists
 //! - target-dir claim → checkout / self-created-dir rewind actions
+//! - path safety vs `.heddle/threads` layout and relative-path normalization
+//! - empty-dir adoption / claim-intent pure validators
+//! - effect staging preconditions (claim established, shared-target present)
 //! - classification of mid-apply `anyhow` failures into [`HeddleError`]
 //! - reflink vs full-copy policy for bytes-on-disk checkouts
 //! - cargo `--shared-target` redirect and advisory flags
@@ -15,7 +18,7 @@
 //! `start_atomic` transaction stay CLI-owned. Callers resolve host/config
 //! facts first, then invoke these helpers.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use objects::HeddleError;
 use repo::ThreadMode;
@@ -443,6 +446,421 @@ pub fn plan_self_created_dir_rewind(claim: Option<TargetDirClaimKind>) -> SelfCr
         Some(TargetDirClaimKind::Created) => SelfCreatedDirRewindPlan::RemoveIfStillAtPath,
         Some(TargetDirClaimKind::AdoptedEmpty) | None => SelfCreatedDirRewindPlan::TouchNothing,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path safety (threads root layout + relative remainder normalization)
+// ---------------------------------------------------------------------------
+
+/// Lexical containment: `path` is `root` or a strict descendant.
+///
+/// Paths must already be absolute and free of `..` (caller-normalized). Uses
+/// [`Path::starts_with`], so a root of `/a` does not match `/ab`.
+pub fn path_is_under_or_equal(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+/// Lexical strict descent: under `root` but not equal to it.
+pub fn path_is_strict_descendant(path: &Path, root: &Path) -> bool {
+    path != root && path.starts_with(root)
+}
+
+/// Pure classification of a candidate checkout path vs heddle layout.
+///
+/// Mirrors the lexical half of CLI `validate_worktree_target` (heddle#572):
+/// managed checkouts live under `.heddle/threads/<seg>/<leaf>`, never on the
+/// threads root or bare per-thread dir, and never on other heddle storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadsRootPathClass {
+    /// Under `.heddle/threads/` as a per-thread checkout slot (allowed).
+    ManagedCheckoutSlot,
+    /// Exactly `.heddle/threads` — forbidden.
+    ThreadsRoot,
+    /// Direct child of threads root (`threads/<seg>` without leaf) — forbidden.
+    BareThreadDir,
+    /// Under `.heddle/` but outside `threads/` — forbidden storage.
+    HeddleStorage,
+    /// Outside `.heddle/` entirely (user `--path` or external) — allowed here.
+    OutsideHeddle,
+}
+
+/// Classify `path` relative to `heddle_dir` / `threads_root`.
+///
+/// Inputs must be absolute normalized paths (no `..`). Nested-in-existing-
+/// thread checks need reserved regions from the caller; see
+/// [`path_is_nested_in_reserved_region`].
+pub fn classify_path_vs_threads_root(
+    path: &Path,
+    heddle_dir: &Path,
+    threads_root: &Path,
+) -> ThreadsRootPathClass {
+    if path_is_under_or_equal(path, threads_root) {
+        if path == threads_root {
+            return ThreadsRootPathClass::ThreadsRoot;
+        }
+        if path.parent() == Some(threads_root) {
+            return ThreadsRootPathClass::BareThreadDir;
+        }
+        return ThreadsRootPathClass::ManagedCheckoutSlot;
+    }
+    if path_is_under_or_equal(path, heddle_dir) {
+        return ThreadsRootPathClass::HeddleStorage;
+    }
+    ThreadsRootPathClass::OutsideHeddle
+}
+
+/// Whether [`classify_path_vs_threads_root`] accepts the layout class.
+///
+/// Nested-in-existing-thread is a separate pure check
+/// ([`path_is_nested_in_reserved_region`]).
+pub fn threads_root_path_layout_allowed(class: ThreadsRootPathClass) -> bool {
+    matches!(
+        class,
+        ThreadsRootPathClass::ManagedCheckoutSlot | ThreadsRootPathClass::OutsideHeddle
+    )
+}
+
+/// Pure layout + reserved-region validation for a worktree target under the
+/// threads root / heddle storage policy.
+///
+/// `reserved_regions` is `(region_root, exempt_exact_path)` pairs: candidate is
+/// nested when it starts with `region_root` unless it equals `exempt_exact`
+/// (self-thread re-materialize exemption). Callers enumerate durable thread
+/// records; this stays FS-free.
+pub fn validate_threads_root_path_safety(
+    path: &Path,
+    heddle_dir: &Path,
+    threads_root: &Path,
+    reserved_regions: &[(PathBuf, Option<PathBuf>)],
+) -> Result<(), ThreadsRootPathSafetyError> {
+    let class = classify_path_vs_threads_root(path, heddle_dir, threads_root);
+    match class {
+        ThreadsRootPathClass::ThreadsRoot => Err(ThreadsRootPathSafetyError::IsThreadsRoot {
+            path: path.to_path_buf(),
+        }),
+        ThreadsRootPathClass::BareThreadDir => Err(ThreadsRootPathSafetyError::IsBareThreadDir {
+            path: path.to_path_buf(),
+        }),
+        ThreadsRootPathClass::HeddleStorage => Err(ThreadsRootPathSafetyError::IsHeddleStorage {
+            path: path.to_path_buf(),
+        }),
+        ThreadsRootPathClass::OutsideHeddle => Ok(()),
+        ThreadsRootPathClass::ManagedCheckoutSlot => {
+            for (region, exempt) in reserved_regions {
+                if path_is_nested_in_reserved_region(path, region, exempt.as_deref()) {
+                    return Err(ThreadsRootPathSafetyError::NestedInReserved {
+                        path: path.to_path_buf(),
+                        reserved: region.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Failures from pure threads-root / heddle-storage path safety checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadsRootPathSafetyError {
+    IsThreadsRoot { path: PathBuf },
+    IsBareThreadDir { path: PathBuf },
+    IsHeddleStorage { path: PathBuf },
+    NestedInReserved { path: PathBuf, reserved: PathBuf },
+}
+
+impl std::fmt::Display for ThreadsRootPathSafetyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IsThreadsRoot { path } => write!(
+                f,
+                "worktree target '{}' is the threads root (not a per-thread leaf)",
+                path.display()
+            ),
+            Self::IsBareThreadDir { path } => write!(
+                f,
+                "worktree target '{}' is a bare thread dir (checkout leaf required)",
+                path.display()
+            ),
+            Self::IsHeddleStorage { path } => write!(
+                f,
+                "worktree target '{}' is under heddle storage (outside threads/)",
+                path.display()
+            ),
+            Self::NestedInReserved { path, reserved } => write!(
+                f,
+                "worktree target '{}' is nested inside reserved region '{}'",
+                path.display(),
+                reserved.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ThreadsRootPathSafetyError {}
+
+/// Whether `candidate` falls inside `reserved_dir`, with optional exact exempt.
+///
+/// Matching CLI `is_inside_existing_thread` for one reserved region: under the
+/// region is nested, unless `candidate == exempt_exact` (self-thread checkout).
+pub fn path_is_nested_in_reserved_region(
+    candidate: &Path,
+    reserved_dir: &Path,
+    exempt_exact: Option<&Path>,
+) -> bool {
+    if !candidate.starts_with(reserved_dir) {
+        return false;
+    }
+    if let Some(exempt) = exempt_exact
+        && candidate == exempt
+    {
+        return false;
+    }
+    true
+}
+
+/// Whether a path component sequence is free of `..` escape segments.
+pub fn path_components_are_safe(path: &Path) -> bool {
+    !path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
+/// Failures from pure relative-remainder normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativePathNormalizeError {
+    /// Remainder contained `..`, a root, or a prefix component.
+    UnsafeComponent,
+}
+
+impl std::fmt::Display for RelativePathNormalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsafeComponent => {
+                write!(f, "path remainder contains an unsafe path component")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RelativePathNormalizeError {}
+
+/// Append unresolved remainder components onto a resolved base.
+///
+/// Matches CLI `canonicalize_existing_ancestor` remainder handling:
+/// - `Normal` → push
+/// - `CurDir` → ignore
+/// - `ParentDir` / `Prefix` / `RootDir` → refuse (escape / re-root)
+///
+/// Callers supply the already-canonical existing ancestor as `base` and the
+/// non-existing tail as `remainder` (from `path.strip_prefix(ancestor)`).
+pub fn append_safe_relative_components(
+    mut base: PathBuf,
+    remainder: &Path,
+) -> Result<PathBuf, RelativePathNormalizeError> {
+    for component in remainder.components() {
+        match component {
+            Component::Normal(part) => base.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(RelativePathNormalizeError::UnsafeComponent);
+            }
+        }
+    }
+    Ok(base)
+}
+
+// ---------------------------------------------------------------------------
+// Empty-dir adoption / create-intent pure validators
+// ---------------------------------------------------------------------------
+
+/// Plan-time intent for the create-target-dir step (before FS create/adopt).
+///
+/// Derived solely from `plan_worktree_target`'s `target_dir_created` bool; the
+/// runtime claim may still land as AdoptedEmpty if a concurrent create races
+/// the transaction ([`CreateDirAttempt::AlreadyExists`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDirCreateIntent {
+    /// Leaf was absent at plan time — attempt `create_dir`, adopt on race.
+    AttemptCreate,
+    /// Leaf was a pre-existing empty dir — adopt only, never create/remove.
+    AdoptOnly,
+}
+
+/// Pure create-intent from the plan-time `target_dir_created` observation.
+pub fn plan_target_dir_create_intent(plan_created: bool) -> TargetDirCreateIntent {
+    if plan_created {
+        TargetDirCreateIntent::AttemptCreate
+    } else {
+        TargetDirCreateIntent::AdoptOnly
+    }
+}
+
+/// Outcome of a pure-facing `create_dir` attempt the caller reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateDirAttempt {
+    /// `create_dir` returned Ok — this start owns the leaf.
+    Created,
+    /// Leaf already exists — must re-validate and possibly adopt empty.
+    AlreadyExists,
+}
+
+/// Observed shape of the worktree leaf (caller supplies FS facts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetLeafShape {
+    /// Path does not exist.
+    Absent,
+    /// Real empty directory (non-symlink).
+    EmptyDirectory,
+    /// Real non-empty directory.
+    NonEmptyDirectory,
+    /// Symlink leaf.
+    Symlink,
+    /// Regular file or other non-directory.
+    NotDirectory,
+}
+
+/// Why a leaf cannot be adopted as an empty directory claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetLeafRefusal {
+    DoesNotExist,
+    IsSymlink,
+    NotDirectory,
+    NotEmpty,
+}
+
+impl TargetLeafRefusal {
+    /// Reason fragment for CLI `target_dir_shape_refusal` messages.
+    pub fn as_reason_str(self) -> &'static str {
+        match self {
+            Self::DoesNotExist => "does not exist",
+            Self::IsSymlink => "is a symlink",
+            Self::NotDirectory => "is not a directory",
+            Self::NotEmpty => "is not empty",
+        }
+    }
+}
+
+/// Pure: classify metadata facts into a leaf shape (emptiness supplied when dir).
+///
+/// `is_empty` is only consulted when the leaf is a real directory; callers may
+/// pass `false` when they have not inspected children for non-dirs.
+pub fn classify_target_leaf_shape(
+    exists: bool,
+    is_symlink: bool,
+    is_dir: bool,
+    is_empty: bool,
+) -> TargetLeafShape {
+    if !exists {
+        return TargetLeafShape::Absent;
+    }
+    if is_symlink {
+        return TargetLeafShape::Symlink;
+    }
+    if !is_dir {
+        return TargetLeafShape::NotDirectory;
+    }
+    if is_empty {
+        TargetLeafShape::EmptyDirectory
+    } else {
+        TargetLeafShape::NonEmptyDirectory
+    }
+}
+
+/// Pure empty-dir adoption gate: only [`TargetLeafShape::EmptyDirectory`] ok.
+pub fn validate_empty_dir_adoption(shape: TargetLeafShape) -> Result<(), TargetLeafRefusal> {
+    match shape {
+        TargetLeafShape::EmptyDirectory => Ok(()),
+        TargetLeafShape::Absent => Err(TargetLeafRefusal::DoesNotExist),
+        TargetLeafShape::Symlink => Err(TargetLeafRefusal::IsSymlink),
+        TargetLeafShape::NotDirectory => Err(TargetLeafRefusal::NotDirectory),
+        TargetLeafShape::NonEmptyDirectory => Err(TargetLeafRefusal::NotEmpty),
+    }
+}
+
+/// Pure claim kind after a successful create or a successful empty-dir adopt.
+pub fn claim_kind_for_create_attempt(attempt: CreateDirAttempt) -> Option<TargetDirClaimKind> {
+    match attempt {
+        CreateDirAttempt::Created => Some(TargetDirClaimKind::Created),
+        // AlreadyExists still requires adoption validation; kind is decided then.
+        CreateDirAttempt::AlreadyExists => None,
+    }
+}
+
+/// Pure claim kind once empty-dir adoption is validated.
+pub fn claim_kind_after_empty_dir_adoption() -> TargetDirClaimKind {
+    TargetDirClaimKind::AdoptedEmpty
+}
+
+/// Pure: whether a settled claim is present (writers/stage_checkout require it).
+pub fn require_established_claim(
+    claim: Option<TargetDirClaimKind>,
+) -> Result<TargetDirClaimKind, TargetLeafRefusal> {
+    claim.ok_or(TargetLeafRefusal::DoesNotExist)
+}
+
+// ---------------------------------------------------------------------------
+// Effect staging preconditions
+// ---------------------------------------------------------------------------
+
+/// Caller-supplied facts for pure start-effect staging gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartEffectStagingFacts {
+    /// Whether [`TargetDirClaimKind`] was established by create-target-dir.
+    pub claim_established: bool,
+    /// Whether a shared-target redirect dir was supplied for this start.
+    pub has_shared_target_dir: bool,
+}
+
+/// Why a planned effect must not run its FS forward yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartEffectPreconditionError {
+    /// Effect writes through the claimed checkout but claim is missing.
+    ClaimNotEstablished,
+    /// Cargo-config redirect is in the plan but no shared-target dir was given.
+    SharedTargetDirMissing,
+}
+
+impl std::fmt::Display for StartEffectPreconditionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClaimNotEstablished => {
+                write!(f, "start effect requires an established target-dir claim")
+            }
+            Self::SharedTargetDirMissing => write!(
+                f,
+                "start plan includes cargo-config redirect but no shared_target_dir"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StartEffectPreconditionError {}
+
+/// Whether this effect writes through the claimed checkout leaf.
+pub fn effect_requires_established_claim(effect: StartEffectKind) -> bool {
+    matches!(
+        effect,
+        StartEffectKind::MaterializeCheckout
+            | StartEffectKind::WriteManifest
+            | StartEffectKind::WriteCargoConfigRedirect
+            | StartEffectKind::HydrateIgnoredDirs
+    )
+}
+
+/// Pure preconditions an effect needs before its FS forward may run.
+///
+/// Mirrors CLI `start_atomic` apply gates: claim-using writers refuse when the
+/// create-target-dir step never established a claim; cargo-config refuses when
+/// the plan includes a redirect without a shared-target dir.
+pub fn validate_start_effect_preconditions(
+    effect: StartEffectKind,
+    facts: StartEffectStagingFacts,
+) -> Result<(), StartEffectPreconditionError> {
+    if effect_requires_established_claim(effect) && !facts.claim_established {
+        return Err(StartEffectPreconditionError::ClaimNotEstablished);
+    }
+    if matches!(effect, StartEffectKind::WriteCargoConfigRedirect) && !facts.has_shared_target_dir {
+        return Err(StartEffectPreconditionError::SharedTargetDirMissing);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +1340,223 @@ mod tests {
             ),
             "a genuine conflict must remain a conflict"
         );
+    }
+
+    #[test]
+    fn threads_root_path_safety_classifies_layout() {
+        let heddle = PathBuf::from("/repo/.heddle");
+        let threads = heddle.join("threads");
+
+        assert_eq!(
+            classify_path_vs_threads_root(&threads, &heddle, &threads),
+            ThreadsRootPathClass::ThreadsRoot
+        );
+        assert_eq!(
+            classify_path_vs_threads_root(&threads.join("feat"), &heddle, &threads),
+            ThreadsRootPathClass::BareThreadDir
+        );
+        assert_eq!(
+            classify_path_vs_threads_root(&threads.join("feat").join("repo"), &heddle, &threads),
+            ThreadsRootPathClass::ManagedCheckoutSlot
+        );
+        assert_eq!(
+            classify_path_vs_threads_root(&heddle.join("objects"), &heddle, &threads),
+            ThreadsRootPathClass::HeddleStorage
+        );
+        assert_eq!(
+            classify_path_vs_threads_root(Path::new("/tmp/work"), &heddle, &threads),
+            ThreadsRootPathClass::OutsideHeddle
+        );
+
+        assert!(threads_root_path_layout_allowed(
+            ThreadsRootPathClass::ManagedCheckoutSlot
+        ));
+        assert!(threads_root_path_layout_allowed(
+            ThreadsRootPathClass::OutsideHeddle
+        ));
+        assert!(!threads_root_path_layout_allowed(
+            ThreadsRootPathClass::ThreadsRoot
+        ));
+        assert!(!threads_root_path_layout_allowed(
+            ThreadsRootPathClass::BareThreadDir
+        ));
+        assert!(!threads_root_path_layout_allowed(
+            ThreadsRootPathClass::HeddleStorage
+        ));
+    }
+
+    #[test]
+    fn threads_root_path_safety_rejects_nested_reserved() {
+        let heddle = PathBuf::from("/repo/.heddle");
+        let threads = heddle.join("threads");
+        let thread_dir = threads.join("feat");
+        let checkout = thread_dir.join("repo");
+        let nested = checkout.join("nested");
+
+        assert!(path_is_nested_in_reserved_region(
+            &nested,
+            &thread_dir,
+            Some(checkout.as_path())
+        ));
+        assert!(!path_is_nested_in_reserved_region(
+            &checkout,
+            &thread_dir,
+            Some(checkout.as_path())
+        ));
+
+        let err = validate_threads_root_path_safety(
+            &nested,
+            &heddle,
+            &threads,
+            &[(thread_dir.clone(), Some(checkout.clone()))],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ThreadsRootPathSafetyError::NestedInReserved { .. }
+        ));
+
+        assert!(
+            validate_threads_root_path_safety(
+                &checkout,
+                &heddle,
+                &threads,
+                &[(thread_dir, Some(checkout.clone()))],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn append_safe_relative_components_refuses_escape() {
+        let base = PathBuf::from("/resolved/ancestor");
+        assert_eq!(
+            append_safe_relative_components(base.clone(), Path::new("a/b")).unwrap(),
+            PathBuf::from("/resolved/ancestor/a/b")
+        );
+        assert_eq!(
+            append_safe_relative_components(base.clone(), Path::new("a/./b")).unwrap(),
+            PathBuf::from("/resolved/ancestor/a/b")
+        );
+        assert_eq!(
+            append_safe_relative_components(base.clone(), Path::new("a/../b")).unwrap_err(),
+            RelativePathNormalizeError::UnsafeComponent
+        );
+        assert!(!path_components_are_safe(Path::new("/a/../b")));
+        assert!(path_components_are_safe(Path::new("/a/b")));
+        assert!(path_is_strict_descendant(
+            Path::new("/repo/.heddle/threads/x/y"),
+            Path::new("/repo/.heddle/threads")
+        ));
+        assert!(!path_is_strict_descendant(
+            Path::new("/repo/.heddle/threads"),
+            Path::new("/repo/.heddle/threads")
+        ));
+    }
+
+    #[test]
+    fn empty_dir_adoption_and_create_intent() {
+        assert_eq!(
+            plan_target_dir_create_intent(true),
+            TargetDirCreateIntent::AttemptCreate
+        );
+        assert_eq!(
+            plan_target_dir_create_intent(false),
+            TargetDirCreateIntent::AdoptOnly
+        );
+
+        assert_eq!(
+            classify_target_leaf_shape(false, false, false, false),
+            TargetLeafShape::Absent
+        );
+        assert_eq!(
+            classify_target_leaf_shape(true, true, true, true),
+            TargetLeafShape::Symlink
+        );
+        assert_eq!(
+            classify_target_leaf_shape(true, false, false, false),
+            TargetLeafShape::NotDirectory
+        );
+        assert_eq!(
+            classify_target_leaf_shape(true, false, true, true),
+            TargetLeafShape::EmptyDirectory
+        );
+        assert_eq!(
+            classify_target_leaf_shape(true, false, true, false),
+            TargetLeafShape::NonEmptyDirectory
+        );
+
+        assert!(validate_empty_dir_adoption(TargetLeafShape::EmptyDirectory).is_ok());
+        assert_eq!(
+            validate_empty_dir_adoption(TargetLeafShape::NonEmptyDirectory).unwrap_err(),
+            TargetLeafRefusal::NotEmpty
+        );
+        assert_eq!(
+            validate_empty_dir_adoption(TargetLeafShape::Symlink).unwrap_err(),
+            TargetLeafRefusal::IsSymlink
+        );
+        assert_eq!(TargetLeafRefusal::NotEmpty.as_reason_str(), "is not empty");
+
+        assert_eq!(
+            claim_kind_for_create_attempt(CreateDirAttempt::Created),
+            Some(TargetDirClaimKind::Created)
+        );
+        assert_eq!(
+            claim_kind_for_create_attempt(CreateDirAttempt::AlreadyExists),
+            None
+        );
+        assert_eq!(
+            claim_kind_after_empty_dir_adoption(),
+            TargetDirClaimKind::AdoptedEmpty
+        );
+        assert!(require_established_claim(Some(TargetDirClaimKind::Created)).is_ok());
+        assert!(require_established_claim(None).is_err());
+    }
+
+    #[test]
+    fn effect_staging_preconditions_gate_claim_and_shared_target() {
+        let no_claim = StartEffectStagingFacts {
+            claim_established: false,
+            has_shared_target_dir: true,
+        };
+        let with_claim = StartEffectStagingFacts {
+            claim_established: true,
+            has_shared_target_dir: false,
+        };
+        let full = StartEffectStagingFacts {
+            claim_established: true,
+            has_shared_target_dir: true,
+        };
+
+        assert!(
+            validate_start_effect_preconditions(StartEffectKind::CreateTargetDir, no_claim).is_ok()
+        );
+        assert!(
+            validate_start_effect_preconditions(StartEffectKind::WriteThreadRef, no_claim).is_ok()
+        );
+        assert_eq!(
+            validate_start_effect_preconditions(StartEffectKind::MaterializeCheckout, no_claim)
+                .unwrap_err(),
+            StartEffectPreconditionError::ClaimNotEstablished
+        );
+        assert_eq!(
+            validate_start_effect_preconditions(
+                StartEffectKind::WriteCargoConfigRedirect,
+                with_claim
+            )
+            .unwrap_err(),
+            StartEffectPreconditionError::SharedTargetDirMissing
+        );
+        assert!(
+            validate_start_effect_preconditions(StartEffectKind::WriteCargoConfigRedirect, full)
+                .is_ok()
+        );
+        assert!(effect_requires_established_claim(
+            StartEffectKind::MaterializeCheckout
+        ));
+        assert!(!effect_requires_established_claim(
+            StartEffectKind::CreateTargetDir
+        ));
     }
 
     #[test]

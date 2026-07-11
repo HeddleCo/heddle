@@ -51,9 +51,14 @@ use std::{
 };
 
 use heddle_core::{
-    CheckoutRewindPlan, SelfCreatedDirRewindPlan, StartEffectKind, TargetDirClaimKind,
-    classify_materialize_error, plan_checkout_rewind, plan_self_created_dir_rewind,
-    plan_start_cleanup, plan_start_transaction,
+    CheckoutRewindPlan, CreateDirAttempt, SelfCreatedDirRewindPlan, StartEffectKind,
+    StartEffectPreconditionError, StartEffectStagingFacts, TargetDirClaimKind,
+    TargetDirCreateIntent, TargetLeafRefusal, TargetLeafShape, append_safe_relative_components,
+    claim_kind_after_empty_dir_adoption, claim_kind_for_create_attempt, classify_materialize_error,
+    classify_target_leaf_shape, path_components_are_safe, plan_checkout_rewind,
+    plan_self_created_dir_rewind, plan_start_cleanup, plan_start_transaction,
+    plan_target_dir_create_intent, require_established_claim, validate_empty_dir_adoption,
+    validate_start_effect_preconditions, validate_threads_root_path_safety,
 };
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -78,6 +83,18 @@ use super::{
 /// (heddle#571); this thin adapter keeps the local `apply_error` call sites.
 fn apply_error(err: anyhow::Error) -> HeddleError {
     classify_materialize_error(err)
+}
+
+/// Map pure effect-staging precondition failures into the transaction `Result`.
+fn staging_precondition_error(err: StartEffectPreconditionError, abs_path: &Path) -> HeddleError {
+    match err {
+        StartEffectPreconditionError::ClaimNotEstablished => {
+            target_dir_shape_refusal(abs_path, "was not established")
+        }
+        StartEffectPreconditionError::SharedTargetDirMissing => {
+            HeddleError::Conflict(err.to_string())
+        }
+    }
 }
 
 // ---- In-process fault seam (unit tests only) ----
@@ -393,32 +410,71 @@ fn outcome_from_cell(
 /// retain the directory handle that later writes/rewinds must use. Opening uses
 /// `O_NOFOLLOW | O_DIRECTORY` on Unix, so a symlink leaf is refused before it can
 /// become an owned claim.
+///
+/// Pure adoption gate is [`validate_empty_dir_adoption`]; this owns the FS
+/// open / emptiness probe and maps the pure refusal into the user-facing error.
 fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDirHandle> {
-    let handle = TargetDirHandle::open(abs_path)
-        .map_err(|_| target_dir_shape_refusal(abs_path, &target_dir_shape_reason(abs_path)))?;
+    let handle = TargetDirHandle::open(abs_path).map_err(|_| {
+        let shape = observe_target_leaf_shape(abs_path);
+        let reason = match validate_empty_dir_adoption(shape) {
+            Err(refusal) => refusal.as_reason_str().to_string(),
+            Ok(()) => target_dir_shape_reason(abs_path),
+        };
+        target_dir_shape_refusal(abs_path, &reason)
+    })?;
     let io_path = handle
         .io_path_if_current(abs_path)
         .map_err(HeddleError::from)?
         .ok_or_else(|| target_dir_shape_refusal(abs_path, "changed since it was claimed"))?;
-    if std::fs::read_dir(io_path)
+    let has_entry = std::fs::read_dir(io_path)
         .map_err(HeddleError::from)?
         .next()
         .transpose()
         .map_err(HeddleError::from)?
-        .is_some()
-    {
-        return Err(target_dir_shape_refusal(abs_path, "is not empty"));
+        .is_some();
+    // Pure empty-dir adoption: only EmptyDirectory may become AdoptedEmpty.
+    let shape = classify_target_leaf_shape(true, false, true, !has_entry);
+    if let Err(refusal) = validate_empty_dir_adoption(shape) {
+        return Err(target_dir_shape_refusal(abs_path, refusal.as_reason_str()));
     }
+    debug_assert_eq!(
+        claim_kind_after_empty_dir_adoption(),
+        TargetDirClaimKind::AdoptedEmpty
+    );
     Ok(handle)
 }
 
-fn target_dir_shape_reason(abs_path: &Path) -> String {
+/// Observe leaf shape from FS metadata + emptiness (facts for pure classifiers).
+fn observe_target_leaf_shape(abs_path: &Path) -> TargetLeafShape {
     match std::fs::symlink_metadata(abs_path) {
-        Ok(meta) if meta.file_type().is_symlink() => "is a symlink".to_string(),
-        Ok(meta) if !meta.is_dir() => "is not a directory".to_string(),
-        Ok(_) => "could not be opened as a real directory".to_string(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "does not exist".to_string(),
-        Err(err) => format!("could not be inspected ({err})"),
+        Ok(meta) => {
+            let is_symlink = meta.file_type().is_symlink();
+            let is_dir = meta.is_dir();
+            let is_empty = if is_dir && !is_symlink {
+                match std::fs::read_dir(abs_path) {
+                    Ok(mut entries) => match entries.next().transpose() {
+                        Ok(None) => true,
+                        Ok(Some(_)) | Err(_) => false,
+                    },
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+            classify_target_leaf_shape(true, is_symlink, is_dir, is_empty)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            classify_target_leaf_shape(false, false, false, false)
+        }
+        Err(_) => TargetLeafShape::NotDirectory,
+    }
+}
+
+fn target_dir_shape_reason(abs_path: &Path) -> String {
+    let shape = observe_target_leaf_shape(abs_path);
+    match validate_empty_dir_adoption(shape) {
+        Err(refusal) => refusal.as_reason_str().to_string(),
+        Ok(()) => "could not be opened as a real directory".to_string(),
     }
 }
 
@@ -516,6 +572,10 @@ fn remove_claimed_created_dir_if_still_at_path(
 }
 
 fn claimed_worktree_path(claim: Option<TargetDir>, abs_path: &Path) -> HeddleResult<PathBuf> {
+    // Pure claim gate before any handle/identity FS probes.
+    if require_established_claim(claim.as_ref().map(TargetDir::kind)).is_err() {
+        return Err(target_dir_shape_refusal(abs_path, "was not established"));
+    }
     match claim {
         Some(claim) => match claim.handle().same_identity_at_path(abs_path) {
             Ok(true) => claim
@@ -561,21 +621,62 @@ fn claimed_worktree_path(claim: Option<TargetDir>, abs_path: &Path) -> HeddleRes
 ///
 /// Parents are created with `create_dir_all` (shared infrastructure, left in
 /// place on rollback — `remove_self_created_dir` only targets the leaf).
+///
+/// Pure create-vs-adopt intent is [`plan_target_dir_create_intent`]; pure
+/// adoption validation is [`validate_empty_dir_adoption`]. Path-component safety
+/// ([`path_components_are_safe`]) runs before any FS create/adopt.
 fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<TargetDir> {
-    if !plan_created {
-        return adopt_existing_empty_dir(abs_path).map(TargetDir::adopted_empty);
+    if !path_components_are_safe(abs_path) {
+        return Err(target_dir_shape_refusal(
+            abs_path,
+            TargetLeafRefusal::NotDirectory.as_reason_str(),
+        ));
     }
-    if let Some(parent) = abs_path.parent() {
-        std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
+    // Normalize any residual relative tail against the leaf's parent so a
+    // non-normalized plan path cannot re-root the create (pure remainder join).
+    if let Some(parent) = abs_path.parent()
+        && let Some(name) = abs_path.file_name()
+    {
+        let normalized = append_safe_relative_components(parent.to_path_buf(), Path::new(name))
+            .map_err(|_| {
+                target_dir_shape_refusal(abs_path, TargetLeafRefusal::NotDirectory.as_reason_str())
+            })?;
+        if normalized != abs_path {
+            return Err(target_dir_shape_refusal(
+                abs_path,
+                TargetLeafRefusal::NotDirectory.as_reason_str(),
+            ));
+        }
     }
-    match std::fs::create_dir(abs_path) {
-        Ok(()) => TargetDirHandle::open(abs_path)
-            .map(TargetDir::created)
-            .map_err(HeddleError::from),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+
+    match plan_target_dir_create_intent(plan_created) {
+        TargetDirCreateIntent::AdoptOnly => {
             adopt_existing_empty_dir(abs_path).map(TargetDir::adopted_empty)
         }
-        Err(err) => Err(HeddleError::from(err)),
+        TargetDirCreateIntent::AttemptCreate => {
+            if let Some(parent) = abs_path.parent() {
+                std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
+            }
+            match std::fs::create_dir(abs_path) {
+                Ok(()) => {
+                    debug_assert_eq!(
+                        claim_kind_for_create_attempt(CreateDirAttempt::Created),
+                        Some(TargetDirClaimKind::Created)
+                    );
+                    TargetDirHandle::open(abs_path)
+                        .map(TargetDir::created)
+                        .map_err(HeddleError::from)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    debug_assert_eq!(
+                        claim_kind_for_create_attempt(CreateDirAttempt::AlreadyExists),
+                        None
+                    );
+                    adopt_existing_empty_dir(abs_path).map(TargetDir::adopted_empty)
+                }
+                Err(err) => Err(HeddleError::from(err)),
+            }
+        }
     }
 }
 
@@ -666,6 +767,19 @@ impl StartThread {
         tx: &mut Tx<'_>,
         target_claim: Rc<Cell<Option<TargetDir>>>,
     ) -> HeddleResult<()> {
+        // Pure threads-root / heddle-storage layout gate before any create/adopt FS.
+        // Nested-in-existing-thread reserved regions are still enforced at plan
+        // time (`plan_worktree_target`); here we re-check the lexical layout so a
+        // stale abs_path cannot land on threads root, bare thread dir, or heddle
+        // storage (heddle#572).
+        let heddle_dir = tx.repo().heddle_dir();
+        let threads_root = heddle_dir.join("threads");
+        if let Err(err) =
+            validate_threads_root_path_safety(&self.abs_path, heddle_dir, &threads_root, &[])
+        {
+            return Err(HeddleError::Conflict(err.to_string()));
+        }
+
         let abs = self.abs_path.clone();
         let rewind_abs = self.abs_path.clone();
         let plan_created = self.target_dir_created;
@@ -1068,6 +1182,17 @@ impl AtomicMutation for StartThread {
         let mut applied: Vec<StartEffectKind> = Vec::with_capacity(plan.effects.len());
 
         for &effect in &plan.effects {
+            // Pure staging preconditions before any FS/Tx forward for this effect.
+            let staging_facts = StartEffectStagingFacts {
+                claim_established: claim_from_cell(&target_claim).is_some(),
+                has_shared_target_dir: self.shared_target_dir.is_some(),
+            };
+            if let Err(pre) = validate_start_effect_preconditions(effect, staging_facts) {
+                let claim_kind = claim_from_cell(&target_claim).as_ref().map(TargetDir::kind);
+                let _cleanup_order = plan_start_cleanup(&applied, claim_kind);
+                return Err(staging_precondition_error(pre, &self.abs_path));
+            }
+
             let stage_result = match effect {
                 StartEffectKind::CreateTargetDir => {
                     self.stage_target_dir(tx, Rc::clone(&target_claim))
@@ -1080,21 +1205,21 @@ impl AtomicMutation for StartThread {
                     self.stage_manifest(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))
                 }
                 StartEffectKind::WriteCargoConfigRedirect => {
-                    match self.shared_target_dir.clone() {
-                        Some(dir) => self
-                            .stage_cargo_config(tx, &dir, Rc::clone(&target_claim))
-                            .map(|cargo_applied| {
-                                // Writer no-ops on a pre-staged config; don't advertise
-                                // a redirect that isn't in effect (`thread show` would lie).
-                                if !cargo_applied {
-                                    self.record.shared_target_dir = None;
-                                }
-                            }),
-                        None => Err(HeddleError::Conflict(
-                            "start plan includes cargo-config redirect but no shared_target_dir"
-                                .to_string(),
-                        )),
-                    }
+                    // Preconditions already require shared_target_dir; unwrap path is safe.
+                    let dir = self.shared_target_dir.clone().ok_or_else(|| {
+                        staging_precondition_error(
+                            StartEffectPreconditionError::SharedTargetDirMissing,
+                            &self.abs_path,
+                        )
+                    })?;
+                    self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))
+                        .map(|cargo_applied| {
+                            // Writer no-ops on a pre-staged config; don't advertise
+                            // a redirect that isn't in effect (`thread show` would lie).
+                            if !cargo_applied {
+                                self.record.shared_target_dir = None;
+                            }
+                        })
                 }
                 StartEffectKind::HydrateIgnoredDirs => self
                     .stage_hydrate(tx, Rc::clone(&target_claim))
