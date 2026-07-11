@@ -18,6 +18,24 @@ service HostedUserService {
   rpc ListSpools(ListSpoolsRequest) returns (ListSpoolsResponse);
   rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository);
   rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse);
+
+  // ── Unified spool settings (any spool: namespace or repo) ────────
+  // One settings-READ + two settings-WRITEs keyed on `full_path`, so the
+  // Settings/Overview/Repos pages get a single surface across namespaces AND
+  // repos (incl. CLI-adopted). Unification-aligned: `SpoolSummary.kind` is a
+  // UX label only, never structural, so these are ONE spool surface, not split
+  // namespace/repo RPCs. Handlers land in weft (a follow-up); this is the
+  // contract only (weft#472).
+  //
+  // Read the full settings + summary metadata for any spool in one call.
+  rpc GetSpool(GetSpoolRequest) returns (HostedSpool);
+  // Write a spool's visibility (separate storage column). Mirrors
+  // SetNamespaceVisibility but keyed on `full_path` so it applies to repos too.
+  rpc SetSpoolVisibility(SetSpoolVisibilityRequest) returns (HostedSpool);
+  // Write a spool's general settings (description, etc.). Gives repos a
+  // description-write path (UpdateRepository stays rename-only). The server
+  // enforces which fields are settable.
+  rpc UpdateSpoolSettings(UpdateSpoolSettingsRequest) returns (HostedSpool);
   rpc CreateGrant(CreateGrantRequest) returns (HostedGrant);
   rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
   rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant);
@@ -352,6 +370,51 @@ message SpoolSummary {
   // value in the registry (weft#457) and populates it in the follow-on handler
   // pass.
   google.protobuf.Timestamp last_activity_at = 5;
+}
+
+// ── Unified spool settings (weft#472) ────────────────────────────────────────
+// One read + two writes for any spool (namespace or repo), keyed on
+// `full_path`. Reuse the existing SpoolSettings / SpoolVisibility / SpoolSummary
+// shapes — do not fork them. Handlers land in weft (a follow-up).
+
+// The unified settings-read result: SpoolSummary-style metadata plus the FULL
+// SpoolSettings, so Settings + Overview + Repos render from one call. `kind` is
+// a UX label only (like SpoolSummary), never structural; `is_repo` is the
+// capability flag.
+message HostedSpool {
+  string spool_id = 1;
+  string full_path = 2;
+  string kind = 3; // UX label only: "namespace" | "repository" — NEVER structural
+  bool is_repo = 4; // capability: content-bearing spool (pushable/pullable)
+  // Unset when the serving registry has no activity data (mirrors
+  // SpoolSummary.last_activity_at).
+  google.protobuf.Timestamp last_activity_at = 5;
+  // The full spool settings (visibility, description, write_policy,
+  // default_state_visibility, …). Reuses the existing SpoolSettings message.
+  SpoolSettings settings = 6;
+}
+
+message GetSpoolRequest {
+  string full_path = 1;
+}
+
+// Unified visibility write (works for repos too). Mirrors
+// SetNamespaceVisibilityRequest but keyed on `full_path`.
+message SetSpoolVisibilityRequest {
+  string full_path = 1;
+  SpoolVisibility visibility = 2; // reuses the existing enum
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// General settings write for any spool (description, etc.). Carries the whole
+// SpoolSettings for forward-compat; the server enforces which fields are
+// settable (e.g. description). Reuses the existing SpoolSettings message.
+message UpdateSpoolSettingsRequest {
+  string full_path = 1;
+  SpoolSettings settings = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
 }
 
 message Bookmark {
