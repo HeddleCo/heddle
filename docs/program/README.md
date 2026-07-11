@@ -18,6 +18,8 @@ This directory is the working control plane for driving Heddle toward:
 | [RELEASE_GATES.md](RELEASE_GATES.md) | Measurable gates |
 | [WAVES.md](WAVES.md) | Multi-wave plan + first tasks |
 | [cli-domain-residual.md](cli-domain-residual.md) | Generated CLI residual extraction matrix |
+| [inventory-ambient-state.md](inventory-ambient-state.md) | OnceLock/static/thread_local inventory |
+| [inventory-process-spawns.md](inventory-process-spawns.md) | Command::new process-spawn inventory |
 | [BASELINE.md](BASELINE.md) | Latest trustworthy baseline record |
 
 ## Tooling

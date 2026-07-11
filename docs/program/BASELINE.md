@@ -43,6 +43,27 @@ Source: `artifacts/baseline/wave0-merged/summary.json` after
 
 **Aggregate:** 8 pass / 1 fail (fmt only). All Git fidelity oracles in the shard passed.
 
+## Wave 1 domain + oracle expansion (same machine)
+
+Additional jobs via `run-baseline.sh --job …` merged into
+`artifacts/baseline/wave1-merged/summary.json`:
+
+| Job | Status | Duration |
+|-----|--------|----------|
+| lib-objects | pass | 21.1 s |
+| lib-refs | pass | 14.6 s |
+| lib-oplog | pass | 8.0 s |
+| lib-repo | pass | 103.9 s |
+| lib-ingest | pass | 33.3 s |
+| lib-git-projection | pass | 5.7 s |
+| git-projection-engine | pass | 92.8 s |
+| formal-specs | pass | 2.4 s |
+
+**Combined curated-so-far:** 16 pass / 1 fail (`fmt-check` only).  
+Oracle jobs all green: git-process-lint, roundtrip-fidelity, commit-conformance, git-projection-engine, formal-specs, lib-git-projection.
+
+Still not run in this program stamp: `cli-core-functionality`, `cli-state-management`, full `suite=perf`.
+
 ### Harness blockers / notes
 
 1. **rustfmt:** `rustfmt.toml` requires nightly (`imports_granularity`, `group_imports`). Stable `cargo fmt` mis-formats the tree — never use it to “fix” the repo. Gate is now `scripts/program/fmt-check.sh` (nightly only). Pre-existing nightly drift on `main` is a **real gate fail** for certification, not introduced by this program branch; fixing it is a separate bounded wave (or `skip_prereq` when nightly missing).
