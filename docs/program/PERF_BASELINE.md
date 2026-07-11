@@ -173,6 +173,7 @@ as harness calibration only (not a win claim).
 
 | Stamp | Commit | Trials | Role |
 |-------|--------|-------:|------|
+| `20260711T200938Z` | `fe4d129e…` | 3 | Calibration A==B + absolute (n=3; not cert n=5) |
 | `20260711T195417Z` | `c422950f…` | 5 | **Primary** residual fan-out tip (absolute-only) |
 | `20260711T155225Z` | `a5b1dc68…` | 5 | Prior primary post open-amortization (+ A==B pairs) |
 | `20260711T041555Z` | `b7f51aa4…` | 5 | Prior Wave 8 cert sample (noisier concurrent cargo) |
