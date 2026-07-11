@@ -6,9 +6,12 @@ use std::collections::BTreeSet;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use heddle_core::{
-    FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest, assemble_fanout_plan_report,
-    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_fanout,
-    select_fanout_parent_thread,
+    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReleaseKind,
+    AgentReservationReport, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
+    assemble_agent_reservation, assemble_agent_reservation_list, assemble_fanout_plan_report,
+    check_agent_capture_thread, fanout_child_body, fanout_parent_delegated_by,
+    fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
+    select_fanout_parent_thread, session_is_active, touch_agent_heartbeat, touch_agent_release,
 };
 use objects::{
     object::ThreadName,
@@ -159,22 +162,28 @@ pub(crate) struct AgentFanoutCommandOutput {
 
 impl From<&AgentEntry> for AgentReservationOutput {
     fn from(entry: &AgentEntry) -> Self {
+        AgentReservationOutput::from(assemble_agent_reservation(entry))
+    }
+}
+
+impl From<AgentReservationReport> for AgentReservationOutput {
+    fn from(report: AgentReservationReport) -> Self {
         Self {
-            session_id: entry.session_id.clone(),
-            reservation_token: entry.reservation_token.clone(),
-            thread: entry.thread.clone(),
-            anchor_state: entry.anchor_state.clone(),
-            anchor_root: entry.anchor_root.clone(),
-            task_assignment_id: entry.task_assignment_id.clone(),
-            status: entry.status.to_string(),
-            path: entry.path.as_ref().map(|path| path.display().to_string()),
-            task: entry.attach_reason.clone(),
-            provider: entry.provider.clone(),
-            model: entry.model.clone(),
-            harness: entry.harness.clone(),
-            thinking_level: entry.thinking_level.clone(),
-            probe_source: entry.probe_source.clone(),
-            probe_confidence: entry.probe_confidence,
+            session_id: report.session_id,
+            reservation_token: report.reservation_token,
+            thread: report.thread,
+            anchor_state: report.anchor_state,
+            anchor_root: report.anchor_root,
+            task_assignment_id: report.task_assignment_id,
+            status: report.status,
+            path: report.path,
+            task: report.task,
+            provider: report.provider,
+            model: report.model,
+            harness: report.harness,
+            thinking_level: report.thinking_level,
+            probe_source: report.probe_source,
+            probe_confidence: report.probe_confidence,
         }
     }
 }
@@ -634,10 +643,10 @@ fn ensure_thread_record(
 pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
+    let now = Utc::now();
     let entry = registry
         .update_entry(&args.session, |entry| {
-            entry.heartbeat_at = Some(Utc::now());
-            entry.last_progress_at = Some(Utc::now());
+            touch_agent_heartbeat(entry, now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
     render_agent_reservation_envelope(&repo, &entry)
@@ -647,18 +656,13 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let status = match args.status {
-        AgentReleaseStatusArg::Complete => AgentStatus::Complete,
-        AgentReleaseStatusArg::Abandoned => AgentStatus::Abandoned,
+        AgentReleaseStatusArg::Complete => AgentReleaseKind::Complete.to_status(),
+        AgentReleaseStatusArg::Abandoned => AgentReleaseKind::Abandoned.to_status(),
     };
+    let now = Utc::now();
     let entry = registry
         .update_entry(&args.session, |entry| {
-            entry.status = status.clone();
-            entry.completed_at = match entry.status {
-                AgentStatus::Active => None,
-                AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => {
-                    Some(Utc::now())
-                }
-            };
+            touch_agent_release(entry, status.clone(), now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
     render_agent_reservation_envelope(&repo, &entry)
@@ -672,22 +676,17 @@ pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
         // "who is alive?" see a pid-checked, current view.
         registry.reap_dead()?;
     }
-    let entries: Vec<_> = registry
-        .list()?
-        .into_iter()
-        .filter(|entry| {
-            args.thread
-                .as_ref()
-                .is_none_or(|thread| &entry.thread == thread)
-        })
-        .filter(|entry| !args.alive_only || entry.status == AgentStatus::Active)
-        .map(|entry| AgentReservationOutput::from(&entry))
-        .collect();
+    let list =
+        assemble_agent_reservation_list(registry.list()?, args.thread.clone(), args.alive_only);
     render_agent_list(
         AgentReservationListOutput {
-            reservations: entries,
-            alive_only: args.alive_only,
-            thread: args.thread.clone(),
+            reservations: list
+                .reservations
+                .into_iter()
+                .map(AgentReservationOutput::from)
+                .collect(),
+            alive_only: list.alive_only,
+            thread: list.thread,
             trust: build_repository_verification_state(&repo),
         },
         should_output_json(cli, Some(repo.config())),
@@ -1311,13 +1310,13 @@ fn validate_active_session(
     registry: &AgentRegistry,
     session_id: &str,
 ) -> Result<objects::store::AgentEntry> {
+    let now = Utc::now();
     let entry = registry
         .update_entry(session_id, |entry| {
-            entry.heartbeat_at = Some(Utc::now());
-            entry.last_progress_at = Some(Utc::now());
+            touch_agent_heartbeat(entry, now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(session_id)))?;
-    if entry.status != AgentStatus::Active {
+    if !session_is_active(&entry.status) {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "agent_session_inactive",
             format!(
@@ -1342,50 +1341,57 @@ pub async fn cmd_agent_capture(
     cli: &Cli,
     args: crate::cli::cli_args::AgentCaptureArgs,
 ) -> Result<()> {
+    let plan = plan_agent_capture(&AgentCaptureOptions {
+        session: args.session.clone(),
+        message: args.message.clone(),
+        confidence: args.confidence,
+    })
+    .map_err(|err| anyhow!(err))?;
     let repo_path = cli
         .repo
         .clone()
         .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
     let repo = Repository::open(&repo_path)?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let entry = validate_active_session(&registry, &args.session)?;
+    let entry = validate_active_session(&registry, &plan.session)?;
 
     // Confirm the reservation still names the thread the caller is
     // attached to. We don't switch threads here — the agent must
     // already be on its reserved thread when invoking capture.
-    if let Some(current) = repo.current_lane()?
-        && current != entry.thread
+    if let AgentCaptureThreadCheck::Mismatch {
+        reserved_thread,
+        current_thread,
+    } = check_agent_capture_thread(&entry.thread, repo.current_lane()?.as_deref())
     {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "agent_session_thread_mismatch",
             format!(
-                "agent session '{}' reserved thread '{}', but the current thread is '{}'",
-                args.session, entry.thread, current
+                "agent session '{}' reserved thread '{reserved_thread}', but the current thread is '{current_thread}'",
+                plan.session
             ),
             format!(
-                "Switch to the reserved thread with `heddle switch {}` before capturing.",
-                entry.thread
+                "Switch to the reserved thread with `heddle switch {reserved_thread}` before capturing."
             ),
             format!(
-                "session {} owns thread {}, current checkout is attached to {}",
-                args.session, entry.thread, current
+                "session {} owns thread {reserved_thread}, current checkout is attached to {current_thread}",
+                plan.session
             ),
             "capturing from the wrong thread would attribute work to a reservation that does not own this checkout",
             "the session heartbeat was refreshed, but no capture, refs, or worktree changes were applied",
-            format!("heddle switch {}", entry.thread),
-            vec![format!("heddle switch {}", entry.thread)],
+            format!("heddle switch {reserved_thread}"),
+            vec![format!("heddle switch {reserved_thread}")],
         )));
     }
 
     super::snapshot::cmd_snapshot(
         cli,
-        args.message.clone(),
-        args.confidence,
+        plan.message.clone(),
+        plan.confidence,
         false,
         super::snapshot::SnapshotAgentOverrides {
             provider: entry.provider.clone(),
             model: entry.model.clone(),
-            session: Some(args.session.clone()),
+            session: Some(plan.session.clone()),
             segment: None,
             policy: None,
             no_policy: false,
@@ -1399,20 +1405,26 @@ pub async fn cmd_agent_capture(
 /// for `heddle ready` that ensures the caller still owns the
 /// reservation it's trying to mark ready.
 pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyArgs) -> Result<()> {
+    let options = AgentReadyOptions {
+        session: args.session.clone(),
+        message: args.message.clone(),
+        confidence: args.confidence,
+    };
     let repo_path = cli
         .repo
         .clone()
         .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
     let repo = Repository::open(&repo_path)?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let entry = validate_active_session(&registry, &args.session)?;
+    let entry = validate_active_session(&registry, &options.session)?;
+    let plan = plan_agent_ready(&entry, &options).map_err(|err| anyhow!(err))?;
 
     super::ready_cmd::cmd_ready(
         cli,
         crate::cli::cli_args::ReadyArgs {
-            thread: Some(entry.thread.clone()),
-            message: args.message.clone(),
-            confidence: args.confidence,
+            thread: Some(plan.thread),
+            message: plan.message,
+            confidence: plan.confidence,
         },
     )
     .await
