@@ -21,19 +21,22 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
-    let ctx = verify_execution_context_from_cli(cli, &start)?;
+    let prepared = verify_execution_context_from_cli(cli, &start)?;
     let output = core_verify(
-        &ctx,
+        &prepared.ctx,
         VerifyOptions::new()
-            .with_start_path(start.clone())
+            .with_start_path(start)
             .with_machine_contract_input(MachineContractInput::from_coverage(
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    // Open cost is paid either in the CLI shell (injected) or inside core
+    // (facade open). Exactly one side owns it; sum keeps profile truthful.
+    let repo_open_ms = prepared.repo_open_ms + output.profile.repo_open_ms;
     if profile_enabled() {
         let fields = [
             ProfileField::millis("plain_git_probe_ms", output.profile.plain_git_probe_ms),
-            ProfileField::millis("repo_open_ms", output.profile.repo_open_ms),
+            ProfileField::millis("repo_open_ms", repo_open_ms),
             ProfileField::millis("verification_ms", output.profile.verification_ms),
             ProfileField::duration("command_body_ms", body_start.elapsed()),
         ];
@@ -50,10 +53,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
                 );
                 emit_profile(
                     "verify repo open",
-                    &[ProfileField::millis(
-                        "repo_open_ms",
-                        output.profile.repo_open_ms,
-                    )],
+                    &[ProfileField::millis("repo_open_ms", repo_open_ms)],
                 );
                 emit_profile(
                     "verify repository checks",
@@ -72,16 +72,8 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
             }
         }
     }
-    let repo_config = output
-        .trust
-        .heddle_initialized
-        .then(|| {
-            Repository::open(&start)
-                .ok()
-                .map(|repo| repo.config().clone())
-        })
-        .flatten();
-    let as_json = should_output_json(cli, repo_config.as_ref());
+    // Config comes from the single open above — never re-open for JSON mode.
+    let as_json = should_output_json(cli, prepared.repo_config.as_ref());
     if !output.clean && as_json {
         return Err(anyhow!(verify_failed_advice(&output.trust)));
     }
@@ -92,10 +84,15 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn verify_execution_context_from_cli(
-    cli: &Cli,
-    start: &Path,
-) -> Result<heddle_core::ExecutionContext> {
+struct VerifyExecutionPrep {
+    ctx: heddle_core::ExecutionContext,
+    repo_config: Option<repo::RepoConfig>,
+    /// Wall time spent opening a Heddle repository in this shell (0 when open
+    /// was deferred to core, e.g. plain-Git observe).
+    repo_open_ms: u128,
+}
+
+fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyExecutionPrep> {
     let config = UserConfig::load_default()?;
     let verbosity = if cli.quiet {
         heddle_core::Verbosity::Quiet
@@ -115,7 +112,25 @@ fn verify_execution_context_from_cli(
         builder = builder.op_id(op_id.to_string());
     }
 
-    Ok(builder.build())
+    // Open once here when a Heddle repo is present so core reuses the handle
+    // and JSON mode can read config without a second `Repository::open`.
+    // Failure is non-fatal: plain-Git observe (or core's own open error) still
+    // runs when no handle is injected.
+    let open_start = Instant::now();
+    let (builder, repo_config, repo_open_ms) = match Repository::open(start) {
+        Ok(repo) => {
+            let repo_open_ms = open_start.elapsed().as_millis();
+            let repo_config = repo.config().clone();
+            (builder.repo(repo), Some(repo_config), repo_open_ms)
+        }
+        Err(_) => (builder, None, 0),
+    };
+
+    Ok(VerifyExecutionPrep {
+        ctx: builder.build(),
+        repo_config,
+        repo_open_ms,
+    })
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {

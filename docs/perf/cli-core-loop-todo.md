@@ -25,6 +25,11 @@ toward these bands:
   route legacy ref migration through the declarative migration pass only.
 - Skip clean tracked directories during the untracked-file scan when the cached
   child-name digest proves there are no added paths below that subtree.
+- Amortize status/verify `Repository::open`: CLI injects the opened repo into
+  `ExecutionContext`; core reports `repo_open_ms = 0` when injected and does
+  not re-open; verify skips the plain-Git probe when a Heddle repo is already
+  injected; CLI profile folds the shell open into `repo_open_ms` so the phase
+  is truthful; verify no longer opens a second time only for repo config/JSON.
 
 ## Next
 

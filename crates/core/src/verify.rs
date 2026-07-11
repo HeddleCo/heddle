@@ -1550,32 +1550,32 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
         fallback.as_path()
     };
 
-    let probe_start = Instant::now();
-    let plain_git_probe = build_plain_git_verification_probe_with_machine_contract(
-        start,
-        &opts.machine_contract_input,
-    )?;
-    let plain_git_probe_ms = probe_start.elapsed().as_millis();
-    let mut profile = VerifyProfile {
-        plain_git_probe_ms,
-        ..VerifyProfile::default()
-    };
-
-    if let Some(probe) = plain_git_probe {
-        return Ok(VerifyReport {
-            output_kind: "verify",
-            clean: probe.trust.verified,
-            repository_label: repository_mode_label("plain-git", "git-only"),
-            repository_context: None,
-            trust: probe.trust,
-            profile,
-        });
-    }
-
+    // An injected Heddle repository already proves this is not the plain-Git
+    // observe path — skip the Sley discover + `.heddle` probe that would only
+    // return `None` after redundant work.
+    let mut profile = VerifyProfile::default();
     let opened;
     let repo = if let Some(repo) = ctx.repo() {
         repo
     } else {
+        let probe_start = Instant::now();
+        let plain_git_probe = build_plain_git_verification_probe_with_machine_contract(
+            start,
+            &opts.machine_contract_input,
+        )?;
+        profile.plain_git_probe_ms = probe_start.elapsed().as_millis();
+
+        if let Some(probe) = plain_git_probe {
+            return Ok(VerifyReport {
+                output_kind: "verify",
+                clean: probe.trust.verified,
+                repository_label: repository_mode_label("plain-git", "git-only"),
+                repository_context: None,
+                trust: probe.trust,
+                profile,
+            });
+        }
+
         let repo_open_start = Instant::now();
         opened = Repository::open(start)?;
         profile.repo_open_ms = repo_open_start.elapsed().as_millis();
@@ -1768,6 +1768,39 @@ pub fn repository_setup_guidance(
         }
     };
     Some(RepositorySetupGuidance { setup_line, effect })
+}
+
+#[cfg(test)]
+mod open_amortization_tests {
+    use super::*;
+    use crate::ExecutionContext;
+
+    #[test]
+    fn verify_uses_injected_repo_without_reopening_start_path() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        Repository::init_default(temp.path()).expect("init repo");
+        let repo = Repository::open(temp.path()).expect("open repo");
+        // If verify re-opened from start_path it would fail — prove injection.
+        let bogus = temp.path().join("not-a-repo-start");
+        let ctx = ExecutionContext::builder()
+            .start_path(&bogus)
+            .repo(repo)
+            .build();
+
+        let report = verify(&ctx, VerifyOptions::new().with_start_path(&bogus))
+            .expect("verify with injected repo must not re-open start_path");
+
+        assert_eq!(report.output_kind, "verify");
+        assert_eq!(
+            report.profile.repo_open_ms, 0,
+            "injected repo must report zero facade open cost"
+        );
+        assert_eq!(
+            report.profile.plain_git_probe_ms, 0,
+            "injected heddle repo must skip plain-git probe"
+        );
+        assert!(report.trust.heddle_initialized);
+    }
 }
 
 #[cfg(test)]

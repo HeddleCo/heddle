@@ -1944,15 +1944,18 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         fallback.as_path()
     };
 
-    let repo_open_start = Instant::now();
+    // When the caller already injected an open `Repository`, reuse it and
+    // report `repo_open_ms = 0` so profiles stay truthful about open cost
+    // inside this facade (callers that open in their shell attribute that
+    // cost themselves).
     let opened;
-    let repo = if let Some(repo) = ctx.repo() {
-        repo
+    let (repo, repo_open_ms) = if let Some(repo) = ctx.repo() {
+        (repo, 0)
     } else {
+        let repo_open_start = Instant::now();
         opened = Repository::open(start)?;
-        &opened
+        (&opened, repo_open_start.elapsed().as_millis())
     };
-    let repo_open_ms = repo_open_start.elapsed().as_millis();
     let body_start = Instant::now();
 
     let current_state_start = Instant::now();
@@ -2335,6 +2338,9 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
             .unwrap_or(recommended_action);
     let presentation = crate::repository_presentation(input.repo, None, None);
     let recommended_action_template = action_template(&recommended_action);
+    // Short path still needs the current lane for prompt segments and short
+    // subject lines; read it from the already-open repo (no second open).
+    let thread = input.repo.current_lane().ok().flatten();
     StatusReport {
         output_kind: "status",
         repository_capability: input.repo.capability_label().to_string(),
@@ -2349,10 +2355,10 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         operation: input.operation,
         remote_tracking: input.remote_tracking,
         git_index: input.git_index,
-        thread: None,
+        thread,
         base_state: None,
         base_root: None,
-        current_state: None,
+        current_state: input.current_state.map(|state| state.change_id.short()),
         path: None,
         execution_path: None,
         session_id: None,
@@ -3164,6 +3170,36 @@ mod tests {
                 "fast and slow short-status classification disagree for {label}",
             );
         }
+    }
+
+    #[test]
+    fn status_uses_injected_repo_without_reopening_start_path() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        repo::Repository::init_default(temp.path()).expect("init repo");
+        let repo = Repository::open(temp.path()).expect("open repo");
+        // If status re-opened from start_path it would fail — prove injection.
+        let bogus = temp.path().join("not-a-repo-start");
+        let ctx = ExecutionContext::builder()
+            .start_path(&bogus)
+            .repo(repo)
+            .build();
+
+        let report = status(
+            &ctx,
+            StatusOptions::new(
+                StatusDetail::ShortText,
+                repo::WorktreeStatusOptions::default(),
+            )
+            .with_start_path(&bogus),
+        )
+        .expect("status with injected repo must not re-open start_path");
+
+        assert_eq!(report.output_kind, "status");
+        assert_eq!(
+            report.profile.repo_open_ms, 0,
+            "injected repo must report zero facade open cost"
+        );
+        assert!(!report.trust.status.is_empty());
     }
 
     #[test]

@@ -172,15 +172,11 @@ pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
     let Ok(output) = build_status_output(cli, true) else {
         return Ok(None);
     };
-    let repo = cli.open_repo().ok();
-    let current_lane = repo
-        .as_ref()
-        .and_then(|repo| repo.current_lane().ok())
-        .flatten();
+    // Short status already carries the current lane on `output.thread` from
+    // the single open in `build_status_command_output` — do not re-open.
     let subject = output
         .thread
         .as_deref()
-        .or(current_lane.as_deref())
         .or_else(|| output.current_state.as_ref().map(|_| "detached"));
     let Some(subject) = subject else {
         return Ok(None);
@@ -270,7 +266,11 @@ struct StatusCommandOutput {
 fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOutput> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
+    // Single open for the whole command: inject into ExecutionContext so core
+    // does not re-open, and attribute open cost here for truthful profiles.
+    let repo_open_start = Instant::now();
     let repo = Repository::open(&start)?;
+    let cli_repo_open_ms = repo_open_start.elapsed().as_millis();
     let repo_config = repo.config().clone();
     let as_json = should_output_json(cli, Some(&repo_config));
     let compact_json = as_json && output_is_compact(cli);
@@ -288,7 +288,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         .start_path(start.clone())
         .repo(repo)
         .build();
-    let output = core_status(
+    let mut output = core_status(
         &ctx,
         StatusOptions::new(detail, status_options)
             .with_start_path(start)
@@ -296,6 +296,9 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    // Core reports 0 for injected repos; fold the shell open into the profile
+    // so `repo_open_ms` reflects real work on this path.
+    output.profile.repo_open_ms = cli_repo_open_ms + output.profile.repo_open_ms;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,
         body_ms = output.profile.build_total_ms,
