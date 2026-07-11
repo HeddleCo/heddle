@@ -1,7 +1,7 @@
 # Performance baseline (measurement calibration / cert sample)
 
-**Status:** n=5 core-loop absolute timings re-stamped on residual fan-out tip
-`c422950f` (Wave 6 measurement residual; absolute-only, no A==B pairs this run)  
+**Status:** n=5 core-loop absolute timings re-stamped on tip `34c101ea` (Wave 6
+measurement residual) **with A==B self-pairs** (`20260711T210616Z`).
 **Not a claim:** this document does **not** assert a Git win, Sley win, or any
 cross-tool superiority. It records absolute wall-clock process times on a
 fixed equal-work Heddle fixture so later waves can detect regressions with
@@ -23,8 +23,8 @@ Raw machine-readable results live under `artifacts/perf/`.
    exit code must be 0.
 4. **n≥5 for certification sample.** Release certification wants ≥5 trials per
    `docs/program/RELEASE_GATES.md` (G5). This document’s primary table is the
-   **n=5** post open-amortization run. Earlier stamps are retained under
-   `artifacts/perf/` for historical comparison only.
+   **n=5** tip re-stamp. Earlier stamps are retained under `artifacts/perf/`
+   for historical comparison only.
 5. **No budget gaming.** Budgets from `perf_core_loop.rs` are shown for
    context; this run does not lower budgets or skip ops to “pass.”
 6. **Still not a Git comparison.** Absolute Heddle-only process times.
@@ -32,25 +32,25 @@ Raw machine-readable results live under `artifacts/perf/`.
 
 ---
 
-## Environment (n=5 primary sample — residual fan-out tip)
+## Environment (n=5 primary sample — tip `34c101ea`)
 
 | Field | Value |
 |-------|-------|
-| Commit | `c422950fb780cc53700a1c4749c15e63d76587cd` |
+| Commit | `34c101ea951358120e6d2f13b22f4551c2845df2` |
 | Branch | `codex/correctness-architecture-performance-program` |
-| Timestamp (UTC) | `20260711T195417Z` |
+| Timestamp (UTC) | `20260711T210616Z` |
 | OS | macOS 26.5.1 (Darwin 25.5.0 arm64) |
 | CPU | Apple M1 Pro |
 | Memory | 32 GB (`34359738368` bytes) |
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
-| Binary | `/tmp/heddle-fan-perf-target/release/heddle` (`heddle 0.10.0`) |
-| Build | `CARGO_TARGET_DIR=/tmp/heddle-fan-perf-target cargo build --release -p heddle-cli --locked --features client` |
-| Trials | 5 timed + 1 warmup; **absolute multi-op only** (`--no-paired`) |
-| Host noise | Single-host residual-wave machine; not multi-host cert. Prefer quieter re-run + A==B pairs before external citation. |
+| Binary | `/tmp/heddle-w6-perf-target/release/heddle` (`heddle 0.10.0`) |
+| Build | `CARGO_TARGET_DIR=/tmp/heddle-w6-perf-target cargo build --release -p heddle-cli --locked --features client` |
+| Trials | 5 timed + 1 warmup; **absolute multi-op + A==B self-pairs** |
+| Host noise | Single-host residual-wave machine; **not** multi-host cert. Multi-host matrix still open. |
 
 Environment snapshot:
-`artifacts/perf/20260711T195417Z-environment.txt`
+`artifacts/perf/20260711T210616Z-environment.txt`
 
 ---
 
@@ -73,19 +73,18 @@ Rust smoke fixture):
 
 ```bash
 # 1) Release binary (isolated target)
-export CARGO_TARGET_DIR=/tmp/heddle-fan-perf-target
+export CARGO_TARGET_DIR=/tmp/heddle-w6-perf-target
 cargo build --release -p heddle-cli --locked --features client
 
-# 2) Absolute multi-op timings (5 trials, 1 warmup; absolute-only this stamp)
+# 2) Absolute multi-op timings + A==B self-pairs (5 trials, 1 warmup)
 bash scripts/program/core-loop-bench.sh \
-  --heddle /tmp/heddle-fan-perf-target/release/heddle \
+  --heddle /tmp/heddle-w6-perf-target/release/heddle \
   --trials 5 \
   --warmup 1 \
-  --no-paired \
   --out-dir "$PWD/artifacts/perf"
 
-# Optional full stamp with A==B self-pairs (omit --no-paired):
-# bash scripts/program/core-loop-bench.sh --heddle ... --trials 5 --warmup 1
+# Optional: absolute-only (omit paired):
+# bash scripts/program/core-loop-bench.sh ... --no-paired
 
 # Optional: manual paired A/B between two commands on the same fixture
 python3 scripts/program/paired-bench.py --help
@@ -99,73 +98,82 @@ in `scripts/program/manifest.toml`.
 ## Absolute timings (n=5, 1 warmup, require success)
 
 Source:
-`artifacts/perf/20260711T195417Z-core-loop-absolute.json`
+`artifacts/perf/20260711T210616Z-core-loop-absolute.json`
 
 Times are **milliseconds** of process wall clock. Median, p95, and p99 are the
 headline numbers for later regression comparison.
 
 | Operation | argv (relative) | median_ms | p95_ms | p99_ms | mean_ms | stdev_ms | smoke budget_ms |
 |-----------|-----------------|----------:|-------:|-------:|--------:|---------:|----------------:|
-| bare_help | `heddle` | 13.6 | 15.0 | 15.2 | 13.4 | 1.3 | 250 |
-| help | `heddle help` | 13.1 | 15.0 | 15.1 | 13.4 | 1.2 | 250 |
-| status_text | `heddle status` | 40.4 | 48.9 | 50.5 | 41.7 | 5.3 | 650 |
-| status_short | `heddle status --short` | 37.4 | 42.0 | 42.5 | 37.9 | 3.3 | 650 |
-| status_json | `heddle --output json status` | 126.1 | 153.7 | 155.6 | 126.3 | 24.3 | 850 |
-| log_json | `heddle --output json log` | 17.3 | 22.0 | 22.0 | 18.9 | 2.8 | 850 |
-| diff_json | `heddle --output json diff` | 43.7 | 47.8 | 47.9 | 42.3 | 5.7 | 1000 |
-| thread_list_json | `heddle --output json thread list` | 57.2 | 65.7 | 66.3 | 58.0 | 6.5 | 850 |
+| bare_help | `heddle` | 9.3 | 9.7 | 9.7 | 9.4 | 0.2 | 250 |
+| help | `heddle help` | 10.1 | 19.6 | 20.7 | 12.8 | 5.0 | 250 |
+| status_text | `heddle status` | 22.0 | 23.3 | 23.4 | 22.2 | 0.8 | 650 |
+| status_short | `heddle status --short` | 21.3 | 22.1 | 22.2 | 21.3 | 0.7 | 650 |
+| status_json | `heddle --output json status` | 52.9 | 54.1 | 54.3 | 53.2 | 0.7 | 850 |
+| log_json | `heddle --output json log` | 11.4 | 12.4 | 12.5 | 11.7 | 0.5 | 850 |
+| diff_json | `heddle --output json diff` | 20.6 | 21.3 | 21.4 | 20.5 | 0.7 | 1000 |
+| thread_list_json | `heddle --output json thread list` | 26.4 | 26.5 | 26.5 | 26.4 | 0.1 | 850 |
 
 Smoke budgets are from `perf_core_loop.rs` (single-run upper bounds on this
-hardware class). All **medians** remain under those budgets. Some **p95/p99**
-values for `status_json` are elevated on this host (noise / `--features client`
-release binary); that is **not** treated as a budget failure for this
-calibration stamp and is **not** a Git comparison.
+hardware class). All **medians** remain under those budgets. This stamp is
+quieter than the prior residual fan-out absolute-only sample (`20260711T195417Z`).
 
-### Comparison vs prior primary stamp `20260711T155225Z`
+### Comparison vs prior primary stamp `20260711T195417Z`
 
-Prior primary (commit `a5b1dc68…`, absolute-only comparison). Same fixture
-recipe, same host class. Median deltas (this stamp − prior primary):
+Prior primary (commit `c422950f…`, absolute-only, noisier host load). Same
+fixture recipe, same host class. Median deltas (this stamp − prior primary):
 
 | Operation | prior median_ms | this median_ms | Δ ms | Δ % |
 |-----------|----------------:|---------------:|-----:|----:|
-| bare_help | 12.0 | 13.6 | +1.6 | +13% |
-| help | 12.7 | 13.1 | +0.4 | +3% |
-| status_text | 27.2 | 40.4 | +13.2 | +49% |
-| status_short | 26.3 | 37.4 | +11.1 | +42% |
-| status_json | 62.1 | 126.1 | +64.0 | +103% |
-| log_json | 14.3 | 17.3 | +3.0 | +21% |
-| diff_json | 24.9 | 43.7 | +18.8 | +76% |
-| thread_list_json | 31.5 | 57.2 | +25.7 | +82% |
+| bare_help | 13.6 | 9.3 | -4.3 | -32% |
+| help | 13.1 | 10.1 | -3.0 | -23% |
+| status_text | 40.4 | 22.0 | -18.4 | -46% |
+| status_short | 37.4 | 21.3 | -16.1 | -43% |
+| status_json | 126.1 | 52.9 | -73.2 | -58% |
+| log_json | 17.3 | 11.4 | -5.9 | -34% |
+| diff_json | 43.7 | 20.6 | -23.1 | -53% |
+| thread_list_json | 57.2 | 26.4 | -30.8 | -54% |
 
-Interpretation (still **not** a Git win claim, **not** a regression verdict):
+Interpretation (still **not** a Git win claim, **not** a hotspot optimization claim):
 
-- This tip ships residual waves + `--features client` release binary; prior
-  stamp was a quieter post open-amortization sample with A==B pairs.
-- Elevated repo-touching medians are consistent with **host noise and binary
-  configuration differences**, not an equal-work before/after perf optimization.
-- Prefer quieter multi-host re-run with A==B pairs before treating deltas as
-  actionable regressions.
+- Same equal-work recipe and `--features client` release binary class; this
+  re-stamp is primarily a **quieter measurement residual** with A==B pairs.
+- Large negative median deltas vs `195417Z` are consistent with host noise
+  differences between residual concurrent load and a quieter run — treat as
+  calibration, not product speed wins.
+- Multi-host / quieter-host matrix remains **open** for external citation.
 
 ### Raw trial times (absolute series, ms)
 
 | Operation | t0 | t1 | t2 | t3 | t4 |
 |-----------|---:|---:|---:|---:|---:|
-| bare_help | 13.6 | 13.9 | 12.1 | 15.2 | 12.1 |
-| help | 15.2 | 12.5 | 14.2 | 13.1 | 12.2 |
-| status_text | 50.9 | 38.6 | 40.6 | 40.4 | 37.9 |
-| status_short | 34.9 | 42.7 | 39.6 | 34.8 | 37.4 |
-| status_json | 156.0 | 105.3 | 99.8 | 126.1 | 144.5 |
-| log_json | 16.8 | 22.1 | 17.3 | 21.9 | 16.4 |
-| diff_json | 48.0 | 47.1 | 35.2 | 43.7 | 37.7 |
-| thread_list_json | 52.2 | 51.5 | 62.5 | 57.2 | 66.5 |
+| bare_help | 9.3 | 9.4 | 9.2 | 9.8 | 9.2 |
+| help | 10.1 | 9.1 | 9.6 | 14.3 | 20.9 |
+| status_text | 22.0 | 23.5 | 21.3 | 22.6 | 21.9 |
+| status_short | 21.8 | 22.2 | 20.8 | 20.7 | 21.3 |
+| status_json | 53.3 | 54.3 | 52.9 | 52.9 | 52.7 |
+| log_json | 12.0 | 11.4 | 12.6 | 11.4 | 11.3 |
+| diff_json | 19.7 | 20.6 | 19.9 | 21.0 | 21.4 |
+| thread_list_json | 26.5 | 26.5 | 26.2 | 26.4 | 26.4 |
 
 ---
 
 ## Paired self-pairs (A==B)
 
-**Not re-run** for stamp `20260711T195417Z` (`--no-paired` absolute-only). Prior
-A==B artifacts remain under `artifacts/perf/20260711T155225Z-core-loop-paired-*.json`
-as harness calibration only (not a win claim).
+Stamp `20260711T210616Z` ran A==B self-pairs (identical command A and B,
+alternating thermal control). Median ratio ≈1.0 indicates harness stability,
+not a product A/B comparison.
+
+Source: `artifacts/perf/20260711T210616Z-core-loop-paired-*.json`
+
+| Op | A median_ms | B median_ms | A/B ratio |
+|----|------------:|------------:|----------:|
+| diff_json | 24.7 | 24.9 | 0.992 |
+| help | 22.8 | 21.6 | 1.059 |
+| log_json | 15.5 | 15.9 | 0.979 |
+| status_json | 58.8 | 59.4 | 0.990 |
+
+Harness calibration only — **not** a Git win claim.
 
 ---
 
@@ -173,26 +181,28 @@ as harness calibration only (not a win claim).
 
 | Stamp | Commit | Trials | Role |
 |-------|--------|-------:|------|
+| `20260711T210616Z` | `34c101ea…` | 5 | **Primary** tip re-stamp (absolute + A==B) |
 | `20260711T200938Z` | `fe4d129e…` | 3 | Calibration A==B + absolute (n=3; not cert n=5) |
-| `20260711T195417Z` | `c422950f…` | 5 | **Primary** residual fan-out tip (absolute-only) |
-| `20260711T155225Z` | `a5b1dc68…` | 5 | Prior primary post open-amortization (+ A==B pairs) |
+| `20260711T195417Z` | `c422950f…` | 5 | Prior residual fan-out tip (absolute-only) |
+| `20260711T155225Z` | `a5b1dc68…` | 5 | Prior post open-amortization (+ A==B pairs) |
 | `20260711T041555Z` | `b7f51aa4…` | 5 | Prior Wave 8 cert sample (noisier concurrent cargo) |
 | `20260711T032344Z` | `c1699119…` | 3 | Wave 1 measurement foundation only |
 
-Do not use n=3 as the certification trial count. Prefer
-`20260711T195417Z` for tip authority going forward; use quieter multi-host +
-A==B pairs before treating median deltas as actionable regressions.
+Do not use n=3 as the certification trial count. Prefer `20260711T210616Z`
+for tip authority going forward; multi-host samples still required before
+external speed claims.
 
 ---
 
 ## How to refresh
 
 ```bash
-cargo build --release -p heddle-cli --locked
-# certification-oriented (≥5 trials):
-bash scripts/program/core-loop-bench.sh --trials 5 --warmup 1
-# quick calibration:
-bash scripts/program/core-loop-bench.sh --trials 3 --warmup 1
+export CARGO_TARGET_DIR=/tmp/heddle-w6-perf-target
+cargo build --release -p heddle-cli --locked --features client
+# certification-oriented (≥5 trials + A==B):
+bash scripts/program/core-loop-bench.sh \
+  --heddle /tmp/heddle-w6-perf-target/release/heddle \
+  --trials 5 --warmup 1 --out-dir "$PWD/artifacts/perf"
 # update this doc’s tables from the new absolute JSON
 ```
 
@@ -212,13 +222,11 @@ bash scripts/program/core-loop-bench.sh --trials 3 --warmup 1
 
 ## Remaining risks / limits
 
-- Single-host sample under residual concurrent load (load ≈13 at bench start);
-  re-run on a quiet machine before citing numbers externally.
-- Process spawn overhead dominates the fastest ops (`help` ~13 ms).
+- Single-host sample; multi-host matrix still **open**.
+- Process spawn overhead dominates the fastest ops (`help` ~10–20 ms).
 - Fixture is synthetic equal-work, not a large monorepo or realworld Git import.
 - No Git comparison was performed; do not rephrase these numbers as “faster
   than Git.”
-- Open amortization is visible in phase profiles (`repo_open_ms` ≈0–1,
-  `plain_git_probe_ms` = 0); remaining status cost is largely
-  `thread_summary_ms` on this 24-thread fixture.
-- Full multi-host / platform matrix (Wave 7) still open.
+- Wave 6 hotspot *code* work remains optional and requires paired before/after
+  on equal-work for any win claim.
+- Full multi-host / platform matrix (Wave 7 residual) still open.

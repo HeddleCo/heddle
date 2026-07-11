@@ -46,19 +46,19 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
 **Focus:** property tests, fault injection suites already present  
-**Status (2026-07-11):** **Partial on program tip** — L7 pack publish durability via `publish_file_durable` landed; **L6** grandparent-dirent durability **shipped** in `heddle-objects` (`create_dir_all_durable` + atomic write wiring). Residual: other store/fs_io create paths, L8 unpaired pack window, optional finalize fsync. Not a Wave 8 tip-correctness gate blocker.
+**Status (2026-07-11):** **Mostly complete on program tip (optional harden residual)** — L7 pack publish durability via `publish_file_durable` landed; **L6** grandparent-dirent durability **shipped** and extended to lock dir ensure, agent registry dirs, streaming pack bucket dirs, and private-dir create (`create_private_dir_all` fsyncs new ancestors while keeping Unix `0o700`). Residual: tests-only bare `create_dir_all`, Windows dir fsync platform no-op, **L7** optional finalize fsync, **L8** unpaired pack-then-index window (accepted). Not a Wave 8 tip-correctness gate blocker.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
 **Required evidence:** before/after paired timings, p95/p99, correctness held  
-**Status (2026-07-11):** **Open with active measurement residual** — tip re-stamp **n=5 absolute** on `c422950f` recorded in `PERF_BASELINE.md` (`20260711T195417Z`; absolute-only, no A==B this run); still **not** a Git win claim. Prior A==B samples retained historically. **Multi-host** / quieter-host matrix still **open**. Correct-path hotspot work remains unblocked with equal-work evidence required for any win claim.
+**Status (2026-07-11):** **Measurement residual advanced; multi-host still open** — tip re-stamp **n=5 absolute + A==B self-pairs** on `34c101ea` recorded in `PERF_BASELINE.md` (`20260711T210616Z`); still **not** a Git win claim and **not** a hotspot optimization claim. **Multi-host** matrix still **open**. Correct-path hotspot *code* work remains optional and requires equal-work paired before/after for any win claim.
 
 ## Wave 7 — Platform matrix & long-tail
 
 Windows materialization, mount optional, large-ref packed-refs degradation docs/tests  
-**Status (2026-07-11):** **Open / residual tracked** — executable platform residual checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md). Mount paths have CI foundation (Linux FUSE smoke, Windows ProjFS smoke, macOS FSKit compile-check) but full Wave 7 certification (large-ref packed-refs, materialization edge cases, multi-host) is **not** claimed complete.
+**Status (2026-07-11):** **Open / residual tracked (docs + stress recipe advanced)** — executable platform residual checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md); packed-refs ~10k stress recipe in [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md) + `scripts/program/packed-refs-stress-recipe.sh`. Mount paths have CI foundation (Linux FUSE smoke, Windows ProjFS smoke, macOS FSKit compile-check). Full Wave 7 certification (Windows materialization edge cases, multi-host, continuous large-ref CI gate) is **not** claimed complete.
 
 ## Wave 8 — Certification
 

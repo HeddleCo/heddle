@@ -267,7 +267,7 @@ impl AgentRegistry {
     }
 
     fn write_entry_file(&self, entry: &AgentEntry) -> Result<()> {
-        std::fs::create_dir_all(&self.agents_dir)?;
+        crate::fs_atomic::create_dir_all_durable(&self.agents_dir)?;
         let path = self.entry_path(&entry.session_id)?;
         let content =
             toml::to_string_pretty(entry).map_err(|e| HeddleError::Config(e.to_string()))?;
@@ -520,7 +520,7 @@ impl AgentRegistry {
         FBuild: FnMut(&str) -> Result<AgentEntry>,
     {
         let _lock = self.write_lock()?;
-        std::fs::create_dir_all(&self.agents_dir)?;
+        crate::fs_atomic::create_dir_all_durable(&self.agents_dir)?;
 
         for dir_entry in std::fs::read_dir(&self.agents_dir)? {
             let dir_entry = dir_entry?;
@@ -574,7 +574,7 @@ impl AgentRegistry {
         F: FnMut(&str) -> Result<AgentEntry>,
     {
         let _lock = self.write_lock()?;
-        std::fs::create_dir_all(&self.agents_dir)?;
+        crate::fs_atomic::create_dir_all_durable(&self.agents_dir)?;
 
         let mut live_owner: Option<AgentEntry> = None;
         for dir_entry in std::fs::read_dir(&self.agents_dir)? {

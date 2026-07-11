@@ -229,7 +229,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
         bucket_dir: PathBuf,
         declared_object_count: Option<u64>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
+        crate::fs_atomic::create_dir_all_durable(&bucket_dir).map_err(StoreError::from)?;
         let header_offset = pack_writer.stream_position().map_err(StoreError::from)?;
 
         // Write a placeholder header with `count = 0` unless the caller knows

@@ -291,6 +291,69 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
     dir.sync_all()
 }
 
+/// Collect missing path components (deepest-first) and the deepest pre-existing
+/// parent that will hold the first new dirent. Used by durable dir creators so
+/// post-create fsync covers every new link without weakening create semantics.
+fn plan_missing_dirs(path: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
+    // Walk from `path` upward until we hit an existing directory (or run out of
+    // parents). `missing[0]` is the leaf; `missing.last()` is the shallowest new dir.
+    let mut missing: Vec<PathBuf> = Vec::new();
+    {
+        let mut cur = path;
+        loop {
+            match fs::metadata(cur) {
+                Ok(meta) if meta.is_dir() => break,
+                Ok(_) => {
+                    // Exists but is not a directory. Fall through to the create
+                    // call so the error matches the platform/create helper.
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    missing.push(cur.to_path_buf());
+                    match cur.parent() {
+                        // `Path::new("a").parent()` is `Some("")` for a single
+                        // relative component — treat empty as cwd (`.`).
+                        Some(parent) if parent.as_os_str().is_empty() => break,
+                        // Root is its own parent (`"/".parent() == Some("/")`).
+                        Some(parent) if parent != cur => cur = parent,
+                        _ => break,
+                    }
+                }
+                // Permission / IO errors walking ancestors: let the create
+                // helper surface a consistent failure for the full path.
+                Err(_) => break,
+            }
+        }
+    }
+
+    let deepest_existing = missing
+        .last()
+        .and_then(|shallowest| match shallowest.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Some(PathBuf::from(".")),
+            Some(parent) => Some(parent.to_path_buf()),
+            None => None,
+        });
+
+    (missing, deepest_existing)
+}
+
+/// Fsync newly created directories deepest-first, then the deepest pre-existing
+/// parent so each new child dirent is durable. No-op when nothing was created.
+fn sync_new_dirents(missing: &[PathBuf], deepest_existing: Option<&Path>) -> io::Result<()> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for dir in missing {
+        sync_directory(dir)?;
+    }
+    // Fsync the deepest pre-existing parent so the first new child dirent
+    // (the grandparent→shard link in the classic `blobs/ab/` case) is durable.
+    if let Some(existing) = deepest_existing {
+        sync_directory(existing)?;
+    }
+    Ok(())
+}
+
 /// Create a directory and any missing ancestors, making new dirents crash-durable.
 ///
 /// Bare [`fs::create_dir_all`] only ensures the directories exist in the live
@@ -309,66 +372,9 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 /// still proceeds. Cost is once per new path segment (typically once per
 /// object-store shard).
 pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
-    // Collect missing path components before creation so we know which new
-    // dirents need an fsync. Walk from `path` upward until we hit an existing
-    // directory (or run out of parents).
-    let mut missing: Vec<PathBuf> = Vec::new();
-    {
-        let mut cur = path;
-        loop {
-            match fs::metadata(cur) {
-                Ok(meta) if meta.is_dir() => break,
-                Ok(_) => {
-                    // Exists but is not a directory. Fall through to
-                    // `create_dir_all` so the error matches std's wording.
-                    break;
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    missing.push(cur.to_path_buf());
-                    match cur.parent() {
-                        // `Path::new("a").parent()` is `Some("")` for a single
-                        // relative component — treat empty as cwd (`.`).
-                        Some(parent) if parent.as_os_str().is_empty() => break,
-                        // Root is its own parent (`"/".parent() == Some("/")`).
-                        Some(parent) if parent != cur => cur = parent,
-                        _ => break,
-                    }
-                }
-                // Permission / IO errors walking ancestors: let create_dir_all
-                // surface a consistent failure for the full path.
-                Err(_) => break,
-            }
-        }
-    }
-
-    let deepest_existing = missing
-        .last()
-        .and_then(|shallowest| match shallowest.parent() {
-            Some(parent) if parent.as_os_str().is_empty() => Some(PathBuf::from(".")),
-            Some(parent) => Some(parent.to_path_buf()),
-            None => None,
-        });
-
+    let (missing, deepest_existing) = plan_missing_dirs(path);
     fs::create_dir_all(path)?;
-
-    if missing.is_empty() {
-        // Path already existed as a directory (or create_dir_all was a no-op).
-        // No new dirents to make durable.
-        return Ok(());
-    }
-
-    // Fsync newly created directories deepest-first so each child's dirent is
-    // durable in its parent before we move up the chain.
-    for dir in &missing {
-        sync_directory(dir)?;
-    }
-    // Fsync the deepest pre-existing parent so the first new child dirent
-    // (the grandparent→shard link in the classic `blobs/ab/` case) is durable.
-    if let Some(existing) = deepest_existing.as_deref() {
-        sync_directory(existing)?;
-    }
-
-    Ok(())
+    sync_new_dirents(&missing, deepest_existing.as_deref())
 }
 
 /// Wrap an `io::Error` raised while writing `path` so that ENOSPC carries
@@ -545,28 +551,35 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Normal, |_, _| Ok(()))
 }
 
-/// Create a directory tree with owner-only permissions on Unix (`0o700`).
+/// Create a directory tree with owner-only permissions on Unix (`0o700`),
+/// making newly created dirents crash-durable (same fsync chain as
+/// [`create_dir_all_durable`]).
 ///
 /// Used for `.heddle` / `~/.heddle` trees that hold credentials, keys, and
-/// repository secrets. On non-Unix platforms this falls back to
-/// [`fs::create_dir_all`]. Existing directories are left as-is (creation-time
-/// privacy; callers that need to tighten existing modes should do so
-/// explicitly).
+/// repository secrets. On Unix, missing ancestors are created with mode
+/// `0o700` and then fsynced deepest-first, plus the deepest pre-existing
+/// parent. On non-Unix platforms this falls back to durable
+/// [`create_dir_all_durable`] (no portable POSIX mode API). Existing
+/// directories are left as-is (creation-time privacy; callers that need to
+/// tighten existing modes should do so explicitly).
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
+        let (missing, deepest_existing) = plan_missing_dirs(path);
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         match builder.create(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(e),
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
+        sync_new_dirents(&missing, deepest_existing.as_deref())
     }
     #[cfg(not(unix))]
     {
-        fs::create_dir_all(path)
+        // No portable POSIX mode API — same durable create chain as public dirs.
+        create_dir_all_durable(path)
     }
 }
 
@@ -963,6 +976,21 @@ mod tests {
         create_private_dir_all(&target).expect("create private dir");
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "new private dir must be 0700, got {mode:o}");
+        // Intermediate ancestors created by the recursive private create must
+        // also be owner-only (DirBuilder mode applies to each new segment).
+        let mid_mode = fs::metadata(dir.path().join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mid_mode, 0o700,
+            "intermediate private ancestor must be 0700"
+        );
+        // Idempotent after durable create: re-run is success and modes stick.
+        create_private_dir_all(&target).expect("idempotent private create");
+        let mode_again = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode_again, 0o700);
     }
 
     #[cfg(unix)]
