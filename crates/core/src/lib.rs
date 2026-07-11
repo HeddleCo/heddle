@@ -12,8 +12,11 @@ pub mod fsck;
 pub mod harness_json;
 pub mod harness_policy;
 pub mod log_plan;
+pub mod marker_plan;
 pub mod merge;
+pub mod purge_plan;
 pub mod query;
+pub mod redact_plan;
 pub mod remote;
 pub mod resolve_plan;
 pub mod save;
@@ -27,6 +30,7 @@ pub mod thread_shaping;
 pub mod timeline_plan;
 pub mod undo;
 pub mod verify;
+pub mod visibility_plan;
 pub mod workflow;
 
 pub use actor::{
@@ -102,6 +106,11 @@ pub use log_plan::{
     summarize_context_line, summarize_paths, timeline_branch_reason, timeline_cursor_reason,
     timeline_label, timeline_recovery_status, timeline_tool_status, truncate_with_ellipsis, yes_no,
 };
+pub use marker_plan::{
+    MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
+    marker_create_message, marker_delete_message, marker_list_filter_matches,
+    marker_prefix_is_valid, plan_marker_delete_selector,
+};
 pub use merge::{
     GitCommitInfo, GitCommitPreview, MergeAttemptPlan, MergeOptions, MergePlan, MergeRelation,
     MergeRelationKind, MergeReport, OperatorAction as MergeOperatorAction,
@@ -116,7 +125,9 @@ pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
     TaskId, Warning, WarningSink,
 };
+pub use purge_plan::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
+pub use redact_plan::{RedactionSignatureStatus, redaction_signature_status, short_public_key};
 pub use remote::{
     ALL_THREADS_MIRROR_COVERS_NOTE, COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF,
     GIT_NOTES_VISIBILITY_WARNING, GitConfigContext, GitOverlayPushTracking, GitRemoteConfigured,
@@ -262,6 +273,7 @@ pub use verify::{
     dirty_path_count, repository_mode_label, repository_presentation, repository_setup_action_kind,
     repository_setup_guidance, verify,
 };
+pub use visibility_plan::{visibility_tier_kind, visibility_tier_label};
 pub use workflow::{
     AUTO_LAND_CONFIDENCE_RECOVERY_ACTION, AUTO_LAND_CONFIDENCE_THRESHOLD, AutoLandPolicyInput,
     LandPushOptions, LandPushPlan, LandPushPlanError, ReadyDecision, ReadyDecisionInput,

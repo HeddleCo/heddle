@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
+use heddle_core::{redaction_signature_status, short_public_key};
 use objects::{
     object::{
         ChangeId, ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateSignature,
@@ -371,13 +372,10 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
     // three-state — verified / unsigned / tampered — instead of a
     // simple boolean so auditors can distinguish "operator chose not
     // to sign" from "someone forged the file".
-    let signature_status: SignatureStatus =
-        match (&redaction.signature, verify_redaction_signature(&redaction)) {
-            (None, _) => SignatureStatus::Unsigned,
-            (Some(_), Ok(true)) => SignatureStatus::Verified,
-            (Some(_), Ok(false)) => SignatureStatus::Unsigned, // unreachable in practice
-            (Some(_), Err(_)) => SignatureStatus::Tampered,
-        };
+    let signature_status = redaction_signature_status(
+        redaction.signature.is_some(),
+        verify_redaction_signature(&redaction).map_err(|_| ()),
+    );
     let signature_algorithm = redaction.signature.as_ref().map(|s| s.algorithm.clone());
 
     #[derive(Serialize)]
@@ -447,25 +445,6 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
 }
 
 /// Three-state signature audit result. Distinct from the upstream
-/// `crypto::SignatureStatus` enum because that one is wired to states,
-/// not redactions, but the verb mapping is the same.
-#[derive(Copy, Clone, Debug)]
-enum SignatureStatus {
-    Unsigned,
-    Verified,
-    Tampered,
-}
-
-impl SignatureStatus {
-    fn label(self) -> &'static str {
-        match self {
-            SignatureStatus::Unsigned => "unsigned",
-            SignatureStatus::Verified => "verified",
-            SignatureStatus::Tampered => "tampered",
-        }
-    }
-}
-
 fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
     // We open the repo above and have `&Cli` here; `Repository::config`
     // requires a borrow, so emit JSON via the local `cli` flags. The
@@ -741,7 +720,7 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
         println!(
             "trusted {} key {} ({})",
             output.entry.algorithm,
-            short_key(&output.entry.public_key),
+            short_public_key(&output.entry.public_key),
             output.entry.label.as_deref().unwrap_or("unlabeled"),
         );
     }
@@ -776,7 +755,7 @@ fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArg
             println!(
                 "  {} {} ({})",
                 k.algorithm,
-                short_key(&k.public_key),
+                short_public_key(&k.public_key),
                 k.label.as_deref().unwrap_or("unlabeled"),
             );
         }
@@ -868,17 +847,6 @@ fn redact_trust_nothing_to_remove_advice(
         "heddle redact trust list",
         vec!["heddle redact trust list".to_string()],
     )
-}
-
-/// Short-form display for a hex-encoded public key. Same length as
-/// the redaction-id shortener: first 16 chars, which is plenty to
-/// disambiguate within a single repo's trust list.
-fn short_key(hex: &str) -> String {
-    if hex.len() <= 16 {
-        hex.to_string()
-    } else {
-        format!("{}…", &hex[..16])
-    }
 }
 
 #[cfg(test)]

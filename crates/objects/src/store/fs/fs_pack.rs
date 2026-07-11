@@ -249,7 +249,7 @@ impl FsStore {
 
     pub(super) fn install_pack_files(&self, pack_data: &[u8], index_data: &[u8]) -> Result<()> {
         let packs = packs_dir(&self.root);
-        fs::create_dir_all(&packs)?;
+        crate::fs_atomic::create_dir_all_durable(&packs)?;
 
         let pack_hash = blake3::hash(pack_data);
         let pack_name = format!("{}", pack_hash.to_hex());
@@ -288,7 +288,7 @@ impl FsStore {
         use std::io::Read;
 
         let packs = packs_dir(&self.root);
-        fs::create_dir_all(&packs)?;
+        crate::fs_atomic::create_dir_all_durable(&packs)?;
 
         // Stream-hash the pack file to derive its name. 64 KiB chunks
         // keep the hasher's working set tiny.

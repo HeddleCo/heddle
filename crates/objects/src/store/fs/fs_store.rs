@@ -329,11 +329,13 @@ impl FsStore {
 
     /// Initialize the directory structure.
     pub fn init(&self) -> Result<()> {
-        std::fs::create_dir_all(blobs_dir(&self.root))?;
-        std::fs::create_dir_all(trees_dir(&self.root))?;
-        std::fs::create_dir_all(states_dir(&self.root))?;
-        std::fs::create_dir_all(actions_dir(&self.root))?;
-        std::fs::create_dir_all(packs_dir(&self.root))?;
+        // Durable create so the object-store layout dirs survive crash
+        // between mkdir and first object write (L6 residual migration).
+        crate::fs_atomic::create_dir_all_durable(&blobs_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&trees_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&states_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&actions_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&packs_dir(&self.root))?;
         Ok(())
     }
 
