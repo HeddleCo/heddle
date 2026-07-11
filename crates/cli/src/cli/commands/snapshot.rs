@@ -4,7 +4,10 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
+use heddle_core::{
+    GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
 use objects::{
     object::{Agent, Attribution, ChangeId, Principal, Tree},
     worktree::WorktreeStatus,
@@ -481,8 +484,7 @@ fn preflight_large_capture_with_status(
     let total = status.change_count();
     let delete_count = status.deleted.len();
     let add_count = status.added.len();
-    let large_capture = total > 100 || delete_count > 25 || add_count > 100;
-    if !large_capture {
+    if !large_capture_requires_force(total, delete_count, add_count) {
         return Ok(());
     }
 
@@ -1118,9 +1120,7 @@ pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
 }
 
 fn is_default_unknown_principal(principal: &Principal) -> bool {
-    principal.name.trim().is_empty()
-        || principal.email.trim().is_empty()
-        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+    principal_lacks_accountable_identity(&principal.name, &principal.email)
 }
 
 /// Walks the `anyhow::Error` source chain looking for an underlying

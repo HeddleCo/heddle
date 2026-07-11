@@ -19,6 +19,7 @@ use heddle_core::{
         MergeReport,
         merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
     },
+    rewrite_land_action_for_default_remote, scope_action_to_repo as core_scope_action_to_repo,
     verify::MachineContractInput,
 };
 use repo::Repository;
@@ -160,20 +161,14 @@ fn merge_output_should_fail(output: &MergeOutput) -> bool {
 /// established `merge --preview` guidance for such repos.
 fn rewrite_land_recommendations_for_remote(repo: &Repository, output: &mut MergeOutput) {
     let has_push_target = heddle_core::status::default_remote_name(repo).is_some();
-    if !has_push_target {
-        return;
-    }
-    let rewrite = |action: Option<String>| -> Option<String> {
-        action.map(|action| {
-            if action.contains(" land ") && action.contains("--no-push") {
-                action.replace("--no-push", "--push")
-            } else {
-                action
-            }
-        })
-    };
-    output.operator.recommended_action = rewrite(output.operator.recommended_action.take());
-    output.operator.next_action = rewrite(output.operator.next_action.take());
+    output.operator.recommended_action = rewrite_land_action_for_default_remote(
+        output.operator.recommended_action.as_deref(),
+        has_push_target,
+    );
+    output.operator.next_action = rewrite_land_action_for_default_remote(
+        output.operator.next_action.as_deref(),
+        has_push_target,
+    );
 }
 
 fn scope_merge_recommendations_to_cli_repo(cli: &Cli, output: &mut MergeOutput) {
@@ -193,28 +188,7 @@ fn scope_merge_recommendations_to_cli_repo(cli: &Cli, output: &mut MergeOutput) 
 }
 
 fn scope_action_to_repo(action: &str, repo_path: &Path) -> String {
-    let Some(rest) = action.strip_prefix("heddle ") else {
-        return action.to_string();
-    };
-    if rest.starts_with("--repo ") || rest.starts_with("-R ") {
-        return action.to_string();
-    }
-    format!(
-        "heddle --repo {} {rest}",
-        quote_recommended_action_arg(&repo_path.display().to_string())
-    )
-}
-
-fn quote_recommended_action_arg(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'))
-    {
-        value.to_string()
-    } else {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    }
+    core_scope_action_to_repo(action, &repo_path.display().to_string())
 }
 
 fn current_thread_name(repo: &Repository) -> String {

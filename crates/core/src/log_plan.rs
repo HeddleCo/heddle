@@ -124,6 +124,42 @@ pub fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+/// Truncate a string with an ellipsis when longer than `max_len`.
+pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+/// Fit `Name <email>` attribution into `max_len` without dropping the name.
+pub fn fit_author(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    if let Some(angle) = s.find(" <") {
+        let name = &s[..angle];
+        if name.len() <= max_len {
+            return name.to_string();
+        }
+    }
+    truncate_with_ellipsis(s, max_len)
+}
+
+/// First non-empty line of content, truncated for blame/context snippets.
+pub fn summarize_context_line(content: &str) -> String {
+    let first_line = content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    if first_line.len() <= 88 {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..85])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +220,11 @@ mod tests {
         assert_eq!(session_list_status(true), "active");
         assert_eq!(session_list_status(false), "ended");
         assert_eq!(yes_no(true), "yes");
+        assert_eq!(truncate_with_ellipsis("abcdef", 5), "ab...");
+        assert_eq!(
+            fit_author("Ada Lovelace <ada@really.long.example.com>", 12),
+            "Ada Lovelace"
+        );
+        assert_eq!(summarize_context_line("\n  hello world\n"), "  hello world");
     }
 }

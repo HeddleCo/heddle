@@ -5,7 +5,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
+    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split,
+    is_manual_review_blocker, thread_move,
 };
 use objects::object::ThreadName;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
@@ -426,10 +427,6 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             thread: summary.name.clone(),
         },
     )
-}
-
-fn is_manual_review_blocker(blocker: &str) -> bool {
-    blocker.starts_with("Heavy-impact change:")
 }
 
 fn thread_resolve_next_action(

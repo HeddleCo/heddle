@@ -9,6 +9,7 @@ pub mod context;
 pub mod contract;
 pub mod diff;
 pub mod fsck;
+pub mod harness_json;
 pub mod harness_policy;
 pub mod log_plan;
 pub mod merge;
@@ -81,6 +82,12 @@ pub use diff::{
     trim_added_decorations_for_display, write_diff_patch,
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
+pub use harness_json::{
+    VerificationClaimPolicyFacts, first_value_string, map_from_pairs, merge_string_vec,
+    opencode_tool_name, opencode_tool_status, parse_relay_payload, raw_git_preservation_command,
+    repository_verification_allows_success_claim, value_array_join, value_cost_micros,
+    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
+};
 pub use harness_policy::{
     ExplicitAgentBind, HarnessFingerprint, HarnessKind, HarnessProbeDecision, SegmentRotation,
     SessionAttachDecision, SessionAttachFacts, SessionAttachRule, SessionLookupFact, SessionPolicy,
@@ -89,9 +96,9 @@ pub use harness_policy::{
     should_rotate_segment,
 };
 pub use log_plan::{
-    ReflogLine, parse_reflog_line, session_list_status, short_oid, summarize_paths,
-    timeline_branch_reason, timeline_cursor_reason, timeline_label, timeline_recovery_status,
-    timeline_tool_status, yes_no,
+    ReflogLine, fit_author, parse_reflog_line, session_list_status, short_oid,
+    summarize_context_line, summarize_paths, timeline_branch_reason, timeline_cursor_reason,
+    timeline_label, timeline_recovery_status, timeline_tool_status, truncate_with_ellipsis, yes_no,
 };
 pub use merge::{
     GitCommitInfo, GitCommitPreview, MergeAttemptPlan, MergeOptions, MergePlan, MergeRelation,
@@ -162,8 +169,9 @@ pub use status::{
     build_repository_verification_health_with_worktree_status, changes_from_worktree_status,
     changes_path_count, changes_paths, combined_verdict_axes, coordination_axis_clean,
     coordination_label, coordination_severity, fast_short_status_report, git_index_plan_for_root,
-    health_severity, human_thread_health, plain_git_status_report, resolve_coordination_with_trust,
-    status, status_combined_verdict,
+    health_severity, human_thread_health, large_capture_requires_force, plain_git_status_report,
+    principal_is_default_unknown, principal_lacks_accountable_identity,
+    resolve_coordination_with_trust, status, status_combined_verdict,
 };
 pub use thread::{
     AvailableGitRef, ThreadActorInfo, ThreadListEntry, ThreadListOptions, ThreadListReport,
@@ -220,11 +228,12 @@ pub use undo::{
     batch_status, check_redaction_redo_supported, check_redaction_undo_safe,
     check_states_reachable, check_thread_worktree_undo_safe, collect_redaction_undo_facts,
     collect_redo_required_states, collect_thread_worktree_hazards, collect_undo_required_states,
-    collect_unsupported_redo_ops, empty_history_refusal, human_undo_redo_message,
-    list_undo_history, list_undo_history_ctx, live_materialized_path_blocks_undo,
-    machine_undo_redo_message, plan_redo_apply_steps, plan_redo_batches, plan_undo_apply,
-    plan_undo_apply_steps, plan_undo_batches, require_nonempty_history, summarize_batch,
-    undo_mode_conflict, validate_undo_list_preview_modes,
+    collect_unsupported_redo_ops, empty_history_refusal, human_operation_description,
+    human_post_undo_trust_status, human_undo_redo_message, list_undo_history,
+    list_undo_history_ctx, live_materialized_path_blocks_undo, machine_undo_redo_message,
+    plan_redo_apply_steps, plan_redo_batches, plan_undo_apply, plan_undo_apply_steps,
+    plan_undo_batches, require_nonempty_history, summarize_batch, undo_mode_conflict,
+    validate_undo_list_preview_modes,
 };
 pub use verify::{
     ActionAudience, ActionTemplate, MachineContractCoverage, MachineContractInput,
@@ -244,8 +253,11 @@ pub use workflow::{
     auto_land_confidence_recovery_action, auto_land_policy_blockers, change_id_matches_display,
     classify_ready_decision, has_integration_target, integrated_land_next_action,
     integration_blocker_recommended_action, integration_blockers, is_heavy_impact_advisory,
-    is_integration_clear, land_blockers_for_preview, land_checkpoint_message, land_performed_steps,
-    land_skipped_steps, land_warnings_for_preview, non_staleness_blockers, plan_land_push,
-    ready_report_recommended_action, ready_scoped_next_action, ready_verification_preflight_blocks,
-    ready_verification_status_blocks, recovery_scope_checkout, should_squash_land,
+    is_integration_clear, is_manual_review_blocker, land_blockers_for_preview,
+    land_checkpoint_message, land_performed_steps, land_skipped_steps, land_text_step,
+    land_warnings_for_preview, non_staleness_blockers, plan_land_push,
+    quote_recommended_action_arg, ready_merge_type_label, ready_report_recommended_action,
+    ready_scoped_next_action, ready_verification_preflight_blocks,
+    ready_verification_status_blocks, recovery_scope_checkout,
+    rewrite_land_action_for_default_remote, scope_action_to_repo, should_squash_land,
 };

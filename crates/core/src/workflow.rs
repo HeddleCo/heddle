@@ -326,6 +326,80 @@ pub fn land_warnings_for_preview(preview: &ThreadPreviewReport) -> Vec<String> {
 // Land step accounting + post-integrate next action
 // ---------------------------------------------------------------------------
 
+/// Whether a land/preview blocker is the heavy-impact manual-review advisory.
+pub fn is_manual_review_blocker(blocker: &str) -> bool {
+    blocker.starts_with("Heavy-impact change:")
+}
+
+/// Human text for a land performed/skipped step token.
+pub fn land_text_step(step: &str) -> String {
+    match step {
+        "capture" => "saved".to_string(),
+        "sync" => "refreshed".to_string(),
+        "merge" => "merged".to_string(),
+        "checkpoint" => "committed".to_string(),
+        "push" => "pushed".to_string(),
+        "capture(no changes)" => "no unsaved changes".to_string(),
+        "sync(current)" => "already refreshed".to_string(),
+        "merge(blocked)" => "merge blocked".to_string(),
+        "checkpoint(not needed)" => "no Git commit needed".to_string(),
+        "checkpoint(not reached)" => "Git commit not reached".to_string(),
+        "push(not requested)" => "push not requested".to_string(),
+        "push(not reached)" => "push not reached".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Scope a `heddle …` recommended action to an explicit `--repo` path.
+pub fn scope_action_to_repo(action: &str, repo_path: &str) -> String {
+    let Some(rest) = action.strip_prefix("heddle ") else {
+        return action.to_string();
+    };
+    if rest.starts_with("--repo ") || rest.starts_with("-R ") {
+        return action.to_string();
+    }
+    format!(
+        "heddle --repo {} {rest}",
+        quote_recommended_action_arg(repo_path)
+    )
+}
+
+/// Quote a recommended-action path/arg when it is not shell-safe bare.
+pub fn quote_recommended_action_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Rewrite land `--no-push` recommendations to `--push` when a default remote exists.
+pub fn rewrite_land_action_for_default_remote(
+    action: Option<&str>,
+    has_default_remote: bool,
+) -> Option<String> {
+    let action = action?;
+    if has_default_remote && action.contains(" land ") && action.contains("--no-push") {
+        Some(action.replace("--no-push", "--push"))
+    } else {
+        Some(action.to_string())
+    }
+}
+
+/// Ready summary labels from preview merge relation strings.
+pub fn ready_merge_type_label(result: &str) -> String {
+    match result {
+        "fast_forward" => "fast-forward".to_string(),
+        "already_integrated" => "already integrated".to_string(),
+        "no_target" => "none configured".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
 /// Steps that actually ran during land.
 pub fn land_performed_steps(
     captured: bool,
@@ -783,5 +857,28 @@ mod tests {
         assert!(change_id_matches_display("abc", "abcdef", "abc"));
         assert!(change_id_matches_display("abc", "abcdef", "abcdef"));
         assert!(!change_id_matches_display("abc", "abcdef", "zzz"));
+    }
+
+    #[test]
+    fn land_text_scope_and_manual_review() {
+        assert_eq!(land_text_step("capture"), "saved");
+        assert_eq!(land_text_step("merge(blocked)"), "merge blocked");
+        assert!(is_manual_review_blocker("Heavy-impact change: Cargo.lock"));
+        assert!(!is_manual_review_blocker("stale"));
+        assert_eq!(
+            scope_action_to_repo("heddle land main", "/tmp/repo"),
+            "heddle --repo /tmp/repo land main"
+        );
+        assert_eq!(
+            rewrite_land_action_for_default_remote(Some("heddle land x --no-push"), true)
+                .as_deref(),
+            Some("heddle land x --push")
+        );
+        assert_eq!(ready_merge_type_label("fast_forward"), "fast-forward");
+        assert_eq!(
+            ready_merge_type_label("already_integrated"),
+            "already integrated"
+        );
+        assert_eq!(ready_merge_type_label("no_target"), "none configured");
     }
 }

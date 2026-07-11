@@ -10,9 +10,10 @@ use heddle_core::{
     UndoListReport, check_redaction_redo_supported, check_redaction_undo_safe,
     check_states_reachable, check_thread_worktree_undo_safe, collect_redaction_undo_facts,
     collect_redo_required_states, collect_thread_worktree_hazards, collect_undo_required_states,
-    human_undo_redo_message, list_undo_history, live_materialized_path_blocks_undo,
-    plan_redo_batches, plan_undo_apply, plan_undo_batches, summarize_batch,
-    validate_undo_list_preview_modes,
+    human_operation_description as core_human_operation_description,
+    human_post_undo_trust_status as core_human_post_undo_trust_status, human_undo_redo_message,
+    list_undo_history, live_materialized_path_blocks_undo, plan_redo_batches, plan_undo_apply,
+    plan_undo_batches, summarize_batch, validate_undo_list_preview_modes,
 };
 use objects::store::ObjectStore;
 use oplog::OpBatch;
@@ -356,10 +357,7 @@ fn print_human_history(batches: &[UndoBatchSummary]) {
 }
 
 fn human_operation_description(description: &str) -> String {
-    if description.starts_with("git checkpoint ") {
-        return "Git commit written".to_string();
-    }
-    description.to_string()
+    core_human_operation_description(description)
 }
 
 fn print_batches(batches: &[UndoBatchSummary]) {
@@ -404,11 +402,7 @@ fn print_post_undo_trust(trust: &RepositoryVerificationState) {
 }
 
 fn human_post_undo_trust_status(trust: &RepositoryVerificationState) -> String {
-    if matches!(trust.status.as_str(), "dirty_worktree" | "uncaptured") {
-        "changes to save".to_string()
-    } else {
-        trust.status.clone()
-    }
+    core_human_post_undo_trust_status(&trust.status)
 }
 
 fn preflight_undo_execution(repo: &Repository, batches: &[OpBatch]) -> Result<()> {

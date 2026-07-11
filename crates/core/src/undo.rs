@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Undo list / planning domain (inspection + batch selection + apply preflight).
+//! Undo list / planning domain (inspection + batch selection + apply preflight + human labels).
 //!
 //! Owns the **read-side** and **pure apply-path preflight** of `heddle undo`:
 //! - listing user-facing oplog batches for the current checkout scope
@@ -31,6 +31,23 @@ use crate::{
     ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract,
     schema_for_report,
 };
+
+/// Soften git-checkpoint batch descriptions for human undo listing.
+pub fn human_operation_description(description: &str) -> String {
+    if description.starts_with("git checkpoint ") {
+        return "Git commit written".to_string();
+    }
+    description.to_string()
+}
+
+/// Soften post-undo verification status for operators.
+pub fn human_post_undo_trust_status(status: &str) -> String {
+    if matches!(status, "dirty_worktree" | "uncaptured") {
+        "changes to save".to_string()
+    } else {
+        status.to_string()
+    }
+}
 
 /// Machine JSON for `heddle undo --list` (stable field names).
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]

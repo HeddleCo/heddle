@@ -3,7 +3,12 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::status::next_action::{NextActionInput, effective_next_action};
+use heddle_core::{
+    VerificationClaimPolicyFacts,
+    raw_git_preservation_command as core_raw_git_preservation_command,
+    repository_verification_allows_success_claim as core_repository_verification_allows_success_claim,
+    status::next_action::{NextActionInput, effective_next_action, non_empty_action},
+};
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
@@ -213,30 +218,22 @@ fn repository_verification_allows_success_claim(
     trust: &RepositoryVerificationState,
     policy: VerificationClaimPolicy,
 ) -> bool {
-    if trust.verified || matches!(output.status.as_str(), "blocked" | "failed") {
-        return true;
-    }
-    if policy.allow_land_publish_followup
-        && output.action == OperatorAction::Land
-        && output.status == "landed"
-        && trust.recommended_action == "heddle push"
-        && matches!(
-            trust.remote_drift.as_str(),
-            "remote_untracked" | "remote_ahead"
-        )
-    {
-        return true;
-    }
-    if policy.allow_matching_workflow_action
-        && trust.workflow_status == "ready"
-        && output
+    core_repository_verification_allows_success_claim(
+        &output.status,
+        trust.verified,
+        &trust.recommended_action,
+        &trust.remote_drift,
+        &trust.workflow_status,
+        output.action == OperatorAction::Land && output.status == "landed",
+        output
             .recommended_action
             .as_deref()
-            .is_some_and(|action| action == trust.recommended_action)
-    {
-        return true;
-    }
-    false
+            .is_some_and(|action| action == trust.recommended_action),
+        VerificationClaimPolicyFacts {
+            allow_land_publish_followup: policy.allow_land_publish_followup,
+            allow_matching_workflow_action: policy.allow_matching_workflow_action,
+        },
+    )
 }
 
 /// True when an operator envelope's `status` is a non-success terminal
@@ -332,7 +329,7 @@ impl Serialize for OperatorCommandEnvelope<'_> {
 }
 
 fn normalized_action(action: Option<&str>) -> Option<&str> {
-    action.filter(|action| !action.trim().is_empty())
+    non_empty_action(action)
 }
 
 impl super::compact::CompactProjection for OperatorCommandOutput {
@@ -698,7 +695,7 @@ fn raw_git_operation_handoff(
 }
 
 fn raw_git_preservation_command() -> String {
-    "heddle verify".to_string()
+    core_raw_git_preservation_command().to_string()
 }
 
 fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) -> String {

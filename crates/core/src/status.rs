@@ -2756,8 +2756,27 @@ fn resolve_principal(repo: &Repository, user_config: &cli_shared::UserConfig) ->
     Ok(principal)
 }
 
-fn principal_is_default_unknown(principal: &Principal) -> bool {
+/// Whether principal is the built-in unknown placeholder (exact match).
+pub fn principal_is_default_unknown(principal: &Principal) -> bool {
     principal.name == "Unknown" && principal.email == "unknown@example.com"
+}
+
+/// Broader refuse-to-capture identity check: empty fields or default unknown.
+pub fn principal_lacks_accountable_identity(name: &str, email: &str) -> bool {
+    let name = name.trim();
+    let email = email.trim();
+    name.is_empty() || email.is_empty() || (name == "Unknown" && email == "unknown@example.com")
+}
+
+/// Large-capture safety gate (Git-overlay worktree size).
+///
+/// Returns true when capture should require `--force`.
+pub fn large_capture_requires_force(
+    total_changes: usize,
+    delete_count: usize,
+    add_count: usize,
+) -> bool {
+    total_changes > 100 || delete_count > 25 || add_count > 100
 }
 
 pub fn fast_short_status_report(start: &Path) -> Result<Option<FastShortStatusReport>> {

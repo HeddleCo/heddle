@@ -12,7 +12,7 @@ use heddle_core::{
     land_blockers_for_preview as core_land_blockers_for_preview,
     land_checkpoint_message as core_land_checkpoint_message,
     land_performed_steps as core_land_performed_steps,
-    land_skipped_steps as core_land_skipped_steps,
+    land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
     land_warnings_for_preview as core_land_warnings_for_preview,
     non_staleness_blockers as core_non_staleness_blockers, plan_land_push,
     recovery_scope_checkout as core_recovery_scope_checkout,
@@ -1590,21 +1590,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
 }
 
 fn land_text_step(step: &str) -> String {
-    match step {
-        "capture" => "saved".to_string(),
-        "sync" => "refreshed".to_string(),
-        "merge" => "merged".to_string(),
-        "checkpoint" => "committed".to_string(),
-        "push" => "pushed".to_string(),
-        "capture(no changes)" => "no unsaved changes".to_string(),
-        "sync(current)" => "already refreshed".to_string(),
-        "merge(blocked)" => "merge blocked".to_string(),
-        "checkpoint(not needed)" => "no Git commit needed".to_string(),
-        "checkpoint(not reached)" => "Git commit not reached".to_string(),
-        "push(not requested)" => "push not requested".to_string(),
-        "push(not reached)" => "push not reached".to_string(),
-        other => other.to_string(),
-    }
+    core_land_text_step(step)
 }
 
 #[cfg(test)]

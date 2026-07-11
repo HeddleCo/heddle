@@ -5,6 +5,7 @@ use anyhow::Result;
 use chrono::Utc;
 use heddle_core::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
+    ready_merge_type_label as core_ready_merge_type_label,
     ready_report_recommended_action as core_ready_report_recommended_action,
     ready_scoped_next_action as core_ready_scoped_next_action, ready_verification_preflight_blocks,
     status::next_action::non_empty_action,
@@ -815,12 +816,7 @@ fn ready_checks_label(checks: &ReadyChecksSummary) -> String {
 }
 
 fn ready_merge_type_label(result: &str) -> String {
-    match result {
-        "fast_forward" => "fast-forward".to_string(),
-        "already_integrated" => "already integrated".to_string(),
-        "no_target" => "none configured".to_string(),
-        other => other.replace('_', " "),
-    }
+    core_ready_merge_type_label(result)
 }
 
 fn ready_report_recommended_action(report: &ThreadPreviewReport) -> Option<String> {
