@@ -8,6 +8,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
+#[cfg(feature = "client")]
+use heddle_core::remote_pull_failure;
 use heddle_core::{
     GitConfigContext, PullExecutionFacts, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
     RemoteInfo, RemoteListReport, build_pull_outcome, format_pull_outcome_text,
@@ -460,6 +462,14 @@ async fn pull_local(
             "domain headline: {}",
             text.headline
         );
+        // Domain detail lines (e.g. hosted state field when objects omitted).
+        for line in &text.detail_lines {
+            if let Some(state) = line.strip_prefix("state: ") {
+                println!("{}", style::field("state", &style::change_id(state)));
+            } else {
+                println!("{line}");
+            }
+        }
     }
 
     Ok(())
@@ -598,12 +608,11 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             render_pull_outcome_text(&output.outcome, &output.trust);
         }
     } else {
-        let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(map_pull_failure(PullFailure::RemoteFailed {
-            remote_thread: options.remote_thread.to_string(),
-            local_thread: options.local_thread.map(str::to_string),
-            error: err,
-        }));
+        return Err(map_pull_failure(remote_pull_failure(
+            options.remote_thread,
+            options.local_thread,
+            result.error.as_deref(),
+        )));
     }
 
     Ok(())

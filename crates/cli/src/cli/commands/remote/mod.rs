@@ -10,11 +10,15 @@ use heddle_core::{
     GitOverlayPushTracking, GitRemoteConfigured, MultiRefPushProgress, PushExecutionFacts,
     PushFailure, PushOutcome, PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker,
     build_push_outcome, first_multi_thread_push_failure, format_multi_ref_push_progress,
-    format_push_outcome_text, named_thread_tip_mismatch_failure, plan_push,
-    refuse_named_thread_tip_overwrite, uses_local_git_overlay_transport,
+    format_push_outcome_text, multi_thread_push_execution_facts, named_thread_tip_mismatch_failure,
+    plan_push, refuse_named_thread_tip_overwrite, transport_error_message,
+    uses_local_git_overlay_transport,
 };
 #[cfg(feature = "client")]
-use heddle_core::{HostedPushPlan, plan_hosted_push, uses_git_overlay_mirror_rpc};
+use heddle_core::{
+    HostedPushPlan, all_threads_mirror_coverage_note, plan_hosted_push, remote_push_failure,
+    uses_git_overlay_mirror_rpc,
+};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
@@ -676,14 +680,9 @@ fn heddle_all_threads_push_output(
     objects: usize,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let failed_threads = failures.iter().map(|(thread, _)| thread.clone()).collect();
     let outcome = build_push_outcome(
         plan,
-        PushExecutionFacts::HeddleAllThreads {
-            pushed_threads: pushed,
-            failed_threads,
-            objects,
-        },
+        multi_thread_push_execution_facts(pushed, failures, objects),
     );
     push_output_from_outcome(outcome, trust)
 }
@@ -1180,7 +1179,7 @@ async fn push_local(
         );
         crate::cli::render::write_json_stdout(&output)?;
     } else {
-        // Domain owns the unstyled line; CLI applies markers / emphasis.
+        // Domain owns unstyled text; CLI styles the primary line + detail lines.
         let trust = build_repository_verification_state(repo);
         let output = heddle_push_output(
             plan,
@@ -1201,6 +1200,9 @@ async fn push_local(
             "domain headline should name the track: {}",
             text.headline
         );
+        for line in &text.detail_lines {
+            println!("{line}");
+        }
     }
 
     Ok(())
@@ -1295,7 +1297,7 @@ async fn push_local_all_threads(
                         objects: Some(copied),
                         remote_state: None,
                     };
-                    let _ = format_multi_ref_push_progress(&event);
+                    let domain_line = format_multi_ref_push_progress(&event);
                     println!(
                         "{} pushed {} to {} ({})",
                         style::ok_marker(),
@@ -1303,14 +1305,29 @@ async fn push_local_all_threads(
                         style::bold(&thread.name),
                         style::count(copied, "object")
                     );
+                    debug_assert_eq!(
+                        domain_line,
+                        format!(
+                            "pushed {} to {} ({})",
+                            thread.state.short(),
+                            thread.name,
+                            if copied == 1 {
+                                "1 object".to_string()
+                            } else {
+                                format!("{copied} objects")
+                            }
+                        ),
+                        "styled local multi-thread success must match domain progress line"
+                    );
                 }
             }
             Err(err) => {
-                failures.push((thread.name.clone(), err.to_string()));
+                let error = transport_error_message(Some(&err.to_string()));
+                failures.push((thread.name.clone(), error.clone()));
                 if !json {
                     let event = MultiRefPushProgress::ThreadFailed {
                         thread: thread.name.clone(),
-                        error: err.to_string(),
+                        error,
                     };
                     eprintln!(
                         "{} {}",
@@ -1435,14 +1452,12 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
                 "domain headline: {}",
                 text.headline
             );
-            if options.all_threads {
+            for line in &text.detail_lines {
+                println!("{line}");
+            }
+            if let Some(note) = all_threads_mirror_coverage_note(options.all_threads) {
                 // Single Git Projection push covers every ref/thread.
-                println!(
-                    "{}",
-                    style::dim(
-                        "Git Projection push covers all threads (every ref shipped in one transfer)"
-                    )
-                );
+                println!("{}", style::dim(note));
             }
             if let Some(new_state) = result.new_state {
                 println!(
@@ -1452,11 +1467,10 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
             }
         }
     } else {
-        let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(map_push_failure(PushFailure::RemoteFailed {
-            track_name: options.track_name.to_string(),
-            error: err,
-        }));
+        return Err(map_push_failure(remote_push_failure(
+            options.track_name,
+            result.error.as_deref(),
+        )));
     }
 
     Ok(())
@@ -1537,7 +1551,8 @@ async fn push_network_all_threads(
                         remote_state: result.new_state.map(|s| s.to_string()),
                     };
                     let line = format_multi_ref_push_progress(&event);
-                    // Prefer historical two-line shape when a remote state is present.
+                    // Prefer historical two-line shape when a remote state is present;
+                    // domain still owns the single-line progress contract for asserts.
                     println!(
                         "{} pushed to {}",
                         style::ok_marker(),
@@ -1556,7 +1571,7 @@ async fn push_network_all_threads(
                 }
             }
             Ok(result) => {
-                let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
+                let err = transport_error_message(result.error.as_deref());
                 failures.push((thread.name.clone(), err.clone()));
                 if !json {
                     let event = MultiRefPushProgress::ThreadFailed {
@@ -1571,11 +1586,12 @@ async fn push_network_all_threads(
                 }
             }
             Err(err) => {
-                failures.push((thread.name.clone(), err.to_string()));
+                let error = transport_error_message(Some(&err.to_string()));
+                failures.push((thread.name.clone(), error.clone()));
                 if !json {
                     let event = MultiRefPushProgress::ThreadFailed {
                         thread: thread.name.clone(),
-                        error: err.to_string(),
+                        error,
                     };
                     eprintln!(
                         "{} {}",
@@ -1614,10 +1630,10 @@ async fn auto_provision_hosted_repo(
             AutoProvisionedHostedRepo::Existing(derived_full_path)
         }
         Err(err) => {
-            return Err(map_push_failure(PushFailure::RemoteFailed {
-                track_name: options.track_name.to_string(),
-                error: auto_provision_create_error_message(&slug, &err),
-            }));
+            return Err(map_push_failure(remote_push_failure(
+                options.track_name,
+                Some(&auto_provision_create_error_message(&slug, &err)),
+            )));
         }
     };
 

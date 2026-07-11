@@ -1341,10 +1341,74 @@ pub fn named_thread_tip_mismatch_failure(
 pub fn first_multi_thread_push_failure(failures: &[(String, String)]) -> Option<PushFailure> {
     failures
         .first()
-        .map(|(name, err)| PushFailure::RemoteFailed {
-            track_name: name.clone(),
-            error: err.clone(),
-        })
+        .map(|(name, err)| remote_push_failure(name, Some(err.as_str())))
+}
+
+/// Default message when a transport result omits or blanks its error string.
+pub const UNKNOWN_TRANSPORT_ERROR: &str = "Unknown error";
+
+/// Normalize an optional transport error string for failure construction.
+///
+/// Empty/whitespace-only strings are treated as missing (same as `None`).
+pub fn transport_error_message(error: Option<&str>) -> String {
+    match error.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => UNKNOWN_TRANSPORT_ERROR.to_string(),
+    }
+}
+
+/// Build [`PushFailure::RemoteFailed`] from a track name + optional transport error.
+pub fn remote_push_failure(track_name: &str, error: Option<&str>) -> PushFailure {
+    PushFailure::RemoteFailed {
+        track_name: track_name.to_string(),
+        error: transport_error_message(error),
+    }
+}
+
+/// Build [`PullFailure::RemoteFailed`] from pull target + optional transport error.
+pub fn remote_pull_failure(
+    remote_thread: &str,
+    local_thread: Option<&str>,
+    error: Option<&str>,
+) -> PullFailure {
+    PullFailure::RemoteFailed {
+        remote_thread: remote_thread.to_string(),
+        local_thread: local_thread.map(str::to_string),
+        error: transport_error_message(error),
+    }
+}
+
+/// Thread names reported as failed in a multi-thread push fan-out (order preserved).
+pub fn multi_thread_failed_names(failures: &[(String, String)]) -> Vec<String> {
+    failures.iter().map(|(thread, _)| thread.clone()).collect()
+}
+
+/// Sorted list of refs/threads reported as successfully pushed (JSON contract).
+///
+/// Matches the sort applied inside [`build_push_outcome`] for
+/// [`PushExecutionFacts::HeddleAllThreads`] so callers can preview `refs_written`
+/// without assembling a full outcome.
+pub fn multi_thread_reported_refs(pushed_threads: &[String]) -> Vec<String> {
+    let mut refs = pushed_threads.to_vec();
+    refs.sort();
+    refs
+}
+
+/// Assemble multi-thread push execution facts: which refs landed vs failed.
+///
+/// Pure: no I/O. `pushed_threads` are the threads that landed (unsorted;
+/// [`build_push_outcome`] sorts for JSON `refs_written`). `failures` are
+/// `(thread, error)` pairs from the fan-out loop.
+pub fn multi_thread_push_execution_facts(
+    pushed_threads: Vec<String>,
+    failures: &[(String, String)],
+    objects: usize,
+) -> PushExecutionFacts {
+    PushExecutionFacts::HeddleAllThreads {
+        pushed_threads,
+        failed_threads: multi_thread_failed_names(failures),
+        objects,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,6 +1514,22 @@ pub fn git_overlay_push_scope_description(all_threads: bool) -> &'static str {
     } else {
         "branch + refs/notes/heddle; tags skipped"
     }
+}
+
+/// Unstyled note when a single git-mirror transfer covers `--all-threads`
+/// (heddle#846 collapse: every ref ships in one pack, not a per-thread loop).
+pub const ALL_THREADS_MIRROR_COVERS_NOTE: &str =
+    "Git Projection push covers all threads (every ref shipped in one transfer)";
+
+/// Pure force / all-threads display policy for network text mode after a
+/// successful single-shot push (mirror or native single-thread).
+///
+/// Returns the unstyled all-threads coverage note when the CLI took the
+/// collapsed mirror path with `--all-threads`. Force discard warnings for
+/// git-overlay refs push remain on [`format_push_outcome_text`] via
+/// [`FORCE_DISCARD_WARNING`].
+pub fn all_threads_mirror_coverage_note(all_threads: bool) -> Option<&'static str> {
+    all_threads.then_some(ALL_THREADS_MIRROR_COVERS_NOTE)
 }
 
 /// Assemble unstyled human text from a push outcome.
@@ -2830,6 +2910,91 @@ mod tests {
                 error: "e1".into(),
             }
         );
+    }
+
+    #[test]
+    fn transport_error_message_defaults_and_trims() {
+        assert_eq!(transport_error_message(None), UNKNOWN_TRANSPORT_ERROR);
+        assert_eq!(transport_error_message(Some("")), UNKNOWN_TRANSPORT_ERROR);
+        assert_eq!(
+            transport_error_message(Some("   ")),
+            UNKNOWN_TRANSPORT_ERROR
+        );
+        assert_eq!(transport_error_message(Some(" boom ")), "boom");
+    }
+
+    #[test]
+    fn remote_push_and_pull_failure_from_transport_errors() {
+        assert_eq!(
+            remote_push_failure("main", None),
+            PushFailure::RemoteFailed {
+                track_name: "main".into(),
+                error: UNKNOWN_TRANSPORT_ERROR.into(),
+            }
+        );
+        assert_eq!(
+            remote_push_failure("feat", Some("refused")),
+            PushFailure::RemoteFailed {
+                track_name: "feat".into(),
+                error: "refused".into(),
+            }
+        );
+        assert_eq!(
+            remote_pull_failure("main", Some("local"), None),
+            PullFailure::RemoteFailed {
+                remote_thread: "main".into(),
+                local_thread: Some("local".into()),
+                error: UNKNOWN_TRANSPORT_ERROR.into(),
+            }
+        );
+        assert_eq!(
+            remote_pull_failure("main", None, Some("gone")),
+            PullFailure::RemoteFailed {
+                remote_thread: "main".into(),
+                local_thread: None,
+                error: "gone".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn multi_thread_reported_refs_and_execution_facts() {
+        let failures = [("b".into(), "e".into()), ("c".into(), "e2".into())];
+        assert_eq!(
+            multi_thread_failed_names(&failures),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            multi_thread_reported_refs(&["z".into(), "a".into()]),
+            vec!["a".to_string(), "z".to_string()]
+        );
+        let facts = multi_thread_push_execution_facts(vec!["z".into(), "a".into()], &failures, 3);
+        assert_eq!(
+            facts,
+            PushExecutionFacts::HeddleAllThreads {
+                pushed_threads: vec!["z".into(), "a".into()],
+                failed_threads: vec!["b".into(), "c".into()],
+                objects: 3,
+            }
+        );
+        let mut req = base_push_request();
+        req.all_threads = true;
+        let plan = plan_push(&req).unwrap();
+        let outcome = build_push_outcome(&plan, facts);
+        assert_eq!(
+            outcome.refs_written.as_deref(),
+            Some(["a".to_string(), "z".to_string()].as_slice())
+        );
+        assert_eq!(outcome.status, "partial");
+    }
+
+    #[test]
+    fn all_threads_mirror_coverage_note_policy() {
+        assert_eq!(
+            all_threads_mirror_coverage_note(true),
+            Some(ALL_THREADS_MIRROR_COVERS_NOTE)
+        );
+        assert_eq!(all_threads_mirror_coverage_note(false), None);
     }
 
     #[test]
