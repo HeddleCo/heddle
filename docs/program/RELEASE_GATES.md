@@ -18,7 +18,7 @@ Every gate is executable from the repo root with checked-in tooling.
 
 | Gate | Threshold | Command |
 |------|-----------|---------|
-| Format | clean | `cargo fmt --all -- --check` |
+| Format | clean | `bash scripts/program/fmt-check.sh` (`cargo +nightly fmt --all -- --check`; never stable `cargo fmt`) |
 | Clippy (default members / affected) | 0 warnings with `-D warnings` on changed packages | `cargo clippy -p <pkgs> -- -D warnings` |
 | Curated unit/integration suite | 0 unexpected fails | `bash scripts/program/run-baseline.sh --suite curated` |
 | Feature matrix (local OSS) | default features green for curated | documented in manifest |

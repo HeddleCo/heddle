@@ -7,6 +7,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Owner:** root  
 **Paths:** `docs/program/**`, `scripts/program/**`, `artifacts/baseline/**`  
+**Status (2026-07-11):** **Done** for local program foundation — contract, audit, gap map, release gates, curated manifest, runner, and first baseline recorded under `artifacts/baseline/`. Branch work continues on program tip; full platform push remains root-owned.  
 **Done when:**
 
 - Product contract, architecture audit, gap map, release gates checked in
@@ -19,43 +20,50 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 **Agent A (harness):** extend git-process lint to `core` + `git-projection`; classify oracle suite; fix harness bugs only  
 **Agent B (perf tooling):** paired-bench runner + stats JSON; inventory Criterion targets  
 **Agent C (architecture inventory):** process provenance map, OnceLock inventory, CLI→core remaining command matrix  
-**Root:** integrate, run baseline, commit
+**Root:** integrate, run baseline, commit  
+**Status (2026-07-11):** **Done** for measurement foundation — git-process lint scope, oracle classification in manifest, paired-bench + core-loop absolute harness, CLI residual inventory, and wave1/curated baseline stamps recorded. Perf **certification** (≥5 trials) still open (calibration n=3 only).
 
 ## Wave 2 — Git fidelity & verification ownership
 
 **Paths:** `crates/git-projection/**`, `crates/ingest/**`, `crates/core/src/verify*`, `crates/core/src/status*`  
 **Focus:** oracle regressions, verification single ownership, residual bridge cleanup slices from `VERIFICATION_CLEANUP_PLAN.md`  
-**Not in scope:** unrelated CLI polish
+**Not in scope:** unrelated CLI polish  
+**Status (2026-07-11):** **Substantially complete / integrated on program branch** — verification ownership and status facade moves landed (e.g. status verdict/setup guidance in core). High-signal re-cert post-wave: roundtrip-fidelity, commit-conformance, git-process-lint, formal-specs all **pass** on `b748bfd4` (`artifacts/baseline/post-wave23-merged/`). Residual bridge cleanup may continue as scoped slices; not a gate blocker for the re-cert suite.
 
 ## Wave 3 — Save / thread / workflow facade extraction
 
 **Paths:** `crates/core/src/save*`, thread-shaping, CLI `workflow`/`start`/`ready`/`land` adapters only  
-**Focus:** typed `*Options`/`*Report`; CLI becomes render/dispatch
+**Focus:** typed `*Options`/`*Report`; CLI becomes render/dispatch  
+**Status (2026-07-11):** **In progress / partial** — facade extraction slices and mid-handler exit cleanup integrated on program tip; `facade-render-free` + `lib-core` **pass** on post-wave23 re-cert. Full save/thread/workflow adapter surface not claimed complete; remaining cmd residual tracked via `docs/program/cli-domain-residual.md`.
 
 ## Wave 4 — Remotes / projection command extraction
 
 **Paths:** CLI remote modules → core/repo ops; push/pull/sync capability routing  
-**Keep:** wire protocol changes minimal unless contract broken
+**Keep:** wire protocol changes minimal unless contract broken  
+**Status:** **Not started** as a dedicated wave on this cert pass.
 
 ## Wave 5 — Concurrency / crash consistency
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
-**Focus:** property tests, fault injection suites already present
+**Focus:** property tests, fault injection suites already present  
+**Status:** **Not started / optional early slices** — not part of post-wave23 high-signal re-cert scope.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
-**Required evidence:** before/after paired timings, p95/p99, correctness held
+**Required evidence:** before/after paired timings, p95/p99, correctness held  
+**Status:** **Blocked on ≥5-trial perf cert**; calibration only (see `PERF_BASELINE.md`). Wave 2–3 high-signal correctness is green for proceeding on correct paths once cert criteria are met.
 
 ## Wave 7 — Platform matrix & long-tail
 
-Windows materialization, mount optional, large-ref packed-refs degradation docs/tests
+Windows materialization, mount optional, large-ref packed-refs degradation docs/tests  
+**Status:** **Not started.**
 
 ## Wave 8 — Certification
 
-Full curated + oracle + format + clippy + doc + perf cert (5 trials) → release gate checklist green
-
+Full curated + oracle + format + clippy + doc + perf cert (5 trials) → release gate checklist green  
+**Status (2026-07-11):** **Partial** — high-signal re-cert **7/7 green** including **fmt via `cargo +nightly`**; full curated 19-job single-stamp re-run, clippy/doc gates, and ≥5-trial perf cert still open.
 ---
 
 ## First three bounded implementation tasks (start immediately)
