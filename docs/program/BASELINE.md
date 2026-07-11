@@ -4,6 +4,7 @@
 
 | Field | Value |
 |-------|-------|
+| Commit (TODO N5 full curated re-cert) | `96a422a824655ecc681042f6c71b988987efc272` |
 | Commit (TODO R2 full curated re-cert) | `6a09ecb7ee96de9b6761c930e15103912f7d0e62` |
 | Commit (TODO #4 full curated re-cert) | `a5b1dc689c755228be15cefeaffd91dbb9dd18f3` |
 | Commit (Wave 8 full curated cert) | `d3db01439b5f245af9785871a2709786a88742b2` |
@@ -17,11 +18,13 @@
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
 | git | 2.55.0 |
-| CARGO_TARGET_DIR (TODO R2 re-cert) | `/tmp/heddle-r2-t3` |
+| CARGO_TARGET_DIR (TODO N5 re-cert) | `/tmp/heddle-n5-t3` |
+| CARGO_TARGET_DIR (TODO R2 re-cert) | `/tmp/heddle-r2-t3` (reused as `/tmp/heddle-n5-t3` for N5) |
 | CARGO_TARGET_DIR (TODO #4 re-cert) | `/tmp/heddle-todo4-target` |
 | CARGO_TARGET_DIR (Wave 8 full curated) | `/tmp/heddle-cert3-target` |
 | CARGO_TARGET_DIR (Wave 8 high-signal) | `/tmp/heddle-cert-w8` |
 | CARGO_TARGET_DIR (release perf binary) | `/tmp/heddle-todo5-target` (primary); prior `/tmp/heddle-w8-target` |
+| Isolation (TODO N5) | detached git worktree `/tmp/heddle-n5-cert` at tip `96a422a8` (`dirty=0`); artifacts under main workspace |
 | Isolation (TODO R2) | detached git worktree `/tmp/heddle-r2-cert` at tip `6a09ecb7` (`dirty=0`); artifacts under main workspace |
 | Isolation (TODO #4) | detached git worktree `/tmp/heddle-todo4-worktree` at tip (`dirty=0`); artifacts under main workspace |
 | Isolation (prior) | workspace (`/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10`) |
@@ -34,23 +37,89 @@
 | Baseline runner + classification | **Shipped** — `scripts/program/run-baseline.sh` |
 | Paired bench runner | **Shipped** — `scripts/program/paired-bench.py` |
 | CLI residual inventory | **Shipped** — `scripts/program/gen-cli-domain-residual.py` |
-| TODO R2 full curated re-cert (19 jobs) | **Green** — 19/19 pass on `6a09ecb7`; see `artifacts/baseline/todo-r2-cert-merged/summary.json` |
+| TODO N5 full curated re-cert (19 jobs) | **Green** — 19/19 pass on `96a422a8`; see `artifacts/baseline/todo-n5-cert-merged/summary.json` |
+| TODO R2 full curated re-cert (19 jobs) | **Green** (historical) — 19/19 pass on `6a09ecb7`; see `artifacts/baseline/todo-r2-cert-merged/summary.json` |
 | TODO #4 full curated re-cert (19 jobs) | **Green** (historical) — 19/19 pass on `a5b1dc68`; see `artifacts/baseline/todo4-curated-merged/summary.json` |
 | Wave 8 full curated (19 jobs) | **Green** (historical) — 19/19 pass on `d3db0143`; see `artifacts/baseline/wave-next-merged/summary.json` |
 | High-signal Wave 8 re-cert (5 jobs) | **Green** — 5/5 pass; see `artifacts/baseline/post-wave-fanout2-merged/summary.json` |
 | High-signal post–Wave 2/3 re-cert (7 jobs) | **Green** — 7/7 pass; see `artifacts/baseline/post-wave23-merged/summary.json` |
-| Full curated suite (19 jobs) | **Current stamp** — 19 pass / 0 fail (`todo-r2-cert-merged` on `6a09ecb7`); supersedes `todo4-curated-merged` |
-| Clippy (`-D warnings`) | **Pass** on `6a09ecb7` |
+| Full curated suite (19 jobs) | **Current stamp** — 19 pass / 0 fail (`todo-n5-cert-merged` on `96a422a8`); supersedes `todo-r2-cert-merged` |
+| Clippy (`-D warnings`) | **Pass** on `96a422a8` |
 | Clippy (soft, no `-D`) | **Pass** — 0 warnings |
 | `cargo doc -p heddle-core --no-deps` | **Pass** |
-| Performance certification (5 trials) | **Recorded** — n=5 absolute + paired self-pairs on tip `a5b1dc68` stamp `20260711T155225Z`; see `docs/program/PERF_BASELINE.md` (**not** a Git win claim; not re-run for TODO R2) |
+| Performance certification (5 trials) | **Recorded** — n=5 absolute + paired self-pairs on tip `a5b1dc68` stamp `20260711T155225Z`; see `docs/program/PERF_BASELINE.md` (**not** a Git win claim; not re-run for TODO N5) |
 
-## TODO R2 full curated re-cert (2026-07-11, this machine) — **current authority**
+## TODO N5 full curated re-cert (2026-07-11, this machine) — **current authority**
+
+Source: `artifacts/baseline/todo-n5-cert-merged/summary.json` after
+`bash scripts/program/run-baseline.sh --suite curated` on commit
+`96a422a824655ecc681042f6c71b988987efc272` with
+`CARGO_TARGET_DIR=/tmp/heddle-n5-t3`.
+
+**Method:** detached worktree at tip (`git worktree add --detach
+/tmp/heddle-n5-cert 96a422a8`, `dirty=0`) so concurrent dirty WIP / untracked
+artifacts in the main workspace could not poison the cert. Single full-suite run
+into `artifacts/baseline/todo-n5-cert/`; gates + merge under
+`artifacts/baseline/todo-n5-cert-merged/`.
+
+| Job | Status | Duration | Oracle |
+|-----|--------|----------|--------|
+| facade-render-free | **pass** | 27 ms | no |
+| fmt-check | **pass** | 2.4 s | no |
+| git-process-lint | **pass** | 1.9 s | yes |
+| roundtrip-fidelity | **pass** | 3.7 s | yes |
+| commit-conformance | **pass** | 2.1 s | yes |
+| git-projection-engine | **pass** | 90.8 s | yes |
+| lib-objects | **pass** | 4.3 s | no |
+| lib-refs | **pass** | 2.4 s | no |
+| lib-oplog | **pass** | 4.5 s | no |
+| lib-merge | **pass** | 5.3 s | no |
+| lib-format | **pass** | 0.8 s | no |
+| lib-crypto | **pass** | 0.6 s | no |
+| lib-core | **pass** | 3.3 s | no |
+| lib-repo | **pass** | 79.4 s | no |
+| lib-ingest | **pass** | 26.0 s | no |
+| lib-git-projection | **pass** | 4.3 s | yes |
+| cli-core-functionality | **pass** | 44.5 s | no |
+| cli-state-management | **pass** | 46.2 s | no |
+| formal-specs | **pass** | 1.1 s | yes |
+
+\*Durations on warm `CARGO_TARGET_DIR=/tmp/heddle-n5-t3` after serial `heddle-mount` + `heddle-cli` prebuild.
+
+**Aggregate curated:** **19 pass / 0 fail.** All oracle jobs green
+(git-process-lint, roundtrip-fidelity, commit-conformance, git-projection-engine,
+lib-git-projection, formal-specs). **fmt-check green.**
+
+### Extra gates (same tip / target dir / clean checkout)
+
+| Gate | Status | Notes |
+|------|--------|-------|
+| `cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings` | **pass** (exit 0) | clean on tip `96a422a8` |
+| `cargo clippy -p heddle-core -p heddle-cli --locked` | **pass** | 0 warnings |
+| `cargo doc -p heddle-core --no-deps --locked` | **pass** | |
+
+**Release-gate checklist:** curated+oracles+fmt+clippy `-D`+doc **green**.
+Perf n=5 prior stamp retained; multi-host still open. **No blockers** from this
+cert pass on tip `96a422a8`.
+
+Logs: `artifacts/baseline/todo-n5-cert-merged/logs/clippy-*.log`,
+`cargo-doc.log`, `run-baseline-suite.log`. Runner stamp:
+`artifacts/baseline/todo-n5-cert/`.
+
+**Note:** A first attempt under concurrent host load hit Swift `HeddleFSKit`
+module-cache thrash (false fails for early `heddle-cli` oracle jobs while other
+`/tmp/heddle-n5-t*` targets compiled mount in parallel). After freeing unused
+`r2` cargo targets and a serial mount/`heddle-cli` prebuild, the authoritative
+re-run above completed 19/19 green. The killed partial under
+`artifacts/baseline/todo-n5-cert-killed-partial/` is **not** authoritative.
+
+## TODO R2 full curated re-cert (historical, 2026-07-11)
 
 Source: `artifacts/baseline/todo-r2-cert-merged/summary.json` after
 `bash scripts/program/run-baseline.sh --suite curated` on commit
 `6a09ecb7ee96de9b6761c930e15103912f7d0e62` with
 `CARGO_TARGET_DIR=/tmp/heddle-r2-t3`.
+**Superseded for tip authority by TODO N5** on `96a422a8`.
 
 **Method:** detached worktree at tip (`git worktree add --detach
 /tmp/heddle-r2-cert 6a09ecb7`, `dirty=0`) so concurrent dirty WIP / untracked
@@ -84,29 +153,9 @@ into `artifacts/baseline/todo-r2-cert/`; gates + merge under
 
 **Aggregate curated:** **19 pass / 0 fail.** All oracle jobs green
 (git-process-lint, roundtrip-fidelity, commit-conformance, git-projection-engine,
-lib-git-projection, formal-specs). **fmt-check green.**
-
-### Extra gates (same tip / target dir / clean checkout)
-
-| Gate | Status | Notes |
-|------|--------|-------|
-| `cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings` | **pass** (exit 0) | clean on tip `6a09ecb7` |
-| `cargo clippy -p heddle-core -p heddle-cli --locked` | **pass** | 0 warnings |
-| `cargo doc -p heddle-core --no-deps --locked` | **pass** | |
-
-**Release-gate checklist:** curated+oracles+fmt+clippy `-D`+doc **green**.
-Perf n=5 prior stamp retained; multi-host still open. **No blockers** from this
-cert pass on tip `6a09ecb7`.
-
-Logs: `artifacts/baseline/todo-r2-cert-merged/logs/clippy-*.log`,
-`cargo-doc.log`, `run-baseline-suite.log`. Runner stamp:
-`artifacts/baseline/todo-r2-cert/`.
-
-**Note:** A first attempt hit `ENOSPC` mid-suite (false fails for
-`git-projection-engine` deep import + compile of later packages). After freeing
-obsolete `/tmp/heddle-*-target` dirs, the authoritative re-run above completed
-19/19 green. The ENOSPC partial under
-`artifacts/baseline/todo-r2-cert-enospace-partial/` is **not** authoritative.
+lib-git-projection, formal-specs). **fmt-check green.** Extra gates (clippy
+`-D`, soft clippy, cargo doc) also green on that tip. ENOSPC partial under
+`todo-r2-cert-enospace-partial/` is not authoritative.
 
 ## TODO #4 full curated re-cert (historical, 2026-07-11)
 
@@ -114,7 +163,7 @@ Source: `artifacts/baseline/todo4-curated-merged/summary.json` after
 `bash scripts/program/run-baseline.sh --suite curated` on commit
 `a5b1dc689c755228be15cefeaffd91dbb9dd18f3` with
 `CARGO_TARGET_DIR=/tmp/heddle-todo4-target`.
-**Superseded for tip authority by TODO R2** on `6a09ecb7`.
+**Superseded for tip authority by TODO N5** on `96a422a8` (was superseded by R2 on `6a09ecb7`).
 
 **Method:** detached worktree at tip (`git worktree add --detach
 /tmp/heddle-todo4-worktree HEAD`, `dirty=0`) so concurrent dirty WIP in the main
