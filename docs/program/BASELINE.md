@@ -62,7 +62,12 @@ Additional jobs via `run-baseline.sh --job …` merged into
 **Combined curated-so-far:** 16 pass / 1 fail (`fmt-check` only).  
 Oracle jobs all green: git-process-lint, roundtrip-fidelity, commit-conformance, git-projection-engine, formal-specs, lib-git-projection.
 
-Still not run in this program stamp: `cli-core-functionality`, `cli-state-management`, full `suite=perf`.
+Also green: `cli-core-functionality` (46.2 s), `cli-state-management` (45.7 s).
+
+**Full curated suite in manifest (excluding suite=perf): 18 pass / 1 fail (`fmt-check` only).**  
+See `artifacts/baseline/curated-merged/summary.json`.
+
+Still not run: full `suite=perf` (core-loop release smoke with ≥3–5 paired trials).
 
 ### Harness blockers / notes
 

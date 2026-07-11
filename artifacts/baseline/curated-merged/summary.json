@@ -1,0 +1,142 @@
+{
+  "jobs": 19,
+  "counts": {
+    "pass": 18,
+    "fail": 1
+  },
+  "results": [
+    {
+      "id": "cli-core-functionality",
+      "status": "pass",
+      "duration_ms": 46172,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-state-management",
+      "status": "pass",
+      "duration_ms": 45656,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 3228,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 39,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "fail",
+      "duration_ms": 3433,
+      "oracle": false,
+      "exit_code": 1
+    },
+    {
+      "id": "formal-specs",
+      "status": "pass",
+      "duration_ms": 2354,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 1773,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-projection-engine",
+      "status": "pass",
+      "duration_ms": 92763,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 38757,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-crypto",
+      "status": "pass",
+      "duration_ms": 18381,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-format",
+      "status": "pass",
+      "duration_ms": 3529,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-git-projection",
+      "status": "pass",
+      "duration_ms": 5709,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-ingest",
+      "status": "pass",
+      "duration_ms": 33343,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-merge",
+      "status": "pass",
+      "duration_ms": 25960,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-objects",
+      "status": "pass",
+      "duration_ms": 21062,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-oplog",
+      "status": "pass",
+      "duration_ms": 7960,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-refs",
+      "status": "pass",
+      "duration_ms": 14622,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-repo",
+      "status": "pass",
+      "duration_ms": 103860,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 4802,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ]
+}
