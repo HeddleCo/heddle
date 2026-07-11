@@ -380,42 +380,6 @@ pub(crate) fn apply_new_state(repo: &Repository, state: &State) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn filter_annotations<'a>(
-    annotations: &'a [Annotation],
-    scope: Option<&str>,
-    tag: Option<&str>,
-    include_superseded: bool,
-) -> Result<Vec<&'a Annotation>> {
-    let scope_filter = if let Some(s) = scope {
-        Some(parse_scope(Some(s))?)
-    } else {
-        None
-    };
-
-    Ok(annotations
-        .iter()
-        .filter(|annotation| {
-            if !include_superseded && annotation.status == AnnotationStatus::Superseded {
-                return false;
-            }
-            if let Some(ref scope) = scope_filter
-                && !annotation.scope.matches(scope)
-            {
-                return false;
-            }
-            if let Some(tag) = tag {
-                let Some(current) = annotation.current_revision() else {
-                    return false;
-                };
-                if !current.tags.iter().any(|candidate| candidate == tag) {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect())
-}
-
 pub(crate) fn print_context_get(
     cli: &Cli,
     target: &ContextTarget,

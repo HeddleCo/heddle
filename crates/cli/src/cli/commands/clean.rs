@@ -4,6 +4,7 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
 use anyhow::{Result, anyhow};
+use heddle_core::clean_plan::clean_result_lines;
 use objects::fs_ops::remove_path_recursively;
 use repo::Repository;
 use serde::Serialize;
@@ -118,21 +119,9 @@ fn output_result(cli: &Cli, repo: &Repository, removed: &[String], dry_run: bool
                 dry_run
             })?
         );
-    } else if removed.is_empty() {
-        if dry_run {
-            println!("Would remove: nothing to clean");
-        } else {
-            println!("Nothing to clean");
-        }
-    } else if dry_run {
-        println!("Would remove:");
-        for path in removed {
-            println!("  {}", path);
-        }
     } else {
-        println!("Removed:");
-        for path in removed {
-            println!("  {}", path);
+        for line in clean_result_lines(removed, dry_run) {
+            println!("{line}");
         }
     }
     Ok(())

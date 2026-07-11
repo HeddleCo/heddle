@@ -16,7 +16,10 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Result, anyhow};
-use grpc::heddle::v1::ProofStatus;
+use heddle_core::prove_plan::{
+    ProofStatusKind, format_unix_secs_label, proof_status_label, proof_submit_followup,
+    require_host_repo, timestamp_secs_u64,
+};
 use repo::Repository;
 
 use super::RecoveryAdvice;
@@ -77,26 +80,10 @@ async fn open_hosted_client(repo: &Repository, remote_name: &str) -> Result<Host
     Ok(client)
 }
 
-/// Validate the start-form positionals: both `host` and `repo` are required
-/// when no subcommand is given. Returns the borrowed pair or a clear error
-/// (clap can't express "required unless a subcommand is present" against a
-/// `#[command(subcommand)]` field, so we enforce it here).
-fn require_host_repo<'a>(
-    host: Option<&'a str>,
-    repo: Option<&'a str>,
-) -> Result<(&'a str, &'a str)> {
-    match (host, repo) {
-        (Some(h), Some(r)) => Ok((h, r)),
-        _ => Err(anyhow!(
-            "a host and repo are required (e.g. `heddle prove github.com owner/repo`); \
-             for other actions use `heddle prove submit <challenge_id>` or `heddle prove list`"
-        )),
-    }
-}
-
 /// `heddle prove <host> <repo>` — request a challenge and guide publishing.
 async fn cmd_prove_start(cli: &Cli, args: ProveArgs) -> Result<()> {
-    let (host, repo_arg) = require_host_repo(args.host.as_deref(), args.repo_spec.as_deref())?;
+    let (host, repo_arg) = require_host_repo(args.host.as_deref(), args.repo_spec.as_deref())
+        .map_err(|e| anyhow!(e))?;
 
     let repo = cli.open_repo()?;
     let mut client = open_hosted_client(&repo, &args.remote).await?;
@@ -138,28 +125,13 @@ async fn cmd_prove_submit(cli: &Cli, args: ProveSubmitArgs) -> Result<()> {
     let mut client = open_hosted_client(&repo, &args.remote).await?;
     let response = client.submit_proof(&args.challenge_id).await?;
 
-    let status = ProofStatus::try_from(response.status).unwrap_or(ProofStatus::Unspecified);
-    println!("Proof status: {}", status_label(status));
+    let status = ProofStatusKind::from_i32(response.status);
+    println!("Proof status: {}", proof_status_label(status));
     if !response.detail.is_empty() {
         println!("  {}", response.detail);
     }
-    match status {
-        ProofStatus::Verified => {
-            println!("Your control of the repo is verified.");
-        }
-        ProofStatus::Pending => {
-            println!(
-                "The marker was not found yet. Push the file, then retry: heddle prove submit {}",
-                args.challenge_id
-            );
-        }
-        ProofStatus::Failed => {
-            println!(
-                "Verification failed. Check the marker line + path, then retry: heddle prove submit {}",
-                args.challenge_id
-            );
-        }
-        ProofStatus::Unspecified => {}
+    if let Some(followup) = proof_submit_followup(status, &args.challenge_id) {
+        println!("{followup}");
     }
     Ok(())
 }
@@ -183,35 +155,19 @@ async fn cmd_prove_list(cli: &Cli, args: ProveListArgs) -> Result<()> {
         status = "STATUS",
     );
     for proof in &proofs {
-        let status = ProofStatus::try_from(proof.status).unwrap_or(ProofStatus::Unspecified);
+        let status = ProofStatusKind::from_i32(proof.status);
+        let when = format_unix_secs_label(timestamp_secs_u64(
+            proof.verified_at.as_ref().map(|t| t.seconds),
+        ));
         println!(
             "  {host:<20} {repo:<30} {status:<10} {when}",
             host = proof.host,
             repo = proof.repo,
-            status = status_label(status),
-            when = ts_label(&proof.verified_at),
+            status = proof_status_label(status),
+            when = when,
         );
     }
     Ok(())
-}
-
-fn status_label(status: ProofStatus) -> &'static str {
-    match status {
-        ProofStatus::Verified => "verified",
-        ProofStatus::Pending => "pending",
-        ProofStatus::Failed => "failed",
-        ProofStatus::Unspecified => "unspecified",
-    }
-}
-
-fn ts_label(ts: &Option<prost_types::Timestamp>) -> String {
-    let secs = ts.as_ref().map(|t| t.seconds.max(0) as u64).unwrap_or(0);
-    if secs == 0 {
-        return String::new();
-    }
-    chrono::DateTime::from_timestamp(secs as i64, 0)
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| secs.to_string())
 }
 
 #[cfg(test)]
@@ -303,9 +259,12 @@ mod tests {
 
     #[test]
     fn status_label_covers_every_variant() {
-        assert_eq!(status_label(ProofStatus::Verified), "verified");
-        assert_eq!(status_label(ProofStatus::Pending), "pending");
-        assert_eq!(status_label(ProofStatus::Failed), "failed");
-        assert_eq!(status_label(ProofStatus::Unspecified), "unspecified");
+        assert_eq!(proof_status_label(ProofStatusKind::Verified), "verified");
+        assert_eq!(proof_status_label(ProofStatusKind::Pending), "pending");
+        assert_eq!(proof_status_label(ProofStatusKind::Failed), "failed");
+        assert_eq!(
+            proof_status_label(ProofStatusKind::Unspecified),
+            "unspecified"
+        );
     }
 }

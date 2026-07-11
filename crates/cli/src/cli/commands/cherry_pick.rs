@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Cherry-pick command - apply specific commits.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use heddle_core::{
+    CherryPickOutcome, CherryPickResolvePlan, CherryPickSuccessFacts,
+    cherry_pick_commit_not_found_kind, cherry_pick_commit_not_found_summary,
+    cherry_pick_human_message, cherry_pick_json_status, default_cherry_pick_commit_message,
+    plan_cherry_pick_resolve,
+};
 use objects::{object::Attribution, store::ObjectStore};
 use repo::Repository;
 
@@ -25,14 +31,23 @@ pub fn cmd_cherry_pick(
         ensure_worktree_clean(&repo, "cherry-pick")?;
     }
 
-    let change_id = repo
-        .resolve_state(&commit)?
-        .ok_or_else(|| cherry_pick_commit_not_found_advice(&commit))?;
+    let resolved = repo.resolve_state(&commit)?;
+    if matches!(
+        plan_cherry_pick_resolve(resolved.is_some()),
+        CherryPickResolvePlan::NotFound
+    ) {
+        return Err(anyhow!(cherry_pick_commit_not_found_advice(&commit)));
+    }
+    let change_id = resolved.expect("not-found gate above");
 
-    let state = repo
-        .store()
-        .get_state(&change_id)?
-        .ok_or_else(|| cherry_pick_commit_not_found_advice(&commit))?;
+    let loaded = repo.store().get_state(&change_id)?;
+    if matches!(
+        plan_cherry_pick_resolve(loaded.is_some()),
+        CherryPickResolvePlan::NotFound
+    ) {
+        return Err(anyhow!(cherry_pick_commit_not_found_advice(&commit)));
+    }
+    let state = loaded.expect("not-found gate above");
 
     // Apply the tree from the cherry-picked commit
     let tree = repo.require_tree(&state.tree)?;
@@ -41,37 +56,44 @@ pub fn cmd_cherry_pick(
     apply_tree_to_worktree(&repo, &tree)?;
 
     if no_commit {
+        let facts = CherryPickSuccessFacts {
+            outcome: CherryPickOutcome::AppliedNotCommitted,
+            commit: &commit,
+            new_change_id_short: None,
+        };
         if should_output_json(cli, Some(repo.config())) {
             let envelope = serde_json::json!({
                 "output_kind": "cherry_pick",
-                "status": "applied",
+                "status": cherry_pick_json_status(facts.outcome),
                 "commit": commit,
                 "no_commit": true,
             });
             println!("{}", serde_json::to_string(&envelope)?);
         } else {
-            println!("Applied {} (not committed)", commit);
+            println!("{}", cherry_pick_human_message(&facts));
         }
     } else {
-        let cherry_message = message.unwrap_or_else(|| format!("Cherry-pick {}", commit));
+        let cherry_message = message.unwrap_or_else(|| default_cherry_pick_commit_message(&commit));
         let attribution = Attribution::human(repo.get_principal()?);
 
         let new_state = repo.snapshot_with_attribution(Some(cherry_message), None, attribution)?;
+        let new_short = new_state.change_id.short();
+        let facts = CherryPickSuccessFacts {
+            outcome: CherryPickOutcome::Committed,
+            commit: &commit,
+            new_change_id_short: Some(&new_short),
+        };
 
         if should_output_json(cli, Some(repo.config())) {
             let envelope = serde_json::json!({
                 "output_kind": "cherry_pick",
-                "status": "committed",
+                "status": cherry_pick_json_status(facts.outcome),
                 "commit": commit,
-                "new_commit": new_state.change_id.short(),
+                "new_commit": new_short,
             });
             println!("{}", serde_json::to_string(&envelope)?);
         } else {
-            println!(
-                "Cherry-picked {} as {}",
-                commit,
-                new_state.change_id.short()
-            );
+            println!("{}", cherry_pick_human_message(&facts));
         }
     }
 
@@ -80,8 +102,8 @@ pub fn cmd_cherry_pick(
 
 fn cherry_pick_commit_not_found_advice(commit: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "cherry_pick_commit_not_found",
-        format!("Refusing to cherry-pick: commit '{commit}' not found"),
+        cherry_pick_commit_not_found_kind(),
+        cherry_pick_commit_not_found_summary(commit),
         "Inspect available history with `heddle log`, then rerun cherry-pick with an existing state.",
         format!("no Heddle state matching '{commit}' was found"),
         "cherry-pick would need to write that commit tree into the worktree",

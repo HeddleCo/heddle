@@ -2,6 +2,10 @@
 //! Oplog command — operator-facing inspection and recovery.
 
 use anyhow::Result;
+use heddle_core::oplog_plan::{
+    OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
+    oplog_recover_shows_detail, plan_oplog_recover,
+};
 use oplog::OplogRecoveryReport;
 use serde::Serialize;
 
@@ -68,6 +72,26 @@ impl From<&OplogRecoveryReport> for RecoverOutput {
     }
 }
 
+fn recover_facts(report: &OplogRecoveryReport) -> OplogRecoverFacts {
+    OplogRecoverFacts {
+        already_healthy: report.already_healthy,
+        prior_recovery: report.prior_recovery,
+        strategy: report.strategy.clone(),
+        entries_recovered: report.entries_recovered,
+        entries_lost: report.entries_lost,
+        damaged_byte_start: report.damaged_byte_start,
+        damaged_byte_end: report.damaged_byte_end,
+        quarantine_path: report
+            .quarantine_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        sidecar_path: report
+            .sidecar_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+    }
+}
+
 fn cmd_oplog_recover(cli: &Cli) -> Result<()> {
     let repo = cli.open_repo()?;
     let report = repo.oplog().recover()?;
@@ -77,70 +101,20 @@ fn cmd_oplog_recover(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    if report.already_healthy && !report.prior_recovery {
-        println!(
-            "{} operation log is healthy; nothing to recover",
-            style::ok_marker()
-        );
+    let facts = recover_facts(&report);
+    let status = plan_oplog_recover(&facts);
+    println!(
+        "{} {}",
+        style::ok_marker(),
+        oplog_recover_headline_from_facts(&facts)
+    );
+
+    if !oplog_recover_shows_detail(status) {
         return Ok(());
     }
 
-    if report.prior_recovery {
-        println!(
-            "{} operation log is healthy; a prior recovery had already salvaged it",
-            style::ok_marker()
-        );
-    } else {
-        println!(
-            "{} salvaged operation log ({} strategy)",
-            style::ok_marker(),
-            report.strategy.as_deref().unwrap_or("forward-greedy")
-        );
-    }
-
-    let damaged_bytes = report
-        .damaged_byte_end
-        .saturating_sub(report.damaged_byte_start);
-    if report.prior_recovery
-        && let Some(strategy) = &report.strategy
-    {
-        println!("  {}", style::field("Strategy", strategy));
-    }
-    println!(
-        "  {}",
-        style::field("Records recovered", &report.entries_recovered.to_string())
-    );
-    println!(
-        "  {}",
-        style::field(
-            "Records lost",
-            &report
-                .entries_lost
-                .map(|count| count.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        )
-    );
-    println!(
-        "  {}",
-        style::field(
-            "Damaged byte range",
-            &format!(
-                "{}..{} ({} bytes)",
-                report.damaged_byte_start, report.damaged_byte_end, damaged_bytes
-            )
-        )
-    );
-    if let Some(quarantine) = &report.quarantine_path {
-        println!(
-            "  {}",
-            style::field("Quarantined to", &quarantine.display().to_string())
-        );
-    }
-    if let Some(sidecar) = &report.sidecar_path {
-        println!(
-            "  {}",
-            style::field("Recovery record", &sidecar.display().to_string())
-        );
+    for (label, value) in oplog_recover_detail_fields(&facts) {
+        println!("  {}", style::field(label, &value));
     }
     Ok(())
 }

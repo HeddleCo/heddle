@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
 use semantic::analysis::{
     HotEventKind, HotSpotKey, HotSpotKeyValue, HotSpotParams, analyze_hot_spots,
 };
@@ -85,7 +86,11 @@ fn cmd_semantic_hot(
         HotSpotKeyArg::File => HotSpotKey::File,
         HotSpotKeyArg::Function => HotSpotKey::Function,
     };
-    let include_kinds: Vec<HotEventKind> = kinds.iter().copied().map(map_event_kind).collect();
+    let include_kinds: Vec<HotEventKind> = kinds
+        .iter()
+        .copied()
+        .map(|arg| map_hot_event_kind(arg_to_token(arg)))
+        .collect();
 
     let params = HotSpotParams {
         limit_states: Some(limit),
@@ -114,35 +119,20 @@ fn cmd_semantic_hot(
     Ok(())
 }
 
-fn map_event_kind(arg: HotEventKindArg) -> HotEventKind {
+/// CLI clap `ValueEnum` → pure core token (boundary adapter only).
+fn arg_to_token(arg: HotEventKindArg) -> HotEventKindToken {
     match arg {
-        HotEventKindArg::FileAdded => HotEventKind::FileAdded,
-        HotEventKindArg::FileDeleted => HotEventKind::FileDeleted,
-        HotEventKindArg::FileModified => HotEventKind::FileModified,
-        HotEventKindArg::FileRenamed => HotEventKind::FileRenamed,
-        HotEventKindArg::FunctionExtracted => HotEventKind::FunctionExtracted,
-        HotEventKindArg::FunctionDeleted => HotEventKind::FunctionDeleted,
-        HotEventKindArg::FunctionRenamed => HotEventKind::FunctionRenamed,
-        HotEventKindArg::FunctionModified => HotEventKind::FunctionModified,
-        HotEventKindArg::FunctionMoved => HotEventKind::FunctionMoved,
-        HotEventKindArg::SignatureChanged => HotEventKind::SignatureChanged,
-        HotEventKindArg::DependencyChanged => HotEventKind::DependencyChanged,
-    }
-}
-
-fn human_event_kind(kind: HotEventKind) -> &'static str {
-    match kind {
-        HotEventKind::FileAdded => "file_added",
-        HotEventKind::FileDeleted => "file_deleted",
-        HotEventKind::FileModified => "file_modified",
-        HotEventKind::FileRenamed => "file_renamed",
-        HotEventKind::FunctionExtracted => "function_extracted",
-        HotEventKind::FunctionDeleted => "function_deleted",
-        HotEventKind::FunctionRenamed => "function_renamed",
-        HotEventKind::FunctionModified => "function_modified",
-        HotEventKind::FunctionMoved => "function_moved",
-        HotEventKind::SignatureChanged => "signature_changed",
-        HotEventKind::DependencyChanged => "dependency_changed",
+        HotEventKindArg::FileAdded => HotEventKindToken::FileAdded,
+        HotEventKindArg::FileDeleted => HotEventKindToken::FileDeleted,
+        HotEventKindArg::FileModified => HotEventKindToken::FileModified,
+        HotEventKindArg::FileRenamed => HotEventKindToken::FileRenamed,
+        HotEventKindArg::FunctionExtracted => HotEventKindToken::FunctionExtracted,
+        HotEventKindArg::FunctionDeleted => HotEventKindToken::FunctionDeleted,
+        HotEventKindArg::FunctionRenamed => HotEventKindToken::FunctionRenamed,
+        HotEventKindArg::FunctionModified => HotEventKindToken::FunctionModified,
+        HotEventKindArg::FunctionMoved => HotEventKindToken::FunctionMoved,
+        HotEventKindArg::SignatureChanged => HotEventKindToken::SignatureChanged,
+        HotEventKindArg::DependencyChanged => HotEventKindToken::DependencyChanged,
     }
 }
 
@@ -189,7 +179,7 @@ impl HotSpotsOutput {
                 let by_kind = spot
                     .by_kind
                     .iter()
-                    .map(|(k, v)| (human_event_kind(*k).to_string(), *v))
+                    .map(|(k, v)| (human_hot_event_kind(*k).to_string(), *v))
                     .collect();
                 HotSpotEntry {
                     key_kind,

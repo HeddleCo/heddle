@@ -4,12 +4,17 @@
 pub mod actor;
 pub mod agent_fanout;
 pub mod agent_ops;
+pub mod approval_plan;
+pub mod cherry_pick_plan;
+pub mod clean_plan;
 pub mod clone_plan;
 pub mod collapse_plan;
 pub mod context;
+pub mod context_plan;
 pub mod contract;
 pub mod diff;
 pub mod fsck;
+pub mod gc_plan;
 pub mod harness_json;
 pub mod harness_policy;
 pub mod hook_plan;
@@ -17,13 +22,17 @@ pub mod init_plan;
 pub mod log_plan;
 pub mod marker_plan;
 pub mod merge;
+pub mod oplog_plan;
+pub mod prove_plan;
 pub mod purge_plan;
 pub mod query;
 pub mod rebase_plan;
 pub mod redact_plan;
 pub mod remote;
 pub mod resolve_plan;
+pub mod revert_plan;
 pub mod save;
+pub mod semantic_plan;
 pub mod stash_plan;
 pub mod status;
 pub mod thread;
@@ -64,6 +73,23 @@ pub use agent_ops::{
     plan_agent_capture, plan_agent_ready, session_is_active, touch_agent_heartbeat,
     touch_agent_release,
 };
+pub use approval_plan::{
+    EligibilitySummary, approval_recorded_message, approval_revoked_message,
+    approvals_empty_message, approvals_header, change_id_bytes_to_string,
+    eligibility_allowed_message, eligibility_approvals_counted_message,
+    eligibility_blocked_message, format_unix_secs_display, format_unix_secs_label,
+    plan_eligibility_summary, short_change_id, timestamp_secs_u64, unmet_requirement_line,
+};
+pub use cherry_pick_plan::{
+    CherryPickOutcome, CherryPickResolvePlan, CherryPickSuccessFacts,
+    cherry_pick_commit_not_found_kind, cherry_pick_commit_not_found_summary,
+    cherry_pick_human_message, cherry_pick_json_status, cherry_pick_should_refuse_not_found,
+    cherry_pick_status_applied, cherry_pick_status_committed, default_cherry_pick_commit_message,
+    plan_cherry_pick_resolve,
+};
+pub use clean_plan::{
+    clean_empty_message, clean_path_line, clean_paths_header, clean_result_lines, clean_result_text,
+};
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
     ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight,
@@ -84,6 +110,14 @@ pub use collapse_plan::{
     CollapsePlan, collapse_has_source_states, collapse_states_required_kind, plan_collapse,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
+pub use context_plan::{
+    ContextContentPlanError, ContextRmPlanError, annotation_passes_filters,
+    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
+    context_target_kind_and_label, count_active_annotations, filter_annotations,
+    next_annotation_tags, plan_annotation_content_source, plan_context_rm,
+    suggestion_tier_human_label, suggestion_tier_token, supersede_reuses_original_scope,
+    supersede_reuses_original_target,
+};
 pub use contract::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
 };
@@ -95,6 +129,12 @@ pub use diff::{
     trim_added_decorations_for_display, write_diff_patch,
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
+pub use gc_plan::{
+    GcDryRunPlan, gc_consolidated_mirror_message, gc_dry_run_messages, gc_dry_run_pack_message,
+    gc_dry_run_prune_message, gc_pack_message, gc_pinned_redactions_message,
+    gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
+    gc_status_token, plan_gc_dry_run,
+};
 pub use harness_json::{
     VerificationClaimPolicyFacts, first_value_string, map_from_pairs, merge_string_vec,
     opencode_tool_name, opencode_tool_status, parse_relay_payload, raw_git_preservation_command,
@@ -140,6 +180,19 @@ pub use merge::{
 pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
     TaskId, Warning, WarningSink,
+};
+pub use oplog_plan::{
+    OPLOG_RECOVER_DEFAULT_STRATEGY, OplogRecoverFacts, OplogRecoverStatus,
+    oplog_recover_damaged_bytes, oplog_recover_damaged_range_display, oplog_recover_detail_fields,
+    oplog_recover_entries_lost_display, oplog_recover_headline, oplog_recover_headline_from_facts,
+    oplog_recover_shows_detail, oplog_recover_shows_strategy_field, plan_oplog_recover,
+    plan_oplog_recover_status,
+};
+// prove_plan timestamp helpers intentionally not re-exported at crate root (collide with
+// approval_plan::timestamp_secs_u64 / format_unix_secs_label). Use heddle_core::prove_plan::*.
+pub use prove_plan::{
+    HostRepoPlanError, ProofStatusKind, proof_status_label, proof_submit_followup,
+    require_host_repo,
 };
 pub use purge_plan::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
@@ -188,12 +241,23 @@ pub use resolve_plan::{
     ResolveSideSelection, contains_line_start_conflict_markers, path_is_active_conflict,
     plan_resolve_side, resolve_requires_marker_check, unresolved_conflict_paths,
 };
+pub use revert_plan::{
+    RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
+    default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
+    plan_revert, revert_has_no_changes, revert_inspect_command, revert_success_message,
+};
 pub use save::{
     CommitGitIndexPlan, GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust,
     commit_scope_text, execute_save, plan_commit_git_index, plan_commit_git_index_only,
     plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, split_git_extra_paths,
     staged_commit_summary, tree_leaf_name,
 };
+pub use semantic_plan::{
+    HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,
+    parse_hot_event_kind_token,
+};
+#[cfg(feature = "semantic")]
+pub use semantic_plan::{hot_event_kind_token, human_hot_event_kind, map_hot_event_kind};
 pub use stash_plan::{
     STASH_DEFAULT_LIST_MESSAGE, StashEntryOpPlan, StashMessageMode, StashMutationReport,
     StashOutcomeStatus, StashPushPlan, StashShowBuckets, StashShowChangeKind,
