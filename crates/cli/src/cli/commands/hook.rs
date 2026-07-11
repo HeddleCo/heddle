@@ -99,16 +99,27 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
 }
 
 fn load_hook_script(source: HookInstallSource) -> Result<String> {
+    use heddle_core::{HookInstallSourcePlan, plan_hook_install_source};
+
+    let from_file = source.from_file.is_some();
+    let from_stdin = source.from_stdin || (!from_file && !io::stdin().is_terminal());
+    // Empty stdin is detected after read; plan first for missing source.
+    match plan_hook_install_source(from_file, from_stdin, false) {
+        HookInstallSourcePlan::SourceRequired => {
+            return Err(anyhow!(hook_install_source_required_advice()));
+        }
+        HookInstallSourcePlan::EmptyStdin => {
+            // unreachable with stdin_empty=false pre-read
+        }
+        HookInstallSourcePlan::Proceed(_) => {}
+    }
+
     if let Some(path) = source.from_file {
         return std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read hook script from {}", path.display()));
     }
 
-    if source.from_stdin {
-        return read_hook_stdin().context("failed to read hook script from stdin");
-    }
-
-    if !io::stdin().is_terminal() {
+    if from_stdin {
         return read_hook_stdin().context("failed to read hook script from stdin");
     }
 
@@ -116,9 +127,14 @@ fn load_hook_script(source: HookInstallSource) -> Result<String> {
 }
 
 fn read_hook_stdin() -> Result<String> {
+    use heddle_core::{HookInstallSourcePlan, plan_hook_install_source};
+
     let mut content = String::new();
     io::stdin().read_to_string(&mut content)?;
-    if content.is_empty() {
+    if matches!(
+        plan_hook_install_source(false, true, content.is_empty()),
+        HookInstallSourcePlan::EmptyStdin
+    ) {
         return Err(anyhow!(hook_install_empty_stdin_advice()));
     }
     Ok(content)

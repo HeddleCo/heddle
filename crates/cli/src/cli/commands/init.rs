@@ -4,6 +4,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
+use heddle_core::{
+    InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_side_effects as core_init_side_effects,
+    principal_is_unconfigured as core_principal_is_unconfigured, resolve_absolute_path,
+    select_init_principal,
+};
 use objects::object::Principal;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
@@ -171,11 +176,11 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
 fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     if path.is_absolute() {
-        Ok(path.to_path_buf())
+        Ok(resolve_absolute_path(std::path::Path::new(""), path))
     } else {
-        Ok(std::env::current_dir()
-            .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {}", e))?
-            .join(path))
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {}", e))?;
+        Ok(resolve_absolute_path(&cwd, path))
     }
 }
 
@@ -230,74 +235,44 @@ fn init_principal_status(
     repo: &Repository,
     user_config: &UserConfig,
 ) -> Result<InitPrincipalStatus> {
-    if let Some(principal) = Principal::from_env()
-        && !principal_is_unconfigured(&principal)
-    {
-        return Ok(configured_principal_status("environment", principal));
+    let mut candidates: Vec<(&'static str, Principal)> = Vec::new();
+    if let Some(principal) = Principal::from_env() {
+        candidates.push(("environment", principal));
     }
-
     if let Some(config) = &repo.config().principal {
-        let principal = Principal::new(&config.name, &config.email);
-        if !principal_is_unconfigured(&principal) {
-            return Ok(configured_principal_status("repository", principal));
-        }
+        candidates.push(("repository", Principal::new(&config.name, &config.email)));
     }
-
     if repo.capability() == RepositoryCapability::GitOverlay {
-        let principal = repo.get_principal()?;
-        if !principal_is_unconfigured(&principal) {
-            return Ok(configured_principal_status("git_config", principal));
-        }
+        candidates.push(("git_config", repo.get_principal()?));
     }
-
     if let Some(config) = &user_config.principal {
-        let principal = Principal::new(&config.name, &config.email);
-        if !principal_is_unconfigured(&principal) {
-            return Ok(configured_principal_status("user_config", principal));
-        }
+        candidates.push(("user_config", Principal::new(&config.name, &config.email)));
     }
-
-    Ok(InitPrincipalStatus {
-        status: "not_configured".to_string(),
-        source: None,
-        principal: None,
-        recommended_action: Some(set_principal_command().to_string()),
-    })
+    Ok(init_principal_status_from_plan(select_init_principal(
+        &candidates,
+    )))
 }
 
-fn configured_principal_status(source: &str, principal: Principal) -> InitPrincipalStatus {
+fn init_principal_status_from_plan(plan: InitPrincipalPlan) -> InitPrincipalStatus {
     InitPrincipalStatus {
-        status: "configured".to_string(),
-        source: Some(source.to_string()),
-        principal: Some(InitPrincipalOutput {
-            name: principal.name,
-            email: principal.email,
-        }),
-        recommended_action: None,
+        status: plan.status.to_string(),
+        source: plan.source.map(str::to_string),
+        principal: match (plan.name, plan.email) {
+            (Some(name), Some(email)) => Some(InitPrincipalOutput { name, email }),
+            _ => None,
+        },
+        recommended_action: plan.recommended_action.map(str::to_string),
     }
 }
 
 fn principal_is_unconfigured(principal: &Principal) -> bool {
-    principal.name.trim().is_empty()
-        || principal.email.trim().is_empty()
-        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+    core_principal_is_unconfigured(principal)
 }
 
 fn set_principal_command() -> &'static str {
-    "heddle init --principal-name <name> --principal-email <email>"
+    SET_PRINCIPAL_COMMAND
 }
 
 fn init_side_effects(has_git: bool, principal_configured: bool) -> Vec<String> {
-    let mut side_effects = Vec::new();
-    if has_git {
-        side_effects.push("created Heddle sidecar for the existing Git repository".to_string());
-        side_effects.push("updated .git/info/exclude for Heddle metadata".to_string());
-        side_effects.push("left Git-tracked files untouched".to_string());
-    } else {
-        side_effects.push("created Heddle repository metadata".to_string());
-    }
-    if principal_configured {
-        side_effects.push("updated default principal attribution".to_string());
-    }
-    side_effects
+    core_init_side_effects(has_git, principal_configured)
 }

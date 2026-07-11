@@ -5,17 +5,21 @@ pub mod actor;
 pub mod agent_fanout;
 pub mod agent_ops;
 pub mod clone_plan;
+pub mod collapse_plan;
 pub mod context;
 pub mod contract;
 pub mod diff;
 pub mod fsck;
 pub mod harness_json;
 pub mod harness_policy;
+pub mod hook_plan;
+pub mod init_plan;
 pub mod log_plan;
 pub mod marker_plan;
 pub mod merge;
 pub mod purge_plan;
 pub mod query;
+pub mod rebase_plan;
 pub mod redact_plan;
 pub mod remote;
 pub mod resolve_plan;
@@ -76,6 +80,9 @@ pub use clone_plan::{
     validate_clone_destination, validate_clone_mode_options, validate_monorepo_clone_options,
     validate_monorepo_execution, validate_monorepo_node_execution,
 };
+pub use collapse_plan::{
+    CollapsePlan, collapse_has_source_states, collapse_states_required_kind, plan_collapse,
+};
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
@@ -101,10 +108,19 @@ pub use harness_policy::{
     detect_harness_kind, fingerprint_harness_from_hints, segment_rotation_policy,
     should_rotate_segment,
 };
+pub use hook_plan::{
+    HookInstallSourceKind, HookInstallSourcePlan, hook_install_empty_stdin_kind,
+    hook_install_source_required_kind, hook_unknown_kind, plan_hook_install_source,
+};
+pub use init_plan::{
+    InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_recommended_action, init_side_effects,
+    principal_is_unconfigured, resolve_absolute_path, select_init_principal,
+};
 pub use log_plan::{
-    ReflogLine, fit_author, parse_reflog_line, session_list_status, short_oid,
-    summarize_context_line, summarize_paths, timeline_branch_reason, timeline_cursor_reason,
-    timeline_label, timeline_recovery_status, timeline_tool_status, truncate_with_ellipsis, yes_no,
+    ReflogLine, extract_scope_bytes, fit_author, format_missing_blobs_suffix, parse_reflog_line,
+    session_list_status, short_oid, summarize_context_line, summarize_paths,
+    timeline_branch_reason, timeline_cursor_reason, timeline_label, timeline_recovery_status,
+    timeline_tool_status, truncate_with_ellipsis, yes_no,
 };
 pub use marker_plan::{
     MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
@@ -127,6 +143,11 @@ pub use objects::{
 };
 pub use purge_plan::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
+pub use rebase_plan::{
+    RebaseContinuePlan, RebaseStartFacts, RebaseStartPlan, no_rebase_in_progress_kind,
+    plan_rebase_abort, plan_rebase_continue, plan_rebase_start, rebase_target_not_found_kind,
+    rebase_target_required_kind,
+};
 pub use redact_plan::{RedactionSignatureStatus, redaction_signature_status, short_public_key};
 pub use remote::{
     ALL_THREADS_MIRROR_COVERS_NOTE, COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF,

@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use heddle_core::{CollapsePlan, plan_collapse};
 use objects::object::{ChangeId, State, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -45,7 +46,7 @@ pub fn cmd_collapse(
     let repo = cli.open_repo()?;
     let json = should_output_json(cli, Some(repo.config()));
 
-    if states.is_empty() {
+    if matches!(plan_collapse(states.len()), CollapsePlan::StatesRequired) {
         return Err(anyhow::anyhow!(collapse_requires_states_advice()));
     }
 
