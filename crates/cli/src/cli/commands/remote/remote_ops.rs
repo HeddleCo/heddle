@@ -3,15 +3,17 @@
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
+use heddle_core::{
+    GitConfigContext, RemoteInfo, RemoteListReport, list_plain_git_remotes, list_remotes,
+    merged_remote_items, show_plain_git_remote, show_remote,
+};
+// Re-export under the historical crate-local names for sibling modules.
+pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
 use objects::{
     object::{ChangeId, ThreadName, Tree},
     store::ObjectStore,
@@ -19,12 +21,7 @@ use objects::{
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::{
-    ConfigEdit, ConfigEditPlan, GitConfig, RemoteConfigSet, Repository as SleyRepository,
-    plumbing::sley_config::{
-        ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigStack, ConfigStackEntry,
-    },
-};
+use sley::{ConfigEdit, ConfigEditPlan, RemoteConfigSet, Repository as SleyRepository};
 
 use super::super::{
     action_line::print_next,
@@ -44,22 +41,6 @@ use crate::{
     git_projection_engine::{GitProjection, git_core::GitPullOutcome},
     remote::{Remote, RemoteConfig, RemoteError, RemoteTarget, resolve_remote_with_key},
 };
-
-#[derive(Serialize)]
-struct RemoteListOutput {
-    output_kind: &'static str,
-    remotes: Vec<RemoteInfoOutput>,
-}
-
-#[derive(Serialize)]
-struct RemoteInfoOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output_kind: Option<&'static str>,
-    name: String,
-    url: String,
-    source: String,
-    is_default: bool,
-}
 
 #[derive(Serialize)]
 struct RemoteMutationOutput {
@@ -627,43 +608,15 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
     match &command {
         RemoteCommands::List => {
             if let Some(probe) = build_plain_git_verification_probe(start)? {
-                let items = plain_git_remote_items(&probe.root);
-                let default = default_remote_from_items(&items);
-                let output = RemoteListOutput {
-                    output_kind: "remote_list",
-                    remotes: items
-                        .into_iter()
-                        .map(|(name, url)| {
-                            let is_default = default.as_deref() == Some(name.as_str());
-                            RemoteInfoOutput {
-                                output_kind: None,
-                                name,
-                                url,
-                                source: "git".to_string(),
-                                is_default,
-                            }
-                        })
-                        .collect(),
-                };
+                let output = list_plain_git_remotes(&probe.root);
                 render_remote_list(&output, should_output_json(cli, None))?;
                 return Ok(());
             }
         }
         RemoteCommands::Show { name } => {
             if let Some(probe) = build_plain_git_verification_probe(start)? {
-                let items = plain_git_remote_items(&probe.root);
-                let default = default_remote_from_items(&items);
-                let url = items
-                    .get(name)
-                    .cloned()
+                let output = show_plain_git_remote(&probe.root, name)
                     .ok_or_else(|| RecoveryAdvice::remote_not_found(name))?;
-                let output = RemoteInfoOutput {
-                    output_kind: Some("remote_show"),
-                    name: name.clone(),
-                    url,
-                    source: "git".to_string(),
-                    is_default: default.as_deref() == Some(name.as_str()),
-                };
                 render_remote_info(&output, should_output_json(cli, None))?;
                 return Ok(());
             }
@@ -677,32 +630,18 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
 
     match command {
         RemoteCommands::List => {
-            let items = merged_remote_items(&repo)?;
-            let default = resolved_default_remote_name(&repo)?;
-            let output = RemoteListOutput {
-                output_kind: "remote_list",
-                remotes: items
-                    .into_iter()
-                    .map(|(name, (url, source))| {
-                        let is_default = default.as_deref() == Some(name.as_str());
-                        RemoteInfoOutput {
-                            output_kind: None,
-                            name,
-                            url,
-                            source,
-                            is_default,
-                        }
-                    })
-                    .collect(),
-            };
+            let output = list_remotes(&repo)?;
             render_remote_list(&output, should_output_json(cli, Some(repo.config())))?;
             Ok(())
         }
         RemoteCommands::Add { name, url } => {
             super::preflight_native_remote_transport(&repo, Some(&url), "remote add")?;
+            // When heddle has no default yet, core's resolved default falls
+            // through to git-overlay rules (upstream / origin / sole remote),
+            // matching the previous private `git_overlay_default_remote_name`.
             let git_overlay_default_before = (repo.capability()
                 == RepositoryCapability::GitOverlay)
-                .then(|| git_overlay_default_remote_name(&repo))
+                .then(|| resolved_default_remote_name(&repo).ok().flatten())
                 .flatten();
             sync_git_overlay_remote_add(&repo, &name, &url)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
@@ -809,20 +748,8 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Show { name } => {
-            let items = merged_remote_items(&repo)?;
-            let default = resolved_default_remote_name(&repo)?;
-            let (url, source) = items
-                .get(&name)
-                .cloned()
+            let output = show_remote(&repo, &name)?
                 .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
-            let is_default = default.as_deref() == Some(name.as_str());
-            let output = RemoteInfoOutput {
-                output_kind: Some("remote_show"),
-                name,
-                url,
-                source,
-                is_default,
-            };
             render_remote_info(&output, should_output_json(cli, Some(repo.config())))?;
             Ok(())
         }
@@ -846,7 +773,7 @@ fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()
     Ok(())
 }
 
-fn render_remote_list(output: &RemoteListOutput, json: bool) -> Result<()> {
+fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(output)?);
     } else if output.remotes.is_empty() {
@@ -870,7 +797,7 @@ fn render_remote_list(output: &RemoteListOutput, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn render_remote_info(output: &RemoteInfoOutput, json: bool) -> Result<()> {
+fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(output)?);
     } else {
@@ -886,347 +813,8 @@ fn render_remote_info(output: &RemoteInfoOutput, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn resolve_default_remote_name(
-    repo: &Repository,
-    requested: Option<&str>,
-) -> Result<String> {
-    if let Some(requested) = requested {
-        return Ok(requested.to_string());
-    }
-    if let Some(default) = RemoteConfig::open(repo)
-        .map_err(anyhow::Error::new)?
-        .default_name()
-    {
-        return Ok(default.to_string());
-    }
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && let Some(default) = git_overlay_default_remote_name(repo)
-    {
-        return Ok(default);
-    }
-    Ok("origin".to_string())
-}
-
-pub(crate) fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>> {
-    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
-    if let Some(default) = cfg.default_name() {
-        return Ok(Some(default.to_string()));
-    }
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        return Ok(git_overlay_default_remote_name(repo));
-    }
-    Ok(None)
-}
-
-fn git_overlay_default_remote_name(repo: &Repository) -> Option<String> {
-    let git_remotes = git_overlay_config_remotes(repo);
-    if let Some(upstream_remote) = git_upstream_remote_name(repo) {
-        return Some(upstream_remote);
-    }
-    if git_remotes.contains_key("origin") {
-        return Some("origin".to_string());
-    }
-    if git_remotes.len() == 1 {
-        return git_remotes.keys().next().cloned();
-    }
-    None
-}
-
-fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
-    let branch = repo.git_overlay_current_branch().ok().flatten()?;
-    let git = SleyRepository::discover(repo.root()).ok()?;
-    git.config_snapshot()
-        .ok()?
-        .get("branch", Some(&branch), "remote")
-        .map(str::to_string)
-        .filter(|remote| !remote.is_empty())
-}
-
-fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
-    let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
-    let git_overlay_remotes = if repo.capability() == RepositoryCapability::GitOverlay {
-        git_overlay_config_remotes(repo)
-    } else {
-        BTreeMap::new()
-    };
-    let mut items: BTreeMap<String, (String, String)> = cfg
-        .list()
-        .into_iter()
-        .map(|(name, remote)| {
-            let source = configured_remote_source(repo, &remote.url);
-            (name, (remote.url, source.to_string()))
-        })
-        .collect();
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        for (name, url) in git_overlay_remotes {
-            items
-                .entry(name)
-                .or_insert_with(|| (url, "git-overlay".to_string()));
-        }
-    }
-    Ok(items)
-}
-
-fn configured_remote_source(repo: &Repository, url: &str) -> &'static str {
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && local_remote_path(url).is_some_and(|path| is_local_git_repository(&path))
-    {
-        "git-overlay"
-    } else {
-        "heddle"
-    }
-}
-
-fn local_remote_path(url: &str) -> Option<std::path::PathBuf> {
-    match RemoteTarget::parse(url).ok()? {
-        RemoteTarget::Local(path) => Some(path),
-        RemoteTarget::Network { .. } => None,
-    }
-}
-
-fn is_local_git_repository(path: &Path) -> bool {
-    if path.join(".git").exists() {
-        return true;
-    }
-    path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
-}
-
-fn plain_git_remote_items(root: &Path) -> BTreeMap<String, String> {
-    let Some(ctx) = GitConfigContext::discover(root) else {
-        return BTreeMap::new();
-    };
-    ctx.remotes(ctx.layered_paths())
-}
-
-fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String> {
-    if items.contains_key("origin") {
-        Some("origin".to_string())
-    } else if items.len() == 1 {
-        items.keys().next().cloned()
-    } else {
-        None
-    }
-}
-
-fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
-    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
-        return BTreeMap::new();
-    };
-    let mut paths = ctx.layered_paths();
-    paths.push(repo.heddle_dir().join("git").join("config"));
-    ctx.remotes(paths)
-}
-
-/// The resolved Git directory layout for a repository, used to read remote
-/// definitions from `.git/config` and its layered companions.
-struct GitConfigContext {
-    git_dir: PathBuf,
-    common_dir: PathBuf,
-    branch: Option<String>,
-}
-
-impl GitConfigContext {
-    fn discover(root: &Path) -> Option<Self> {
-        let git = SleyRepository::discover(root).ok()?;
-        Some(Self {
-            git_dir: git.git_dir().to_path_buf(),
-            common_dir: git.common_dir().to_path_buf(),
-            branch: git
-                .head()
-                .ok()
-                .and_then(|head| head.symbolic_target.map(|name| name.to_string()))
-                .and_then(|name| name.strip_prefix("refs/heads/").map(str::to_string)),
-        })
-    }
-
-    /// The standard repository config files, ordered highest-precedence first:
-    /// the per-worktree `config.worktree` (only when `extensions.worktreeConfig`
-    /// is enabled), then the git-dir `config`, then the shared common-dir
-    /// `config` for linked worktrees.
-    fn layered_paths(&self) -> Vec<std::path::PathBuf> {
-        let mut paths = Vec::new();
-        if self.worktree_config_enabled() {
-            paths.push(self.git_dir.join("config.worktree"));
-        }
-        paths.push(self.git_dir.join("config"));
-        if self.common_dir != self.git_dir {
-            paths.push(self.common_dir.join("config"));
-        }
-        paths
-    }
-
-    fn worktree_config_enabled(&self) -> bool {
-        let mut paths = vec![self.git_dir.join("config")];
-        if self.common_dir != self.git_dir {
-            paths.push(self.common_dir.join("config"));
-        }
-        self.load(paths)
-            .and_then(|config| config.get_bool("extensions", None, "worktreeConfig"))
-            .unwrap_or(false)
-    }
-
-    /// The file a write to remote `name` must target so the next
-    /// `remote list` read resolves the value we just wrote. The
-    /// highest-precedence file that already defines the remote, resolved
-    /// through `include.path`/`includeIf` indirection — not merely the
-    /// top-level layer that *follows* the include, whose physical text has
-    /// no `[remote]` section to edit. When no file defines the remote, the
-    /// common config — git's default target for a brand-new remote.
-    ///
-    /// Errors when the defining file lies outside the repository's Git
-    /// directory (reached via an include), so a reported-successful write is
-    /// never a silent no-op against a file heddle won't edit.
-    fn write_file_for(&self, name: &str) -> Result<std::path::PathBuf> {
-        match self.defining_files_for(name).into_iter().next() {
-            Some(path) => {
-                if !self.owns_config_file(&path) {
-                    anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, &path));
-                }
-                Ok(path)
-            }
-            None => Ok(self.common_dir.join("config")),
-        }
-    }
-
-    /// Every file that currently defines remote `name`, resolved through
-    /// includes. A remove must clear all of them, otherwise a
-    /// lower-precedence definition resurfaces — or a higher-precedence one
-    /// keeps winning — on the next read, leaving the "successful" removal
-    /// silently divergent. Errors when any defining file lies outside the
-    /// repository's Git directory rather than no-op'ing against it.
-    fn remove_files_for(&self, name: &str) -> Result<Vec<std::path::PathBuf>> {
-        let files = self.defining_files_for(name);
-        for path in &files {
-            if !self.owns_config_file(path) {
-                anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, path));
-            }
-        }
-        Ok(files)
-    }
-
-    /// The file(s) whose `[remote "<name>"]` section the reader resolves,
-    /// following `include.path`/`includeIf`. Returned highest-precedence
-    /// first, matching `remotes` read precedence (first-seen wins). The
-    /// section metadata records the file each section physically lives in,
-    /// so an include-defined remote resolves to the included file — the one
-    /// a write must edit — not the including config.
-    fn defining_files_for(&self, name: &str) -> Vec<std::path::PathBuf> {
-        let mut files = Vec::new();
-        let Some(stack) = self.config_stack() else {
-            return files;
-        };
-        for entry in stack.entries.iter().rev() {
-            if entry.section.eq_ignore_ascii_case("remote")
-                && entry.subsection.as_deref() == Some(name)
-                && let Some(path) = config_entry_origin_path(entry)
-                && !files.contains(&path)
-            {
-                files.push(path);
-            }
-        }
-        files
-    }
-
-    /// Whether heddle may rewrite `path`: only config files within the
-    /// repository's own Git directory tree (git-dir / common-dir). A section
-    /// pulled in from a file outside that tree via `include.path`/`includeIf`
-    /// (e.g. a user-global config) is not ours to edit.
-    fn owns_config_file(&self, path: &Path) -> bool {
-        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        [&self.git_dir, &self.common_dir].into_iter().any(|root| {
-            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-            target.starts_with(&root)
-        })
-    }
-
-    fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
-        let mut remotes = BTreeMap::new();
-        for path in paths {
-            let Some(config) = self.load_one(&path, true) else {
-                continue;
-            };
-            for section in &config.sections {
-                if !section.name.eq_ignore_ascii_case("remote") {
-                    continue;
-                }
-                let Some(name) = section.subsection.as_deref() else {
-                    continue;
-                };
-                let Some(url) = config_section_value(section, "url") else {
-                    continue;
-                };
-                remotes
-                    .entry(name.to_string())
-                    .or_insert_with(|| url.to_string());
-            }
-        }
-        remotes
-    }
-
-    fn load(&self, paths: Vec<PathBuf>) -> Option<GitConfig> {
-        let mut merged = GitConfig::default();
-        for path in paths.into_iter().rev() {
-            let Some(config) = self.load_one(&path, true) else {
-                continue;
-            };
-            merged.sections.extend(config.sections);
-        }
-        Some(merged)
-    }
-
-    fn config_stack(&self) -> Option<ConfigStack> {
-        let context = ConfigIncludeContext {
-            git_dir: Some(self.git_dir.clone()),
-            current_branch: self.branch.clone(),
-        };
-        let mut stack = ConfigStack::new();
-        for path in self.layered_paths().into_iter().rev() {
-            let scope = if path
-                .file_name()
-                .is_some_and(|name| name == "config.worktree")
-            {
-                ConfigScope::Worktree
-            } else {
-                ConfigScope::Local
-            };
-            stack.push_file(&path, scope, true, &context).ok()?;
-        }
-        Some(stack)
-    }
-
-    fn load_one(&self, path: &Path, follow_includes: bool) -> Option<GitConfig> {
-        let bytes = fs::read(path).ok()?;
-        let config = GitConfig::parse(&bytes).ok()?;
-        if !follow_includes {
-            return Some(config);
-        }
-        let base = path.parent().unwrap_or_else(|| Path::new("."));
-        config
-            .resolve_includes(
-                base,
-                &ConfigIncludeContext {
-                    git_dir: Some(self.git_dir.clone()),
-                    current_branch: self.branch.clone(),
-                },
-            )
-            .ok()
-    }
-}
-
-fn config_entry_origin_path(entry: &ConfigStackEntry) -> Option<PathBuf> {
-    (entry.origin.kind == ConfigOriginKind::File).then(|| PathBuf::from(&entry.origin.name))
-}
-
-fn config_section_value<'a>(
-    section: &'a sley::plumbing::sley_config::ConfigSection,
-    key: &str,
-) -> Option<&'a str> {
-    section
-        .entries
-        .iter()
-        .rev()
-        .find(|entry| entry.key.eq_ignore_ascii_case(key))
-        .and_then(|entry| entry.value.as_deref())
+fn map_included_config_error(err: heddle_core::IncludedGitRemoteConfigError) -> anyhow::Error {
+    RecoveryAdvice::git_remote_in_included_config(&err.name, &err.path).into()
 }
 
 fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Result<()> {
@@ -1236,7 +824,10 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
     validate_git_overlay_remote_name(name)?;
     let ctx = GitConfigContext::discover(repo.root())
         .context("Git-overlay remote add requires a writable Git config")?;
-    upsert_git_remote_config(repo.root(), &ctx.write_file_for(name)?, name, url)
+    let config_path = ctx
+        .write_file_for(name)
+        .map_err(map_included_config_error)?;
+    upsert_git_remote_config(repo.root(), &config_path, name, url)
 }
 
 fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
@@ -1246,7 +837,10 @@ fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
     let Some(ctx) = GitConfigContext::discover(repo.root()) else {
         return Ok(());
     };
-    for config_path in ctx.remove_files_for(name)? {
+    for config_path in ctx
+        .remove_files_for(name)
+        .map_err(map_included_config_error)?
+    {
         remove_git_remote_config(repo.root(), &config_path, name)?;
     }
     Ok(())
@@ -1318,6 +912,10 @@ struct PullNetworkOptions<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use heddle_core::plain_git_remote_items;
+
     use super::*;
 
     fn init_git(root: &Path) {
@@ -1364,110 +962,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_quoted_url_with_equals_and_strips_quotes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        fs::write(
-            tmp.path().join(".git").join("config"),
-            "[remote \"origin\"]\n\turl = \"https://example.com/repo?ref=main&a=b\"\n",
-        )
-        .unwrap();
-
-        let remotes = plain_git_remote_items(tmp.path());
-
-        assert_eq!(
-            remotes.get("origin").map(String::as_str),
-            Some("https://example.com/repo?ref=main&a=b"),
-        );
-    }
-
-    #[test]
-    fn strips_inline_comments_from_url() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        fs::write(
-            tmp.path().join(".git").join("config"),
-            "[remote \"origin\"]\n\turl = https://example.com/repo ; trailing comment\n",
-        )
-        .unwrap();
-
-        let remotes = plain_git_remote_items(tmp.path());
-
-        assert_eq!(
-            remotes.get("origin").map(String::as_str),
-            Some("https://example.com/repo"),
-        );
-    }
-
-    #[test]
-    fn follows_include_directives() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("extra.config"),
-            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
-        )
-        .unwrap();
-        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
-
-        let remotes = plain_git_remote_items(tmp.path());
-
-        assert_eq!(
-            remotes.get("upstream").map(String::as_str),
-            Some("https://example.com/upstream"),
-        );
-    }
-
-    #[test]
-    fn worktree_config_overrides_local_when_extension_enabled() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[extensions]\n\tworktreeConfig = true\n\
-             [remote \"origin\"]\n\turl = https://example.com/local\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("config.worktree"),
-            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
-        )
-        .unwrap();
-
-        let remotes = plain_git_remote_items(tmp.path());
-
-        assert_eq!(
-            remotes.get("origin").map(String::as_str),
-            Some("https://example.com/worktree"),
-        );
-    }
-
-    #[test]
-    fn ignores_worktree_config_when_extension_disabled() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        init_git(tmp.path());
-        let git_dir = tmp.path().join(".git");
-        fs::write(
-            git_dir.join("config"),
-            "[remote \"origin\"]\n\turl = https://example.com/local\n",
-        )
-        .unwrap();
-        fs::write(
-            git_dir.join("config.worktree"),
-            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
-        )
-        .unwrap();
-
-        let remotes = plain_git_remote_items(tmp.path());
-
-        assert_eq!(
-            remotes.get("origin").map(String::as_str),
-            Some("https://example.com/local"),
-        );
-    }
+    // Pure git-config read coverage lives in heddle_core::remote. These tests
+    // keep mutation/write-target invariants for the CLI git-overlay sync path.
 
     #[test]
     fn remove_clears_worktree_layer_when_extension_enabled() {
