@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack and prune operations for FsStore.
 
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::{
     FsStore,
@@ -16,6 +19,53 @@ use crate::{
         pack::{ObjectType as PackObjectType, PackBuilder},
     },
 };
+
+/// Paths of `*.pack` files in `packs_dir` that have no matching `*.idx`.
+///
+/// L8 residual: crash between durable pack and index publish can leave an
+/// unpaired pack that [`FsStore::reload_packs`] ignores. Listing supports
+/// optional GC (design: `docs/program/L8_PACK_INSTALL_JOURNAL.md` Option D).
+/// Does not delete anything.
+pub(crate) fn list_unpaired_pack_files(packs_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    if !packs_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut unpaired = Vec::new();
+    for entry in fs::read_dir(packs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pack") {
+            continue;
+        }
+        let idx = path.with_extension("idx");
+        if !idx.exists() {
+            unpaired.push(path);
+        }
+    }
+    unpaired.sort();
+    Ok(unpaired)
+}
+
+/// Remove unpaired `*.pack` files (no matching `*.idx`) under `packs_dir`.
+///
+/// Safe for correctness: loaders never open unpaired packs. Bounds L8 disk
+/// leak. Returns `(removed_count, bytes_freed)`.
+pub(crate) fn prune_unpaired_pack_files(packs_dir: &Path) -> std::io::Result<(u64, u64)> {
+    let mut removed = 0u64;
+    let mut bytes_freed = 0u64;
+    for path in list_unpaired_pack_files(packs_dir)? {
+        let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                removed += 1;
+                bytes_freed = bytes_freed.saturating_add(bytes);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((removed, bytes_freed))
+}
 
 fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
     match fs::remove_file(path) {
@@ -311,12 +361,20 @@ impl FsStore {
         // Publish pack then index. Each call fsyncs data + parent dir;
         // a crash between the two can leave a pack without its index,
         // which `reload_packs` ignores (unpaired packs are not loaded).
+        // L8 design / recovery: docs/program/L8_PACK_INSTALL_JOURNAL.md;
+        // orphan cleanup: `prune_unpaired_pack_files`.
         publish_file_durable(src_pack_path, &pack_path)?;
         publish_file_durable(src_index_path, &index_path)?;
 
         self.clear_recent_object_caches();
         self.reload_packs()?;
         Ok(())
+    }
+
+    /// Remove L8 orphan packs (`.pack` without `.idx`) from this store.
+    pub fn prune_unpaired_packs(&self) -> Result<(u64, u64)> {
+        let packs = packs_dir(&self.root);
+        Ok(prune_unpaired_pack_files(&packs)?)
     }
 
     pub(super) fn prune_loose_objects_impl(&self) -> Result<(u64, u64)> {
@@ -378,5 +436,43 @@ impl FsStore {
         }
 
         Ok((removed, bytes_freed))
+    }
+}
+
+#[cfg(test)]
+mod unpaired_pack_tests {
+    use std::fs;
+
+    use super::{list_unpaired_pack_files, prune_unpaired_pack_files};
+
+    #[test]
+    fn list_and_prune_unpaired_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs = dir.path();
+        fs::write(packs.join("aaa.pack"), b"pack-only").unwrap();
+        fs::write(packs.join("bbb.pack"), b"paired-pack").unwrap();
+        fs::write(packs.join("bbb.idx"), b"paired-idx").unwrap();
+        fs::write(packs.join("ccc.idx"), b"index-only").unwrap();
+
+        let listed = list_unpaired_pack_files(packs).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].ends_with("aaa.pack"));
+
+        let (removed, bytes) = prune_unpaired_pack_files(packs).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(bytes, b"pack-only".len() as u64);
+        assert!(!packs.join("aaa.pack").exists());
+        assert!(packs.join("bbb.pack").exists());
+        assert!(packs.join("bbb.idx").exists());
+        assert!(packs.join("ccc.idx").exists());
+        assert!(list_unpaired_pack_files(packs).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_packs_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(list_unpaired_pack_files(&missing).unwrap().is_empty());
+        assert_eq!(prune_unpaired_pack_files(&missing).unwrap(), (0, 0));
     }
 }

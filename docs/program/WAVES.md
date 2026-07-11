@@ -46,14 +46,14 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
 **Focus:** property tests, fault injection suites already present  
-**Status (2026-07-11):** **Mostly complete on program tip (L8 residual only)** — **L6** grandparent-dirent durability shipped across objects + production refs/oplog dir creates; **L7** finalize fsyncs staged pack/index (`SyncData` + index parent dirent); publish still re-fsyncs at install. Residual: tests-only bare `create_dir_all`, Windows dir fsync platform no-op, **L8** unpaired pack-then-index window (accepted). Not a Wave 8 tip-correctness gate blocker.
+**Status (2026-07-11):** **Mostly complete on program tip (L8 residual mitigated by design + GC foundation)** — **L6**/**L7** shipped; **L8** install window documented in [`L8_PACK_INSTALL_JOURNAL.md`](L8_PACK_INSTALL_JOURNAL.md) with Option D helpers (`prune_unpaired_packs`). Full intent journal still optional. Residual: tests-only bare `create_dir_all`, Windows dir fsync no-op, journal not implemented. Not a Wave 8 tip-correctness gate blocker.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
 **Required evidence:** before/after paired timings, p95/p99, correctness held  
-**Status (2026-07-11):** **Measurement residual advanced; multi-host still open** — tip re-stamp **n=5 absolute + A==B self-pairs** on `34c101ea` recorded in `PERF_BASELINE.md` (`20260711T210616Z`); still **not** a Git win claim and **not** a hotspot optimization claim. **Multi-host** matrix still **open**. Correct-path hotspot *code* work remains optional and requires equal-work paired before/after for any win claim.
+**Status (2026-07-11):** **Measurement residual advanced; multi-host still open** — tip re-stamp **n=5 absolute + A==B self-pairs** on `34c101ea` recorded in `PERF_BASELINE.md` (`20260711T210616Z`); still **not** a Git win claim and **not** a hotspot optimization claim. **Multi-host prep shipped** ([`MULTI_HOST_PERF.md`](MULTI_HOST_PERF.md), matrix stub, `scripts/program/multi-host-perf-prep.sh`); matrix **not certified** until ≥2 hosts complete the recipe. Correct-path hotspot *code* work remains optional and requires equal-work paired before/after for any win claim.
 
 ## Wave 7 — Platform matrix & long-tail
 

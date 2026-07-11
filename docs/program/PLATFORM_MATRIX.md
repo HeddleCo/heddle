@@ -128,14 +128,15 @@ Treat items as done only when evidence is checked in (tests, CI job, or program 
 
 - [x] Equal-work tip re-stamp with A==B self-pairs (measurement residual).  
   **Evidence:** `PERF_BASELINE.md` primary `20260711T210616Z` on `34c101ea` (n=5 absolute + A==B). Hotspot *code* changes still need paired before/after if attempted.
-- [ ] Multi-host or quieter-host perf sample before external speed claims.
+- [ ] Multi-host or quieter-host perf sample before external speed claims.  
+  **Prep:** [`MULTI_HOST_PERF.md`](MULTI_HOST_PERF.md) + [`MULTI_HOST_PERF_MATRIX.md`](MULTI_HOST_PERF_MATRIX.md) + `scripts/program/multi-host-perf-prep.sh`. Residual open until ≥2 host stamps on one commit.
 
 ### Wave 5 handoff (adjacent)
 
 - [x] L6 `create_dir_all_durable` (or equivalent) landed in objects + tests; residual notes remain in GAP_MAP L6 (not a silent “no residual”).  
   **Evidence:** GAP_MAP L6 **Shipped on program tip**; capability row above. Windows dir fsync no-op called out.
-- [x] L7 finalize fsync shipped; L8 remains accepted optional residual.  
-  **Evidence:** GAP_MAP L7 **Shipped**; L8 unpaired pack-then-index window still acceptable.
+- [x] L7 finalize fsync shipped; L8 design + Option D foundation.  
+  **Evidence:** GAP_MAP L7 **Shipped**; [`L8_PACK_INSTALL_JOURNAL.md`](L8_PACK_INSTALL_JOURNAL.md); `FsStore::prune_unpaired_packs` helpers. Intent journal still optional.
 
 ---
 

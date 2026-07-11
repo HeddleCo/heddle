@@ -222,7 +222,9 @@ bash scripts/program/core-loop-bench.sh \
 
 ## Remaining risks / limits
 
-- Single-host sample; multi-host matrix still **open**.
+- Single-host sample; multi-host matrix still **open** (prep:
+  [`MULTI_HOST_PERF.md`](MULTI_HOST_PERF.md), living table
+  [`MULTI_HOST_PERF_MATRIX.md`](MULTI_HOST_PERF_MATRIX.md)).
 - Process spawn overhead dominates the fastest ops (`help` ~10–20 ms).
 - Fixture is synthetic equal-work, not a large monorepo or realworld Git import.
 - No Git comparison was performed; do not rephrase these numbers as “faster
