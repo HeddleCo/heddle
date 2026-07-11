@@ -5,7 +5,6 @@ use anyhow::{Context, Result, anyhow};
 use heddle_core::{
     AutoLandPolicyInput, LandPushOptions, LandPushPlanError,
     auto_land_policy_blockers as core_auto_land_policy_blockers,
-    change_id_matches_display as core_change_id_matches_display,
     integrated_land_next_action as core_integrated_land_next_action,
     integration_blocker_recommended_action as core_integration_blocker_recommended_action,
     integration_blockers as core_integration_blockers,
@@ -1283,10 +1282,6 @@ fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) ->
 
 fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
     core_op_targets_merge_state(op, merge_state)
-}
-
-fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {
-    core_change_id_matches_display(&id.short(), &id.to_string_full(), display)
 }
 
 fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {

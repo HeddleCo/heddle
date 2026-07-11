@@ -7,7 +7,6 @@ use heddle_core::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
     ready_freshness_summary as core_ready_freshness_summary,
     ready_integration_summary as core_ready_integration_summary,
-    ready_merge_type_label as core_ready_merge_type_label,
     ready_merge_type_summary as core_ready_merge_type_summary,
     ready_report_recommended_action as core_ready_report_recommended_action,
     ready_scoped_next_action as core_ready_scoped_next_action,
@@ -799,10 +798,6 @@ fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
 
 fn ready_checks_label(checks: &ReadyChecksSummary) -> String {
     format!("{} ({})", checks.status.replace('_', " "), checks.reason)
-}
-
-fn ready_merge_type_label(result: &str) -> String {
-    core_ready_merge_type_label(result)
 }
 
 fn ready_report_recommended_action(report: &ThreadPreviewReport) -> Option<String> {
