@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git Projection command implementations.
 
-use std::{collections::BTreeMap, fs, path::Path, time::Instant};
+use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
