@@ -9,9 +9,10 @@ use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use heddle_core::{
-    GitConfigContext, PullExecutionFacts, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
-    RemoteListReport, build_pull_outcome, list_plain_git_remotes, list_remotes,
-    merged_remote_items, plan_pull, show_plain_git_remote, show_remote,
+    GitConfigContext, PullExecutionFacts, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
+    RemoteInfo, RemoteListReport, build_pull_outcome, format_pull_outcome_text,
+    list_plain_git_remotes, list_remotes, merged_remote_items, plan_pull, pull_should_materialize,
+    show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
@@ -127,6 +128,108 @@ fn heddle_pull_output(
     PullOutput { outcome, trust }
 }
 
+/// Map a typed [`PullFailure`] to RecoveryAdvice / anyhow for CLI exit.
+fn map_pull_failure(failure: PullFailure) -> anyhow::Error {
+    match failure {
+        PullFailure::Preflight(blocker) => {
+            super::map_remote_preflight_blocker(blocker, "pull", None)
+        }
+        PullFailure::LocalLazyUnsupported { source_path } => anyhow::anyhow!(
+            RecoveryAdvice::local_lazy_pull_unsupported(std::path::Path::new(&source_path))
+        ),
+        PullFailure::RemoteFailed {
+            remote_thread,
+            local_thread,
+            error,
+        } => {
+            #[cfg(feature = "client")]
+            {
+                anyhow::anyhow!(RecoveryAdvice::remote_pull_failed(
+                    &remote_thread,
+                    local_thread.as_deref(),
+                    &error,
+                ))
+            }
+            #[cfg(not(feature = "client"))]
+            {
+                let _ = local_thread;
+                anyhow::anyhow!("Pull failed from {remote_thread}: {error}")
+            }
+        }
+    }
+}
+
+/// Print unstyled domain pull text with CLI markers / emphasis.
+fn render_pull_outcome_text(outcome: &PullOutcome, trust: &RepositoryVerificationState) {
+    let text = format_pull_outcome_text(outcome, 8);
+    if outcome.changed {
+        if outcome.transport == "git" {
+            println!(
+                "{} pulled from {}",
+                style::ok_marker(),
+                style::bold(&outcome.remote)
+            );
+        } else if let (Some(state), Some(objects)) = (&outcome.state, outcome.objects) {
+            let thread = outcome.thread.as_deref().unwrap_or("thread");
+            println!(
+                "{} pulled {} from {} ({})",
+                style::ok_marker(),
+                style::change_id(state),
+                style::bold(thread),
+                style::count(objects, "object")
+            );
+        } else {
+            println!(
+                "{} pulled from {}",
+                style::ok_marker(),
+                style::bold(outcome.thread.as_deref().unwrap_or(outcome.remote.as_str()))
+            );
+            for line in &text.detail_lines {
+                if let Some(state) = line.strip_prefix("state: ") {
+                    println!("{}", style::field("state", &style::change_id(state)));
+                } else {
+                    println!("{line}");
+                }
+            }
+            // Workspace line for heddle hosted success is not historical; skip.
+            return;
+        }
+    } else {
+        println!(
+            "{} already up to date with {}; repository verification checked below",
+            style::ok_marker(),
+            style::bold(&outcome.remote)
+        );
+    }
+
+    if outcome.transport == "git" {
+        for line in &text.detail_lines {
+            if let Some(branch) = line.strip_prefix("Branch: ") {
+                if let Some((name, rest)) = branch.split_once(" at ") {
+                    println!("Branch: {} at {rest}", style::bold(name));
+                } else {
+                    println!("Branch: {}", style::bold(branch));
+                }
+            } else if let Some(rest) = line.strip_prefix("Imported: ") {
+                // rest is "N new state(s)" — re-style via count when parseable
+                println!("Imported: {rest}");
+            } else if let Some(rest) = line.strip_prefix("Scanned: ") {
+                println!("Scanned: {rest}");
+            } else {
+                println!("{line}");
+            }
+        }
+        if !trust.verified {
+            println!("Workspace: {}", style::warn(&trust.status));
+            if !trust.recommended_action.is_empty() {
+                print_next(&trust.recommended_action);
+            }
+        } else {
+            println!("Workspace: verified");
+        }
+    }
+}
+
 /// Execute pull command.
 ///
 /// Pure orchestration (`plan_pull`) runs first; network / git I/O bodies stay
@@ -180,78 +283,22 @@ pub async fn cmd_pull(
         let changed_paths =
             changed_paths_between_states(&repo, old_state.as_ref(), new_state.as_ref())?;
         let verification = build_repository_verification_state(&repo);
+        let output = git_overlay_pull_output(GitOverlayPullOutputInput {
+            plan: plan.clone(),
+            remote: remote_name.clone(),
+            branch,
+            old_git_head,
+            new_git_head,
+            old_state,
+            new_state,
+            changed_paths,
+            outcome,
+            trust: verification,
+        });
         if should_output_json(cli, Some(repo.config())) {
-            let output = git_overlay_pull_output(GitOverlayPullOutputInput {
-                plan: plan.clone(),
-                remote: remote_name,
-                branch,
-                old_git_head,
-                new_git_head,
-                old_state,
-                new_state,
-                changed_paths,
-                outcome,
-                trust: verification,
-            });
             crate::cli::render::write_json_stdout(&output)?;
         } else {
-            if outcome.changed {
-                println!(
-                    "{} pulled from {}",
-                    style::ok_marker(),
-                    style::bold(&remote_name)
-                );
-            } else {
-                println!(
-                    "{} already up to date with {}; repository verification checked below",
-                    style::ok_marker(),
-                    style::bold(&remote_name)
-                );
-            }
-            if let Some(branch) = &branch {
-                if outcome.changed {
-                    println!("Branch: {}", style::bold(branch));
-                } else if let Some(head) = &new_git_head {
-                    println!("Branch: {} at {}", style::bold(branch), short_oid(head));
-                }
-            }
-            match (&old_git_head, &new_git_head) {
-                (Some(old), Some(new)) if old != new => {
-                    println!("Git: {} -> {}", short_oid(old), short_oid(new));
-                }
-                (Some(head), Some(_)) if outcome.changed => {
-                    println!("Git: {}", short_oid(head));
-                }
-                _ => {}
-            }
-            println!(
-                "Imported: {}",
-                style::count(outcome.states_created, "new state")
-            );
-            println!(
-                "Scanned: {} across branches + refs/notes/heddle",
-                style::count(outcome.commits_seen, "Git commit object")
-            );
-            if outcome.materialized_checkout {
-                println!("Worktree: materialized checkout");
-            }
-            if outcome.changed {
-                println!("Changed paths: {}", changed_paths.len());
-                for path in changed_paths.iter().take(8) {
-                    println!("  - {path}");
-                }
-                if changed_paths.len() > 8 {
-                    println!("  - ... {} more", changed_paths.len() - 8);
-                }
-            }
-            if !verification.verified {
-                println!("Workspace: {}", style::warn(&verification.status));
-                if !verification.recommended_action.is_empty() {
-                    print_next(&verification.recommended_action);
-                }
-            } else {
-                println!("Workspace: verified");
-            }
+            render_pull_outcome_text(&output.outcome, &output.trust);
         }
         return Ok(());
     }
@@ -324,9 +371,9 @@ async fn pull_local(
     lazy: bool,
 ) -> Result<()> {
     if lazy {
-        return Err(anyhow::anyhow!(
-            RecoveryAdvice::local_lazy_pull_unsupported(source_path)
-        ));
+        return Err(map_pull_failure(PullFailure::LocalLazyUnsupported {
+            source_path: source_path.display().to_string(),
+        }));
     }
 
     if !should_output_json(cli, Some(repo.config())) {
@@ -353,14 +400,9 @@ async fn pull_local(
     let pre_target = repo.refs().get_thread(&track_tn)?;
     let changed = pre_target.as_ref() != Some(&state_id) || objects_copied > 0;
 
-    // Preserve attached-HEAD semantics only when the pull target is the
-    // current checkout. Pulling a remote into a side thread must not move
-    // the operator's active thread or overwrite its worktree.
+    // Materialize policy comes from plan_pull (pure); lazy is always false here.
     let head_ref = repo.head_ref()?;
-    let should_materialize = match &head_ref {
-        Head::Attached { thread } => thread == track_to_update,
-        Head::Detached { .. } => local_thread.is_none(),
-    };
+    let should_materialize = pull_should_materialize(plan.will_materialize, plan.lazy);
     if should_materialize {
         // A dirty-refusal must NEVER leave a ref advanced without its
         // corresponding worktree materialization. Run the refuse-able
@@ -396,12 +438,27 @@ async fn pull_local(
         );
         crate::cli::render::write_json_stdout(&output)?;
     } else {
+        let output = heddle_pull_output(
+            Some(plan),
+            changed,
+            source_path.display().to_string(),
+            remote_thread.to_string(),
+            Some(state_id.short().to_string()),
+            Some(objects_copied),
+            build_repository_verification_state(repo),
+        );
+        let text = format_pull_outcome_text(&output.outcome, 8);
         println!(
             "{} pulled {} from {} ({})",
             style::ok_marker(),
             style::change_id(&state_id.short().to_string()),
             style::bold(remote_thread),
             style::count(objects_copied, "object")
+        );
+        debug_assert!(
+            text.headline.contains(remote_thread) || text.headline.contains("pulled"),
+            "domain headline: {}",
+            text.headline
         );
     }
 
@@ -411,10 +468,6 @@ async fn pull_local(
 fn git_checkout_head_oid(root: &Path) -> Option<String> {
     let git = SleyRepository::discover(root).ok()?;
     git.head().ok()?.oid.map(|oid| oid.to_string())
-}
-
-fn short_oid(oid: &str) -> String {
-    oid.chars().take(12).collect()
 }
 
 fn changed_paths_between_states(
@@ -497,11 +550,8 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             changed = pre_target.as_ref() != Some(&final_state);
             if changed {
                 let head_ref = repo.head_ref()?;
-                let should_materialize = !options.lazy
-                    && match &head_ref {
-                        Head::Attached { thread } => thread == track_to_update,
-                        Head::Detached { .. } => options.local_thread.is_none(),
-                    };
+                let should_materialize =
+                    pull_should_materialize(options.plan.will_materialize, options.lazy);
                 if should_materialize {
                     match (&head_ref, pre_target) {
                         (Head::Attached { .. }, Some(_)) => {
@@ -536,25 +586,24 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
             );
             crate::cli::render::write_json_stdout(&output)?;
         } else {
-            println!(
-                "{} pulled from {}",
-                style::ok_marker(),
-                style::bold(options.remote_thread)
+            let output = heddle_pull_output(
+                Some(options.plan),
+                changed,
+                options.remote_thread.to_string(),
+                options.remote_thread.to_string(),
+                result.final_state.map(|state| state.to_string()),
+                None,
+                build_repository_verification_state(repo),
             );
-            if let Some(final_state) = result.final_state {
-                println!(
-                    "{}",
-                    style::field("state", &style::change_id(&final_state.to_string()))
-                );
-            }
+            render_pull_outcome_text(&output.outcome, &output.trust);
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow::anyhow!(RecoveryAdvice::remote_pull_failed(
-            options.remote_thread,
-            options.local_thread,
-            &err,
-        )));
+        return Err(map_pull_failure(PullFailure::RemoteFailed {
+            remote_thread: options.remote_thread.to_string(),
+            local_thread: options.local_thread.map(str::to_string),
+            error: err,
+        }));
     }
 
     Ok(())

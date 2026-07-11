@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Remote domain helpers: list/show assembly and pure push/pull routing.
+//! Remote domain helpers: list/show assembly and pure push/pull orchestration.
 //!
 //! - List/show: pure report types and default-resolution for `heddle remote
 //!   list` / `heddle remote show`.
 //! - Push/pull routing: capability → plan decisions (git-overlay mirror vs
-//!   native fan-out, default thread selection). CLI probes the repo, calls
-//!   these pure helpers, then owns network I/O and rendering.
+//!   native fan-out, default thread selection).
+//! - Typed outcomes, failure kinds (map to RecoveryAdvice kinds), multi-ref
+//!   progress events, and unstyled human text assembly.
+//! - CLI probes the repo, plans, executes network I/O, maps failures, and styles.
 //!
 //! Mutation (add/remove/set-default) and push/pull network bodies stay outside
 //! this module.
@@ -474,11 +476,13 @@ pub fn git_overlay_thread_mismatch_blocker(
 
 /// Whether a pull would materialize into the current checkout.
 ///
-/// Matches CLI: materialize when no `--local-thread` or when it equals the
-/// attached HEAD thread (detached HEAD materializes only with no local override).
-pub fn pull_will_materialize(local_thread: Option<&str>, head: &Head) -> bool {
+/// Destination track is `local_thread` when set, otherwise `remote_thread`.
+/// Attached HEAD materializes only when that track equals the attached thread.
+/// Detached HEAD materializes only when there is no `--local-thread` override.
+pub fn pull_will_materialize(local_thread: Option<&str>, remote_thread: &str, head: &Head) -> bool {
+    let track = local_thread.unwrap_or(remote_thread);
     match head {
-        Head::Attached { thread } => local_thread.is_none_or(|local| thread == local),
+        Head::Attached { thread } => thread == track,
         Head::Detached { .. } => local_thread.is_none(),
     }
 }
@@ -592,7 +596,11 @@ pub fn plan_pull(request: &PullPlanRequest) -> Result<PullPlan, RemotePreflightB
 
     let remote_thread =
         default_pull_thread_name(request.thread.as_deref(), request.capability, &request.head);
-    let will_materialize = pull_will_materialize(request.local_thread.as_deref(), &request.head);
+    let will_materialize = pull_will_materialize(
+        request.local_thread.as_deref(),
+        &remote_thread,
+        &request.head,
+    );
     let requires_clean = pull_requires_clean_worktree(uses_local, will_materialize);
 
     Ok(PullPlan {
@@ -1061,6 +1069,559 @@ pub fn summarize_pull_outcome(outcome: &PullOutcome) -> String {
         }
         other => format!("pulled via {other} from {}", outcome.remote),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Typed push/pull failure kinds (pure; CLI maps to RecoveryAdvice)
+// ---------------------------------------------------------------------------
+
+/// Stable RecoveryAdvice `kind` strings shared by domain failures and CLI.
+pub mod remote_advice_kind {
+    pub const REMOTE_NOT_CONFIGURED: &str = "remote_not_configured";
+    pub const REMOTE_TRANSPORT_MISMATCH: &str = "remote_transport_mismatch";
+    pub const GIT_OVERLAY_THREAD_MISMATCH: &str = "git_overlay_thread_mismatch";
+    pub const NAMED_THREAD_TIP_MISMATCH: &str = "named_thread_tip_mismatch";
+    pub const REMOTE_PUSH_FAILED: &str = "remote_push_failed";
+    pub const REMOTE_PULL_FAILED: &str = "remote_pull_failed";
+    pub const LOCAL_LAZY_PULL_UNSUPPORTED: &str = "local_lazy_pull_unsupported";
+}
+
+/// Typed push failure. Pure facts only; CLI maps via [`PushFailure::advice_kind`]
+/// and field accessors into [`RecoveryAdvice`](crate-external).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushFailure {
+    /// Preflight blocker from [`plan_push`].
+    Preflight(RemotePreflightBlocker),
+    /// heddle#837: named existing thread tip ≠ current checkout, without `--force`.
+    NamedThreadTipMismatch {
+        thread: String,
+        tip_short: String,
+        current_short: String,
+    },
+    /// Hosted/network push or multi-thread fan-out reported failure.
+    RemoteFailed { track_name: String, error: String },
+}
+
+/// Typed pull failure. Pure facts only; CLI maps to RecoveryAdvice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullFailure {
+    /// Preflight blocker from [`plan_pull`].
+    Preflight(RemotePreflightBlocker),
+    /// `--lazy` is unsupported on local path remotes.
+    LocalLazyUnsupported { source_path: String },
+    /// Hosted/network pull reported failure.
+    RemoteFailed {
+        remote_thread: String,
+        local_thread: Option<String>,
+        error: String,
+    },
+}
+
+impl PushFailure {
+    /// RecoveryAdvice `kind` this failure should surface as.
+    pub fn advice_kind(&self) -> &'static str {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                remote_advice_kind::REMOTE_NOT_CONFIGURED
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                remote_advice_kind::REMOTE_TRANSPORT_MISMATCH
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch { .. }) => {
+                remote_advice_kind::GIT_OVERLAY_THREAD_MISMATCH
+            }
+            Self::NamedThreadTipMismatch { .. } => remote_advice_kind::NAMED_THREAD_TIP_MISMATCH,
+            Self::RemoteFailed { .. } => remote_advice_kind::REMOTE_PUSH_FAILED,
+        }
+    }
+
+    /// Primary recovery command for this failure (unstyled).
+    pub fn primary_command(&self) -> String {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                "heddle remote add <name> <url>".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                "heddle clone <remote> <fresh-path>".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                requested, ..
+            }) => format!("heddle thread switch {requested} && heddle push"),
+            Self::NamedThreadTipMismatch { thread, .. } => {
+                format!("heddle thread switch {thread}")
+            }
+            Self::RemoteFailed { track_name, .. } => format!("heddle push {track_name}"),
+        }
+    }
+
+    /// Operator-facing recovery hint (unstyled prose).
+    pub fn recovery_hint(&self) -> String {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle push <remote>` accepts a remote name, URL, local path, or hosted address positionally.".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                requested, ..
+            }) => format!(
+                "Switch to the requested thread with `heddle thread switch {requested} && heddle push`, or pass `--all-threads`."
+            ),
+            Self::NamedThreadTipMismatch { thread, .. } => format!(
+                "Switch to that thread's checkout (`heddle thread switch {thread}`), or pass `--force` to push the current state under '{thread}'."
+            ),
+            Self::RemoteFailed { track_name, .. } => format!(
+                "Inspect `heddle verify`, then retry with `heddle push {track_name}` after fixing the remote."
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PushFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight(blocker) => write!(f, "{blocker}"),
+            Self::NamedThreadTipMismatch {
+                thread,
+                tip_short,
+                current_short,
+            } => write!(
+                f,
+                "thread '{thread}' already exists at {tip_short} but the current checkout is {current_short}; refusing to overwrite it"
+            ),
+            Self::RemoteFailed { track_name, error } => {
+                write!(f, "Push failed for {track_name}: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PushFailure {}
+
+impl PullFailure {
+    /// RecoveryAdvice `kind` this failure should surface as.
+    pub fn advice_kind(&self) -> &'static str {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                remote_advice_kind::REMOTE_NOT_CONFIGURED
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                remote_advice_kind::REMOTE_TRANSPORT_MISMATCH
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch { .. }) => {
+                // Not raised by plan_pull today; reserved for shared kind map.
+                remote_advice_kind::GIT_OVERLAY_THREAD_MISMATCH
+            }
+            Self::LocalLazyUnsupported { .. } => remote_advice_kind::LOCAL_LAZY_PULL_UNSUPPORTED,
+            Self::RemoteFailed { .. } => remote_advice_kind::REMOTE_PULL_FAILED,
+        }
+    }
+
+    /// Primary recovery command for this failure (unstyled).
+    pub fn primary_command(&self) -> String {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                "heddle remote add <name> <url>".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                "heddle clone <remote> <fresh-path>".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                requested, ..
+            }) => format!("heddle thread switch {requested}"),
+            Self::LocalLazyUnsupported { source_path } => {
+                format!("heddle pull {source_path}")
+            }
+            Self::RemoteFailed {
+                remote_thread,
+                local_thread,
+                ..
+            } => {
+                if let Some(local) = local_thread {
+                    format!("heddle pull {remote_thread} {local}")
+                } else {
+                    format!("heddle pull {remote_thread}")
+                }
+            }
+        }
+    }
+
+    /// Operator-facing recovery hint (unstyled prose).
+    pub fn recovery_hint(&self) -> String {
+        match self {
+            Self::Preflight(RemotePreflightBlocker::MissingRemote) => {
+                "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle pull <remote>` accepts a remote name, URL, local path, or hosted address positionally.".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
+                "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.".to_string()
+            }
+            Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch { .. }) => {
+                "Switch to the attached thread, or omit an explicit mismatched thread name.".to_string()
+            }
+            Self::LocalLazyUnsupported { source_path } => format!(
+                "Run `heddle pull {source_path}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
+            ),
+            Self::RemoteFailed {
+                remote_thread,
+                local_thread,
+                ..
+            } => {
+                let cmd = if let Some(local) = local_thread {
+                    format!("heddle pull {remote_thread} {local}")
+                } else {
+                    format!("heddle pull {remote_thread}")
+                };
+                format!("Inspect `heddle verify`, then retry with `{cmd}` after fixing the remote.")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PullFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight(blocker) => write!(f, "{blocker}"),
+            Self::LocalLazyUnsupported { .. } => write!(
+                f,
+                "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote"
+            ),
+            Self::RemoteFailed {
+                remote_thread,
+                error,
+                ..
+            } => write!(f, "Pull failed from {remote_thread}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PullFailure {}
+
+impl RemotePreflightBlocker {
+    /// RecoveryAdvice `kind` for this preflight blocker.
+    pub fn advice_kind(&self) -> &'static str {
+        match self {
+            Self::MissingRemote => remote_advice_kind::REMOTE_NOT_CONFIGURED,
+            Self::TransportMismatch => remote_advice_kind::REMOTE_TRANSPORT_MISMATCH,
+            Self::GitOverlayThreadMismatch { .. } => {
+                remote_advice_kind::GIT_OVERLAY_THREAD_MISMATCH
+            }
+        }
+    }
+}
+
+/// Pure heddle#837 guard: refuse pushing the current checkout under an existing
+/// named thread whose tip differs, unless `--force`.
+///
+/// `existing_tip_differs` is true only when the named thread exists **and** its
+/// tip is not the current checkout state. Non-existent threads always allow
+/// (push creates them on the remote).
+pub fn refuse_named_thread_tip_overwrite(
+    force: bool,
+    named_thread: Option<&str>,
+    existing_tip_differs: bool,
+) -> bool {
+    named_thread.is_some() && !force && existing_tip_differs
+}
+
+/// Build a [`PushFailure::NamedThreadTipMismatch`] for the heddle#837 refuse path.
+pub fn named_thread_tip_mismatch_failure(
+    thread: &str,
+    tip_short: impl Into<String>,
+    current_short: impl Into<String>,
+) -> PushFailure {
+    PushFailure::NamedThreadTipMismatch {
+        thread: thread.to_string(),
+        tip_short: tip_short.into(),
+        current_short: current_short.into(),
+    }
+}
+
+/// First multi-thread push failure as a typed [`PushFailure`], if any.
+pub fn first_multi_thread_push_failure(failures: &[(String, String)]) -> Option<PushFailure> {
+    failures
+        .first()
+        .map(|(name, err)| PushFailure::RemoteFailed {
+            track_name: name.clone(),
+            error: err.clone(),
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Multi-ref push progress (pure event facts for --all-threads fan-out)
+// ---------------------------------------------------------------------------
+
+/// Progress facts for a multi-thread / multi-ref push fan-out (heddle#838).
+///
+/// CLI owns TTY rendering and styling; domain only names the pure events and
+/// unstyled text lines. Live byte-upload progress remains on the transport
+/// progress handle and is out of scope here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiRefPushProgress {
+    /// Fan-out is about to begin.
+    Begin {
+        /// Display target (for example `file:///path` or a host address).
+        target: String,
+    },
+    /// One thread landed successfully.
+    ThreadSucceeded {
+        thread: String,
+        /// Short state id when known (local path push).
+        state_short: Option<String>,
+        /// Objects copied when known (local path push).
+        objects: Option<usize>,
+        /// Hosted remote state id when known.
+        remote_state: Option<String>,
+    },
+    /// One thread failed; fan-out continues for remaining threads.
+    ThreadFailed { thread: String, error: String },
+}
+
+/// Unstyled human line for a multi-ref progress fact (no TTY markers).
+pub fn format_multi_ref_push_progress(event: &MultiRefPushProgress) -> String {
+    match event {
+        MultiRefPushProgress::Begin { target } => {
+            format!("pushing all threads to {target}")
+        }
+        MultiRefPushProgress::ThreadSucceeded {
+            thread,
+            state_short: Some(state),
+            objects: Some(n),
+            ..
+        } => {
+            let unit = if *n == 1 { "object" } else { "objects" };
+            format!("pushed {state} to {thread} ({n} {unit})")
+        }
+        MultiRefPushProgress::ThreadSucceeded {
+            thread,
+            state_short: Some(state),
+            objects: None,
+            ..
+        } => format!("pushed {state} to {thread}"),
+        MultiRefPushProgress::ThreadSucceeded {
+            thread,
+            state_short: None,
+            objects: Some(n),
+            ..
+        } => {
+            let unit = if *n == 1 { "object" } else { "objects" };
+            format!("pushed to {thread} ({n} {unit})")
+        }
+        MultiRefPushProgress::ThreadSucceeded {
+            thread,
+            remote_state: Some(state),
+            ..
+        } => format!("pushed to {thread} (remote state {state})"),
+        MultiRefPushProgress::ThreadSucceeded { thread, .. } => {
+            format!("pushed to {thread}")
+        }
+        MultiRefPushProgress::ThreadFailed { thread, error } => {
+            format!("failed to push {thread}: {error}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Human text assembly from outcomes (pure; CLI adds style markers)
+// ---------------------------------------------------------------------------
+
+/// Unstyled human text derived from a [`PushOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushOutcomeText {
+    /// Primary success / partial line.
+    pub headline: String,
+    /// Follow-on detail lines (force warning, notes visibility, tracking).
+    pub detail_lines: Vec<String>,
+}
+
+/// Unstyled human text derived from a [`PullOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullOutcomeText {
+    /// Primary success / up-to-date line.
+    pub headline: String,
+    /// Follow-on detail lines (branch, import stats, changed paths, …).
+    pub detail_lines: Vec<String>,
+}
+
+/// Git-overlay scope description for text mode (matches historical CLI copy).
+pub fn git_overlay_push_scope_description(all_threads: bool) -> &'static str {
+    if all_threads {
+        "all threads + Git tags + refs/notes/heddle"
+    } else {
+        "branch + refs/notes/heddle; tags skipped"
+    }
+}
+
+/// Assemble unstyled human text from a push outcome.
+///
+/// `track_name` fills the heddle single-thread headline when the outcome does
+/// not carry a thread field (JSON contract keeps that field optional).
+pub fn format_push_outcome_text(
+    outcome: &PushOutcome,
+    track_name: Option<&str>,
+) -> PushOutcomeText {
+    let headline = match outcome.transport {
+        "git" => {
+            let remote = outcome.remote.as_deref().unwrap_or("remote");
+            let all_threads = outcome.push_scope == Some("all_threads");
+            let subject = if all_threads {
+                "all threads".to_string()
+            } else {
+                outcome
+                    .thread
+                    .as_deref()
+                    .map(|t| format!("thread {t}"))
+                    .unwrap_or_else(|| "current thread".to_string())
+            };
+            format!(
+                "pushed {subject} to {remote} ({})",
+                git_overlay_push_scope_description(all_threads)
+            )
+        }
+        "heddle" if outcome.push_scope == Some("all_threads") => summarize_push_outcome(outcome),
+        "heddle" => {
+            let track = track_name.or(outcome.thread.as_deref()).unwrap_or("thread");
+            match (&outcome.state, outcome.objects) {
+                (Some(state), Some(objects)) => {
+                    let unit = if objects == 1 { "object" } else { "objects" };
+                    format!("pushed {state} to {track} ({objects} {unit})")
+                }
+                (Some(state), None) => format!("pushed to {track} (state {state})"),
+                (None, Some(objects)) => {
+                    let unit = if objects == 1 { "object" } else { "objects" };
+                    format!("pushed to {track} ({objects} {unit})")
+                }
+                (None, None) => format!("pushed to {track}"),
+            }
+        }
+        _ => summarize_push_outcome(outcome),
+    };
+
+    let mut detail_lines = Vec::new();
+    if let Some(warning) = outcome.force_discard_warning {
+        detail_lines.push(format!("Force: {warning}."));
+    }
+    if outcome.git_notes_ref.is_some() {
+        detail_lines.push(format!(
+            "Git interop: published {GIT_NOTES_REF}; ordinary `git log --all` may show Heddle metadata commits."
+        ));
+    }
+    if let Some(configured) = &outcome.git_remote_configured {
+        detail_lines.push(format!(
+            "Git tracking: configured remote {} -> {} for future fetch/push.",
+            configured.name, configured.url
+        ));
+    }
+    if let Some(upstream) = &outcome.git_upstream_configured {
+        detail_lines.push(format!(
+            "Git tracking: branch {} tracks {}/{}.",
+            upstream.branch, upstream.remote, upstream.branch
+        ));
+    }
+
+    PushOutcomeText {
+        headline,
+        detail_lines,
+    }
+}
+
+/// Assemble unstyled human text from a pull outcome.
+///
+/// Path lists are truncated to `max_paths` entries with an overflow line.
+pub fn format_pull_outcome_text(outcome: &PullOutcome, max_paths: usize) -> PullOutcomeText {
+    let headline = if !outcome.changed {
+        format!(
+            "already up to date with {}; repository verification checked below",
+            outcome.remote
+        )
+    } else if outcome.transport == "git" {
+        format!("pulled from {}", outcome.remote)
+    } else if let (Some(state), Some(objects)) = (&outcome.state, outcome.objects) {
+        let unit = if objects == 1 { "object" } else { "objects" };
+        let thread = outcome.thread.as_deref().unwrap_or("thread");
+        format!("pulled {state} from {thread} ({objects} {unit})")
+    } else if outcome.transport == "heddle" {
+        format!(
+            "pulled from {}",
+            outcome.thread.as_deref().unwrap_or(outcome.remote.as_str())
+        )
+    } else {
+        summarize_pull_outcome(outcome)
+    };
+
+    let mut detail_lines = Vec::new();
+    if outcome.transport == "git" {
+        if let Some(branch) = &outcome.branch {
+            if outcome.changed {
+                detail_lines.push(format!("Branch: {branch}"));
+            } else if let Some(head) = &outcome.new_git_head {
+                let short: String = head.chars().take(12).collect();
+                detail_lines.push(format!("Branch: {branch} at {short}"));
+            }
+        }
+        match (&outcome.old_git_head, &outcome.new_git_head) {
+            (Some(old), Some(new)) if old != new => {
+                let old_s: String = old.chars().take(12).collect();
+                let new_s: String = new.chars().take(12).collect();
+                detail_lines.push(format!("Git: {old_s} -> {new_s}"));
+            }
+            (Some(head), Some(_)) if outcome.changed => {
+                let short: String = head.chars().take(12).collect();
+                detail_lines.push(format!("Git: {short}"));
+            }
+            _ => {}
+        }
+        if let Some(states) = outcome.states_created {
+            let unit = if states == 1 {
+                "new state"
+            } else {
+                "new states"
+            };
+            detail_lines.push(format!("Imported: {states} {unit}"));
+        }
+        if let Some(commits) = outcome.commits_seen {
+            let unit = if commits == 1 {
+                "Git commit object"
+            } else {
+                "Git commit objects"
+            };
+            detail_lines.push(format!(
+                "Scanned: {commits} {unit} across branches + refs/notes/heddle"
+            ));
+        }
+        if outcome.materialized_checkout == Some(true) {
+            detail_lines.push("Worktree: materialized checkout".to_string());
+        }
+        if outcome.changed
+            && let Some(paths) = &outcome.changed_paths
+        {
+            detail_lines.push(format!("Changed paths: {}", paths.len()));
+            for path in paths.iter().take(max_paths) {
+                detail_lines.push(format!("  - {path}"));
+            }
+            if paths.len() > max_paths {
+                detail_lines.push(format!("  - ... {} more", paths.len() - max_paths));
+            }
+        }
+    } else if outcome.changed
+        && let Some(state) = &outcome.state
+        && outcome.objects.is_none()
+    {
+        // Hosted pull: print state as a field line (CLI styles separately when needed).
+        detail_lines.push(format!("state: {state}"));
+    }
+
+    PullOutcomeText {
+        headline,
+        detail_lines,
+    }
+}
+
+/// Whether a network pull should materialize the checkout after fetch.
+///
+/// Combines plan materialize policy with lazy mode (lazy never materializes).
+pub fn pull_should_materialize(will_materialize: bool, lazy: bool) -> bool {
+    will_materialize && !lazy
 }
 
 /// Merged remote map: name → (url, source label).
@@ -1808,11 +2369,13 @@ mod tests {
     fn pull_will_materialize_table() {
         let attached = attached_head("feature");
         let detached = detached_head();
-        assert!(pull_will_materialize(None, &attached));
-        assert!(pull_will_materialize(Some("feature"), &attached));
-        assert!(!pull_will_materialize(Some("other"), &attached));
-        assert!(pull_will_materialize(None, &detached));
-        assert!(!pull_will_materialize(Some("feature"), &detached));
+        // local_thread None → destination is remote_thread
+        assert!(pull_will_materialize(None, "feature", &attached));
+        assert!(!pull_will_materialize(None, "main", &attached));
+        assert!(pull_will_materialize(Some("feature"), "main", &attached));
+        assert!(!pull_will_materialize(Some("other"), "feature", &attached));
+        assert!(pull_will_materialize(None, "main", &detached));
+        assert!(!pull_will_materialize(Some("feature"), "main", &detached));
     }
 
     #[test]
@@ -1990,12 +2553,18 @@ mod tests {
     fn plan_pull_native_materialize_policy() {
         let mut req = base_pull_request();
         req.head = attached_head("feature");
-        // no explicit thread → native default remote_thread is "main"
+        // no explicit thread → native default remote_thread is "main" ≠ attached
         let plan = plan_pull(&req).unwrap();
         assert!(!plan.uses_local_git_overlay);
+        assert!(!plan.will_materialize);
+        assert!(!plan.requires_clean_worktree);
+        assert_eq!(plan.remote_thread, "main");
+
+        // Explicit remote thread matching attached HEAD materializes.
+        req.thread = Some("feature".into());
+        let plan = plan_pull(&req).unwrap();
         assert!(plan.will_materialize);
         assert!(plan.requires_clean_worktree);
-        assert_eq!(plan.remote_thread, "main");
 
         req.local_thread = Some("scratch".into());
         let plan = plan_pull(&req).unwrap();
@@ -2171,5 +2740,234 @@ mod tests {
             "all_threads_tags_and_heddle_notes"
         );
         assert_eq!(git_overlay_ref_scope(false), "branch_and_heddle_notes");
+    }
+
+    // --- Typed failures, multi-ref progress, outcome text ---
+
+    #[test]
+    fn push_failure_advice_kinds_map_to_recovery_kinds() {
+        assert_eq!(
+            PushFailure::Preflight(RemotePreflightBlocker::MissingRemote).advice_kind(),
+            remote_advice_kind::REMOTE_NOT_CONFIGURED
+        );
+        assert_eq!(
+            PushFailure::Preflight(RemotePreflightBlocker::TransportMismatch).advice_kind(),
+            remote_advice_kind::REMOTE_TRANSPORT_MISMATCH
+        );
+        assert_eq!(
+            PushFailure::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                requested: "feature".into(),
+                attached: Some("main".into()),
+            })
+            .advice_kind(),
+            remote_advice_kind::GIT_OVERLAY_THREAD_MISMATCH
+        );
+        assert_eq!(
+            named_thread_tip_mismatch_failure("feat", "aaa", "bbb").advice_kind(),
+            remote_advice_kind::NAMED_THREAD_TIP_MISMATCH
+        );
+        assert_eq!(
+            PushFailure::RemoteFailed {
+                track_name: "main".into(),
+                error: "boom".into(),
+            }
+            .advice_kind(),
+            remote_advice_kind::REMOTE_PUSH_FAILED
+        );
+    }
+
+    #[test]
+    fn pull_failure_advice_kinds_map_to_recovery_kinds() {
+        assert_eq!(
+            PullFailure::LocalLazyUnsupported {
+                source_path: "/tmp/src".into(),
+            }
+            .advice_kind(),
+            remote_advice_kind::LOCAL_LAZY_PULL_UNSUPPORTED
+        );
+        assert_eq!(
+            PullFailure::RemoteFailed {
+                remote_thread: "main".into(),
+                local_thread: None,
+                error: "no".into(),
+            }
+            .advice_kind(),
+            remote_advice_kind::REMOTE_PULL_FAILED
+        );
+    }
+
+    #[test]
+    fn named_thread_tip_overwrite_guard_table() {
+        // (force, named, tip_differs) → refuse
+        let cases = [
+            (false, Some("feat"), true, true),
+            (true, Some("feat"), true, false),
+            (false, Some("feat"), false, false),
+            (false, None, true, false),
+            (false, None, false, false),
+        ];
+        for (force, named, differs, refuse) in cases {
+            assert_eq!(
+                refuse_named_thread_tip_overwrite(force, named, differs),
+                refuse,
+                "force={force} named={named:?} differs={differs}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_multi_thread_push_failure_picks_first() {
+        assert!(first_multi_thread_push_failure(&[]).is_none());
+        let failure = first_multi_thread_push_failure(&[
+            ("a".into(), "e1".into()),
+            ("b".into(), "e2".into()),
+        ])
+        .unwrap();
+        assert_eq!(
+            failure,
+            PushFailure::RemoteFailed {
+                track_name: "a".into(),
+                error: "e1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn multi_ref_push_progress_formatting() {
+        assert_eq!(
+            format_multi_ref_push_progress(&MultiRefPushProgress::Begin {
+                target: "file:///tmp/r".into(),
+            }),
+            "pushing all threads to file:///tmp/r"
+        );
+        assert_eq!(
+            format_multi_ref_push_progress(&MultiRefPushProgress::ThreadSucceeded {
+                thread: "main".into(),
+                state_short: Some("abc".into()),
+                objects: Some(1),
+                remote_state: None,
+            }),
+            "pushed abc to main (1 object)"
+        );
+        assert_eq!(
+            format_multi_ref_push_progress(&MultiRefPushProgress::ThreadSucceeded {
+                thread: "main".into(),
+                state_short: Some("abc".into()),
+                objects: Some(2),
+                remote_state: None,
+            }),
+            "pushed abc to main (2 objects)"
+        );
+        assert_eq!(
+            format_multi_ref_push_progress(&MultiRefPushProgress::ThreadSucceeded {
+                thread: "feat".into(),
+                state_short: None,
+                objects: None,
+                remote_state: Some("s1".into()),
+            }),
+            "pushed to feat (remote state s1)"
+        );
+        assert_eq!(
+            format_multi_ref_push_progress(&MultiRefPushProgress::ThreadFailed {
+                thread: "x".into(),
+                error: "nope".into(),
+            }),
+            "failed to push x: nope"
+        );
+    }
+
+    #[test]
+    fn format_push_outcome_text_git_overlay_details() {
+        let mut req = base_push_request();
+        req.capability = RepositoryCapability::GitOverlay;
+        req.force = true;
+        let plan = plan_push(&req).unwrap();
+        let outcome = build_push_outcome(
+            &plan,
+            PushExecutionFacts::GitOverlayRefs {
+                remote_name: "origin".into(),
+                current_thread: Some("main".into()),
+                refs_written: vec!["refs/heads/main".into()],
+                tracking: Some(GitOverlayPushTracking {
+                    remote_name: "origin".into(),
+                    configured_remote: Some(GitRemoteConfigured {
+                        name: "origin".into(),
+                        url: "https://example.com/r.git".into(),
+                    }),
+                    upstream_branch: Some("main".into()),
+                }),
+            },
+        );
+        let text = format_push_outcome_text(&outcome, None);
+        assert!(
+            text.headline.contains("pushed thread main to origin"),
+            "{}",
+            text.headline
+        );
+        assert!(
+            text.detail_lines.iter().any(|l| l.starts_with("Force:")),
+            "{:?}",
+            text.detail_lines
+        );
+        assert!(
+            text.detail_lines
+                .iter()
+                .any(|l| l.contains("refs/notes/heddle")),
+            "{:?}",
+            text.detail_lines
+        );
+        assert!(
+            text.detail_lines
+                .iter()
+                .any(|l| l.contains("tracks origin/main")),
+            "{:?}",
+            text.detail_lines
+        );
+    }
+
+    #[test]
+    fn format_pull_outcome_text_up_to_date_and_paths() {
+        let plan = plan_pull(&base_pull_request()).unwrap();
+        let up = build_pull_outcome(
+            Some(&plan),
+            PullExecutionFacts::Heddle {
+                changed: false,
+                remote: "origin".into(),
+                thread: "main".into(),
+                state: None,
+                objects: None,
+            },
+        );
+        let text = format_pull_outcome_text(&up, 8);
+        assert!(text.headline.contains("already up to date with origin"));
+
+        let git = build_pull_outcome(
+            Some(&plan),
+            PullExecutionFacts::GitOverlay {
+                remote: "origin".into(),
+                branch: Some("main".into()),
+                old_git_head: None,
+                new_git_head: None,
+                old_state: None,
+                new_state: None,
+                changed: true,
+                states_created: 1,
+                commits_seen: 3,
+                materialized_checkout: false,
+                changed_paths: vec!["a".into(), "b".into(), "c".into()],
+            },
+        );
+        let text = format_pull_outcome_text(&git, 2);
+        assert_eq!(text.headline, "pulled from origin");
+        assert!(text.detail_lines.iter().any(|l| l == "Changed paths: 3"));
+        assert!(text.detail_lines.iter().any(|l| l == "  - ... 1 more"));
+    }
+
+    #[test]
+    fn pull_should_materialize_respects_lazy() {
+        assert!(pull_should_materialize(true, false));
+        assert!(!pull_should_materialize(true, true));
+        assert!(!pull_should_materialize(false, false));
+        assert!(!pull_should_materialize(false, true));
     }
 }
