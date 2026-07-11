@@ -10,10 +10,13 @@
 //! half-materialized checkout / dangling thread ref behind.
 //!
 //! [`StartThread`] maps the whole write-path onto the merged primitive
-//! ([`repo::atomic`]) so it is all-or-nothing: each effect registers its own
-//! inverse through the right combinator, and a failure anywhere rewinds every
-//! applied effect — with **precise directory rewind** — back to the exact
-//! pre-start state. The structure mirrors the impl-b undo/redo migration:
+//! ([`repo::atomic`]) so it is all-or-nothing: apply order comes from
+//! [`heddle_core::plan_start_transaction`]'s `effects` list; each effect
+//! registers its own inverse through the right combinator, and a failure
+//! anywhere rewinds every applied effect — with **precise directory rewind**
+//! — back to the exact pre-start state (effect-kind reverse order matches
+//! [`heddle_core::plan_start_cleanup`]). The structure mirrors the impl-b
+//! undo/redo migration:
 //!
 //!   * **Atomic single writes** (the thread-ref CAS) → [`Tx::step`]
 //!     (forward-first; the restore inverse is registered only after the write
@@ -48,8 +51,9 @@ use std::{
 };
 
 use heddle_core::{
-    CheckoutRewindPlan, SelfCreatedDirRewindPlan, TargetDirClaimKind, classify_materialize_error,
-    plan_checkout_rewind, plan_self_created_dir_rewind,
+    CheckoutRewindPlan, SelfCreatedDirRewindPlan, StartEffectKind, TargetDirClaimKind,
+    classify_materialize_error, plan_checkout_rewind, plan_self_created_dir_rewind,
+    plan_start_cleanup, plan_start_transaction,
 };
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -1030,6 +1034,16 @@ impl AtomicMutation for StartThread {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<StartThreadOutput>> {
         let mut oplog: Vec<OpRecord> = Vec::new();
 
+        // Pure ordered effect list from heddle-core (`plan_start_transaction`).
+        // FS/clonefile/mount work and Tx combinators stay here; only the
+        // sequence is plan-owned so cleanup order stays single-sourced with
+        // `plan_start_cleanup` (reverse of this applied prefix).
+        let plan = plan_start_transaction(
+            &self.thread_mode,
+            self.shared_target_dir.is_some(),
+            self.hydrate,
+        );
+
         // The single [`TargetDir`] claim, decided atomically by
         // `stage_target_dir`'s forward and consumed by BOTH directory rewinds
         // (the target-dir inverse and the checkout rewind). It starts `None` — an
@@ -1045,47 +1059,72 @@ impl AtomicMutation for StartThread {
         // (heddle#316 r9 Finding 3). `None` until the checkout forward runs.
         let checkout_outcome = Rc::new(Cell::new(None));
 
-        // 0. Create the target dir inside the transaction (first, so its removal
-        //    inverse runs last and a self-created dir never leaks).
-        self.stage_target_dir(tx, Rc::clone(&target_claim))?;
-
-        // 1. Thread ref (+ staged ThreadCreate for a brand-new thread).
-        self.stage_ref(tx, &mut oplog)?;
-
-        // 2. Mode-specific materialization.
         let mut fskit_readiness = None;
-        let linked = match self.thread_mode {
-            ThreadMode::Solid | ThreadMode::Materialized => {
-                self.stage_checkout(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
-                if matches!(self.thread_mode, ThreadMode::Materialized) {
-                    self.stage_manifest(
-                        tx,
-                        Rc::clone(&target_claim),
-                        Rc::clone(&checkout_outcome),
-                    )?;
+        let mut linked = Vec::new();
+        // Forward-apply prefix whose stage handlers returned Ok. On failure the
+        // Tx ledger rewinds registered inverses in reverse registration order,
+        // matching `plan_start_cleanup(&applied, claim_kind)` at the effect-kind
+        // grain (hydrate is finer: one Tx step per symlink + exclude restore).
+        let mut applied: Vec<StartEffectKind> = Vec::with_capacity(plan.effects.len());
+
+        for &effect in &plan.effects {
+            let stage_result = match effect {
+                StartEffectKind::CreateTargetDir => {
+                    self.stage_target_dir(tx, Rc::clone(&target_claim))
                 }
-                if let Some(dir) = self.shared_target_dir.clone() {
-                    let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;
-                    // The writer no-ops on a pre-staged config; don't advertise a
-                    // redirect that isn't in effect (`thread show` would lie).
-                    if !applied {
-                        self.record.shared_target_dir = None;
+                StartEffectKind::WriteThreadRef => self.stage_ref(tx, &mut oplog),
+                StartEffectKind::MaterializeCheckout => {
+                    self.stage_checkout(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))
+                }
+                StartEffectKind::WriteManifest => {
+                    self.stage_manifest(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))
+                }
+                StartEffectKind::WriteCargoConfigRedirect => {
+                    match self.shared_target_dir.clone() {
+                        Some(dir) => self
+                            .stage_cargo_config(tx, &dir, Rc::clone(&target_claim))
+                            .map(|cargo_applied| {
+                                // Writer no-ops on a pre-staged config; don't advertise
+                                // a redirect that isn't in effect (`thread show` would lie).
+                                if !cargo_applied {
+                                    self.record.shared_target_dir = None;
+                                }
+                            }),
+                        None => Err(HeddleError::Conflict(
+                            "start plan includes cargo-config redirect but no shared_target_dir"
+                                .to_string(),
+                        )),
                     }
                 }
-                if self.hydrate {
-                    self.stage_hydrate(tx, Rc::clone(&target_claim))?
-                } else {
-                    Vec::new()
+                StartEffectKind::HydrateIgnoredDirs => self
+                    .stage_hydrate(tx, Rc::clone(&target_claim))
+                    .map(|names| {
+                        linked = names;
+                    }),
+                StartEffectKind::EstablishVirtualizedMount => self.stage_mount(tx).map(|outcome| {
+                    fskit_readiness = outcome.fskit_readiness;
+                }),
+                StartEffectKind::WriteThreadRecord => self.stage_record(tx),
+            };
+            match stage_result {
+                Ok(()) => applied.push(effect),
+                Err(err) => {
+                    // Applied-prefix cleanup order from core. Execution stays on
+                    // the Tx ledger (stage inverses + plan_checkout_rewind /
+                    // plan_self_created_dir_rewind); this pins the effect-kind
+                    // reverse order to the same source as forward apply.
+                    let claim_kind = claim_from_cell(&target_claim).as_ref().map(TargetDir::kind);
+                    let _cleanup_order = plan_start_cleanup(&applied, claim_kind);
+                    return Err(err);
                 }
             }
-            ThreadMode::Virtualized => {
-                fskit_readiness = self.stage_mount(tx)?.fskit_readiness;
-                Vec::new()
-            }
-        };
+        }
 
-        // 3. Thread record (sole record under the name), via converge_records.
-        self.stage_record(tx)?;
+        debug_assert_eq!(
+            applied.as_slice(),
+            plan.effects.as_slice(),
+            "successful start apply must complete every planned effect"
+        );
 
         Ok(StagedCommit::new(
             StartThreadOutput {

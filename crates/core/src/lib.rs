@@ -3,6 +3,7 @@
 
 pub mod actor;
 pub mod agent_fanout;
+pub mod agent_ops;
 pub mod clone_plan;
 pub mod context;
 pub mod contract;
@@ -38,15 +39,26 @@ pub use agent_fanout::{
     parse_fanout_lane, parse_fanout_lanes, plan_fanout, select_fanout_base,
     select_fanout_parent_thread,
 };
+pub use agent_ops::{
+    AgentCaptureOptions, AgentCapturePlan, AgentCapturePlanError, AgentCaptureThreadCheck,
+    AgentExplainReport, AgentReadyOptions, AgentReadyPlan, AgentReadyPlanError, AgentReleaseKind,
+    AgentReservationListReport, AgentReservationReport, AgentSessionUse, apply_agent_heartbeat,
+    apply_agent_release, assemble_agent_explain, assemble_agent_reservation,
+    assemble_agent_reservation_list, check_agent_capture_thread, classify_agent_session_use,
+    default_attach_reason_message, filter_agent_reservations, filter_agent_reservations_ref,
+    plan_agent_capture, plan_agent_ready, session_is_active, touch_agent_heartbeat,
+    touch_agent_release,
+};
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
     ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight, MonorepoClonePlan,
-    MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeFacts, MonorepoNodePlan,
+    MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoExecutionPlan, MonorepoNodeExecution,
+    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodePlan, MonorepoNodeStepOptions,
     MonorepoSkippedChild, UnsupportedCloneFlag, absolute_path, assemble_clone_security_preflight,
     looks_like_git_overlay_url, looks_like_local_path, normalize_clone_depth, plan_adopt,
-    plan_clone, plan_monorepo_clone, resolve_adopt_start_path, resolve_clone_destination,
-    select_clone_mode, validate_clone_destination, validate_clone_mode_options,
-    validate_monorepo_clone_options,
+    plan_clone, plan_monorepo_clone, plan_monorepo_execution, plan_monorepo_node_steps,
+    resolve_adopt_start_path, resolve_clone_destination, select_clone_mode,
+    validate_clone_destination, validate_clone_mode_options, validate_monorepo_clone_options,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -76,23 +88,26 @@ pub use objects::{
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use remote::{
-    COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF, GIT_NOTES_VISIBILITY_WARNING,
-    GitConfigContext, GitOverlayPushTracking, GitRemoteConfigured, GitUpstreamConfigured,
-    HostedPushPlan, IncludedGitRemoteConfigError, MultiRefPushProgress, PullExecutionFacts,
-    PullFailure, PullOutcome, PullOutcomeText, PullPlan, PullPlanRequest, PushExecutionFacts,
-    PushFailure, PushOutcome, PushOutcomeText, PushPath, PushPlan, PushPlanRequest, RemoteInfo,
-    RemoteListReport, RemotePreflightBlocker, all_threads_uses_single_mirror_push,
-    build_pull_outcome, build_push_outcome, default_pull_thread_name, default_push_thread_name,
+    ALL_THREADS_MIRROR_COVERS_NOTE, COMMITS_SEEN_SCOPE, FORCE_DISCARD_WARNING, GIT_NOTES_REF,
+    GIT_NOTES_VISIBILITY_WARNING, GitConfigContext, GitOverlayPushTracking, GitRemoteConfigured,
+    GitUpstreamConfigured, HostedPushPlan, IncludedGitRemoteConfigError, MultiRefPushProgress,
+    PullExecutionFacts, PullFailure, PullOutcome, PullOutcomeText, PullPlan, PullPlanRequest,
+    PushExecutionFacts, PushFailure, PushOutcome, PushOutcomeText, PushPath, PushPlan,
+    PushPlanRequest, RemoteInfo, RemoteListReport, RemotePreflightBlocker, UNKNOWN_TRANSPORT_ERROR,
+    all_threads_mirror_coverage_note, all_threads_uses_single_mirror_push, build_pull_outcome,
+    build_push_outcome, default_pull_thread_name, default_push_thread_name,
     first_multi_thread_push_failure, format_multi_ref_push_progress, format_pull_outcome_text,
     format_push_outcome_text, git_overlay_current_thread_push_ok,
     git_overlay_push_scope_description, git_overlay_ref_scope, git_overlay_thread_mismatch_blocker,
-    list_plain_git_remotes, list_remotes, merged_remote_items, named_thread_tip_mismatch_failure,
-    plain_git_remote_items, plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree,
-    pull_should_materialize, pull_status, pull_will_materialize, push_scope_label, push_status,
-    refuse_named_thread_tip_overwrite, remote_advice_kind, remote_missing_blocker,
+    list_plain_git_remotes, list_remotes, merged_remote_items, multi_thread_failed_names,
+    multi_thread_push_execution_facts, multi_thread_reported_refs,
+    named_thread_tip_mismatch_failure, plain_git_remote_items, plan_hosted_push, plan_pull,
+    plan_push, pull_requires_clean_worktree, pull_should_materialize, pull_status,
+    pull_will_materialize, push_scope_label, push_status, refuse_named_thread_tip_overwrite,
+    remote_advice_kind, remote_missing_blocker, remote_pull_failure, remote_push_failure,
     resolve_default_remote_name, resolved_default_remote_name, show_plain_git_remote, show_remote,
-    summarize_pull_outcome, summarize_push_outcome, transport_mismatch_blocker,
-    uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
+    summarize_pull_outcome, summarize_push_outcome, transport_error_message,
+    transport_mismatch_blocker, uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
 };
 pub use save::{
     GitScope, SavePlan, SaveReport, SaveVerb, execute_save, plan_creates_new_state, plan_git_scope,
