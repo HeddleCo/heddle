@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Remote list/show domain assembly.
+//! Remote domain helpers: list/show assembly and pure push/pull routing.
 //!
-//! Pure report types and default-resolution helpers for `heddle remote list`
-//! and `heddle remote show`. CLI opens/probes the repo, calls these functions,
-//! and renders. Mutation (add/remove/set-default) and network push/pull stay
-//! outside this module.
+//! - List/show: pure report types and default-resolution for `heddle remote
+//!   list` / `heddle remote show`.
+//! - Push/pull routing: capability → plan decisions (git-overlay mirror vs
+//!   native fan-out, default thread selection). CLI probes the repo, calls
+//!   these pure helpers, then owns network I/O and rendering.
+//!
+//! Mutation (add/remove/set-default) and push/pull network bodies stay outside
+//! this module.
 
 use std::{
     collections::BTreeMap,
@@ -14,6 +18,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use cli_shared::remote::{RemoteConfig, RemoteTarget};
+use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use sley::{
@@ -161,6 +166,123 @@ pub fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>>
         return Ok(git_overlay_default_remote_name(repo));
     }
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Push / pull capability routing (pure; no network I/O)
+// ---------------------------------------------------------------------------
+
+/// Hosted/network push strategy for one push invocation.
+///
+/// Derived solely from [`RepositoryCapability`] and the `--all-threads` flag.
+/// CLI applies the plan by calling the corresponding transport (mirror RPC,
+/// per-thread native fan-out, or single native push).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedPushPlan {
+    /// Native path: one push RPC per pushable thread (heddle#838).
+    NativePerThreadFanout,
+    /// Git-overlay: single multi-ref git-mirror transfer (heddle#846).
+    /// Covers every ref (= every thread) in one ship even when
+    /// `--all-threads` was set.
+    GitOverlayMirror,
+    /// Native path: single-thread push RPC for the resolved track name.
+    NativeSingleThread,
+}
+
+/// Whether a hosted `--all-threads` push collapses to a SINGLE mirror push
+/// instead of the per-thread native fan-out.
+///
+/// True for git-overlay repos: the default mirror push (#846) already ships
+/// every ref (= every thread) in one transfer, so looping per thread would
+/// re-upload the identical pack T times. Native (non-overlay) repos keep the
+/// #838 per-thread fan-out.
+pub fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool {
+    capability == RepositoryCapability::GitOverlay
+}
+
+/// Plan the hosted/network push strategy for a capability + `--all-threads`.
+pub fn plan_hosted_push(capability: RepositoryCapability, all_threads: bool) -> HostedPushPlan {
+    if all_threads && !all_threads_uses_single_mirror_push(capability) {
+        HostedPushPlan::NativePerThreadFanout
+    } else if capability == RepositoryCapability::GitOverlay {
+        HostedPushPlan::GitOverlayMirror
+    } else {
+        HostedPushPlan::NativeSingleThread
+    }
+}
+
+/// Whether a single-thread network push should use the git-overlay mirror RPC
+/// rather than the plain native push RPC.
+pub fn uses_git_overlay_mirror_rpc(capability: RepositoryCapability) -> bool {
+    capability == RepositoryCapability::GitOverlay
+}
+
+/// Whether push/pull should take the local git-overlay path (git refs /
+/// git projection) rather than native heddle remote transport.
+///
+/// Eligible when the repo is git-overlay, hosted mode is off, and the
+/// resolved target is not a hosted heddle network endpoint.
+pub fn uses_local_git_overlay_transport(
+    capability: RepositoryCapability,
+    hosted_enabled: bool,
+    uses_hosted_network: bool,
+) -> bool {
+    capability == RepositoryCapability::GitOverlay && !hosted_enabled && !uses_hosted_network
+}
+
+/// Default thread name for a push when the user omitted it.
+///
+/// Explicit request wins; otherwise the attached HEAD thread, else `"main"`
+/// for detached HEAD.
+pub fn default_push_thread_name(requested: Option<&str>, head: &Head) -> String {
+    if let Some(requested) = requested {
+        return requested.to_string();
+    }
+    match head {
+        Head::Attached { thread } => thread.to_string(),
+        Head::Detached { .. } => "main".to_string(),
+    }
+}
+
+/// Default remote thread name for a pull when the user omitted it.
+///
+/// Explicit request wins. On git-overlay, pull tracks the attached HEAD
+/// thread (Git branch). On native heddle, the historical default is `"main"`.
+pub fn default_pull_thread_name(
+    explicit_thread: Option<&str>,
+    capability: RepositoryCapability,
+    head: &Head,
+) -> String {
+    if let Some(thread) = explicit_thread {
+        return thread.to_string();
+    }
+
+    if capability == RepositoryCapability::GitOverlay
+        && let Head::Attached { thread } = head
+    {
+        return thread.to_string();
+    }
+
+    "main".to_string()
+}
+
+/// Whether a git-overlay current-thread refs push may target `requested`.
+///
+/// Git-overlay refs push always ships the attached HEAD branch. When the user
+/// names a different thread without `--all-threads`, callers should refuse.
+/// `all_threads == true` or `requested == None` always allows.
+pub fn git_overlay_current_thread_push_ok(
+    all_threads: bool,
+    requested: Option<&str>,
+    attached: Option<&str>,
+) -> bool {
+    if all_threads {
+        return true;
+    }
+    match requested {
+        None => true,
+        Some(name) => attached == Some(name),
+    }
 }
 
 /// Merged remote map: name → (url, source label).
@@ -670,5 +792,152 @@ mod tests {
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         let target = ctx.write_file_for("origin").unwrap();
         assert_eq!(target, git_dir.join("extra.config"));
+    }
+
+    // --- Push / pull capability routing ---
+
+    #[test]
+    fn git_overlay_all_threads_hosted_push_is_single_mirror() {
+        assert!(
+            all_threads_uses_single_mirror_push(RepositoryCapability::GitOverlay),
+            "git-overlay --all-threads must collapse to one mirror push",
+        );
+        assert!(
+            !all_threads_uses_single_mirror_push(RepositoryCapability::NativeHeddle),
+            "native --all-threads must keep the per-thread fan-out (#838)",
+        );
+    }
+
+    #[test]
+    fn plan_hosted_push_routes_by_capability_and_all_threads() {
+        assert_eq!(
+            plan_hosted_push(RepositoryCapability::NativeHeddle, true),
+            HostedPushPlan::NativePerThreadFanout,
+        );
+        assert_eq!(
+            plan_hosted_push(RepositoryCapability::GitOverlay, true),
+            HostedPushPlan::GitOverlayMirror,
+        );
+        assert_eq!(
+            plan_hosted_push(RepositoryCapability::GitOverlay, false),
+            HostedPushPlan::GitOverlayMirror,
+        );
+        assert_eq!(
+            plan_hosted_push(RepositoryCapability::NativeHeddle, false),
+            HostedPushPlan::NativeSingleThread,
+        );
+    }
+
+    #[test]
+    fn uses_git_overlay_mirror_rpc_only_for_overlay() {
+        assert!(uses_git_overlay_mirror_rpc(
+            RepositoryCapability::GitOverlay
+        ));
+        assert!(!uses_git_overlay_mirror_rpc(
+            RepositoryCapability::NativeHeddle
+        ));
+    }
+
+    #[test]
+    fn uses_local_git_overlay_transport_requires_overlay_and_no_hosted() {
+        assert!(uses_local_git_overlay_transport(
+            RepositoryCapability::GitOverlay,
+            false,
+            false,
+        ));
+        assert!(!uses_local_git_overlay_transport(
+            RepositoryCapability::GitOverlay,
+            true,
+            false,
+        ));
+        assert!(!uses_local_git_overlay_transport(
+            RepositoryCapability::GitOverlay,
+            false,
+            true,
+        ));
+        assert!(!uses_local_git_overlay_transport(
+            RepositoryCapability::NativeHeddle,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn default_push_thread_prefers_explicit_then_attached_then_main() {
+        let attached = Head::Attached {
+            thread: objects::object::ThreadName::new("feature"),
+        };
+        let detached = Head::Detached {
+            state: objects::object::ChangeId::generate(),
+        };
+
+        assert_eq!(
+            default_push_thread_name(Some("release"), &attached),
+            "release"
+        );
+        assert_eq!(default_push_thread_name(None, &attached), "feature");
+        assert_eq!(default_push_thread_name(None, &detached), "main");
+    }
+
+    #[test]
+    fn default_pull_thread_uses_current_git_overlay_thread() {
+        let head = Head::Attached {
+            thread: objects::object::ThreadName::new("master"),
+        };
+        assert_eq!(
+            default_pull_thread_name(None, RepositoryCapability::GitOverlay, &head),
+            "master"
+        );
+    }
+
+    #[test]
+    fn default_pull_thread_keeps_native_main_default() {
+        let head = Head::Attached {
+            thread: objects::object::ThreadName::new("feature"),
+        };
+        assert_eq!(
+            default_pull_thread_name(None, RepositoryCapability::NativeHeddle, &head),
+            "main"
+        );
+    }
+
+    #[test]
+    fn default_pull_thread_honors_explicit_thread() {
+        let head = Head::Attached {
+            thread: objects::object::ThreadName::new("master"),
+        };
+        assert_eq!(
+            default_pull_thread_name(Some("release"), RepositoryCapability::GitOverlay, &head),
+            "release"
+        );
+    }
+
+    #[test]
+    fn git_overlay_current_thread_push_refuses_mismatched_thread() {
+        assert!(git_overlay_current_thread_push_ok(
+            false,
+            None,
+            Some("main")
+        ));
+        assert!(git_overlay_current_thread_push_ok(
+            false,
+            Some("main"),
+            Some("main")
+        ));
+        assert!(!git_overlay_current_thread_push_ok(
+            false,
+            Some("feature"),
+            Some("main")
+        ));
+        assert!(!git_overlay_current_thread_push_ok(
+            false,
+            Some("feature"),
+            None
+        ));
+        assert!(git_overlay_current_thread_push_ok(
+            true,
+            Some("feature"),
+            Some("main")
+        ));
     }
 }

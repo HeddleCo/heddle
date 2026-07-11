@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use heddle_core::{
-    GitConfigContext, RemoteInfo, RemoteListReport, list_plain_git_remotes, list_remotes,
-    merged_remote_items, show_plain_git_remote, show_remote,
+    GitConfigContext, RemoteInfo, RemoteListReport, default_pull_thread_name,
+    list_plain_git_remotes, list_remotes, merged_remote_items, show_plain_git_remote, show_remote,
+    uses_local_git_overlay_transport,
 };
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
@@ -196,10 +197,11 @@ pub async fn cmd_pull(
         )));
     }
     let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && !repo.hosted_enabled()
-        && !pull_uses_hosted_network
-    {
+    if uses_local_git_overlay_transport(
+        repo.capability(),
+        repo.hosted_enabled(),
+        pull_uses_hosted_network,
+    ) {
         ensure_worktree_clean(&repo, "pull")?;
         let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
         let branch = repo.git_overlay_current_branch()?;
@@ -298,7 +300,7 @@ pub async fn cmd_pull(
     let (target, _server_key) = resolve_remote_with_key(&repo, remote.as_deref())?;
 
     let head_ref = repo.head_ref()?;
-    let remote_thread = default_pull_thread_name(thread, repo.capability(), &head_ref);
+    let remote_thread = default_pull_thread_name(thread.as_deref(), repo.capability(), &head_ref);
     let local_thread_name = local_thread.as_deref();
     let should_materialize = match &head_ref {
         Head::Attached { thread } => local_thread_name.is_none_or(|local| thread == local),
@@ -338,24 +340,6 @@ pub async fn cmd_pull(
     }
 
     Ok(())
-}
-
-fn default_pull_thread_name(
-    explicit_thread: Option<String>,
-    capability: RepositoryCapability,
-    head_ref: &Head,
-) -> String {
-    if let Some(thread) = explicit_thread {
-        return thread;
-    }
-
-    if capability == RepositoryCapability::GitOverlay
-        && let Head::Attached { thread } = head_ref
-    {
-        return thread.to_string();
-    }
-
-    "main".to_string()
 }
 
 async fn pull_local(
@@ -922,48 +906,9 @@ mod tests {
         SleyRepository::init(root).expect("init git repo");
     }
 
-    #[test]
-    fn default_pull_thread_uses_current_git_overlay_thread() {
-        let head = Head::Attached {
-            thread: ThreadName::new("master"),
-        };
-
-        assert_eq!(
-            default_pull_thread_name(None, RepositoryCapability::GitOverlay, &head),
-            "master"
-        );
-    }
-
-    #[test]
-    fn default_pull_thread_keeps_native_main_default() {
-        let head = Head::Attached {
-            thread: ThreadName::new("feature"),
-        };
-
-        assert_eq!(
-            default_pull_thread_name(None, RepositoryCapability::NativeHeddle, &head),
-            "main"
-        );
-    }
-
-    #[test]
-    fn default_pull_thread_honors_explicit_thread() {
-        let head = Head::Attached {
-            thread: ThreadName::new("master"),
-        };
-
-        assert_eq!(
-            default_pull_thread_name(
-                Some("release".to_string()),
-                RepositoryCapability::GitOverlay,
-                &head,
-            ),
-            "release"
-        );
-    }
-
-    // Pure git-config read coverage lives in heddle_core::remote. These tests
-    // keep mutation/write-target invariants for the CLI git-overlay sync path.
+    // Pure pull-thread selection and capability routing live in
+    // heddle_core::remote. These tests keep mutation/write-target invariants
+    // for the CLI git-overlay sync path.
 
     #[test]
     fn remove_clears_worktree_layer_when_extension_enabled() {

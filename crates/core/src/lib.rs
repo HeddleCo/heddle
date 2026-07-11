@@ -13,6 +13,7 @@ pub mod status;
 pub mod thread_shaping;
 pub mod undo;
 pub mod verify;
+pub mod workflow;
 
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -42,9 +43,12 @@ pub use objects::{
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use remote::{
-    GitConfigContext, IncludedGitRemoteConfigError, RemoteInfo, RemoteListReport,
-    list_plain_git_remotes, list_remotes, merged_remote_items, plain_git_remote_items,
-    resolve_default_remote_name, resolved_default_remote_name, show_plain_git_remote, show_remote,
+    GitConfigContext, HostedPushPlan, IncludedGitRemoteConfigError, RemoteInfo, RemoteListReport,
+    all_threads_uses_single_mirror_push, default_pull_thread_name, default_push_thread_name,
+    git_overlay_current_thread_push_ok, list_plain_git_remotes, list_remotes, merged_remote_items,
+    plain_git_remote_items, plan_hosted_push, resolve_default_remote_name,
+    resolved_default_remote_name, show_plain_git_remote, show_remote, uses_git_overlay_mirror_rpc,
+    uses_local_git_overlay_transport,
 };
 pub use save::{
     GitScope, SavePlan, SaveReport, SaveVerb, execute_save, plan_creates_new_state, plan_git_scope,
@@ -83,4 +87,15 @@ pub use verify::{
     build_repository_verification_state_with_worktree_status_and_machine_contract,
     dirty_path_count, repository_mode_label, repository_presentation, repository_setup_action_kind,
     repository_setup_guidance, verify,
+};
+pub use workflow::{
+    AUTO_LAND_CONFIDENCE_RECOVERY_ACTION, AUTO_LAND_CONFIDENCE_THRESHOLD, AutoLandPolicyInput,
+    LandPushOptions, LandPushPlan, LandPushPlanError, ReadyDecision, ReadyDecisionInput,
+    auto_land_confidence_recovery_action, auto_land_policy_blockers, classify_ready_decision,
+    has_integration_target, integrated_land_next_action, integration_blocker_recommended_action,
+    integration_blockers, is_heavy_impact_advisory, is_integration_clear,
+    land_blockers_for_preview, land_performed_steps, land_skipped_steps, land_warnings_for_preview,
+    non_staleness_blockers, plan_land_push, ready_report_recommended_action,
+    ready_scoped_next_action, ready_verification_preflight_blocks,
+    ready_verification_status_blocks, recovery_scope_checkout, should_squash_land,
 };

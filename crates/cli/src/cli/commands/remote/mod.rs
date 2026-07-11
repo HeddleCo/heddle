@@ -6,6 +6,11 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "client")]
+use heddle_core::{HostedPushPlan, plan_hosted_push, uses_git_overlay_mirror_rpc};
+use heddle_core::{
+    default_push_thread_name, git_overlay_current_thread_push_ok, uses_local_git_overlay_transport,
+};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
@@ -225,10 +230,11 @@ pub async fn cmd_push(
 
     let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
 
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && !repo.hosted_enabled()
-        && !push_uses_hosted_network
-    {
+    if uses_local_git_overlay_transport(
+        repo.capability(),
+        repo.hosted_enabled(),
+        push_uses_hosted_network,
+    ) {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
         } else {
@@ -259,12 +265,16 @@ pub async fn cmd_push(
         // thread explicitly (positional or `--thread`) we must NOT
         // silently push the wrong branch — refuse and tell them to
         // switch first or use `--all-threads`.
-        if !all_threads && let Some(requested) = thread.as_deref() {
+        if let Some(requested) = thread.as_deref() {
             let attached = match repo.head_ref()? {
                 Head::Attached { thread } => Some(thread.to_string()),
                 Head::Detached { .. } => None,
             };
-            if attached.as_deref() != Some(requested) {
+            if !git_overlay_current_thread_push_ok(
+                all_threads,
+                Some(requested),
+                attached.as_deref(),
+            ) {
                 let attached_label = attached
                     .as_deref()
                     .map(|t| format!("'{t}'"))
@@ -1069,14 +1079,7 @@ fn looks_like_remote_location(value: &str) -> bool {
 }
 
 fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Result<String> {
-    if let Some(requested) = requested {
-        return Ok(requested.to_string());
-    }
-
-    match repo.head_ref()? {
-        Head::Attached { thread } => Ok(thread.to_string()),
-        Head::Detached { .. } => Ok("main".to_string()),
-    }
+    Ok(default_push_thread_name(requested, &repo.head_ref()?))
 }
 
 /// Resolve the state a `push` should upload for a single-thread push
@@ -1297,16 +1300,6 @@ async fn push_local_all_threads(
     Ok(())
 }
 
-/// Whether a hosted `--all-threads` push collapses to a SINGLE mirror push
-/// instead of the per-thread native fan-out. True for git-overlay repos: the
-/// default mirror push (#846) already ships every ref (= every thread) in one
-/// transfer, so looping per thread would re-upload the identical pack T times.
-/// Native (non-overlay) repos keep the #838 per-thread fan-out.
-#[cfg(feature = "client")]
-fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool {
-    capability == RepositoryCapability::GitOverlay
-}
-
 #[cfg(feature = "client")]
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let mut client = options
@@ -1335,7 +1328,11 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // and re-upload the identical full pack once per thread and print a
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
     // single projection push below; only the non-Git-backed path loops.
-    if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
+    // Plan is pure (capability + flag); network bodies stay here.
+    if matches!(
+        plan_hosted_push(repo.capability(), options.all_threads),
+        HostedPushPlan::NativePerThreadFanout
+    ) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
@@ -1425,7 +1422,7 @@ async fn push_network_one_thread(
     force: bool,
     progress: &objects::Progress,
 ) -> Result<wire::PushComplete> {
-    let result = if repo.capability() == RepositoryCapability::GitOverlay {
+    let result = if uses_git_overlay_mirror_rpc(repo.capability()) {
         // Default (heddle#846): push ALL git-overlay refs in one multi-ref
         // git-mirror transfer through weft's git lane, with live progress.
         // Native heddle conversion stays opt-in via `heddle adopt`.
@@ -1806,22 +1803,7 @@ mod git_overlay_config_atomic_tests {
         assert_eq!(spool_slug_from_local_name("---"), "");
     }
 
-    /// A git-overlay `--all-threads` hosted push collapses to a SINGLE mirror
-    /// push (mirror ships every ref = every thread), while a native repo keeps
-    /// the #838 per-thread fan-out. This drives the branch condition in
-    /// `push_network`.
-    #[cfg(feature = "client")]
-    #[test]
-    fn git_overlay_all_threads_hosted_push_is_single_mirror() {
-        assert!(
-            all_threads_uses_single_mirror_push(RepositoryCapability::GitOverlay),
-            "git-overlay --all-threads must collapse to one mirror push",
-        );
-        assert!(
-            !all_threads_uses_single_mirror_push(RepositoryCapability::NativeHeddle),
-            "native --all-threads must keep the per-thread fan-out (#838)",
-        );
-    }
+    // Capability / push-routing pure decisions live in heddle_core::remote.
 
     #[cfg(feature = "client")]
     #[test]
