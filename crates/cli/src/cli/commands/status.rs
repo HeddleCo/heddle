@@ -12,15 +12,17 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
     ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
-    MachineContractInput, MaterializedThreadInfo, StatusDetail, StatusOptions,
-    StatusReport as StatusOutput, changes_from_worktree_status, changes_paths, coordination_label,
-    fast_short_status_report, human_thread_health, status as core_status, status_combined_verdict,
+    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
+    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
+    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
+    status_combined_verdict,
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
+#[cfg(feature = "client")]
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 use tokio::time::{Duration, sleep};
@@ -33,12 +35,8 @@ use tracing::debug;
 
 use super::{
     action_line::print_command,
-    git_projection::{GitIndexPlan, git_index_plan_for_root},
     next_action::{NextActionValidationContext, write_command_json},
-    verification_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
-        serialize_empty_action_as_null,
-    },
+    verification_health::repository_setup_guidance,
 };
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
@@ -46,28 +44,6 @@ use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-
-#[derive(Serialize)]
-struct PlainGitStatusOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
-    storage_model: String,
-    heddle_initialized: bool,
-    git_branch: Option<String>,
-    path: String,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
-    thread_health: String,
-    changed_path_count: usize,
-    changes: ChangesInfo,
-    git_index: Option<CoreGitIndexPlan>,
-}
 
 fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
     let Some(profile) = profile else {
@@ -225,37 +201,18 @@ pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
     Ok(Some(segment))
 }
 
-fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput>> {
+fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusReport>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let Some(probe) = build_plain_git_verification_probe(start)? else {
-        return Ok(None);
-    };
-    let changes = changes_from_worktree_status(&probe.changes);
-    let changed_path_count = probe.changes.change_count();
-    let trust = probe.trust;
-    let git_index = git_index_plan_for_root(&probe.root)?.map(core_git_index_plan);
-    Ok(Some(PlainGitStatusOutput {
-        output_kind: "status",
-        repository_capability: "plain-git".to_string(),
-        repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-        storage_model: "git-only".to_string(),
-        heddle_initialized: false,
-        git_branch: probe.git_branch,
-        path: probe.root.display().to_string(),
-        recommended_action: trust.recommended_action.clone(),
-        recommended_action_template: trust.recommended_action_template.clone(),
-        recovery_commands: trust.recovery_commands.clone(),
-        recovery_action_templates: trust.recovery_action_templates.clone(),
-        thread_health: trust.status.clone(),
-        changed_path_count,
-        changes,
-        git_index,
-        trust,
-    }))
+    Ok(plain_git_status_report(
+        start,
+        &MachineContractInput::from_coverage(
+            super::verification_health::machine_contract_coverage(),
+        ),
+    )?)
 }
 
-fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
+fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusReport, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
         write_command_json(
             output,
@@ -350,18 +307,6 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         report: output,
         render_json: as_json,
     })
-}
-
-fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
-    CoreGitIndexPlan {
-        commit_mode: plan.commit_mode,
-        has_staged_changes: plan.has_staged_changes,
-        staged_paths: plan.staged_paths,
-        unstaged_paths: plan.unstaged_paths,
-        untracked_paths: plan.untracked_paths,
-        will_commit: plan.will_commit,
-        preserved_after_commit: plan.preserved_after_commit,
-    }
 }
 
 fn cli_coordination_status(status: CoordinationStatus) -> super::thread::CoordinationStatus {
@@ -546,7 +491,7 @@ impl super::compact::CompactProjection for StatusOutput {
     }
 }
 
-impl super::compact::CompactProjection for PlainGitStatusOutput {
+impl super::compact::CompactProjection for PlainGitStatusReport {
     fn compact(&self) -> super::compact::CompactOutput {
         let (next_action, next_action_template) =
             compact_next_action(&self.recommended_action, &self.recommended_action_template);
@@ -685,7 +630,7 @@ fn short_status_subject(output: &StatusOutput) -> &str {
         .unwrap_or("repository")
 }
 
-fn render_short_plain_git_status(output: &PlainGitStatusOutput) {
+fn render_short_plain_git_status(output: &PlainGitStatusReport) {
     render_short_changes(&output.changes);
     if output.changes.is_empty() {
         println!(
@@ -1610,14 +1555,17 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
-    use heddle_core::ActorInfo;
+    use heddle_core::{
+        ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
+        repository_mode_label,
+    };
     use repo::{AgentUsageSummary, Repository};
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
-        ChangesInfo, MaterializedThreadInfo, PlainGitStatusOutput, RepositoryVerificationState,
-        assess_materialized_threads, build_status_output, render_status_materialized,
+        MaterializedThreadInfo, assess_materialized_threads, build_status_output,
+        render_status_materialized,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -1834,12 +1782,9 @@ mod tests {
         render_status_materialized(&fresh_only, false);
     }
 
-    /// Action-field presence contract (HeddleCo/heddle#645): an empty
-    /// `recommended_action` must serialize as `null`, never `""` — the
-    /// serialization-boundary walker hard-fails the whole command on a
-    /// raw empty. `PlainGitStatusOutput.recommended_action` is cloned
-    /// from `trust.recommended_action`, which CAN legitimately be empty;
-    /// this pins the safe-by-construction wire shape.
+    /// Action-field presence contract (HeddleCo/heddle#645): empty
+    /// `recommended_action` serializes as `null` via core's
+    /// `PlainGitStatusReport` (assembly + serde live in heddle-core).
     #[test]
     fn plain_git_status_serializes_empty_recommended_action_as_null() {
         let machine_contract_coverage =
@@ -1873,10 +1818,10 @@ mod tests {
             recovery_action_templates: Vec::new(),
             checks: Vec::new(),
         };
-        let output = PlainGitStatusOutput {
+        let output = PlainGitStatusReport {
             output_kind: "status",
             repository_capability: "plain-git".to_string(),
-            repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+            repository_label: repository_mode_label("plain-git", "git-only"),
             storage_model: "git-only".to_string(),
             heddle_initialized: false,
             git_branch: Some("main".to_string()),
@@ -1887,11 +1832,7 @@ mod tests {
             recovery_action_templates: trust.recovery_action_templates.clone(),
             thread_health: trust.status.clone(),
             changed_path_count: 0,
-            changes: ChangesInfo {
-                modified: Vec::new(),
-                added: Vec::new(),
-                deleted: Vec::new(),
-            },
+            changes: ChangesInfo::default(),
             git_index: None,
             trust,
         };

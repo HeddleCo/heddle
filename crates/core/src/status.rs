@@ -6,6 +6,7 @@ pub mod verdict;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -51,8 +52,9 @@ use crate::{
     schema_for_report,
     verify::{
         MachineContractInput, action_template, action_templates,
+        build_plain_git_verification_probe_with_machine_contract,
         build_repository_verification_state_with_worktree_status_and_machine_contract,
-        serialize_empty_action_as_null,
+        repository_mode_label, serialize_empty_action_as_null,
     },
 };
 
@@ -1411,6 +1413,51 @@ pub fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>
     )))
 }
 
+/// Build a Git index plan for a worktree root without requiring a Heddle
+/// repository (plain-Git observe path).
+pub fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan>> {
+    let git = match SleyRepository::discover(root) {
+        Ok(git) => git,
+        Err(_) => return Ok(None),
+    };
+    if !git_worktree_matches_root(&git, root) {
+        return Ok(None);
+    }
+    let ignore_patterns = git_ignore_patterns_for_root(root, &git)?;
+    Ok(Some(GitIndexPlan::from_intent(
+        &git_index_intent_for_root_with_ignore_and_repo(root, &ignore_patterns, &git)?,
+    )))
+}
+
+fn git_ignore_patterns_for_root(root: &Path, git: &SleyRepository) -> Result<Vec<String>> {
+    let mut patterns = Vec::new();
+    append_ignore_file_patterns(&mut patterns, &root.join(".gitignore"))?;
+    append_ignore_file_patterns(&mut patterns, &git.git_dir().join("info").join("exclude"))?;
+    Ok(patterns)
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(path).map_err(|err| {
+        HeddleError::Config(format!(
+            "failed to read ignore file {}: {err}",
+            path.display()
+        ))
+    })?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !patterns.iter().any(|pattern| pattern == trimmed) {
+            patterns.push(trimmed.to_string());
+        }
+    }
+    Ok(())
+}
+
 fn git_worktree_matches_root(git: &SleyRepository, root: &Path) -> bool {
     git.workdir()
         .is_some_and(|workdir| paths_equal(&workdir, root))
@@ -1820,6 +1867,70 @@ pub struct FastShortStatusProfile {
     pub branch_ms: u128,
     pub remote_ms: u128,
     pub total_ms: u128,
+}
+
+/// Typed plain-Git status observe report (no `.heddle` metadata yet).
+///
+/// Assembled by [`plain_git_status_report`]; CLI maps options, calls core, and
+/// renders. Machine JSON uses this shape directly (including empty
+/// `recommended_action` → `null`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PlainGitStatusReport {
+    pub output_kind: &'static str,
+    pub repository_capability: String,
+    pub repository_label: String,
+    pub storage_model: String,
+    pub heddle_initialized: bool,
+    pub git_branch: Option<String>,
+    pub path: String,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    #[schemars(with = "Option<String>")]
+    pub recommended_action: String,
+    pub recommended_action_template: Option<ActionTemplate>,
+    pub recovery_commands: Vec<String>,
+    pub recovery_action_templates: Vec<ActionTemplate>,
+    pub thread_health: String,
+    pub changed_path_count: usize,
+    pub changes: ChangesInfo,
+    pub git_index: Option<GitIndexPlan>,
+}
+
+/// Build a plain-Git status report when `start` is a Git worktree without
+/// Heddle metadata. Returns `Ok(None)` when the path is not a plain-Git observe
+/// target (no Git, or `.heddle` already present).
+pub fn plain_git_status_report(
+    start: &Path,
+    machine_contract_input: &MachineContractInput,
+) -> Result<Option<PlainGitStatusReport>> {
+    let Some(probe) =
+        build_plain_git_verification_probe_with_machine_contract(start, machine_contract_input)?
+    else {
+        return Ok(None);
+    };
+    let changes = changes_from_worktree_status(&probe.changes);
+    let changed_path_count = probe.changes.change_count();
+    let trust = probe.trust;
+    let git_index = git_index_plan_for_root(&probe.root)?;
+    Ok(Some(PlainGitStatusReport {
+        output_kind: "status",
+        repository_capability: "plain-git".to_string(),
+        repository_label: repository_mode_label("plain-git", "git-only"),
+        storage_model: "git-only".to_string(),
+        heddle_initialized: false,
+        git_branch: probe.git_branch,
+        path: probe.root.display().to_string(),
+        recommended_action: trust.recommended_action.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_action_templates: trust.recovery_action_templates.clone(),
+        thread_health: trust.status.clone(),
+        changed_path_count,
+        changes,
+        git_index,
+        trust,
+    }))
 }
 
 pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusReport> {
@@ -3111,5 +3222,88 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "Machine contract" && check.status == "not_checked")
         );
+    }
+
+    /// Empty `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a raw
+    /// empty. Pins the safe-by-construction wire shape for plain-Git status.
+    #[test]
+    fn plain_git_status_serializes_empty_recommended_action_as_null() {
+        let trust = RepositoryVerificationState {
+            verified: true,
+            status: "verified".to_string(),
+            repository_mode: "plain-git".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            heddle_thread: None,
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "not_applicable".to_string(),
+            mapping_state: "not_applicable".to_string(),
+            remote_drift: "clean".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: "not_checked".to_string(),
+            machine_contract_coverage: MachineContractInput::default().coverage,
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no ready threads are waiting to land".to_string(),
+            summary: "plain Git repository".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        };
+        let output = PlainGitStatusReport {
+            output_kind: "status",
+            repository_capability: "plain-git".to_string(),
+            repository_label: repository_mode_label("plain-git", "git-only"),
+            storage_model: "git-only".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            path: "/tmp/repo".to_string(),
+            recommended_action: trust.recommended_action.clone(),
+            recommended_action_template: trust.recommended_action_template.clone(),
+            recovery_commands: trust.recovery_commands.clone(),
+            recovery_action_templates: trust.recovery_action_templates.clone(),
+            thread_health: trust.status.clone(),
+            changed_path_count: 0,
+            changes: ChangesInfo::default(),
+            git_index: None,
+            trust,
+        };
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert!(value["recommended_action"].is_null());
+        assert!(value["verification"]["recommended_action"].is_null());
+    }
+
+    #[test]
+    fn plain_git_status_report_assembles_for_git_only_worktree() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        SleyRepository::init(root).expect("init plain git repository");
+        fs::write(root.join("README"), "hello\n").expect("write file");
+
+        let report = plain_git_status_report(root, &MachineContractInput::default())
+            .expect("plain git status")
+            .expect("probe present");
+        assert_eq!(report.output_kind, "status");
+        assert_eq!(report.repository_capability, "plain-git");
+        assert_eq!(report.storage_model, "git-only");
+        assert!(!report.heddle_initialized);
+        assert!(!report.repository_label.is_empty());
+        assert!(!report.trust.status.is_empty());
+        assert!(report.changed_path_count > 0 || !report.changes.is_empty());
+    }
+
+    #[test]
+    fn plain_git_status_report_skips_heddle_repos() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        repo::Repository::init_default(temp.path()).expect("init repo");
+        let report = plain_git_status_report(temp.path(), &MachineContractInput::default())
+            .expect("plain git status");
+        assert!(report.is_none());
     }
 }

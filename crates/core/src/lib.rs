@@ -46,13 +46,14 @@ pub use save::{
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,
-    RepositoryVerificationCheck, RepositoryVerificationHealth, StateInfo, StatusCombinedVerdict,
-    StatusDetail, StatusOptions, StatusProfile, StatusReport, StatusThreadSummary,
-    assess_materialized_threads, build_repository_verification_health_with_worktree_status,
-    changes_from_worktree_status, changes_path_count, changes_paths, combined_verdict_axes,
-    coordination_axis_clean, coordination_label, coordination_severity, fast_short_status_report,
-    health_severity, human_thread_health, resolve_coordination_with_trust, status,
-    status_combined_verdict,
+    PlainGitStatusReport, RepositoryVerificationCheck, RepositoryVerificationHealth, StateInfo,
+    StatusCombinedVerdict, StatusDetail, StatusOptions, StatusProfile, StatusReport,
+    StatusThreadSummary, assess_materialized_threads,
+    build_repository_verification_health_with_worktree_status, changes_from_worktree_status,
+    changes_path_count, changes_paths, combined_verdict_axes, coordination_axis_clean,
+    coordination_label, coordination_severity, fast_short_status_report, git_index_plan_for_root,
+    health_severity, human_thread_health, plain_git_status_report, resolve_coordination_with_trust,
+    status, status_combined_verdict,
 };
 pub use thread_shaping::{
     CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
