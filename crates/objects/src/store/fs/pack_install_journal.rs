@@ -21,6 +21,13 @@
 //! Recovery on store open / pack reload finishes or aborts incomplete installs.
 //! Intents older than [`DEFAULT_PACK_INSTALL_INTENT_TTL_SECS`] are aborted unless
 //! they can still complete quickly (final pack + staged index present).
+//!
+//! **Concurrency:** install and recover share an exclusive flock on
+//! `packs/.pack-install.lock` (reentrant via [`crate::lock::RepoLock`]) so a
+//! concurrent `reload_packs` cannot abort another thread's live install.
+//! Non-expired Prepared/PackPublished intents that cannot complete yet are
+//! treated as **in progress** and left alone (crash cleanup uses TTL expiry).
+//!
 //! Orphan `.staging/*` dirs without a matching intent are swept past TTL.
 //! Unpaired final packs without intent are still GC'd via
 //! [`super::fs_pack::prune_unpaired_pack_files`].
@@ -33,7 +40,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::fs_atomic::{create_dir_all_durable, publish_file_durable, write_file_atomic};
+use crate::{
+    fs_atomic::{create_dir_all_durable, publish_file_durable, write_file_atomic},
+    lock::RepoLock,
+};
 
 /// Intent schema version.
 pub const PACK_INSTALL_INTENT_VERSION: u32 = 1;
@@ -81,9 +91,20 @@ pub struct PackInstallRecoverReport {
     pub completed: u64,
     pub aborted: u64,
     pub cleaned_stale_completed: u64,
+    /// Non-expired intents left alone (likely a concurrent live install).
+    pub skipped_in_progress: u64,
     /// Orphan `.staging/<id>` directories removed (no matching intent, past TTL).
     pub orphan_staging_swept: u64,
     pub errors: u64,
+}
+
+const PACK_INSTALL_LOCK_NAME: &str = ".pack-install.lock";
+
+/// Exclusive install/recover lock for `packs_dir` (cross-thread + cross-process).
+fn acquire_pack_install_lock(packs_dir: &Path) -> io::Result<crate::lock::WriteLockGuard> {
+    create_dir_all_durable(packs_dir)?;
+    let lock = RepoLock::at(packs_dir.join(PACK_INSTALL_LOCK_NAME));
+    lock.write().map_err(|e| io::Error::other(e.to_string()))
 }
 
 impl PackInstallIntent {
@@ -255,15 +276,23 @@ pub fn recover_pack_install_intents(packs_dir: &Path) -> io::Result<PackInstallR
 /// Recover install intents with an optional TTL (seconds).
 ///
 /// Policy:
+/// - Hold `packs/.pack-install.lock` for the whole recovery (serializes with install).
 /// - If the install can complete (final pack + staged idx, or both finals) →
 ///   complete/cleanup **regardless of TTL**.
-/// - Else if `created_unix + ttl < now` → **abort** (drop partial + staging + intent).
-/// - Else apply normal recovery (abort incomplete prepared; complete pack_published
-///   when staging idx is present).
+/// - Else if `created_unix + ttl < now` → **abort** (crash / abandoned install).
+/// - Else → **skip in progress** (do not abort a concurrent live install).
 ///
 /// Also sweeps orphan `.staging/*` dirs with no matching intent file when older
 /// than the TTL (best-effort). `ttl_secs = None` disables expiry and orphan sweep.
 pub fn recover_pack_install_intents_with_ttl(
+    packs_dir: &Path,
+    ttl_secs: Option<i64>,
+) -> io::Result<PackInstallRecoverReport> {
+    let _guard = acquire_pack_install_lock(packs_dir)?;
+    recover_pack_install_intents_with_ttl_locked(packs_dir, ttl_secs)
+}
+
+fn recover_pack_install_intents_with_ttl_locked(
     packs_dir: &Path,
     ttl_secs: Option<i64>,
 ) -> io::Result<PackInstallRecoverReport> {
@@ -324,12 +353,14 @@ pub fn recover_pack_install_intents_with_ttl(
         || report.errors > 0
         || report.completed > 0
         || report.aborted > 0
+        || report.skipped_in_progress > 0
     {
         tracing::info!(
             ?packs_dir,
             intents_seen = report.intents_seen,
             completed = report.completed,
             aborted = report.aborted,
+            skipped_in_progress = report.skipped_in_progress,
             cleaned_stale_completed = report.cleaned_stale_completed,
             orphan_staging_swept = report.orphan_staging_swept,
             errors = report.errors,
@@ -391,21 +422,17 @@ fn recover_one_intent(
         return Ok(());
     }
 
-    // Normal recovery (not expired, cannot complete quickly).
+    // Not expired and cannot complete yet: treat as a live concurrent install
+    // (or a crash that is still within TTL). Do **not** delete staging.
     match intent.phase {
-        PackInstallPhase::Prepared => {
-            abort_install(packs_dir, intent)?;
-            report.aborted += 1;
-            Ok(())
-        }
-        PackInstallPhase::PackPublished => {
-            // Staging idx missing → abort orphan pack.
-            complete_from_staging(packs_dir, intent)?;
-            if intent.dst_pack_path().exists() && intent.dst_idx_path().exists() {
-                report.completed += 1;
-            } else {
-                report.aborted += 1;
-            }
+        PackInstallPhase::Prepared | PackInstallPhase::PackPublished => {
+            tracing::debug!(
+                install_id = %intent.install_id,
+                pack_name = %intent.pack_name,
+                phase = ?intent.phase,
+                "skipping in-progress pack install intent"
+            );
+            report.skipped_in_progress += 1;
             Ok(())
         }
         PackInstallPhase::Completed => {
@@ -475,6 +502,15 @@ pub fn install_pack_bytes_journaled(
     pack_data: &[u8],
     index_data: &[u8],
 ) -> io::Result<String> {
+    let _guard = acquire_pack_install_lock(packs_dir)?;
+    install_pack_bytes_journaled_locked(packs_dir, pack_data, index_data)
+}
+
+fn install_pack_bytes_journaled_locked(
+    packs_dir: &Path,
+    pack_data: &[u8],
+    index_data: &[u8],
+) -> io::Result<String> {
     create_dir_all_durable(packs_dir)?;
 
     let pack_name = format!("{}", blake3::hash(pack_data).to_hex());
@@ -531,6 +567,16 @@ pub fn install_pack_bytes_journaled(
 /// Consumes `src_pack_path` / `src_index_path` (moved into staging then finals).
 /// On success both final files exist and staging/intent are gone.
 pub fn install_pack_files_journaled(
+    packs_dir: &Path,
+    src_pack_path: &Path,
+    src_index_path: &Path,
+    pack_name: &str,
+) -> io::Result<()> {
+    let _guard = acquire_pack_install_lock(packs_dir)?;
+    install_pack_files_journaled_locked(packs_dir, src_pack_path, src_index_path, pack_name)
+}
+
+fn install_pack_files_journaled_locked(
     packs_dir: &Path,
     src_pack_path: &Path,
     src_index_path: &Path,
@@ -686,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_prepared_aborts_without_finals() {
+    fn recover_prepared_aborts_without_finals_when_expired() {
         let root = tempfile::tempdir().unwrap();
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
@@ -698,7 +744,7 @@ mod tests {
         write_file_atomic(&staging_pack, b"p").unwrap();
         write_file_atomic(&staging_idx, b"i").unwrap();
 
-        let intent = PackInstallIntent::new(
+        let mut intent = PackInstallIntent::new(
             install_id.clone(),
             "name1".into(),
             staging_pack,
@@ -706,14 +752,48 @@ mod tests {
             packs.join("name1.pack"),
             packs.join("name1.idx"),
         );
+        intent.created_unix = 1; // expired under any short TTL
         write_intent(&packs, &intent).unwrap();
 
-        let report = recover_pack_install_intents(&packs).unwrap();
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(60)).unwrap();
         assert_eq!(report.aborted, 1);
         assert!(!packs.join("name1.pack").exists());
         assert!(!packs.join("name1.idx").exists());
         assert!(!intent_path(&packs, &install_id).exists());
         assert!(!stage.exists());
+    }
+
+    #[test]
+    fn recover_prepared_fresh_skips_in_progress() {
+        // Concurrent install mid-way: Prepared, staging present, not expired.
+        // Recover must not delete the live installer's staging.
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let install_id = "live-prep".to_string();
+        let stage = staging_dir(&packs, &install_id);
+        create_dir_all_durable(&stage).unwrap();
+        let staging_pack = stage.join(STAGED_PACK_NAME);
+        let staging_idx = stage.join(STAGED_IDX_NAME);
+        write_file_atomic(&staging_pack, b"live-p").unwrap();
+        write_file_atomic(&staging_idx, b"live-i").unwrap();
+
+        let intent = PackInstallIntent::new(
+            install_id.clone(),
+            "live-name".into(),
+            staging_pack.clone(),
+            staging_idx.clone(),
+            packs.join("live-name.pack"),
+            packs.join("live-name.idx"),
+        );
+        write_intent(&packs, &intent).unwrap();
+
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(86_400)).unwrap();
+        assert_eq!(report.skipped_in_progress, 1);
+        assert_eq!(report.aborted, 0);
+        assert!(staging_pack.exists());
+        assert!(staging_idx.exists());
+        assert!(intent_path(&packs, &install_id).exists());
     }
 
     #[test]
@@ -745,10 +825,85 @@ mod tests {
         };
         write_intent(&packs, &intent).unwrap();
 
+        // created_unix=1 → expired under default 24h TTL in 2026+.
         let report = recover_pack_install_intents(&packs).unwrap();
         assert_eq!(report.aborted, 1);
         assert!(!dst_pack.exists());
         assert!(!intent_path(&packs, &install_id).exists());
+    }
+
+    #[test]
+    fn concurrent_reload_does_not_abort_live_install() {
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = Arc::new(root.path().join("packs"));
+        create_dir_all_durable(&packs).unwrap();
+
+        // Thread A: plant a live Prepared install (mid-protocol), wait, then finish.
+        let barrier = Arc::new(Barrier::new(2));
+        let packs_a = Arc::clone(&packs);
+        let barrier_a = Arc::clone(&barrier);
+        let installer = thread::spawn(move || {
+            let packs = packs_a.as_path();
+            let install_id = "concurrent-live".to_string();
+            let stage = staging_dir(packs, &install_id);
+            create_dir_all_durable(&stage).unwrap();
+            let staging_pack = stage.join(STAGED_PACK_NAME);
+            let staging_idx = stage.join(STAGED_IDX_NAME);
+            write_file_atomic(&staging_pack, b"conc-pack").unwrap();
+            write_file_atomic(&staging_idx, b"conc-idx").unwrap();
+            let dst_pack = packs.join("conc.pack");
+            let dst_idx = packs.join("conc.idx");
+            let mut intent = PackInstallIntent::new(
+                install_id.clone(),
+                "conc".into(),
+                staging_pack.clone(),
+                staging_idx.clone(),
+                dst_pack.clone(),
+                dst_idx.clone(),
+            );
+            write_intent(packs, &intent).unwrap();
+            // Signal recoverer: intent is Prepared, staging present.
+            barrier_a.wait();
+            // Wait until recoverer has run.
+            barrier_a.wait();
+            // Staging must still exist (recoverer did not abort).
+            assert!(
+                staging_pack.exists() && staging_idx.exists(),
+                "concurrent recover must not delete live staging"
+            );
+            // Finish install as the live writer would.
+            publish_file_durable(&staging_pack, &dst_pack).unwrap();
+            intent.phase = PackInstallPhase::PackPublished;
+            write_intent(packs, &intent).unwrap();
+            publish_file_durable(&staging_idx, &dst_idx).unwrap();
+            remove_staging(packs, &install_id);
+            remove_intent(packs, &install_id).unwrap();
+            assert!(dst_pack.exists() && dst_idx.exists());
+        });
+
+        let packs_b = Arc::clone(&packs);
+        let barrier_b = Arc::clone(&barrier);
+        let recoverer = thread::spawn(move || {
+            barrier_b.wait(); // wait until Prepared intent exists
+            let report = recover_pack_install_intents_with_ttl(packs_b.as_path(), Some(86_400))
+                .expect("recover");
+            assert_eq!(report.aborted, 0, "must not abort live install");
+            assert!(
+                report.skipped_in_progress >= 1,
+                "expected skip of in-progress intent, got {report:?}"
+            );
+            barrier_b.wait(); // let installer finish
+        });
+
+        installer.join().expect("installer");
+        recoverer.join().expect("recoverer");
+        assert!(packs.join("conc.pack").exists());
+        assert!(packs.join("conc.idx").exists());
     }
 
     #[test]

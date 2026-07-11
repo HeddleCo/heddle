@@ -69,18 +69,34 @@ Every publish uses existing L6/L7 durability (`publish_file_durable`).
 
 ---
 
+## Concurrency
+
+Install and recover take an exclusive flock on `packs/.pack-install.lock`
+(`RepoLock`, reentrant for install → `reload_packs` → recover).
+
+| Case | Behavior |
+|------|----------|
+| Live install mid-`Prepared` + concurrent recover | **Skip** intent (do not abort); count `skipped_in_progress` |
+| Expired `Prepared` / stuck install | **Abort** after TTL |
+| Completable crash residue | **Complete** regardless of TTL |
+
+Without the skip policy, recover could delete another thread's staging between
+intent write and pack publish (Fable review, worth-fixing).
+
 ## Recovery table
 
-| Intent phase | Disk | Action |
-|--------------|------|--------|
-| `prepared`, no finals | staging only | **Abort** — drop staging + intent |
-| `prepared`, pack final + staged idx | crash after pack publish before phase flip | **Complete** index publish |
-| `prepared`, both finals | rare | **Cleanup** staging + intent |
-| `pack_published`, staged idx present | pack final | **Complete** index publish |
-| `pack_published`, staged idx missing | pack final only | **Abort** — delete unpaired pack + intent |
-| `completed` leftover | both finals | **Cleanup** staging + intent |
-| corrupt / unknown version | — | drop intent file; count error |
-| no intent, unpaired `.pack` | legacy L8 | **Option D** `prune_unpaired_pack_files` on reload |
+| Intent phase | Disk | TTL | Action |
+|--------------|------|-----|--------|
+| `prepared`, no finals | staging only | fresh | **Skip in progress** (live install) |
+| `prepared`, no finals | staging only | expired | **Abort** — drop staging + intent |
+| `prepared`, pack final + staged idx | crash after pack publish before phase flip | any | **Complete** index publish |
+| `prepared`, both finals | rare | any | **Cleanup** staging + intent |
+| `pack_published`, staged idx present | pack final | any | **Complete** index publish |
+| `pack_published`, staged idx missing | pack final only | fresh | **Skip in progress** |
+| `pack_published`, staged idx missing | pack final only | expired | **Abort** — delete unpaired pack + intent |
+| `completed` leftover | both finals | any | **Cleanup** staging + intent |
+| corrupt / unknown version | — | — | drop intent file; count error |
+| no intent, unpaired `.pack` | legacy L8 | — | **Option D** `prune_unpaired_pack_files` on reload |
 
 ---
 
