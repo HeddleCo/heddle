@@ -63,7 +63,7 @@ Windows materialization, mount optional, large-ref packed-refs degradation docs/
 ## Wave 8 — Certification
 
 Full curated + oracle + format + clippy + doc + perf cert (5 trials) → release gate checklist green  
-**Status (2026-07-11):** **Partial (fanout2)** — high-signal re-cert **5/5 green** on tip `b7f51aa4` (`artifacts/baseline/post-wave-fanout2-merged/`: fmt-check, facade-render-free, git-process-lint, roundtrip-fidelity, lib-core); **n=5** core-loop perf sample recorded (`artifacts/perf/20260711T041555Z-*`, `PERF_BASELINE.md`) — **not** a Git win claim. Still open: full curated 19-job single-stamp re-run, commit-conformance/formal-specs in this fanout set, clippy/doc gates, multi-host perf.
+**Status (2026-07-11):** **Mostly complete / clippy blocker** — full curated **19/19 green** on tip `d3db0143` (`artifacts/baseline/wave-next-merged/summary.json`, `CARGO_TARGET_DIR=/tmp/heddle-cert3-target`; sequential `--job` merge). All oracles + fmt green. `cargo doc -p heddle-core --no-deps --locked` **pass**. Clippy soft **pass** (1 warning); clippy **`-D warnings` fail** — `clippy::assign_op_pattern` at `crates/cli/src/cli/commands/status.rs:301` (one-line fix, crates path). Prior **n=5** core-loop perf sample retained (`PERF_BASELINE.md`) — **not** a Git win claim; multi-host perf still open. Release-gate checklist **not fully green** until clippy `-D` fixed.
 ---
 
 ## First three bounded implementation tasks (start immediately)

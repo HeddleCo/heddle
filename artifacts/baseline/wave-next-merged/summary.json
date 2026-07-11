@@ -1,0 +1,195 @@
+{
+  "jobs": 19,
+  "counts": {
+    "pass": 19,
+    "fail": 0
+  },
+  "results": [
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 31,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "pass",
+      "duration_ms": 2442,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 72281,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 5003,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 2925,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-projection-engine",
+      "status": "pass",
+      "duration_ms": 109241,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-objects",
+      "status": "pass",
+      "duration_ms": 92254,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-refs",
+      "status": "pass",
+      "duration_ms": 59358,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-oplog",
+      "status": "pass",
+      "duration_ms": 26938,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-merge",
+      "status": "pass",
+      "duration_ms": 52605,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-format",
+      "status": "pass",
+      "duration_ms": 7895,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-crypto",
+      "status": "pass",
+      "duration_ms": 40206,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 88935,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-repo",
+      "status": "pass",
+      "duration_ms": 153811,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-ingest",
+      "status": "pass",
+      "duration_ms": 100955,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-git-projection",
+      "status": "pass",
+      "duration_ms": 16906,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-core-functionality",
+      "status": "pass",
+      "duration_ms": 60507,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-state-management",
+      "status": "pass",
+      "duration_ms": 55125,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "formal-specs",
+      "status": "pass",
+      "duration_ms": 3504,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ],
+  "gates": {
+    "clippy_d_warnings": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings",
+      "status": "fail",
+      "exit_code": 101,
+      "note": "clippy::assign_op_pattern in crates/cli/src/cli/commands/status.rs:301",
+      "log": "logs/clippy-d-warnings.log"
+    },
+    "clippy_soft": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "warnings": 1,
+      "note": "same assign_op_pattern as warning only",
+      "log": "logs/clippy-soft.log"
+    },
+    "cargo_doc": {
+      "command": "cargo doc -p heddle-core --no-deps --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "log": "logs/cargo-doc.log"
+    }
+  },
+  "certification": {
+    "label": "wave-next-full-curated",
+    "wave": 8,
+    "commit": "d3db01439b5f245af9785871a2709786a88742b2",
+    "branch": "codex/correctness-architecture-performance-program",
+    "isolation": "workspace",
+    "worktree_path": "/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10",
+    "cargo_target_dir": "/tmp/heddle-cert3-target",
+    "note": "Full curated 19-job suite (suite!=perf) via sequential --job merge after full-suite timeout; clippy -D warnings blocked by assign_op_pattern in CLI status; cargo doc green; prior n=5 perf stamp retained (not re-run this cert)",
+    "method": "wave-next-full (7 jobs) + sequential BASELINE_OUT_DIR=wave-next-<job> for remaining 12; merged here",
+    "oracle_jobs_pass": [
+      "git-process-lint",
+      "roundtrip-fidelity",
+      "commit-conformance",
+      "git-projection-engine",
+      "lib-git-projection",
+      "formal-specs"
+    ],
+    "release_gate_checklist": {
+      "curated_19": "pass",
+      "oracles": "pass",
+      "fmt_check": "pass",
+      "clippy_d_warnings": "fail",
+      "cargo_doc": "pass",
+      "perf_n5": "prior_recorded_not_rerun"
+    },
+    "blockers": [
+      "cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings fails: clippy::assign_op_pattern at crates/cli/src/cli/commands/status.rs:301 (fix requires crates/** edit outside this cert agent's exclusive paths)"
+    ]
+  }
+}
