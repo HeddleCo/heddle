@@ -291,6 +291,86 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
     dir.sync_all()
 }
 
+/// Create a directory and any missing ancestors, making new dirents crash-durable.
+///
+/// Bare [`fs::create_dir_all`] only ensures the directories exist in the live
+/// filesystem view. After the first write into a newly created shard
+/// (e.g. `blobs/ab/…`), [`write_file_atomic`] fsyncs the shard directory so
+/// the *file* dirent is durable — but the grandparent that holds the new
+/// shard dirent may never be fsynced. A crash can then drop the entire new
+/// shard tree despite per-file durability (GAP_MAP L6).
+///
+/// This helper:
+/// 1. creates missing ancestor directories (same end state as `create_dir_all`);
+/// 2. fsyncs each newly created directory, deepest-first;
+/// 3. fsyncs the deepest pre-existing parent so the new child dirent is durable.
+///
+/// On Windows, directory fsync is a no-op (see [`sync_directory`]); creation
+/// still proceeds. Cost is once per new path segment (typically once per
+/// object-store shard).
+pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+    // Collect missing path components before creation so we know which new
+    // dirents need an fsync. Walk from `path` upward until we hit an existing
+    // directory (or run out of parents).
+    let mut missing: Vec<PathBuf> = Vec::new();
+    {
+        let mut cur = path;
+        loop {
+            match fs::metadata(cur) {
+                Ok(meta) if meta.is_dir() => break,
+                Ok(_) => {
+                    // Exists but is not a directory. Fall through to
+                    // `create_dir_all` so the error matches std's wording.
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    missing.push(cur.to_path_buf());
+                    match cur.parent() {
+                        // `Path::new("a").parent()` is `Some("")` for a single
+                        // relative component — treat empty as cwd (`.`).
+                        Some(parent) if parent.as_os_str().is_empty() => break,
+                        // Root is its own parent (`"/".parent() == Some("/")`).
+                        Some(parent) if parent != cur => cur = parent,
+                        _ => break,
+                    }
+                }
+                // Permission / IO errors walking ancestors: let create_dir_all
+                // surface a consistent failure for the full path.
+                Err(_) => break,
+            }
+        }
+    }
+
+    let deepest_existing = missing
+        .last()
+        .and_then(|shallowest| match shallowest.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Some(PathBuf::from(".")),
+            Some(parent) => Some(parent.to_path_buf()),
+            None => None,
+        });
+
+    fs::create_dir_all(path)?;
+
+    if missing.is_empty() {
+        // Path already existed as a directory (or create_dir_all was a no-op).
+        // No new dirents to make durable.
+        return Ok(());
+    }
+
+    // Fsync newly created directories deepest-first so each child's dirent is
+    // durable in its parent before we move up the chain.
+    for dir in &missing {
+        sync_directory(dir)?;
+    }
+    // Fsync the deepest pre-existing parent so the first new child dirent
+    // (the grandparent→shard link in the classic `blobs/ab/` case) is durable.
+    if let Some(existing) = deepest_existing.as_deref() {
+        sync_directory(existing)?;
+    }
+
+    Ok(())
+}
+
 /// Wrap an `io::Error` raised while writing `path` so that ENOSPC carries
 /// an actionable message naming the path. Non-ENOSPC errors pass through
 /// unchanged. The wrapped error's `raw_os_error()` still returns 28, and
@@ -437,7 +517,7 @@ fn write_file_atomic_impl(
     before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
     let tmp = temp_path(path);
     let inner = (|| -> io::Result<()> {
@@ -525,7 +605,7 @@ pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// streaming-pack install path did exactly that).
 pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
     // Data-block durability before publishing the dirent. Required even on
     // the same-filesystem rename path: StreamingPackBuilder (and similar
@@ -557,7 +637,7 @@ pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
 /// exercised without needing a real multi-mount layout.
 fn publish_file_via_copy_durable(src: &Path, dst: &Path) -> io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
     let tmp = temp_path(dst);
     let result = (|| -> io::Result<()> {
@@ -1065,5 +1145,47 @@ mod tests {
         );
         // Source remains for the caller to retry / clean up.
         assert!(src.exists());
+    }
+
+    /// GAP_MAP L6: nested shard directories must be creatable via the durable
+    /// helper. We cannot observe fsync from userspace, but we can assert the
+    /// end state matches `create_dir_all` (full nested path exists as dirs).
+    #[test]
+    fn create_dir_all_durable_creates_nested_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Classic object-store shard layout: grandparent holds the new shard
+        // dirent (`ab`), parent is the shard itself.
+        let shard = dir.path().join("blobs/ab");
+        create_dir_all_durable(&shard).expect("create nested shard path");
+        assert!(shard.is_dir(), "leaf shard directory must exist");
+        assert!(
+            dir.path().join("blobs").is_dir(),
+            "intermediate grandparent must exist"
+        );
+        // Idempotent: re-running against an existing tree is a no-op success.
+        create_dir_all_durable(&shard).expect("idempotent durable create");
+        assert!(shard.is_dir());
+    }
+
+    /// GAP_MAP L6: `write_file_atomic` must still round-trip when the full
+    /// parent chain is missing — it now goes through `create_dir_all_durable`
+    /// instead of bare `create_dir_all`.
+    #[test]
+    fn write_file_atomic_creates_missing_shard_parents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("blobs/ab/object.bin");
+        write_file_atomic(&target, b"shard-bytes").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"shard-bytes");
+        assert!(dir.path().join("blobs/ab").is_dir());
+    }
+
+    /// Existing parent chain: durable create must not fail or alter contents.
+    #[test]
+    fn create_dir_all_durable_ok_when_path_already_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("already/there");
+        fs::create_dir_all(&nested).unwrap();
+        create_dir_all_durable(&nested).expect("existing dir");
+        assert!(nested.is_dir());
     }
 }

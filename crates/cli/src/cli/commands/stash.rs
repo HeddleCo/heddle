@@ -2,6 +2,11 @@
 //! Stash command implementation.
 
 use anyhow::{Result, anyhow};
+use heddle_core::stash_plan::{
+    StashEntryOpPlan, StashMessageMode, StashMutationReport, StashPushPlan, StashShowChangeKind,
+    bucket_stash_show_changes, format_stash_list_line, plan_stash_entry_op, plan_stash_push,
+    stash_list_is_empty, stash_mutation_message, stash_show_change_prefix, stash_show_is_empty,
+};
 use objects::{object::ContentHash, store::ObjectStore};
 use repo::{DiffKind, Repository};
 use serde::Serialize;
@@ -53,6 +58,30 @@ pub fn cmd_stash(cli: &Cli, command: StashCommands) -> Result<()> {
     }
 }
 
+fn print_stash_mutation(cli: &Cli, repo: &Repository, report: &StashMutationReport) -> Result<()> {
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&StashOutput {
+                message: stash_mutation_message(report, StashMessageMode::Json),
+                stash_index: report.json_stash_index(),
+            })?
+        );
+    } else {
+        println!("{}", stash_mutation_message(report, StashMessageMode::Text));
+    }
+    Ok(())
+}
+
+fn map_diff_kind(kind: DiffKind) -> StashShowChangeKind {
+    match kind {
+        DiffKind::Modified => StashShowChangeKind::Modified,
+        DiffKind::Added => StashShowChangeKind::Added,
+        DiffKind::Deleted => StashShowChangeKind::Deleted,
+        DiffKind::Unchanged => StashShowChangeKind::Unchanged,
+    }
+}
+
 fn cmd_stash_push(cli: &Cli, repo: &Repository, message: Option<String>) -> Result<()> {
     let current_state = repo.current_state()?;
     let current_tree = match current_state.as_ref() {
@@ -65,7 +94,10 @@ fn cmd_stash_push(cli: &Cli, repo: &Repository, message: Option<String>) -> Resu
         &worktree_status_options(Some(repo.config())),
     )?;
 
-    if status.is_clean() {
+    if matches!(
+        plan_stash_push(status.is_clean()),
+        StashPushPlan::RefuseNoChanges
+    ) {
         return Err(anyhow!(no_changes_to_stash_advice()));
     }
 
@@ -82,19 +114,7 @@ fn cmd_stash_push(cli: &Cli, repo: &Repository, message: Option<String>) -> Resu
 
     restore_worktree(repo, &current_tree, &status)?;
 
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&StashOutput {
-                message: format!("Saved stash@{{{}}}", entry.index),
-                stash_index: Some(entry.index),
-            })?
-        );
-    } else {
-        println!("Saved stash@{{{}}}", entry.index);
-    }
-
-    Ok(())
+    print_stash_mutation(cli, repo, &StashMutationReport::stashed(entry.index))
 }
 
 fn cmd_stash_list(cli: &Cli, repo: &Repository) -> Result<()> {
@@ -117,12 +137,14 @@ fn cmd_stash_list(cli: &Cli, repo: &Repository) -> Result<()> {
                 stashes: entries
             })?
         );
-    } else if stashes.is_empty() {
+    } else if stash_list_is_empty(stashes.len()) {
         println!("No stashes.");
     } else {
         for stash in stashes {
-            let msg = stash.message.as_deref().unwrap_or("WIP on main");
-            println!("stash@{{{}}}: {}", stash.index, msg);
+            println!(
+                "{}",
+                format_stash_list_line(stash.index, stash.message.as_deref())
+            );
         }
     }
 
@@ -131,105 +153,79 @@ fn cmd_stash_list(cli: &Cli, repo: &Repository) -> Result<()> {
 
 fn cmd_stash_pop(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
-    let stash = stash_manager
-        .pop_with(|stash| {
-            apply_stash(repo, stash).map_err(|err| std::io::Error::other(err.to_string()).into())
-        })?
-        .ok_or_else(|| anyhow!(no_stash_available_advice("pop stash", "No stash found")))?;
+    let stash = stash_manager.pop_with(|stash| {
+        apply_stash(repo, stash).map_err(|err| std::io::Error::other(err.to_string()).into())
+    })?;
 
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&StashOutput {
-                message: "Applied and dropped stash".to_string(),
-                stash_index: None,
-            })?
-        );
-    } else {
-        println!("Applied and dropped stash@{{{}}}", stash.index);
+    match plan_stash_entry_op(stash.is_some()) {
+        StashEntryOpPlan::RefuseEmpty => Err(anyhow!(no_stash_available_advice(
+            "pop stash",
+            "No stash found"
+        ))),
+        StashEntryOpPlan::Proceed => {
+            let stash = stash.expect("Proceed implies Some");
+            print_stash_mutation(
+                cli,
+                repo,
+                &StashMutationReport::applied_and_dropped(stash.index),
+            )
+        }
     }
-
-    Ok(())
 }
 
 fn cmd_stash_apply(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
-    let stash = stash_manager
-        .top()?
-        .ok_or_else(|| anyhow!(no_stash_available_advice("apply stash", "No stash found")))?;
+    let stash = stash_manager.top()?;
 
-    apply_stash(repo, &stash)?;
-
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&StashOutput {
-                message: format!("Applied stash@{{{}}}", stash.index),
-                stash_index: Some(stash.index),
-            })?
-        );
-    } else {
-        println!("Applied stash@{{{}}}", stash.index);
+    match plan_stash_entry_op(stash.is_some()) {
+        StashEntryOpPlan::RefuseEmpty => Err(anyhow!(no_stash_available_advice(
+            "apply stash",
+            "No stash found"
+        ))),
+        StashEntryOpPlan::Proceed => {
+            let stash = stash.expect("Proceed implies Some");
+            apply_stash(repo, &stash)?;
+            print_stash_mutation(cli, repo, &StashMutationReport::applied(stash.index))
+        }
     }
-
-    Ok(())
 }
 
 fn cmd_stash_drop(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
     let stash = stash_manager.drop()?;
 
-    match stash {
-        Some(s) => {
-            if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::to_string(&StashOutput {
-                        message: format!("Dropped stash@{{{}}}", s.index),
-                        stash_index: None,
-                    })?
-                );
-            } else {
-                println!("Dropped stash@{{{}}}", s.index);
-            }
-        }
-        None => {
-            return Err(anyhow!(no_stash_available_advice(
-                "drop stash",
-                "No stash to drop"
-            )));
+    match plan_stash_entry_op(stash.is_some()) {
+        StashEntryOpPlan::RefuseEmpty => Err(anyhow!(no_stash_available_advice(
+            "drop stash",
+            "No stash to drop"
+        ))),
+        StashEntryOpPlan::Proceed => {
+            let stash = stash.expect("Proceed implies Some");
+            print_stash_mutation(cli, repo, &StashMutationReport::dropped(stash.index))
         }
     }
-
-    Ok(())
 }
 
 fn cmd_stash_clear(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
     let count = stash_manager.clear()?;
 
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&StashOutput {
-                message: format!("Cleared {} stash(es)", count),
-                stash_index: None,
-            })?
-        );
-    } else if count == 0 {
-        println!("No stashes to clear");
-    } else {
-        println!("Cleared {} stash(es)", count);
-    }
-
-    Ok(())
+    print_stash_mutation(cli, repo, &StashMutationReport::cleared(count))
 }
 
 fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
-    let stash = stash_manager
-        .top()?
-        .ok_or_else(|| anyhow!(no_stash_available_advice("show stash", "No stash found")))?;
+    let stash = stash_manager.top()?;
+
+    let stash = match plan_stash_entry_op(stash.is_some()) {
+        StashEntryOpPlan::RefuseEmpty => {
+            return Err(anyhow!(no_stash_available_advice(
+                "show stash",
+                "No stash found"
+            )));
+        }
+        StashEntryOpPlan::Proceed => stash.expect("Proceed implies Some"),
+    };
 
     let parent_tree_hash = ContentHash::from_hex(&stash.parent_tree_hash)
         .map_err(|e| anyhow!("Invalid parent tree hash: {}", e))?;
@@ -242,39 +238,29 @@ fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
     let changes = repo.diff_trees(&parent_tree_hash, &stash_tree_hash)?;
 
     if should_output_json(cli, Some(repo.config())) {
-        let mut modified = Vec::new();
-        let mut added = Vec::new();
-        let mut deleted = Vec::new();
-
-        for change in &changes {
-            match change.kind {
-                DiffKind::Modified => modified.push(change.path.clone()),
-                DiffKind::Added => added.push(change.path.clone()),
-                DiffKind::Deleted => deleted.push(change.path.clone()),
-                DiffKind::Unchanged => {}
-            }
-        }
+        let buckets = bucket_stash_show_changes(
+            changes
+                .iter()
+                .map(|change| (map_diff_kind(change.kind), change.path.as_str())),
+        );
 
         println!(
             "{}",
             serde_json::to_string(&StashShowOutput {
                 output_kind: "stash_show",
-                modified,
-                added,
-                deleted,
+                modified: buckets.modified,
+                added: buckets.added,
+                deleted: buckets.deleted,
             })?
         );
-    } else if changes.is_empty() {
+    } else if stash_show_is_empty(changes.len()) {
         println!("Empty stash");
     } else {
         for change in &changes {
-            let prefix = match change.kind {
-                DiffKind::Modified => "M",
-                DiffKind::Added => "A",
-                DiffKind::Deleted => "D",
-                DiffKind::Unchanged => continue,
+            let Some(prefix) = stash_show_change_prefix(map_diff_kind(change.kind)) else {
+                continue;
             };
-            println!("{} {}", prefix, change.path);
+            println!("{prefix} {}", change.path);
         }
     }
 

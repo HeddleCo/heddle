@@ -2,15 +2,20 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    timeline_cursor_reason, timeline_label,
+    timeline_plan::{
+        TimelinePlanError, TimelineSelection, TimelineTargetOptions, parse_branch_reason,
+        parse_materialize_mode, parse_tool_status, plan_timeline_target,
+        timeline_materialization_recovery_status, timeline_materialize_status,
+    },
+    timeline_recovery_status, timeline_tool_status,
+};
 use objects::object::{ChangeId, ContentHash};
 use repo::{
-    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineBranchReason,
-    TimelineCursorMoveReason, TimelineLabel, TimelineMaterializationRecoveryStatus,
-    TimelineMaterializeMode, TimelineMaterializeStatus, TimelineNativeToolKey,
-    TimelineNavigationRecoveryStatus, TimelineOperationBodyV1, TimelineOperationEnvelope,
-    TimelineSeekBranchConstraint, TimelineSeekSelector, TimelineStepId, TimelineStore,
-    TimelineToolCallStatus, TimelineToolPayloadMetadata, TimelineView, ToolCallFinishedV1,
-    ToolCallStartedV1,
+    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
+    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
+    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
 };
 use serde::Serialize;
 
@@ -70,7 +75,7 @@ fn cmd_timeline_status(
             branch_id: step.branch_id.to_string(),
             parent_step_id: step.parent_step_id.as_ref().map(ToString::to_string),
             tool_name: step.tool_name.clone(),
-            tool_status: step.status.as_ref().map(timeline_tool_status_label),
+            tool_status: step.status.as_ref().map(timeline_tool_status),
             changed: step.changed,
             payload_summary: step.payload_summary.clone(),
             payload_hash: step.payload_hash.map(|hash| hash.to_hex()),
@@ -103,13 +108,13 @@ fn cmd_timeline_status(
         recovery: snapshot
             .recovery
             .map(|recovery| TimelineStatusRecoveryOutput {
-                status: timeline_navigation_recovery_status_label(&recovery.status),
+                status: timeline_recovery_status(recovery.status),
                 branch_id: recovery.branch_id.to_string(),
                 from_step_id: recovery.from_step_id.as_ref().map(ToString::to_string),
                 to_step_id: recovery.to_step_id.as_ref().map(ToString::to_string),
                 from_state: recovery.from_state.to_string_full(),
                 to_state: recovery.to_state.to_string_full(),
-                reason: timeline_cursor_move_reason_label(&recovery.reason).to_string(),
+                reason: timeline_cursor_reason(&recovery.reason).to_string(),
                 moved_at_ms: recovery.moved_at_ms,
                 checkout_state: recovery.checkout_state.map(|state| state.to_string_full()),
             }),
@@ -173,8 +178,8 @@ fn cmd_timeline_record_finish(
     store: &TimelineStore,
     args: TimelineRecordFinishArgs,
 ) -> Result<()> {
-    let tool_status = parse_tool_status(&args.status)?;
-    let tool_status_label = timeline_tool_status_label(&tool_status);
+    let tool_status = parse_tool_status(&args.status).map_err(map_timeline_plan_error)?;
+    let tool_status_label = timeline_tool_status(&tool_status);
     let native = native_tool_ref(&args.tool)?;
     let step_id = recording_step_id(&args.tool, &native);
     let payload = payload_metadata(&args.tool)?;
@@ -244,7 +249,7 @@ fn cmd_timeline_fork(
     args: TimelineForkArgs,
 ) -> Result<()> {
     let selection = target_selection(&args.target)?;
-    let reason = parse_branch_reason(&args.reason)?;
+    let reason = parse_branch_reason(&args.reason).map_err(map_timeline_plan_error)?;
     let outcome = repo.fork_timeline_from_selector(
         store,
         &selection.thread,
@@ -293,7 +298,7 @@ fn cmd_timeline_reset(
     args: TimelineResetArgs,
 ) -> Result<()> {
     let selection = target_selection(&args.target)?;
-    let mode = parse_materialize_mode(&args.mode)?;
+    let mode = parse_materialize_mode(&args.mode).map_err(map_timeline_plan_error)?;
     let outcome = repo.reset_timeline_cursor(
         store,
         &selection.thread,
@@ -312,7 +317,7 @@ fn cmd_timeline_reset(
     let materialization_status = outcome
         .materialization
         .as_ref()
-        .map(|materialization| materialize_status_label(&materialization.status).to_string());
+        .map(|materialization| timeline_materialize_status(&materialization.status).to_string());
     let blocker_count = outcome
         .materialization
         .as_ref()
@@ -355,7 +360,7 @@ fn cmd_timeline_reset(
         materialized,
         materialization_status,
         recovery_status: outcome.materialization.as_ref().map(|materialization| {
-            recovery_status_label(&materialization.recovery.status).to_string()
+            timeline_materialization_recovery_status(&materialization.recovery.status).to_string()
         }),
         blocker_count,
         branch_count: outcome.navigation.branches.len(),
@@ -403,7 +408,9 @@ fn cmd_timeline_recover(
             .map(|id| id.to_string_full()),
         materialized: None,
         materialization_status: None,
-        recovery_status: Some(recovery_status_label(&outcome.recovery.status).to_string()),
+        recovery_status: Some(
+            timeline_materialization_recovery_status(&outcome.recovery.status).to_string(),
+        ),
         blocker_count: usize::from(outcome.recovery.blocker.is_some()),
         branch_count: outcome.navigation.branches.len(),
         step_count: outcome.navigation.steps.len(),
@@ -551,10 +558,10 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
 fn recording_step_id(
     args: &TimelineRecordToolArgs,
     native: &NativeToolCallRefV1,
-) -> TimelineStepId {
+) -> repo::TimelineStepId {
     args.step_id
         .as_ref()
-        .map(|step| TimelineStepId::new(step.clone()))
+        .map(|step| repo::TimelineStepId::new(step.clone()))
         .unwrap_or_else(|| {
             let key = format!(
                 "{}\0{}\0{}\0{}",
@@ -565,15 +572,15 @@ fn recording_step_id(
             );
             let hash =
                 ContentHash::compute_typed("timeline-native-tool-call-v1", key.as_bytes()).to_hex();
-            TimelineStepId::new(format!("tls-{}", &hash[..24]))
+            repo::TimelineStepId::new(format!("tls-{}", &hash[..24]))
         })
 }
 
 fn timeline_position_for_recording(
     view: &TimelineView,
     args: &TimelineRecordToolArgs,
-    step_id: &TimelineStepId,
-) -> (TimelineBranchId, Option<TimelineStepId>) {
+    step_id: &repo::TimelineStepId,
+) -> (TimelineBranchId, Option<repo::TimelineStepId>) {
     let branch_id = args
         .branch
         .as_ref()
@@ -629,187 +636,69 @@ fn require_current_change(repo: &Repository, context: &str) -> Result<ChangeId> 
         .ok_or_else(|| anyhow!("{context} requires a repository state"))
 }
 
-fn parse_tool_status(value: &str) -> Result<TimelineToolCallStatus> {
-    match value {
-        "succeeded" => Ok(TimelineToolCallStatus::Succeeded),
-        "failed" => Ok(TimelineToolCallStatus::Failed),
-        "cancelled" => Ok(TimelineToolCallStatus::Cancelled),
-        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
-            "timeline_tool_status_invalid",
-            "--status",
-            other,
-            "succeeded, failed, or cancelled",
-            "heddle timeline record-finish --tool-call <id> --status succeeded",
-        ))),
-    }
-}
-
-fn timeline_tool_status_label(status: &TimelineToolCallStatus) -> &'static str {
-    match status {
-        TimelineToolCallStatus::Succeeded => "succeeded",
-        TimelineToolCallStatus::Failed => "failed",
-        TimelineToolCallStatus::Cancelled => "cancelled",
-    }
-}
-
-fn timeline_cursor_move_reason_label(reason: &TimelineCursorMoveReason) -> &'static str {
-    match reason {
-        TimelineCursorMoveReason::SeekToolCall => "seek-tool-call",
-        TimelineCursorMoveReason::Undo => "undo",
-        TimelineCursorMoveReason::Redo => "redo",
-        TimelineCursorMoveReason::Reset => "reset",
-        TimelineCursorMoveReason::AutoAdvance => "auto-advance",
-    }
-}
-
-fn timeline_label(label: &TimelineLabel) -> &'static str {
-    match label {
-        TimelineLabel::RepoReversible => "repo-reversible",
-        TimelineLabel::ExternalSideEffectsUnknown => "external-side-effects-unknown",
-        TimelineLabel::IgnoredPathTouched => "ignored-path-touched",
-        TimelineLabel::OutsideRepoTouched => "outside-repo-touched",
-        TimelineLabel::PurgeBoundary => "purge-boundary",
-        TimelineLabel::CaptureFailed => "capture-failed",
-    }
-}
-
-fn timeline_navigation_recovery_status_label(
-    status: &TimelineNavigationRecoveryStatus,
-) -> &'static str {
-    match status {
-        TimelineNavigationRecoveryStatus::PendingCursorRecord => "pending-cursor-record",
-        TimelineNavigationRecoveryStatus::Blocked => "blocked",
-        TimelineNavigationRecoveryStatus::AlreadyApplied => "already-applied",
-    }
-}
-
-#[derive(Debug)]
-struct TimelineSelection {
-    thread: String,
-    selector: TimelineSeekSelector,
-    branch_constraint: Option<TimelineSeekBranchConstraint>,
-}
-
 fn target_selection(args: &TimelineTargetArgs) -> Result<TimelineSelection> {
-    if args.thread.trim().is_empty() {
-        return Err(anyhow!(RecoveryAdvice::missing_option(
+    plan_timeline_target(&TimelineTargetOptions {
+        thread: args.thread.clone(),
+        from_branch: args.from_branch.clone(),
+        step: args.step.clone(),
+        tool_call: args.tool_call.clone(),
+        harness: args.harness.clone(),
+        session: args.session.clone(),
+        message: args.message.clone(),
+        undo: args.undo,
+        redo: args.redo,
+        current: args.current,
+    })
+    .map_err(map_timeline_plan_error)
+}
+
+fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
+    match err {
+        TimelinePlanError::InvalidToolStatus { raw } => {
+            anyhow!(RecoveryAdvice::malformed_option_value(
+                "timeline_tool_status_invalid",
+                "--status",
+                &raw,
+                "succeeded, failed, or cancelled",
+                "heddle timeline record-finish --tool-call <id> --status succeeded",
+            ))
+        }
+        TimelinePlanError::InvalidBranchReason { raw } => {
+            anyhow!(RecoveryAdvice::malformed_option_value(
+                "timeline_branch_reason_invalid",
+                "--reason",
+                &raw,
+                "explicit-fork, edit-from-rewound-cursor, retry, or fan-out",
+                "heddle timeline fork --thread <thread> --current --reason explicit-fork",
+            ))
+        }
+        TimelinePlanError::InvalidMaterializeMode { raw } => {
+            anyhow!(RecoveryAdvice::malformed_option_value(
+                "timeline_materialize_mode_invalid",
+                "--mode",
+                &raw,
+                "fail-if-dirty or capture-current-then-seek",
+                "heddle timeline reset --thread <thread> --current --mode fail-if-dirty",
+            ))
+        }
+        TimelinePlanError::ThreadRequired => anyhow!(RecoveryAdvice::missing_option(
             "timeline_thread_required",
             "--thread",
             "timeline navigation",
             TIMELINE_RESET_CURRENT_COMMAND,
-        )));
-    }
-    let selected = args.step.is_some() as u8
-        + args.tool_call.is_some() as u8
-        + args.undo as u8
-        + args.redo as u8
-        + args.current as u8;
-    if selected != 1 {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+        )),
+        TimelinePlanError::TargetRequired => anyhow!(RecoveryAdvice::invalid_usage(
             "timeline_target_required",
             "select exactly one timeline target: --step, --tool-call, --undo, --redo, or --current",
             "Set exactly one timeline selector. Use `--current` to target the current cursor.",
             TIMELINE_RESET_CURRENT_COMMAND,
-        )));
-    }
-
-    let branch = args
-        .from_branch
-        .as_ref()
-        .map(|branch| TimelineBranchId::new(branch.clone()));
-    let (selector, branch_constraint) = if let Some(step_id) = &args.step {
-        (
-            TimelineSeekSelector::StepId(TimelineStepId::new(step_id.clone())),
-            branch.map(TimelineSeekBranchConstraint::Target),
-        )
-    } else if let Some(tool_call_id) = &args.tool_call {
-        if args.harness.trim().is_empty() {
-            return Err(anyhow!(RecoveryAdvice::missing_option(
-                "timeline_tool_call_harness_required",
-                "--harness",
-                "--tool-call timeline targets",
-                TIMELINE_TOOL_CALL_COMMAND,
-            )));
-        }
-        (
-            TimelineSeekSelector::NativeToolCall(TimelineNativeToolKey {
-                harness: args.harness.clone(),
-                session_id: args.session.clone(),
-                message_id: args.message.clone(),
-                tool_call_id: tool_call_id.clone(),
-            }),
-            None,
-        )
-    } else if args.undo {
-        (
-            TimelineSeekSelector::Undo,
-            branch.map(TimelineSeekBranchConstraint::Current),
-        )
-    } else if args.redo {
-        (
-            TimelineSeekSelector::Redo,
-            branch.map(TimelineSeekBranchConstraint::Current),
-        )
-    } else {
-        (
-            TimelineSeekSelector::CurrentCursor,
-            branch.map(TimelineSeekBranchConstraint::Current),
-        )
-    };
-
-    Ok(TimelineSelection {
-        thread: args.thread.clone(),
-        selector,
-        branch_constraint,
-    })
-}
-
-fn parse_branch_reason(value: &str) -> Result<TimelineBranchReason> {
-    match value {
-        "explicit-fork" => Ok(TimelineBranchReason::ExplicitFork),
-        "edit-from-rewound-cursor" => Ok(TimelineBranchReason::EditFromRewoundCursor),
-        "retry" => Ok(TimelineBranchReason::Retry),
-        "fan-out" => Ok(TimelineBranchReason::FanOut),
-        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
-            "timeline_branch_reason_invalid",
-            "--reason",
-            other,
-            "explicit-fork, edit-from-rewound-cursor, retry, or fan-out",
-            "heddle timeline fork --thread <thread> --current --reason explicit-fork",
-        ))),
-    }
-}
-
-fn parse_materialize_mode(value: &str) -> Result<TimelineMaterializeMode> {
-    match value {
-        "fail-if-dirty" => Ok(TimelineMaterializeMode::FailIfDirty),
-        "capture-current-then-seek" => Ok(TimelineMaterializeMode::CaptureCurrentThenSeek),
-        other => Err(anyhow!(RecoveryAdvice::malformed_option_value(
-            "timeline_materialize_mode_invalid",
-            "--mode",
-            other,
-            "fail-if-dirty or capture-current-then-seek",
-            "heddle timeline reset --thread <thread> --current --mode fail-if-dirty",
-        ))),
-    }
-}
-
-fn materialize_status_label(status: &TimelineMaterializeStatus) -> &'static str {
-    match status {
-        TimelineMaterializeStatus::Materialized => "materialized",
-        TimelineMaterializeStatus::AlreadyAtTarget => "already-at-target",
-        TimelineMaterializeStatus::Refused => "refused",
-        TimelineMaterializeStatus::Unsupported => "unsupported",
-        TimelineMaterializeStatus::RecoveryBlocked => "recovery-blocked",
-    }
-}
-
-fn recovery_status_label(status: &TimelineMaterializationRecoveryStatus) -> &'static str {
-    match status {
-        TimelineMaterializationRecoveryStatus::NoPending => "no-pending",
-        TimelineMaterializationRecoveryStatus::CursorRecorded => "cursor-recorded",
-        TimelineMaterializationRecoveryStatus::AlreadyApplied => "already-applied",
-        TimelineMaterializationRecoveryStatus::Blocked => "blocked",
+        )),
+        TimelinePlanError::ToolCallHarnessRequired => anyhow!(RecoveryAdvice::missing_option(
+            "timeline_tool_call_harness_required",
+            "--harness",
+            "--tool-call timeline targets",
+            TIMELINE_TOOL_CALL_COMMAND,
+        )),
     }
 }
 
@@ -917,6 +806,8 @@ struct TimelineActionOutput {
 
 #[cfg(test)]
 mod tests {
+    use repo::TimelineSeekSelector;
+
     use super::*;
 
     fn target() -> TimelineTargetArgs {

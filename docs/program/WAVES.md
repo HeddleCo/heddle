@@ -46,19 +46,19 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 
 **Paths:** `objects` atomic FS, oplog, refs locks, operation dedup  
 **Focus:** property tests, fault injection suites already present  
-**Status:** **Not started / optional early slices** — not part of post-wave23 high-signal re-cert scope.
+**Status (2026-07-11):** **Partial on program tip** — L7 pack publish durability via `publish_file_durable` landed; **L6** grandparent-dirent durability **shipped** in `heddle-objects` (`create_dir_all_durable` + atomic write wiring). Residual: other store/fs_io create paths, L8 unpaired pack window, optional finalize fsync. Not a Wave 8 tip-correctness gate blocker.
 
 ## Wave 6 — Performance hotspots (correct paths only)
 
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
 **Required evidence:** before/after paired timings, p95/p99, correctness held  
-**Status:** **Unblocked for correct-path hotspot work** — n=5 equal-work core-loop absolute + A==B self-pairs recorded (see `PERF_BASELINE.md`); still **not** a Git win claim. Wave 2–3 / Wave 8 high-signal correctness green for proceeding on correct paths with before/after paired evidence.
+**Status (2026-07-11):** **Open with active measurement residual** — n=5 equal-work core-loop absolute + A==B self-pairs recorded (see `PERF_BASELINE.md`); still **not** a Git win claim. **Equal-work re-stamp delegated** (refresh tip timings with before/after paired evidence on correct paths). **Multi-host** / quieter-host matrix still **open**. Wave 2–3 / Wave 8 high-signal correctness green for proceeding on correct-path hotspots only.
 
 ## Wave 7 — Platform matrix & long-tail
 
 Windows materialization, mount optional, large-ref packed-refs degradation docs/tests  
-**Status:** **Not started.**
+**Status (2026-07-11):** **Open / residual tracked** — executable platform residual checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md). Mount paths have CI foundation (Linux FUSE smoke, Windows ProjFS smoke, macOS FSKit compile-check) but full Wave 7 certification (large-ref packed-refs, materialization edge cases, multi-host) is **not** claimed complete.
 
 ## Wave 8 — Certification
 

@@ -17,12 +17,14 @@ pub mod query;
 pub mod remote;
 pub mod resolve_plan;
 pub mod save;
+pub mod stash_plan;
 pub mod status;
 pub mod thread;
 pub mod thread_lifecycle;
 pub mod thread_materialize;
 pub mod thread_plan;
 pub mod thread_shaping;
+pub mod timeline_plan;
 pub mod undo;
 pub mod verify;
 pub mod workflow;
@@ -160,6 +162,14 @@ pub use save::{
     plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, split_git_extra_paths,
     staged_commit_summary, tree_leaf_name,
 };
+pub use stash_plan::{
+    STASH_DEFAULT_LIST_MESSAGE, StashEntryOpPlan, StashMessageMode, StashMutationReport,
+    StashOutcomeStatus, StashPushPlan, StashShowBuckets, StashShowChangeKind,
+    bucket_stash_show_changes, format_stash_list_line, plan_stash_entry_op, plan_stash_push,
+    stash_entry_op_should_refuse, stash_list_entry_message, stash_list_is_empty,
+    stash_mutation_message, stash_push_should_refuse, stash_show_change_prefix,
+    stash_show_is_empty, stash_stack_is_empty,
+};
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,
@@ -220,6 +230,11 @@ pub use thread_plan::{
 pub use thread_shaping::{
     CaptureSplitOptions, NoPathsMatchedDetails, ThreadMoveOptions, ThreadMoveOutput,
     ThreadShapingError, capture_split, thread_move,
+};
+pub use timeline_plan::{
+    TimelinePlanError, TimelineSelection, TimelineTargetOptions, parse_branch_reason,
+    parse_materialize_mode, parse_tool_status, plan_timeline_target,
+    timeline_materialization_recovery_status, timeline_materialize_status,
 };
 pub use undo::{
     LiveThreadWorktree, PurgeOpRef, RedactOpRef, RedactionUndoBatchFacts, RequiredStateRef,

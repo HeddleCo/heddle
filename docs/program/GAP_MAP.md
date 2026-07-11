@@ -4,12 +4,12 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 
 ## P0 — measurement and truth
 
-| ID | Gap | Owner | Contract violated | Fix direction |
-|----|-----|-------|-------------------|---------------|
-| M1 | No single curated suite manifest with skip/TODO/oracle applicability | program harness | Deterministic reporting | `scripts/program/manifest.toml` + runner |
-| M2 | No machine-readable baseline artifacts with env/commit/classification | program harness | Reproducible reporting | `run-baseline.sh` + JSONL results |
-| M3 | Perf claims lack paired alternating trials + equal-work checks | program harness | Truthful measurement | `paired-bench.py` + profile-before-optimize rule |
-| M4 | Stability thresholds still TBD | product/docs | Release gates | Derive interim gates from oracles already in CI |
+| ID | Gap | Owner | Contract violated | Status / fix direction |
+|----|-----|-------|-------------------|------------------------|
+| M1 | No single curated suite manifest with skip/TODO/oracle applicability | program harness | Deterministic reporting | **Shipped** — `scripts/program/manifest.toml` + runner (Wave 0/1; see `BASELINE.md`) |
+| M2 | No machine-readable baseline artifacts with env/commit/classification | program harness | Reproducible reporting | **Shipped** — `run-baseline.sh` + JSONL/`summary.json` under `artifacts/baseline/` |
+| M3 | Perf claims lack paired alternating trials + equal-work checks | program harness | Truthful measurement | **Shipped** (harness) — `paired-bench.py` + `core-loop-bench.sh` + profile-before-optimize rule; equal-work **re-stamp** and multi-host samples still open (Wave 6) |
+| M4 | Stability thresholds still TBD | product/docs | Release gates | **Open** — derive interim gates from oracles already in CI; `docs/STABILITY.md` still TBD |
 
 ## P0 — correctness contracts
 
@@ -18,7 +18,7 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 | C1 | Git round-trip oracle is necessary but not a full porcelain oracle | git-projection + ingest | Byte-identical public history | Keep fixtures green; expand corpus only when equal work defined |
 | C2 | Realworld fixtures are stress/shape coverage, not continuous oracle | cli tests | Perf/correctness boundary | Classify as stress; never claim perf win on partial import |
 | C3 | Formal Quint specs vs Rust property tests may drift | formal_specs + domain | Spec fidelity | Keep `specs/quint/verify.sh` + formal_specs in curated suite |
-| C4 | git-process lint omits `core` / `git-projection` | tooling | No runtime git | Extend lint dirs |
+| C4 | git-process lint omits `core` / `git-projection` | tooling | No runtime git | **Shipped** — `git_process_lint` scan dirs include `crates/core/src` and `crates/git-projection/src` (Wave 1). Stale inverse claims may remain in older audit/contract prose — trust this row + lint source. |
 
 ## P1 — architecture / embeddability
 
@@ -45,12 +45,12 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 
 | ID | Gap | Owner | Notes |
 |----|-----|-------|-------|
-| L1 | Windows mount/materialization edge cases | mount/repo | Platform matrix |
-| L2 | Reftable not implemented | refs | Known limitation ~10k+ refs |
-| L3 | Partial clone | wire/repo | Planned |
+| L1 | Windows mount/materialization edge cases | mount/repo | **Open** — platform residual; see [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md). ProjFS smoke exists in CI (foundation); materialization edge cases not fully certified. |
+| L2 | Reftable not implemented | refs | **Open** — packed-refs works but degrades ~10k+ refs; reftable **not implemented**. Residual + docs/tests checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md). |
+| L3 | Partial clone | wire/repo | **Planned** — lazy object fetch not supported; see platform matrix. |
 | L4 | Semantic merge language matrix opt-in | semantic | First-class Rust/Py/JS/TS |
 | L5 | Hosted collaboration sync maturity | client/weft | Foundation |
-| L6 | `create_dir_all` without grandparent dirent fsync | objects `fs_atomic` / `fs_io` | After first write into a new shard (`blobs/ab/…`), parent dir is fsynced but the grandparent holding the new shard dirent may not be. Crash can drop an entire new shard tree despite per-file durability. Fix: `create_dir_all_durable` that fsyncs newly created ancestors + deepest pre-existing parent; wire into `write_file_atomic` + `write_atomic`. Cost is once-per-shard. |
+| L6 | Grandparent dirent durability on new object shards | objects `fs_atomic` | **Shipped on program tip** — `create_dir_all_durable` fsyncs newly created ancestors + deepest pre-existing parent; wired into `write_file_atomic` / secret / `publish_file_*_durable`. Residual: other `fs_io`/store `create_dir_all` call sites not yet migrated; Windows dir fsync remains platform no-op. |
 | L7 | `StreamingPackBuilder::finalize` flushes but does not fsync pack/index | objects pack | Publish path now fsyncs at `publish_file_durable` install boundary (Wave 5 fix). Residual: staged files are not durable *before* install returns control if a caller reads them without publishing. Optional harden: fsync in finalize. |
 | L8 | Pack-without-index window between two durable publishes | objects `install_pack_files_streaming` | Pack then index are separate durable renames; crash between leaves an unpaired `.pack` that `reload_packs` ignores. Acceptable; optional journal/two-phase if unpaired packs become a disk-leak concern. |
 
