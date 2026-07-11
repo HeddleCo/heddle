@@ -206,6 +206,17 @@ enum SpoolBootstrapSyncDirection {
   SPOOL_BOOTSTRAP_SYNC_DIRECTION_BIDI = 3;
 }
 
+// Inheritable HOLD-verdict lifecycle policy (weft#481). A state's effective
+// lifecycle is the nearest ancestor spool that sets this explicitly (walking
+// `parent_spool_id` up); absence (`UNSPECIFIED`) inherits, and the built-in
+// root default is `EXPLICIT_SUPERSESSION` — so existing spools get the safe
+// behavior with no settings-value migration.
+enum SpoolHoldLifecycle {
+  SPOOL_HOLD_LIFECYCLE_UNSPECIFIED = 0;             // inherit; root default = EXPLICIT_SUPERSESSION
+  SPOOL_HOLD_LIFECYCLE_EXPLICIT_SUPERSESSION = 1;
+  SPOOL_HOLD_LIFECYCLE_AUTO_CLEAR_ON_RESUBMIT = 2;
+}
+
 enum SpoolWritePolicy {
   SPOOL_WRITE_POLICY_UNSPECIFIED = 0;
   SPOOL_WRITE_POLICY_DEVELOPERS = 1;
@@ -245,6 +256,7 @@ message SpoolSettings {
   SpoolSyncBehavior sync_behavior = 8;
   SpoolBootstrapSyncDirection bootstrap_sync_direction = 9;
   string description = 10;
+  SpoolHoldLifecycle hold_lifecycle = 11;  // +weft#481: inheritable HOLD lifecycle policy
 }
 
 message GetCurrentUserNamespaceRequest {}
