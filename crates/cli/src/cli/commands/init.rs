@@ -5,8 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use heddle_core::{
-    InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_side_effects as core_init_side_effects,
-    principal_is_unconfigured as core_principal_is_unconfigured, resolve_absolute_path,
+    InitPrincipalPlan, init_side_effects as core_init_side_effects, resolve_absolute_path,
     select_init_principal,
 };
 use objects::object::Principal;
@@ -263,14 +262,6 @@ fn init_principal_status_from_plan(plan: InitPrincipalPlan) -> InitPrincipalStat
         },
         recommended_action: plan.recommended_action.map(str::to_string),
     }
-}
-
-fn principal_is_unconfigured(principal: &Principal) -> bool {
-    core_principal_is_unconfigured(principal)
-}
-
-fn set_principal_command() -> &'static str {
-    SET_PRINCIPAL_COMMAND
 }
 
 fn init_side_effects(has_git: bool, principal_configured: bool) -> Vec<String> {
