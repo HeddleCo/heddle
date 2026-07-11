@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure log/reflog helpers: parse, summarize, short ids.
+//! Pure log/reflog helpers: parse, summarize, short ids, timeline labels.
 //!
-//! FS traversal and render stay in CLI.
+//! FS traversal and styled render stay in CLI.
+
+use objects::object::{
+    TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel, TimelineToolCallStatus,
+};
+use repo::TimelineNavigationRecoveryStatus;
 
 /// Parsed reflog line (git-style: `old new actor... timestamp\tmessage`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,19 +63,65 @@ pub fn summarize_paths(paths: &[String]) -> String {
     }
 }
 
-/// Stable string labels for timeline enums (CLI render + JSON fields).
-pub fn timeline_label_str(label: &str) -> &'static str {
+/// Stable timeline label string for machine/text output.
+pub fn timeline_label(label: &TimelineLabel) -> &'static str {
     match label {
-        "RepoReversible" | "repo-reversible" => "repo-reversible",
-        "ExternalSideEffectsUnknown" | "external-side-effects-unknown" => {
-            "external-side-effects-unknown"
-        }
-        "IgnoredPathTouched" | "ignored-path-touched" => "ignored-path-touched",
-        "OutsideRepoTouched" | "outside-repo-touched" => "outside-repo-touched",
-        "PurgeBoundary" | "purge-boundary" => "purge-boundary",
-        "CaptureFailed" | "capture-failed" => "capture-failed",
-        _ => "unknown",
+        TimelineLabel::RepoReversible => "repo-reversible",
+        TimelineLabel::ExternalSideEffectsUnknown => "external-side-effects-unknown",
+        TimelineLabel::IgnoredPathTouched => "ignored-path-touched",
+        TimelineLabel::OutsideRepoTouched => "outside-repo-touched",
+        TimelineLabel::PurgeBoundary => "purge-boundary",
+        TimelineLabel::CaptureFailed => "capture-failed",
     }
+}
+
+/// Tool-call status label.
+pub fn timeline_tool_status(status: &TimelineToolCallStatus) -> &'static str {
+    match status {
+        TimelineToolCallStatus::Succeeded => "succeeded",
+        TimelineToolCallStatus::Failed => "failed",
+        TimelineToolCallStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Branch reason label.
+pub fn timeline_branch_reason(reason: &TimelineBranchReason) -> &'static str {
+    match reason {
+        TimelineBranchReason::EditFromRewoundCursor => "edit-from-rewound-cursor",
+        TimelineBranchReason::ExplicitFork => "explicit-fork",
+        TimelineBranchReason::Retry => "retry",
+        TimelineBranchReason::FanOut => "fan-out",
+    }
+}
+
+/// Cursor move reason label.
+pub fn timeline_cursor_reason(reason: &TimelineCursorMoveReason) -> &'static str {
+    match reason {
+        TimelineCursorMoveReason::SeekToolCall => "seek-tool-call",
+        TimelineCursorMoveReason::Undo => "undo",
+        TimelineCursorMoveReason::Redo => "redo",
+        TimelineCursorMoveReason::Reset => "reset",
+        TimelineCursorMoveReason::AutoAdvance => "auto-advance",
+    }
+}
+
+/// Navigation recovery status label.
+pub fn timeline_recovery_status(status: TimelineNavigationRecoveryStatus) -> &'static str {
+    match status {
+        TimelineNavigationRecoveryStatus::PendingCursorRecord => "pending-cursor-record",
+        TimelineNavigationRecoveryStatus::Blocked => "blocked",
+        TimelineNavigationRecoveryStatus::AlreadyApplied => "already-applied",
+    }
+}
+
+/// Session list row status (active vs ended).
+pub fn session_list_status(is_active: bool) -> &'static str {
+    if is_active { "active" } else { "ended" }
+}
+
+/// yes/no for compact timeline fields.
+pub fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 #[cfg(test)]
@@ -106,5 +157,32 @@ mod tests {
             summarize_paths(&["a".into(), "b".into(), "c".into(), "d".into()]),
             "a, b +2"
         );
+    }
+
+    #[test]
+    fn timeline_and_session_labels() {
+        assert_eq!(
+            timeline_label(&TimelineLabel::RepoReversible),
+            "repo-reversible"
+        );
+        assert_eq!(
+            timeline_tool_status(&TimelineToolCallStatus::Failed),
+            "failed"
+        );
+        assert_eq!(
+            timeline_branch_reason(&TimelineBranchReason::FanOut),
+            "fan-out"
+        );
+        assert_eq!(
+            timeline_cursor_reason(&TimelineCursorMoveReason::Undo),
+            "undo"
+        );
+        assert_eq!(
+            timeline_recovery_status(TimelineNavigationRecoveryStatus::Blocked),
+            "blocked"
+        );
+        assert_eq!(session_list_status(true), "active");
+        assert_eq!(session_list_status(false), "ended");
+        assert_eq!(yes_no(true), "yes");
     }
 }

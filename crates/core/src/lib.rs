@@ -35,9 +35,10 @@ pub use actor::{
     resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
 };
 pub use agent_fanout::{
-    FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneReport, FanoutNodeSpec,
-    FanoutPlan, FanoutPlanError, FanoutPlanReport, FanoutPlanRequest, FanoutTaskPlaceholder,
-    assemble_fanout_plan_report, assemble_fanout_start_commands, ensure_unique_thread_names,
+    FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneAvailability,
+    FanoutLanePreflightBlock, FanoutLaneReport, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
+    FanoutPlanReport, FanoutPlanRequest, FanoutTaskPlaceholder, assemble_fanout_plan_report,
+    assemble_fanout_start_commands, check_fanout_start_preflight, ensure_unique_thread_names,
     fanout_child_body, fanout_parent_body, fanout_parent_delegated_by, fanout_start_attach_rule,
     parse_fanout_lane, parse_fanout_lanes, plan_fanout, select_fanout_base,
     select_fanout_parent_thread,
@@ -54,17 +55,19 @@ pub use agent_ops::{
 };
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
-    ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight, MonorepoClonePlan,
-    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoExecutionPlan,
-    MonorepoExecutionProgress, MonorepoNodeExecution, MonorepoNodeExecutionError,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodePlan, MonorepoNodeStepOptions,
-    MonorepoPlacedNodeSummary, MonorepoSkippedChild, UnsupportedCloneFlag, absolute_path,
-    assemble_clone_security_preflight, assemble_monorepo_clone_result_summary,
-    looks_like_git_overlay_url, looks_like_local_path, monorepo_execution_progress,
-    normalize_clone_depth, plan_adopt, plan_clone, plan_monorepo_clone, plan_monorepo_execution,
-    plan_monorepo_node_steps, resolve_adopt_start_path, resolve_clone_destination,
-    select_clone_mode, validate_clone_destination, validate_clone_mode_options,
-    validate_monorepo_clone_options, validate_monorepo_execution, validate_monorepo_node_execution,
+    ClonePlanFacts, ClonePlanOptions, CloneRemoteSource, CloneSecurityPreflight,
+    MonorepoCloneJsonReport, MonorepoClonePlan, MonorepoCloneResultSummary, MonorepoEdgeFacts,
+    MonorepoEdgeSkipReason, MonorepoExecutionPlan, MonorepoExecutionProgress,
+    MonorepoNodeExecution, MonorepoNodeExecutionError, MonorepoNodeExecutionStep,
+    MonorepoNodeFacts, MonorepoNodePlan, MonorepoNodeStepOptions, MonorepoPlacedJsonRow,
+    MonorepoPlacedNodeSummary, MonorepoSkippedChild, MonorepoSkippedJsonRow, UnsupportedCloneFlag,
+    absolute_path, assemble_clone_security_preflight, assemble_monorepo_clone_json_report,
+    assemble_monorepo_clone_result_summary, looks_like_git_overlay_url, looks_like_local_path,
+    monorepo_execution_progress, monorepo_rel_display, normalize_clone_depth, plan_adopt,
+    plan_clone, plan_monorepo_clone, plan_monorepo_execution, plan_monorepo_node_steps,
+    resolve_adopt_start_path, resolve_clone_destination, select_clone_mode,
+    validate_clone_destination, validate_clone_mode_options, validate_monorepo_clone_options,
+    validate_monorepo_execution, validate_monorepo_node_execution,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -85,7 +88,11 @@ pub use harness_policy::{
     detect_harness_kind, fingerprint_harness_from_hints, segment_rotation_policy,
     should_rotate_segment,
 };
-pub use log_plan::{ReflogLine, parse_reflog_line, short_oid, summarize_paths, timeline_label_str};
+pub use log_plan::{
+    ReflogLine, parse_reflog_line, session_list_status, short_oid, summarize_paths,
+    timeline_branch_reason, timeline_cursor_reason, timeline_label, timeline_recovery_status,
+    timeline_tool_status, yes_no,
+};
 pub use merge::{
     GitCommitInfo, GitCommitPreview, MergeAttemptPlan, MergeOptions, MergePlan, MergeRelation,
     MergeRelationKind, MergeReport, OperatorAction as MergeOperatorAction,
@@ -121,11 +128,11 @@ pub use remote::{
     heddle_pull_execution_facts_from_local, heddle_single_push_execution_facts,
     heddle_single_push_execution_facts_from_hosted, heddle_single_push_execution_facts_from_local,
     hosted_path_contains_internal_user_namespace, hosted_spool_display_path,
-    list_plain_git_remotes, list_remotes, local_pull_changed, looks_like_git_remote_url,
-    looks_like_remote_location, merged_remote_items, message_indicates_already_exists,
-    multi_ref_progress_from_hosted_thread, multi_ref_push_begin, multi_ref_thread_failed,
-    multi_ref_thread_succeeded_hosted, multi_ref_thread_succeeded_local, multi_thread_failed_names,
-    multi_thread_push_execution_facts, multi_thread_reported_refs,
+    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
+    looks_like_git_remote_url, looks_like_remote_location, merged_remote_items,
+    message_indicates_already_exists, multi_ref_progress_from_hosted_thread, multi_ref_push_begin,
+    multi_ref_thread_failed, multi_ref_thread_succeeded_hosted, multi_ref_thread_succeeded_local,
+    multi_thread_failed_names, multi_thread_push_execution_facts, multi_thread_reported_refs,
     named_thread_tip_mismatch_failure, parse_hosted_pull_result, parse_hosted_push_result,
     plain_git_remote_items, plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree,
     pull_should_materialize, pull_status, pull_tip_changed, pull_will_materialize,
@@ -141,8 +148,10 @@ pub use resolve_plan::{
     plan_resolve_side, resolve_requires_marker_check, unresolved_conflict_paths,
 };
 pub use save::{
-    GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust, execute_save,
-    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, tree_leaf_name,
+    CommitGitIndexPlan, GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust,
+    commit_scope_text, execute_save, plan_commit_git_index, plan_commit_git_index_only,
+    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint, split_git_extra_paths,
+    staged_commit_summary, tree_leaf_name,
 };
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,

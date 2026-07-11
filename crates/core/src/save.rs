@@ -265,6 +265,121 @@ pub fn commit_next_action_from_trust(
     has_default_remote.then(|| "heddle push".to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Git-projection commit index planning (pure)
+// ---------------------------------------------------------------------------
+
+/// Pure commit index plan for git-overlay `heddle commit` routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitGitIndexPlan {
+    pub commit_mode: &'static str,
+    pub has_staged_changes: bool,
+    pub staged_paths: Vec<String>,
+    pub unstaged_paths: Vec<String>,
+    pub untracked_paths: Vec<String>,
+    pub will_commit: Vec<String>,
+    pub preserved_after_commit: Vec<String>,
+}
+
+/// Split `unstaged: ` / `untracked: ` prefixed extra paths from status rows.
+pub fn split_git_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut unstaged_paths = Vec::new();
+    let mut untracked_paths = Vec::new();
+    for path in extra_paths {
+        if let Some(path) = path.strip_prefix("unstaged: ") {
+            unstaged_paths.push(path.to_string());
+        } else if let Some(path) = path.strip_prefix("untracked: ") {
+            untracked_paths.push(path.to_string());
+        }
+    }
+    (unstaged_paths, untracked_paths)
+}
+
+/// Plan commit scope from staged + extra worktree paths and `--all`.
+pub fn plan_commit_git_index(
+    staged_paths: &[String],
+    extra_paths: &[String],
+    include_all: bool,
+) -> CommitGitIndexPlan {
+    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
+    let has_staged_changes = !staged_paths.is_empty();
+    let mut will_commit = Vec::new();
+    if has_staged_changes {
+        will_commit.extend(staged_paths.iter().cloned());
+    }
+    if include_all || !has_staged_changes {
+        will_commit.extend(unstaged_paths.iter().cloned());
+        will_commit.extend(untracked_paths.iter().cloned());
+    }
+    let commit_mode = if has_staged_changes && include_all {
+        "worktree_all_explicit"
+    } else if has_staged_changes {
+        "staged_index"
+    } else if will_commit.is_empty() {
+        "none"
+    } else {
+        "worktree_all"
+    };
+    let preserved_after_commit = if has_staged_changes && !include_all {
+        extra_paths.to_vec()
+    } else {
+        Vec::new()
+    };
+    CommitGitIndexPlan {
+        commit_mode,
+        has_staged_changes,
+        staged_paths: staged_paths.to_vec(),
+        unstaged_paths,
+        untracked_paths,
+        will_commit,
+        preserved_after_commit,
+    }
+}
+
+/// Index-only plan: commit staged paths, preserve all extras.
+pub fn plan_commit_git_index_only(
+    staged_paths: &[String],
+    extra_paths: &[String],
+) -> CommitGitIndexPlan {
+    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
+    CommitGitIndexPlan {
+        commit_mode: "staged_index",
+        has_staged_changes: !staged_paths.is_empty(),
+        staged_paths: staged_paths.to_vec(),
+        unstaged_paths,
+        untracked_paths,
+        will_commit: staged_paths.to_vec(),
+        preserved_after_commit: extra_paths.to_vec(),
+    }
+}
+
+/// Human scope line for git-projection commit text mode.
+pub fn commit_scope_text(commit_mode: &str) -> &'static str {
+    match commit_mode {
+        "staged_index" => {
+            "staged Git index only; unstaged and untracked paths stay in the worktree"
+        }
+        "worktree_all_explicit" => "all staged, unstaged, and untracked worktree changes (--all)",
+        "worktree_all" => "all unstaged and untracked worktree changes",
+        "none" => "no Git paths",
+        _ => "Git worktree changes",
+    }
+}
+
+/// Annotate a commit summary when staged-only commit leaves extras behind.
+pub fn staged_commit_summary(
+    summary: &str,
+    staged_path_count: usize,
+    extra_path_count: usize,
+) -> String {
+    if extra_path_count == 0 {
+        return summary.to_string();
+    }
+    format!(
+        "{summary} (committed {staged_path_count} staged path(s); left {extra_path_count} unstaged/untracked path(s) in the worktree)"
+    )
+}
+
 /// Execute a save: optional Heddle snapshot + optional Git checkpoint write-through.
 ///
 /// Callers own clap validation (missing message/intent) and plain-Git refusal.
@@ -786,5 +901,27 @@ mod tests {
             Some("heddle push")
         );
         assert_eq!(commit_next_action_from_trust("", true, false), None);
+    }
+
+    #[test]
+    fn commit_git_index_plan_modes() {
+        let staged = vec!["a.rs".into()];
+        let extra = vec!["unstaged: b.rs".into(), "untracked: c.rs".into()];
+        let staged_only = plan_commit_git_index(&staged, &extra, false);
+        assert_eq!(staged_only.commit_mode, "staged_index");
+        assert_eq!(staged_only.will_commit, vec!["a.rs"]);
+        assert_eq!(staged_only.preserved_after_commit.len(), 2);
+
+        let all = plan_commit_git_index(&staged, &extra, true);
+        assert_eq!(all.commit_mode, "worktree_all_explicit");
+        assert_eq!(all.will_commit.len(), 3);
+
+        let index_only = plan_commit_git_index_only(&staged, &extra);
+        assert_eq!(index_only.commit_mode, "staged_index");
+        assert_eq!(index_only.will_commit, vec!["a.rs"]);
+
+        assert!(commit_scope_text("staged_index").contains("staged Git index"));
+        assert!(staged_commit_summary("ok", 1, 2).contains("left 2 unstaged/untracked"));
+        assert_eq!(staged_commit_summary("ok", 1, 0), "ok");
     }
 }

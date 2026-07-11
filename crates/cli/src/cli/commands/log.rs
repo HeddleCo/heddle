@@ -10,7 +10,11 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
-    parse_reflog_line, short_oid, status::next_action::canonical_adopt_ref_command, summarize_paths,
+    parse_reflog_line, short_oid, status::next_action::canonical_adopt_ref_command,
+    summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
+    timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
+    timeline_recovery_status as core_timeline_recovery_status,
+    timeline_tool_status as core_timeline_tool_status, yes_no,
 };
 use objects::object::{
     Agent, ChangeId, State, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
@@ -694,57 +698,24 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
     }
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
-}
-
 fn timeline_label(label: &TimelineLabel) -> String {
-    match label {
-        TimelineLabel::RepoReversible => "repo-reversible",
-        TimelineLabel::ExternalSideEffectsUnknown => "external-side-effects-unknown",
-        TimelineLabel::IgnoredPathTouched => "ignored-path-touched",
-        TimelineLabel::OutsideRepoTouched => "outside-repo-touched",
-        TimelineLabel::PurgeBoundary => "purge-boundary",
-        TimelineLabel::CaptureFailed => "capture-failed",
-    }
-    .to_string()
+    core_timeline_label(label).to_string()
 }
 
 fn timeline_tool_status(status: &TimelineToolCallStatus) -> String {
-    match status {
-        TimelineToolCallStatus::Succeeded => "succeeded",
-        TimelineToolCallStatus::Failed => "failed",
-        TimelineToolCallStatus::Cancelled => "cancelled",
-    }
-    .to_string()
+    core_timeline_tool_status(status).to_string()
 }
 
 fn timeline_branch_reason(reason: &TimelineBranchReason) -> String {
-    match reason {
-        TimelineBranchReason::EditFromRewoundCursor => "edit-from-rewound-cursor",
-        TimelineBranchReason::ExplicitFork => "explicit-fork",
-        TimelineBranchReason::Retry => "retry",
-        TimelineBranchReason::FanOut => "fan-out",
-    }
-    .to_string()
+    core_timeline_branch_reason(reason).to_string()
 }
 
 fn timeline_cursor_reason(reason: &TimelineCursorMoveReason) -> &'static str {
-    match reason {
-        TimelineCursorMoveReason::SeekToolCall => "seek-tool-call",
-        TimelineCursorMoveReason::Undo => "undo",
-        TimelineCursorMoveReason::Redo => "redo",
-        TimelineCursorMoveReason::Reset => "reset",
-        TimelineCursorMoveReason::AutoAdvance => "auto-advance",
-    }
+    core_timeline_cursor_reason(reason)
 }
 
 fn timeline_recovery_status(status: TimelineNavigationRecoveryStatus) -> &'static str {
-    match status {
-        TimelineNavigationRecoveryStatus::PendingCursorRecord => "pending-cursor-record",
-        TimelineNavigationRecoveryStatus::Blocked => "blocked",
-        TimelineNavigationRecoveryStatus::AlreadyApplied => "already-applied",
-    }
+    core_timeline_recovery_status(status)
 }
 
 fn collect_reflog_entries(root: &Path, limit: usize) -> Result<Vec<ReflogEntry>> {

@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use objects::object::ChangeId;
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Clone options / facts
@@ -583,6 +584,95 @@ impl MonorepoEdgeSkipReason {
             Self::Cycle => "cycle",
             Self::DepthBounded => "depth-bounded",
         }
+    }
+
+    /// Map wire `EdgeSkip` discriminant (proto i32) without taking gRPC types.
+    ///
+    /// Proto layout: Unspecified=0, Unreadable=1, Cycle=2, DepthBounded=3.
+    /// Unknown values map to [`None`] so callers can fall back or omit.
+    pub fn from_wire_i32(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Unspecified),
+            1 => Some(Self::Unreadable),
+            2 => Some(Self::Cycle),
+            3 => Some(Self::DepthBounded),
+            _ => None,
+        }
+    }
+}
+
+/// Relative path label for monorepo placement lines (`""` → `.`).
+pub fn monorepo_rel_display(rel_path: &Path) -> String {
+    if rel_path.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        rel_path.display().to_string()
+    }
+}
+
+/// Machine-facing monorepo clone envelope fields (CLI wraps with serde_json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonorepoCloneJsonReport {
+    pub output_kind: &'static str,
+    pub action: &'static str,
+    pub status: &'static str,
+    pub success: bool,
+    pub transport: &'static str,
+    pub local: String,
+    pub placed: Vec<MonorepoPlacedJsonRow>,
+    pub skipped: Vec<MonorepoSkippedJsonRow>,
+}
+
+/// One placed node in monorepo clone JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonorepoPlacedJsonRow {
+    pub spool_id: String,
+    pub path: String,
+    pub content_state: Option<String>,
+}
+
+/// One skipped edge in monorepo clone JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonorepoSkippedJsonRow {
+    pub child_spool_id: String,
+    pub mount_name: String,
+    pub path: String,
+    pub reason: String,
+}
+
+/// Pure JSON-oriented report from a monorepo result summary + local path.
+pub fn assemble_monorepo_clone_json_report(
+    local_path: &Path,
+    summary: &MonorepoCloneResultSummary,
+) -> MonorepoCloneJsonReport {
+    let placed = summary
+        .placed
+        .iter()
+        .map(|node| MonorepoPlacedJsonRow {
+            spool_id: node.spool_id.clone(),
+            path: node.rel_path.display().to_string(),
+            content_state: node.content_state.map(|s| s.to_string()),
+        })
+        .collect();
+    let skipped = summary
+        .skipped
+        .iter()
+        .map(|sk| MonorepoSkippedJsonRow {
+            child_spool_id: sk.child_spool_id.clone(),
+            mount_name: sk.mount_name.clone(),
+            path: sk.rel_path.display().to_string(),
+            reason: sk.reason_label().to_string(),
+        })
+        .collect();
+    MonorepoCloneJsonReport {
+        output_kind: "clone_monorepo",
+        action: "clone",
+        status: "cloned",
+        success: true,
+        transport: "heddle",
+        local: local_path.display().to_string(),
+        placed,
+        skipped,
     }
 }
 
@@ -1645,6 +1735,17 @@ mod tests {
         assert_eq!(plan.skipped.len(), 1);
         assert_eq!(plan.skipped[0].reason, MonorepoEdgeSkipReason::Unspecified);
         assert_eq!(plan.skipped[0].reason_label(), "unspecified");
+    }
+
+    #[test]
+    fn monorepo_rel_display_and_wire_skip() {
+        assert_eq!(monorepo_rel_display(Path::new("")), ".");
+        assert_eq!(monorepo_rel_display(Path::new("libs")), "libs");
+        assert_eq!(
+            MonorepoEdgeSkipReason::from_wire_i32(1),
+            Some(MonorepoEdgeSkipReason::Unreadable)
+        );
+        assert_eq!(MonorepoEdgeSkipReason::from_wire_i32(99), None);
     }
 
     #[test]

@@ -22,7 +22,8 @@ use heddle_core::{
 use heddle_core::{
     MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
     MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
-    assemble_monorepo_clone_result_summary, monorepo_execution_progress, plan_monorepo_clone,
+    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
+    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
     plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
 };
 use ingest::ImportOptions;
@@ -1573,50 +1574,32 @@ async fn clone_monorepo(
 /// to `None` (empty checkout), matching prior client planner policy.
 #[cfg(feature = "client")]
 fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
-    use grpc::heddle::v1::EdgeSkip;
     use objects::object::ChangeId;
 
     let content_state = node
         .content_state
         .as_deref()
         .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
-    let edges =
-        node.edges
-            .iter()
-            .map(|edge| {
-                let skip_reason = edge.skipped.and_then(|s| EdgeSkip::try_from(s).ok()).map(
-                    |reason| match reason {
-                        EdgeSkip::Unspecified => MonorepoEdgeSkipReason::Unspecified,
-                        EdgeSkip::Unreadable => MonorepoEdgeSkipReason::Unreadable,
-                        EdgeSkip::Cycle => MonorepoEdgeSkipReason::Cycle,
-                        EdgeSkip::DepthBounded => MonorepoEdgeSkipReason::DepthBounded,
-                    },
-                );
-                MonorepoEdgeFacts {
-                    mount_name: edge.mount_name.clone(),
-                    child_spool_id: edge.child_spool_id.clone(),
-                    child: edge
-                        .subtree
-                        .as_ref()
-                        .map(|subtree| monorepo_node_facts_from_resolved(subtree)),
-                    skip_reason,
-                }
-            })
-            .collect();
+    let edges = node
+        .edges
+        .iter()
+        .map(|edge| {
+            let skip_reason = edge.skipped.and_then(MonorepoEdgeSkipReason::from_wire_i32);
+            MonorepoEdgeFacts {
+                mount_name: edge.mount_name.clone(),
+                child_spool_id: edge.child_spool_id.clone(),
+                child: edge
+                    .subtree
+                    .as_ref()
+                    .map(|subtree| monorepo_node_facts_from_resolved(subtree)),
+                skip_reason,
+            }
+        })
+        .collect();
     MonorepoNodeFacts {
         spool_id: node.spool_id.clone(),
         content_state,
         edges,
-    }
-}
-
-/// Relative path label for text-mode monorepo placement lines (`""` → `.`).
-#[cfg(feature = "client")]
-fn monorepo_rel_display(rel_path: &Path) -> String {
-    if rel_path.as_os_str().is_empty() {
-        ".".to_string()
-    } else {
-        rel_path.display().to_string()
     }
 }
 
@@ -1626,39 +1609,8 @@ fn monorepo_clone_output_json(
     local_path: &Path,
     summary: &MonorepoCloneResultSummary,
 ) -> serde_json::Value {
-    let placed: Vec<_> = summary
-        .placed
-        .iter()
-        .map(|node| {
-            serde_json::json!({
-                "spool_id": node.spool_id,
-                "path": node.rel_path.display().to_string(),
-                "content_state": node.content_state.map(|s| s.to_string()),
-            })
-        })
-        .collect();
-    let skipped: Vec<_> = summary
-        .skipped
-        .iter()
-        .map(|sk| {
-            serde_json::json!({
-                "child_spool_id": sk.child_spool_id,
-                "mount_name": sk.mount_name,
-                "path": sk.rel_path.display().to_string(),
-                "reason": sk.reason_label(),
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "output_kind": "clone_monorepo",
-        "action": "clone",
-        "status": "cloned",
-        "success": true,
-        "transport": "heddle",
-        "local": local_path.display().to_string(),
-        "placed": placed,
-        "skipped": skipped,
-    })
+    serde_json::to_value(assemble_monorepo_clone_json_report(local_path, summary))
+        .expect("monorepo clone report serializes")
 }
 
 /// Execute pure per-node monorepo steps with hosted/FS I/O helpers.

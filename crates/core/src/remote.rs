@@ -2229,6 +2229,17 @@ pub fn hosted_spool_display_path(
     }
 }
 
+/// Whether a push/pull plan should treat the remote as a native-transport
+/// mismatch (git local/url against a non-overlay Heddle repo).
+///
+/// Overlay capability never reports mismatch (git is the native transport).
+pub fn is_native_transport_mismatch(
+    capability: RepositoryCapability,
+    remote_is_git_local_or_url: bool,
+) -> bool {
+    capability != RepositoryCapability::GitOverlay && remote_is_git_local_or_url
+}
+
 /// Error when a remote write would touch config outside the repo Git tree.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("Remote '{name}' is defined in an included Git config that heddle won't edit: {path}")]
@@ -3729,5 +3740,17 @@ mod tests {
             hosted_spool_display_path("ns", "slug", "ns/slug"),
             "ns/slug"
         );
+        assert!(!is_native_transport_mismatch(
+            RepositoryCapability::GitOverlay,
+            true
+        ));
+        assert!(is_native_transport_mismatch(
+            RepositoryCapability::NativeHeddle,
+            true
+        ));
+        assert!(!is_native_transport_mismatch(
+            RepositoryCapability::NativeHeddle,
+            false
+        ));
     }
 }

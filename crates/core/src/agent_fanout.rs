@@ -9,8 +9,9 @@
 //! - dry-run `agent fanout start` command argv assembly
 //! - plan dry-run report fields (stable JSON names, no verification)
 //!
-//! Worktree target resolution, live-reservation / existing-thread checks,
-//! agent-task store writes, thread spawn, and registry linking stay CLI-owned.
+//! Worktree target resolution, agent-task store writes, thread spawn, and
+//! registry linking stay CLI-owned. Live-reservation / existing-thread /
+//! path-collision **decisions** after the CLI gathers facts are pure here.
 
 use std::{
     collections::BTreeSet,
@@ -30,6 +31,83 @@ pub struct FanoutNodeSpec {
     pub thread: String,
     pub path: PathBuf,
     pub title: String,
+}
+
+/// CLI-gathered availability facts for one fanout lane start preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FanoutLaneAvailability {
+    pub thread: String,
+    /// Active agent reservation already owns this thread name.
+    pub has_live_owner: bool,
+    /// Thread ref already exists in the repository.
+    pub thread_ref_exists: bool,
+    /// Active thread record (ThreadManager) already exists.
+    pub active_thread_record: bool,
+    /// Resolved absolute/normalized checkout path for collision detection.
+    pub resolved_path: PathBuf,
+}
+
+/// Pure preflight refusal after live I/O facts are known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FanoutLanePreflightBlock {
+    LiveOwner { thread: String },
+    ThreadExists { thread: String },
+    ActiveThreadRecord { thread: String },
+    DuplicatePath { thread: String },
+}
+
+impl FanoutLanePreflightBlock {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::LiveOwner { .. } => "agent_fanout_live_owner",
+            Self::ThreadExists { .. } | Self::ActiveThreadRecord { .. } => {
+                "agent_fanout_thread_exists"
+            }
+            Self::DuplicatePath { .. } => "agent_fanout_duplicate_path",
+        }
+    }
+
+    pub fn thread(&self) -> &str {
+        match self {
+            Self::LiveOwner { thread }
+            | Self::ThreadExists { thread }
+            | Self::ActiveThreadRecord { thread }
+            | Self::DuplicatePath { thread } => thread,
+        }
+    }
+}
+
+/// Pure fanout-start preflight from CLI-gathered per-lane facts.
+///
+/// Checks live owner, existing thread ref/record, then path collisions across
+/// the lane set (in order).
+pub fn check_fanout_start_preflight(
+    lanes: &[FanoutLaneAvailability],
+) -> Result<(), FanoutLanePreflightBlock> {
+    let mut seen_paths = BTreeSet::new();
+    for lane in lanes {
+        if lane.has_live_owner {
+            return Err(FanoutLanePreflightBlock::LiveOwner {
+                thread: lane.thread.clone(),
+            });
+        }
+        if lane.thread_ref_exists {
+            return Err(FanoutLanePreflightBlock::ThreadExists {
+                thread: lane.thread.clone(),
+            });
+        }
+        if lane.active_thread_record {
+            return Err(FanoutLanePreflightBlock::ActiveThreadRecord {
+                thread: lane.thread.clone(),
+            });
+        }
+        if !seen_paths.insert(lane.resolved_path.clone()) {
+            return Err(FanoutLanePreflightBlock::DuplicatePath {
+                thread: lane.thread.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl FanoutNodeSpec {
@@ -527,6 +605,41 @@ mod tests {
                 .command
                 .contains("agent fanout start")
         );
+    }
+
+    #[test]
+    fn fanout_start_preflight_blocks_in_priority_order() {
+        let ok = FanoutLaneAvailability {
+            thread: "a".into(),
+            has_live_owner: false,
+            thread_ref_exists: false,
+            active_thread_record: false,
+            resolved_path: PathBuf::from("/tmp/a"),
+        };
+        assert!(check_fanout_start_preflight(&[ok.clone()]).is_ok());
+
+        let mut live = ok.clone();
+        live.has_live_owner = true;
+        assert!(matches!(
+            check_fanout_start_preflight(&[live]),
+            Err(FanoutLanePreflightBlock::LiveOwner { .. })
+        ));
+
+        let mut exists = ok.clone();
+        exists.thread_ref_exists = true;
+        assert!(matches!(
+            check_fanout_start_preflight(&[exists]),
+            Err(FanoutLanePreflightBlock::ThreadExists { .. })
+        ));
+
+        let dup_a = ok.clone();
+        let mut dup_b = ok;
+        dup_b.thread = "b".into();
+        // same resolved path
+        assert!(matches!(
+            check_fanout_start_preflight(&[dup_a, dup_b]),
+            Err(FanoutLanePreflightBlock::DuplicatePath { thread }) if thread == "b"
+        ));
     }
 
     #[test]

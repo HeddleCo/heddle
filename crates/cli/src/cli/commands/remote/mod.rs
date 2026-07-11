@@ -12,10 +12,11 @@ use heddle_core::{
     first_multi_thread_push_failure, format_mirror_failure_text, format_mirror_success_text,
     format_multi_ref_push_progress, format_push_outcome_text, format_pushing_to,
     git_overlay_push_execution_facts, heddle_single_push_execution_facts_from_local,
-    looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
-    multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
-    named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
-    remote_urls_match, transport_error_message, uses_local_git_overlay_transport,
+    is_native_transport_mismatch, looks_like_git_remote_url, looks_like_remote_location,
+    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
+    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
+    refuse_named_thread_tip_overwrite, remote_urls_match, transport_error_message,
+    uses_local_git_overlay_transport,
 };
 #[cfg(feature = "client")]
 use heddle_core::{
@@ -199,11 +200,12 @@ pub async fn cmd_push(
     };
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
-    let transport_mismatch = repo.capability() != RepositoryCapability::GitOverlay
-        && matches!(
-            classify_remote_spec(&repo, remote.as_deref()),
-            Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl)
-        );
+    let remote_is_git_local_or_url = matches!(
+        classify_remote_spec(&repo, remote.as_deref()),
+        Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl)
+    );
+    let transport_mismatch =
+        is_native_transport_mismatch(repo.capability(), remote_is_git_local_or_url);
     let head = repo.head_ref()?;
     let plan = plan_push(&PushPlanRequest {
         capability: repo.capability(),

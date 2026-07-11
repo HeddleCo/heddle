@@ -12,8 +12,8 @@ use heddle_core::{
     GitConfigContext, LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest,
     RemoteInfo, RemoteListReport, build_pull_outcome, format_pull_outcome_text,
     format_pulling_from, git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
-    list_plain_git_remotes, list_remotes, local_pull_changed, merged_remote_items, plan_pull,
-    pull_should_materialize, show_plain_git_remote, show_remote,
+    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
+    merged_remote_items, plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 #[cfg(feature = "client")]
 use heddle_core::{
@@ -262,11 +262,12 @@ pub async fn cmd_pull(
     let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
-    let transport_mismatch = repo.capability() != RepositoryCapability::GitOverlay
-        && matches!(
-            super::classify_remote_spec(&repo, remote.as_deref()),
-            Some(super::RemoteTransportKind::LocalGit | super::RemoteTransportKind::GitUrl)
-        );
+    let remote_is_git_local_or_url = matches!(
+        super::classify_remote_spec(&repo, remote.as_deref()),
+        Some(super::RemoteTransportKind::LocalGit | super::RemoteTransportKind::GitUrl)
+    );
+    let transport_mismatch =
+        is_native_transport_mismatch(repo.capability(), remote_is_git_local_or_url);
     let head = repo.head_ref()?;
     let plan = plan_pull(&PullPlanRequest {
         capability: repo.capability(),

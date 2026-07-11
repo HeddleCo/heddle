@@ -5,8 +5,10 @@ use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
-    GitScope, SavePlan, SaveVerb, commit_next_action_from_trust, execute_save, plan_git_scope,
-    tree_leaf_name,
+    CommitGitIndexPlan, GitScope, SavePlan, SaveVerb, commit_next_action_from_trust,
+    commit_scope_text as core_commit_scope_text, execute_save, plan_commit_git_index,
+    plan_commit_git_index_only, plan_git_scope,
+    staged_commit_summary as core_staged_commit_summary, tree_leaf_name,
 };
 use objects::{
     object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
@@ -572,14 +574,7 @@ fn commit_staged_index(
 }
 
 fn staged_commit_summary(summary: &str, intent: &GitIndexIntent) -> String {
-    if intent.extra_paths.is_empty() {
-        return summary.to_string();
-    }
-    format!(
-        "{summary} (committed {} staged path(s); left {} unstaged/untracked path(s) in the worktree)",
-        intent.staged_paths.len(),
-        intent.extra_paths.len()
-    )
+    core_staged_commit_summary(summary, intent.staged_paths.len(), intent.extra_paths.len())
 }
 
 fn require_commit_message(message: Option<String>) -> Result<String> {
@@ -619,76 +614,36 @@ pub(crate) struct GitIndexPlan {
     pub(crate) preserved_after_commit: Vec<String>,
 }
 
+impl From<CommitGitIndexPlan> for GitIndexPlan {
+    fn from(plan: CommitGitIndexPlan) -> Self {
+        Self {
+            commit_mode: plan.commit_mode,
+            has_staged_changes: plan.has_staged_changes,
+            staged_paths: plan.staged_paths,
+            unstaged_paths: plan.unstaged_paths,
+            untracked_paths: plan.untracked_paths,
+            will_commit: plan.will_commit,
+            preserved_after_commit: plan.preserved_after_commit,
+        }
+    }
+}
+
 impl GitIndexPlan {
     pub(crate) fn from_intent(intent: &GitIndexIntent, include_all: bool) -> Self {
-        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
-        let has_staged_changes = !intent.staged_paths.is_empty();
-        let mut will_commit = Vec::new();
-        if has_staged_changes {
-            will_commit.extend(intent.staged_paths.iter().cloned());
-        }
-        if include_all || !has_staged_changes {
-            will_commit.extend(unstaged_paths.iter().cloned());
-            will_commit.extend(untracked_paths.iter().cloned());
-        }
-        let commit_mode = if has_staged_changes && include_all {
-            "worktree_all_explicit"
-        } else if has_staged_changes {
-            "staged_index"
-        } else if will_commit.is_empty() {
-            "none"
-        } else {
-            "worktree_all"
-        };
-        let preserved_after_commit = if has_staged_changes && !include_all {
-            intent.extra_paths.clone()
-        } else {
-            Vec::new()
-        };
-        Self {
-            commit_mode,
-            has_staged_changes,
-            staged_paths: intent.staged_paths.clone(),
-            unstaged_paths,
-            untracked_paths,
-            will_commit,
-            preserved_after_commit,
-        }
+        plan_commit_git_index(&intent.staged_paths, &intent.extra_paths, include_all).into()
     }
 
     /// Plan for an index-only commit: checkpoint exactly the staged index (which
     /// may be empty, as on the `--no-all` path) and preserve every unstaged or
     /// untracked worktree path. Never sweeps the worktree.
     pub(crate) fn index_only(intent: &GitIndexIntent) -> Self {
-        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
-        Self {
-            commit_mode: "staged_index",
-            has_staged_changes: !intent.staged_paths.is_empty(),
-            staged_paths: intent.staged_paths.clone(),
-            unstaged_paths,
-            untracked_paths,
-            will_commit: intent.staged_paths.clone(),
-            preserved_after_commit: intent.extra_paths.clone(),
-        }
+        plan_commit_git_index_only(&intent.staged_paths, &intent.extra_paths).into()
     }
 }
 
 // Plain-Git observe-path index planning lives in
 // `heddle_core::git_index_plan_for_root` / `plain_git_status_report`. Overlay
 // commit paths below use repo-scoped `git_index_intent_for_repo`.
-
-fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut unstaged_paths = Vec::new();
-    let mut untracked_paths = Vec::new();
-    for path in extra_paths {
-        if let Some(path) = path.strip_prefix("unstaged: ") {
-            unstaged_paths.push(path.to_string());
-        } else if let Some(path) = path.strip_prefix("untracked: ") {
-            untracked_paths.push(path.to_string());
-        }
-    }
-    (unstaged_paths, untracked_paths)
-}
 
 fn empty_git_index() -> Index {
     Index {
@@ -1102,15 +1057,7 @@ fn render_git_projection_commit(
 }
 
 fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
-    match plan.commit_mode {
-        "staged_index" => {
-            "staged Git index only; unstaged and untracked paths stay in the worktree"
-        }
-        "worktree_all_explicit" => "all staged, unstaged, and untracked worktree changes (--all)",
-        "worktree_all" => "all unstaged and untracked worktree changes",
-        "none" => "no Git paths",
-        _ => "Git worktree changes",
-    }
+    core_commit_scope_text(plan.commit_mode)
 }
 
 pub async fn cmd_switch_git_projection(cli: &Cli, args: SwitchArgs) -> Result<()> {

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
-use std::collections::BTreeSet;
-
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use heddle_core::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReleaseKind,
-    AgentReservationReport, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
-    assemble_agent_reservation, assemble_agent_reservation_list, assemble_fanout_plan_report,
-    check_agent_capture_thread, fanout_child_body, fanout_parent_delegated_by,
+    AgentReservationReport, FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec,
+    FanoutPlan, FanoutPlanError, FanoutPlanRequest, assemble_agent_reservation,
+    assemble_agent_reservation_list, assemble_fanout_plan_report, check_agent_capture_thread,
+    check_fanout_start_preflight, fanout_child_body, fanout_parent_delegated_by,
     fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
     select_fanout_parent_thread, session_is_active, touch_agent_heartbeat, touch_agent_release,
 };
@@ -1057,62 +1056,62 @@ fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
 
 /// I/O preflight for fanout start after pure [`plan_fanout`].
 ///
-/// Duplicate thread names are already rejected by the pure plan; this checks
-/// live reservations, existing thread refs/records, and resolved path collisions.
+/// Gathers live facts (reservations, refs, thread records, resolved paths),
+/// then applies pure [`check_fanout_start_preflight`].
 fn preflight_fanout_start_io(repo: &Repository, lanes: &[FanoutNodeSpec]) -> Result<()> {
-    let mut seen_paths = BTreeSet::new();
     let manager = ThreadManager::new(repo.heddle_dir());
+    let mut facts = Vec::with_capacity(lanes.len());
     for lane in lanes {
-        if super::thread::find_active_thread_entry(repo, &lane.thread)?.is_some() {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_live_owner",
-                &lane.thread,
-                format!(
-                    "fanout lane '{}' already has an active agent reservation",
-                    lane.thread
-                ),
-                "Release the active reservation or choose a fresh child thread.",
-            )));
-        }
-        if repo
-            .refs()
-            .get_thread(&ThreadName::new(&lane.thread))?
-            .is_some()
-        {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_thread_exists",
-                &lane.thread,
-                format!("fanout lane '{}' already exists", lane.thread),
-                "Choose a fresh child thread or inspect the existing thread before retrying.",
-            )));
-        }
-        if let Some(existing) = manager.find_by_thread(&lane.thread)?
-            && existing.state == ThreadState::Active
-        {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_thread_exists",
-                &lane.thread,
-                format!(
-                    "fanout lane '{}' already has an active thread record",
-                    lane.thread
-                ),
-                "Drop or finish the existing thread before reusing the lane name.",
-            )));
-        }
         let prepared = plan_worktree_target(repo, &lane.path, Some(&lane.thread))?;
-        if !seen_paths.insert(prepared.path.clone()) {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_duplicate_path",
-                &lane.thread,
-                format!(
-                    "fanout lane '{}' resolves to a checkout path used by another lane",
-                    lane.thread
-                ),
-                "Use a distinct checkout path for each child lane.",
-            )));
-        }
+        let active_thread_record = match manager.find_by_thread(&lane.thread)? {
+            Some(existing) => existing.state == ThreadState::Active,
+            None => false,
+        };
+        facts.push(FanoutLaneAvailability {
+            thread: lane.thread.clone(),
+            has_live_owner: super::thread::find_active_thread_entry(repo, &lane.thread)?.is_some(),
+            thread_ref_exists: repo
+                .refs()
+                .get_thread(&ThreadName::new(&lane.thread))?
+                .is_some(),
+            active_thread_record,
+            resolved_path: prepared.path,
+        });
+    }
+    if let Err(block) = check_fanout_start_preflight(&facts) {
+        return Err(anyhow!(fanout_lane_preflight_block_advice(block)));
     }
     Ok(())
+}
+
+fn fanout_lane_preflight_block_advice(block: FanoutLanePreflightBlock) -> RecoveryAdvice {
+    let thread = block.thread().to_string();
+    match block {
+        FanoutLanePreflightBlock::LiveOwner { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_live_owner",
+            &thread,
+            format!("fanout lane '{thread}' already has an active agent reservation"),
+            "Release the active reservation or choose a fresh child thread.",
+        ),
+        FanoutLanePreflightBlock::ThreadExists { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_thread_exists",
+            &thread,
+            format!("fanout lane '{thread}' already exists"),
+            "Choose a fresh child thread or inspect the existing thread before retrying.",
+        ),
+        FanoutLanePreflightBlock::ActiveThreadRecord { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_thread_exists",
+            &thread,
+            format!("fanout lane '{thread}' already has an active thread record"),
+            "Drop or finish the existing thread before reusing the lane name.",
+        ),
+        FanoutLanePreflightBlock::DuplicatePath { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_duplicate_path",
+            &thread,
+            format!("fanout lane '{thread}' resolves to a checkout path used by another lane"),
+            "Use a distinct checkout path for each child lane.",
+        ),
+    }
 }
 
 fn fanout_lane_unavailable_advice(
