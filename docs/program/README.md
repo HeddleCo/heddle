@@ -21,6 +21,7 @@ This directory is the working control plane for driving Heddle toward:
 | [inventory-ambient-state.md](inventory-ambient-state.md) | OnceLock/static/thread_local inventory |
 | [inventory-process-spawns.md](inventory-process-spawns.md) | Command::new process-spawn inventory |
 | [BASELINE.md](BASELINE.md) | Latest trustworthy baseline record |
+| [PERF_BASELINE.md](PERF_BASELINE.md) | Equal-work core-loop timing calibration (not a Git win claim) |
 
 ## Tooling
 

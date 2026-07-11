@@ -22,7 +22,7 @@
 | Paired bench runner | **Shipped** — `scripts/program/paired-bench.py` |
 | CLI residual inventory | **Shipped** — `scripts/program/gen-cli-domain-residual.py` |
 | Full curated suite green on this host | **In progress** — first wave0 oracle shard recorded under `artifacts/baseline/` |
-| Performance certification (5 trials) | **Blocked** until oracle shard green and equal-work fixtures automated |
+| Performance certification (5 trials) | **Calibration recorded (3 trials)** — see `docs/program/PERF_BASELINE.md`; ≥5-trial cert still open |
 
 ## Wave 0 oracle shard (2026-07-11, this machine)
 
@@ -32,7 +32,7 @@ Source: `artifacts/baseline/wave0-merged/summary.json` after
 | Job | Status | Duration | Oracle |
 |-----|--------|----------|--------|
 | facade-render-free | pass | 39 ms | no |
-| fmt-check (stable cargo fmt, pre-fix) | **fail** | 3.4 s | no — tree has nightly-rustfmt drift; do **not** rewrite with stable fmt |
+| fmt-check (`cargo +nightly fmt --check`) | **pass** (post `c1699119`) | — | yes — applied `cargo +nightly fmt --all` |
 | git-process-lint | pass | 1.8 s | yes |
 | roundtrip-fidelity | pass | 4.8 s | yes |
 | commit-conformance | pass | 3.2 s | yes |
@@ -67,13 +67,15 @@ Also green: `cli-core-functionality` (46.2 s), `cli-state-management` (45.7 s).
 **Full curated suite in manifest (excluding suite=perf): 18 pass / 1 fail (`fmt-check` only).**  
 See `artifacts/baseline/curated-merged/summary.json`.
 
-Still not run: full `suite=perf` (core-loop release smoke with ≥3–5 paired trials).
+Perf calibration run (2026-07-11): equal-work core-loop absolute + paired self-pairs
+with 3 trials on release binary — see `docs/program/PERF_BASELINE.md` and
+`artifacts/perf/20260711T032344Z-*`. Full ≥5-trial certification still open.
 
 ### Harness blockers / notes
 
 1. **rustfmt:** `rustfmt.toml` requires nightly (`imports_granularity`, `group_imports`). Stable `cargo fmt` mis-formats the tree — never use it to “fix” the repo. Gate is now `scripts/program/fmt-check.sh` (nightly only). Pre-existing nightly drift on `main` is a **real gate fail** for certification, not introduced by this program branch; fixing it is a separate bounded wave (or `skip_prereq` when nightly missing).
 2. **Full curated suite** (repo/objects/refs/oplog/cli shards) not yet run end-to-end in one stamp; wave0 is the first trustworthy partial baseline.
-3. **Perf certification** still blocked until equal-work fixture automation + ≥5 paired trials.
+3. **Perf certification (≥5 trials)** still open; equal-work fixture automation is now shipped (`scripts/program/core-loop-bench.sh`) and a 3-trial calibration is recorded in `PERF_BASELINE.md`.
 
 ## Classification vocabulary (enforced by runner)
 
@@ -87,13 +89,19 @@ Results are never collapsed into a single pass rate without:
 
 ## Performance baseline
 
-Not yet certified. Existing budgets live in:
+**Calibration (not certification):** `docs/program/PERF_BASELINE.md` records
+absolute equal-work core-loop timings (n=3) with raw JSON under
+`artifacts/perf/`. Explicitly **not** a Git win claim.
+
+Existing budgets / other benches:
 
 - `crates/cli/tests/cli_integration/perf_core_loop.rs` (ignored release smoke)
 - Criterion benches under objects/refs/oplog/cli/mount/semantic
 - Weekly `.github/workflows/benchmarks.yml`
 
-**Blocker for claiming speed:** must run paired trials on correct paths with raw artifacts; no early-exit gaming.
+**Blocker for claiming speed / cert:** ≥5 paired trials on correct paths with
+raw artifacts; no early-exit gaming; no cross-tool claims from absolute-only
+calibration.
 
 ## How to refresh
 

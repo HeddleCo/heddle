@@ -246,6 +246,17 @@ required = false
 suite = "perf"
 notes = "Equal-work command surface budgets; ignored by default; requires release binary"
 
+[[jobs]]
+id = "core-loop-absolute-bench"
+kind = "script"
+command = ["bash", "scripts/program/core-loop-bench.sh", "--trials", "3", "--warmup", "1"]
+oracle = false
+perf_eligible = true
+platforms = ["any"]
+required = false
+suite = "perf"
+notes = "Fixed equal-work fixture + absolute multi-op timings; writes artifacts/perf/*-core-loop-absolute.json. Measurement calibration only — not a Git win claim. Requires executable target/release/heddle (cargo build --release -p heddle-cli --locked); job fails loudly if binary missing."
+
 # ---------------------------------------------------------------------------
 # Explicit exclusions (not run as curated; justification required)
 # ---------------------------------------------------------------------------

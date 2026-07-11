@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "kind": "paired_bench",
+  "name": "core-loop-log_json",
+  "timestamp_utc": "20260711T032349Z",
+  "trials": 3,
+  "warmup": 1,
+  "require_success": true,
+  "cwd": "/var/folders/pl/d2jk07gx0_z4w33h_k5ylhl80000gn/T/heddle-core-loop-7FSv9U",
+  "command_a": "\"/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10/target/release/heddle\" --output json log",
+  "command_b": "\"/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10/target/release/heddle\" --output json log",
+  "a": {
+    "n": 3,
+    "mean_s": 0.019558639032766223,
+    "median_s": 0.018802582984790206,
+    "stdev_s": 0.0019856040976986957,
+    "min_s": 0.018062124960124493,
+    "max_s": 0.02181120915338397,
+    "p95_s": 0.021510346536524592,
+    "p99_s": 0.021751036630012092,
+    "raw_s": [
+      0.018062124960124493,
+      0.018802582984790206,
+      0.02181120915338397
+    ],
+    "mean_ms": 19.559,
+    "median_ms": 18.803,
+    "stdev_ms": 1.986,
+    "min_ms": 18.062,
+    "max_ms": 21.811,
+    "p95_ms": 21.51,
+    "p99_ms": 21.751,
+    "raw_ms": [
+      18.062,
+      18.803,
+      21.811
+    ]
+  },
+  "b": {
+    "n": 3,
+    "mean_s": 0.01879613862062494,
+    "median_s": 0.018545291852205992,
+    "stdev_s": 0.0008906295182297844,
+    "min_s": 0.018057832960039377,
+    "max_s": 0.01978529104962945,
+    "p95_s": 0.019661291129887102,
+    "p99_s": 0.01976049106568098,
+    "raw_s": [
+      0.01978529104962945,
+      0.018057832960039377,
+      0.018545291852205992
+    ],
+    "mean_ms": 18.796,
+    "median_ms": 18.545,
+    "stdev_ms": 0.891,
+    "min_ms": 18.058,
+    "max_ms": 19.785,
+    "p95_ms": 19.661,
+    "p99_ms": 19.76,
+    "raw_ms": [
+      19.785,
+      18.058,
+      18.545
+    ]
+  },
+  "ratio_b_over_a_median": 0.986316181516532,
+  "raw_trials": [
+    {
+      "trial": 0,
+      "label": "A",
+      "seconds": 0.018062124960124493,
+      "ms": 18.062,
+      "exit_code": 0
+    },
+    {
+      "trial": 0,
+      "label": "B",
+      "seconds": 0.01978529104962945,
+      "ms": 19.785,
+      "exit_code": 0
+    },
+    {
+      "trial": 1,
+      "label": "A",
+      "seconds": 0.018802582984790206,
+      "ms": 18.803,
+      "exit_code": 0
+    },
+    {
+      "trial": 1,
+      "label": "B",
+      "seconds": 0.018057832960039377,
+      "ms": 18.058,
+      "exit_code": 0
+    },
+    {
+      "trial": 2,
+      "label": "A",
+      "seconds": 0.02181120915338397,
+      "ms": 21.811,
+      "exit_code": 0
+    },
+    {
+      "trial": 2,
+      "label": "B",
+      "seconds": 0.018545291852205992,
+      "ms": 18.545,
+      "exit_code": 0
+    }
+  ],
+  "notes": "Paired alternating A/B. Does not assert correctness or equal work; only times successful (or all) process wall times. Not a Git win claim; measurement calibration only."
+}
