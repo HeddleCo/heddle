@@ -21,7 +21,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 **Agent B (perf tooling):** paired-bench runner + stats JSON; inventory Criterion targets  
 **Agent C (architecture inventory):** process provenance map, OnceLock inventory, CLI→core remaining command matrix  
 **Root:** integrate, run baseline, commit  
-**Status (2026-07-11):** **Done** for measurement foundation — git-process lint scope, oracle classification in manifest, paired-bench + core-loop absolute harness, CLI residual inventory, and wave1/curated baseline stamps recorded. Perf **certification** (≥5 trials) still open (calibration n=3 only).
+**Status (2026-07-11):** **Done** for measurement foundation — git-process lint scope, oracle classification in manifest, paired-bench + core-loop absolute harness, CLI residual inventory, and wave1/curated baseline stamps recorded. Perf **n=5 cert sample** recorded in Wave 8 partial cert (`docs/program/PERF_BASELINE.md`).
 
 ## Wave 2 — Git fidelity & verification ownership
 
@@ -53,7 +53,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 **Prerequisite:** Wave 2–3 correctness green for touched ops  
 **Focus:** status/verify open amortization, worktree scan, pack/hash benches  
 **Required evidence:** before/after paired timings, p95/p99, correctness held  
-**Status:** **Blocked on ≥5-trial perf cert**; calibration only (see `PERF_BASELINE.md`). Wave 2–3 high-signal correctness is green for proceeding on correct paths once cert criteria are met.
+**Status:** **Unblocked for correct-path hotspot work** — n=5 equal-work core-loop absolute + A==B self-pairs recorded (see `PERF_BASELINE.md`); still **not** a Git win claim. Wave 2–3 / Wave 8 high-signal correctness green for proceeding on correct paths with before/after paired evidence.
 
 ## Wave 7 — Platform matrix & long-tail
 
@@ -63,7 +63,7 @@ Windows materialization, mount optional, large-ref packed-refs degradation docs/
 ## Wave 8 — Certification
 
 Full curated + oracle + format + clippy + doc + perf cert (5 trials) → release gate checklist green  
-**Status (2026-07-11):** **Partial** — high-signal re-cert **7/7 green** including **fmt via `cargo +nightly`**; full curated 19-job single-stamp re-run, clippy/doc gates, and ≥5-trial perf cert still open.
+**Status (2026-07-11):** **Partial (fanout2)** — high-signal re-cert **5/5 green** on tip `b7f51aa4` (`artifacts/baseline/post-wave-fanout2-merged/`: fmt-check, facade-render-free, git-process-lint, roundtrip-fidelity, lib-core); **n=5** core-loop perf sample recorded (`artifacts/perf/20260711T041555Z-*`, `PERF_BASELINE.md`) — **not** a Git win claim. Still open: full curated 19-job single-stamp re-run, commit-conformance/formal-specs in this fanout set, clippy/doc gates, multi-host perf.
 ---
 
 ## First three bounded implementation tasks (start immediately)

@@ -1,6 +1,6 @@
-# Performance baseline (measurement calibration)
+# Performance baseline (measurement calibration / cert sample)
 
-**Status:** measurement calibration only  
+**Status:** n=5 core-loop absolute timings recorded (Wave 8 partial cert)  
 **Not a claim:** this document does **not** assert a Git win, Sley win, or any
 cross-tool superiority. It records absolute wall-clock process times on a
 fixed equal-work Heddle fixture so later waves can detect regressions with
@@ -20,32 +20,34 @@ Raw machine-readable results live under `artifacts/perf/`.
 3. **Absolute process wall times.** Each sample is end-to-end `heddle` process
    lifetime (including process start). stdout discarded for timing purity;
    exit code must be 0.
-4. **n=3 is calibration, not certification.** Release certification wants ≥5
-   paired trials per `docs/program/RELEASE_GATES.md` (G5). This wave records
-   ≥3 successful trials with full raw JSON.
+4. **n≥5 for certification sample.** Release certification wants ≥5 trials per
+   `docs/program/RELEASE_GATES.md` (G5). This document’s primary table is the
+   **n=5** Wave 8 run. An earlier n=3 calibration stamp is retained only as
+   historical comparison under `artifacts/perf/20260711T032344Z-*`.
 5. **No budget gaming.** Budgets from `perf_core_loop.rs` are shown for
    context; this run does not lower budgets or skip ops to “pass.”
+6. **Still not a Git comparison.** Absolute Heddle-only process times.
 
 ---
 
-## Environment
+## Environment (n=5 Wave 8 cert sample)
 
 | Field | Value |
 |-------|-------|
-| Commit | `c1699119855c242566e8677affef78f8f8fa1a71` |
+| Commit | `b7f51aa4a505c69c3dea5831ed44069f954b36c3` |
 | Branch | `codex/correctness-architecture-performance-program` |
-| Timestamp (UTC) | `20260711T032344Z` |
+| Timestamp (UTC) | `20260711T041555Z` |
 | OS | macOS 26.5.1 (Darwin 25.5.0 arm64) |
 | CPU | Apple M1 Pro |
 | Memory | 32 GB (`34359738368` bytes) |
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
 | Binary | `target/release/heddle` (`heddle 0.10.0`) |
-| Binary SHA-256 | `8e3fd8c718b239fa9a6ffa7684f9beccf49d95a9b0c59d296042bea5f221d5da` |
-| Build | `CARGO_TARGET_DIR=/tmp/heddle-perf-release-target cargo build --release -p heddle-cli --locked` then copy into `target/release/heddle` |
+| Binary SHA-256 | `ff84f3e1f1e281e777c02d94c2d5a68066c913ab334d05c12485b657fdc2ac1a` |
+| Build | `CARGO_TARGET_DIR=/tmp/heddle-w8-target cargo build --release -p heddle-cli --locked` then copy into `target/release/heddle` and `artifacts/perf/bin/heddle` |
 
 Environment snapshot:
-`artifacts/perf/20260711T032344Z-environment.txt`
+`artifacts/perf/20260711T041555Z-environment.txt`
 
 ---
 
@@ -68,14 +70,15 @@ Rust smoke fixture):
 
 ```bash
 # 1) Release binary (isolated target used on this host due to disk contention)
-export CARGO_TARGET_DIR=/tmp/heddle-perf-release-target
+export CARGO_TARGET_DIR=/tmp/heddle-w8-target
 cargo build --release -p heddle-cli --locked
 cp -f "$CARGO_TARGET_DIR/release/heddle" target/release/heddle
+cp -f "$CARGO_TARGET_DIR/release/heddle" artifacts/perf/bin/heddle
 
-# 2) Absolute multi-op timings + paired A==B self-pairs (3 trials, 1 warmup)
+# 2) Absolute multi-op timings + paired A==B self-pairs (5 trials, 1 warmup)
 bash scripts/program/core-loop-bench.sh \
   --heddle "$PWD/target/release/heddle" \
-  --trials 3 \
+  --trials 5 \
   --warmup 1 \
   --out-dir "$PWD/artifacts/perf"
 
@@ -88,47 +91,48 @@ in `scripts/program/manifest.toml`.
 
 ---
 
-## Absolute timings (n=3, 1 warmup, require success)
+## Absolute timings (n=5, 1 warmup, require success)
 
 Source:
-`artifacts/perf/20260711T032344Z-core-loop-absolute.json`
+`artifacts/perf/20260711T041555Z-core-loop-absolute.json`
 
-Times are **milliseconds** of process wall clock. Median and p95 are the
+Times are **milliseconds** of process wall clock. Median, p95, and p99 are the
 headline numbers for later regression comparison.
 
-| Operation | argv (relative) | median_ms | p95_ms | mean_ms | stdev_ms | smoke budget_ms |
-|-----------|-----------------|----------:|-------:|--------:|---------:|----------------:|
-| bare_help | `heddle` | 11.2 | 12.5 | 11.6 | 0.9 | 250 |
-| help | `heddle help` | 11.5 | 11.5 | 11.5 | 0.1 | 250 |
-| status_text | `heddle status` | 25.3 | 25.5 | 25.3 | 0.2 | 650 |
-| status_short | `heddle status --short` | 23.6 | 24.2 | 23.5 | 0.9 | 650 |
-| status_json | `heddle --output json status` | 58.6 | 60.0 | 59.0 | 0.9 | 850 |
-| log_json | `heddle --output json log` | 14.1 | 15.4 | 14.3 | 1.1 | 850 |
-| diff_json | `heddle --output json diff` | 23.7 | 24.0 | 23.7 | 0.3 | 1000 |
-| thread_list_json | `heddle --output json thread list` | 31.3 | 36.1 | 32.9 | 3.2 | 850 |
+| Operation | argv (relative) | median_ms | p95_ms | p99_ms | mean_ms | stdev_ms | smoke budget_ms |
+|-----------|-----------------|----------:|-------:|-------:|--------:|---------:|----------------:|
+| bare_help | `heddle` | 13.1 | 17.9 | 18.1 | 14.3 | 3.0 | 250 |
+| help | `heddle help` | 13.1 | 13.8 | 13.8 | 12.9 | 1.0 | 250 |
+| status_text | `heddle status` | 34.5 | 42.0 | 43.5 | 35.0 | 5.4 | 650 |
+| status_short | `heddle status --short` | 30.6 | 34.3 | 34.8 | 31.2 | 2.4 | 650 |
+| status_json | `heddle --output json status` | 79.9 | 86.4 | 87.5 | 79.7 | 5.3 | 850 |
+| log_json | `heddle --output json log` | 16.7 | 24.9 | 25.9 | 18.6 | 4.6 | 850 |
+| diff_json | `heddle --output json diff` | 30.2 | 32.6 | 32.7 | 30.9 | 1.5 | 1000 |
+| thread_list_json | `heddle --output json thread list` | 46.2 | 55.2 | 56.9 | 47.0 | 6.6 | 850 |
 
 Smoke budgets are from `perf_core_loop.rs` (single-run upper bounds on this
-hardware class). All medians and p95s in this calibration run are **under**
+hardware class). All medians, p95s, and p99s in this n=5 run are **under**
 those budgets. That is expected for a warm release binary on Apple M1 Pro; it
 is **not** evidence that the budgets should be tightened without multi-host
-data.
+data. Host was under concurrent cargo load during this cert pass; treat
+absolute ms as noisy single-host samples.
 
-### Raw trial medians (absolute series)
+### Raw trial times (absolute series, ms)
 
-| Operation | trial0_ms | trial1_ms | trial2_ms |
-|-----------|----------:|----------:|----------:|
-| bare_help | 10.9 | 12.6 | 11.2 |
-| help | 11.6 | 11.5 | 11.4 |
-| status_text | 25.3 | 25.1 | 25.5 |
-| status_short | 24.3 | 23.6 | 22.6 |
-| status_json | 58.4 | 58.6 | 60.1 |
-| log_json | 13.3 | 14.1 | 15.5 |
-| diff_json | 23.4 | 24.0 | 23.7 |
-| thread_list_json | 31.3 | 36.6 | 30.7 |
+| Operation | t0 | t1 | t2 | t3 | t4 |
+|-----------|---:|---:|---:|---:|---:|
+| bare_help | 12.4 | 11.2 | 13.1 | 18.2 | 16.8 |
+| help | 13.1 | 11.5 | 13.8 | 13.7 | 12.7 |
+| status_text | 33.1 | 29.1 | 34.5 | 43.9 | 34.5 |
+| status_short | 30.6 | 28.7 | 31.8 | 34.9 | 29.9 |
+| status_json | 79.9 | 87.7 | 80.8 | 73.9 | 76.4 |
+| log_json | 15.6 | 16.7 | 26.1 | 14.6 | 19.8 |
+| diff_json | 29.4 | 30.2 | 29.8 | 32.7 | 32.2 |
+| thread_list_json | 45.7 | 47.0 | 57.3 | 38.8 | 46.2 |
 
 ---
 
-## Paired self-pairs (A==B, alternating)
+## Paired self-pairs (A==B, alternating, n=5)
 
 Also produced by `core-loop-bench.sh` via `scripts/program/paired-bench.py`
 (alternating A/B, require success, median/mean/p95/p99/stdev). A and B are the
@@ -137,15 +141,26 @@ run-to-run noise, not to claim a win.
 
 | Op | Artifact | A median_ms | A p95_ms | B median_ms | B p95_ms | ratio B/A |
 |----|----------|------------:|---------:|------------:|--------:|----------:|
-| status_json | `…-core-loop-paired-status_json.json` | 64.4 | 66.3 | 64.1 | 64.2 | 0.996 |
-| log_json | `…-core-loop-paired-log_json.json` | 18.8 | 21.5 | 18.5 | 19.7 | 0.986 |
-| diff_json | `…-core-loop-paired-diff_json.json` | 29.8 | 34.3 | 29.5 | 31.4 | 0.990 |
-| help | `…-core-loop-paired-help.json` | 16.3 | 16.5 | 16.0 | 16.4 | 0.978 |
+| status_json | `…-core-loop-paired-status_json.json` | 88.9 | 105.1 | 91.0 | 104.7 | 1.023 |
+| log_json | `…-core-loop-paired-log_json.json` | 22.5 | 29.2 | 25.9 | 31.3 | 1.151 |
+| diff_json | `…-core-loop-paired-diff_json.json` | 40.5 | 50.9 | 44.2 | 50.0 | 1.092 |
+| help | `…-core-loop-paired-help.json` | 20.3 | 24.7 | 20.8 | 30.1 | 1.023 |
 
-Prefix: `artifacts/perf/20260711T032344Z-`
+Prefix: `artifacts/perf/20260711T041555Z-`
 
-Self-pair ratios near 1.0 indicate the alternating harness is balanced; they
-are **not** cross-implementation comparisons.
+Self-pair ratios near 1.0 indicate the alternating harness is balanced under
+quiet conditions; ratios here reflect concurrent machine load and are still
+**not** cross-implementation comparisons. Prefer absolute-series median/p95 for
+regression baselines when A==B noise is elevated.
+
+---
+
+## Historical n=3 calibration (superseded for cert count)
+
+Earlier Wave 1 measurement foundation stamp (n=3 only):
+`artifacts/perf/20260711T032344Z-core-loop-absolute.json` on commit
+`c1699119855c242566e8677affef78f8f8fa1a71`. Kept for harness continuity; do not
+use n=3 as the certification trial count.
 
 ---
 
@@ -153,9 +168,10 @@ are **not** cross-implementation comparisons.
 
 ```bash
 cargo build --release -p heddle-cli --locked
-bash scripts/program/core-loop-bench.sh --trials 3 --warmup 1
-# certification-oriented:
+# certification-oriented (≥5 trials):
 bash scripts/program/core-loop-bench.sh --trials 5 --warmup 1
+# quick calibration:
+bash scripts/program/core-loop-bench.sh --trials 3 --warmup 1
 # update this doc’s tables from the new absolute JSON
 ```
 
@@ -166,7 +182,7 @@ bash scripts/program/core-loop-bench.sh --trials 5 --warmup 1
 | Piece | Path | Role |
 |-------|------|------|
 | Paired alternating runner | `scripts/program/paired-bench.py` | A/B wall times; mean/median/p95/p99/stdev; require-success default |
-| Equal-work multi-op runner | `scripts/program/core-loop-bench.sh` | Fixture + absolute timings + optional self-pairs |
+| Equal-work multi-op runner | `scripts/program/core-loop-bench.sh` | Fixture + absolute timings + optional self-pairs (`--trials` ≥1, incl. 5) |
 | Smoke budgets (ignored test) | `crates/cli/tests/cli_integration/perf_core_loop.rs` | Single-run budget smoke, not CI gate |
 | Manifest suite | `scripts/program/manifest.toml` `suite=perf` | Opt-in curated perf jobs |
 | Raw artifacts | `artifacts/perf/` | JSON + environment snapshot |
@@ -175,11 +191,10 @@ bash scripts/program/core-loop-bench.sh --trials 5 --warmup 1
 
 ## Remaining risks / limits
 
-- **n=3** is insufficient for formal certification (want ≥5).
-- Process spawn overhead dominates the fastest ops (`help` ~11 ms).
-- Host was under concurrent cargo load and low free disk during the program
-  wave; release binary was built with an isolated `CARGO_TARGET_DIR` then
-  copied. Re-run on a quiet machine before citing numbers externally.
+- Single-host sample under concurrent cargo load; re-run on a quiet machine
+  before citing numbers externally.
+- Process spawn overhead dominates the fastest ops (`help` ~13 ms).
 - Fixture is synthetic equal-work, not a large monorepo or realworld Git import.
 - No Git comparison was performed; do not rephrase these numbers as “faster
   than Git.”
+- Full multi-host / platform matrix (Wave 7) still open.

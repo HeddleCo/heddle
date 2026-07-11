@@ -4,7 +4,8 @@
 
 | Field | Value |
 |-------|-------|
-| Commit (cert re-run) | `b748bfd4af575d9563437592213a5582de5e0f4d` |
+| Commit (Wave 8 partial cert) | `b7f51aa4a505c69c3dea5831ed44069f954b36c3` |
+| Commit (post–Wave 2/3 re-cert) | `b748bfd4af575d9563437592213a5582de5e0f4d` |
 | Commit (program start) | `74f2e20edef1572877c712c8551485fc2b5655a8` |
 | Branch | `codex/correctness-architecture-performance-program` |
 | OS | macOS 26.5.1 (Darwin 25.5.0 arm64) |
@@ -13,7 +14,8 @@
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
 | git | 2.55.0 |
-| CARGO_TARGET_DIR (cert) | `/tmp/heddle-cert-target` |
+| CARGO_TARGET_DIR (Wave 8 high-signal) | `/tmp/heddle-cert-w8` |
+| CARGO_TARGET_DIR (release perf binary) | `/tmp/heddle-w8-target` |
 
 ## Harness status
 
@@ -23,11 +25,36 @@
 | Baseline runner + classification | **Shipped** — `scripts/program/run-baseline.sh` |
 | Paired bench runner | **Shipped** — `scripts/program/paired-bench.py` |
 | CLI residual inventory | **Shipped** — `scripts/program/gen-cli-domain-residual.py` |
-| High-signal post–Wave 2/3 re-cert | **Green** — 7/7 pass; see `artifacts/baseline/post-wave23-merged/summary.json` |
-| Full curated suite (19 jobs) | **Prior stamp** — 18 pass / 1 fail (`fmt-check`); fmt now fixed |
-| Performance certification (5 trials) | **Calibration recorded (3 trials)** — see `docs/program/PERF_BASELINE.md`; ≥5-trial cert still open |
+| High-signal Wave 8 re-cert (5 jobs) | **Green** — 5/5 pass; see `artifacts/baseline/post-wave-fanout2-merged/summary.json` |
+| High-signal post–Wave 2/3 re-cert (7 jobs) | **Green** — 7/7 pass; see `artifacts/baseline/post-wave23-merged/summary.json` |
+| Full curated suite (19 jobs) | **Prior stamp** — 18 pass / 1 fail (`fmt-check`); fmt fixed; full 19-job single-stamp refresh still open |
+| Performance certification (5 trials) | **Recorded** — n=5 absolute + paired self-pairs; see `docs/program/PERF_BASELINE.md` (**not** a Git win claim) |
 
-## Post–Wave 2/3 high-signal re-cert (2026-07-11, this machine)
+## Wave 8 partial cert — high-signal re-run (2026-07-11, this machine)
+
+Source: `artifacts/baseline/post-wave-fanout2-merged/summary.json` after
+`scripts/program/run-baseline.sh --job …` for each job below on commit
+`b7f51aa4`.
+
+| Job | Status | Duration | Oracle |
+|-----|--------|----------|--------|
+| facade-render-free | **pass** | 234 ms | no |
+| fmt-check (`cargo +nightly fmt --check`) | **pass** | 29.9 s | no |
+| git-process-lint | **pass** | 73.3 s* | yes |
+| roundtrip-fidelity | **pass** | 5.5 s | yes |
+| lib-core | **pass** | 26.6 s* | no |
+
+\*Includes compile into `CARGO_TARGET_DIR=/tmp/heddle-cert-w8` on this run.
+
+**Aggregate:** **5 pass / 0 fail.** Oracle jobs green (git-process-lint,
+roundtrip-fidelity). **fmt-check green** via
+`scripts/program/fmt-check.sh` → `cargo +nightly fmt --all -- --check`.
+
+Perf: n=5 core-loop absolute + A==B self-pairs on release binary built from the
+same tip — `artifacts/perf/20260711T041555Z-*`, documented in
+`docs/program/PERF_BASELINE.md`. Explicitly **not** a Git comparison.
+
+## Post–Wave 2/3 high-signal re-cert (historical, 2026-07-11)
 
 Source: `artifacts/baseline/post-wave23-merged/summary.json` after
 `scripts/program/run-baseline.sh --job …` for each job below on commit
@@ -46,9 +73,9 @@ Source: `artifacts/baseline/post-wave23-merged/summary.json` after
 
 \*Includes cold compile into `CARGO_TARGET_DIR=/tmp/heddle-cert-target` on this run.
 
-**Aggregate:** **7 pass / 0 fail.** All high-signal oracle jobs green
-(git-process-lint, roundtrip-fidelity, commit-conformance, formal-specs).
-**fmt-check is green** via `scripts/program/fmt-check.sh` → `cargo +nightly fmt --all -- --check`.
+**Aggregate:** **7 pass / 0 fail.** Superseded for tip re-cert authority by
+Wave 8 fanout2 5-job suite above for the listed jobs; commit-conformance and
+formal-specs not re-run in the Wave 8 partial set.
 
 ## Wave 0 oracle shard (historical, pre-fmt fix)
 
@@ -93,19 +120,15 @@ Also green: `cli-core-functionality` (46.2 s), `cli-state-management` (45.7 s).
 `artifacts/baseline/curated-merged/summary.json` (18/19; fmt was sole fail).
 
 **fmt status after Wave 2/3:** fixed by `c1699119` (`cargo +nightly fmt --all`);
-re-certified green in post-wave23 high-signal suite. Expect full curated
-refresh to be 19/19 when re-run end-to-end (not re-executed in this cert pass
-beyond the seven high-signal jobs).
-
-Perf calibration run (2026-07-11): equal-work core-loop absolute + paired self-pairs
-with 3 trials on release binary — see `docs/program/PERF_BASELINE.md` and
-`artifacts/perf/20260711T032344Z-*`. Full ≥5-trial certification still open.
+re-certified green in post-wave23 and Wave 8 high-signal suites. Expect full
+curated refresh to be 19/19 when re-run end-to-end (not re-executed in Wave 8
+partial cert beyond the five high-signal jobs).
 
 ### Harness blockers / notes
 
-1. **rustfmt:** `rustfmt.toml` requires nightly (`imports_granularity`, `group_imports`). Stable `cargo fmt` mis-formats the tree — never use it to “fix” the repo. Gate is `scripts/program/fmt-check.sh` (nightly only). **Post–Wave 2/3:** tree is clean under `cargo +nightly fmt --all -- --check` (verified 2026-07-11 on `b748bfd4`).
-2. **Full curated suite** not re-run end-to-end in one stamp on this re-cert; high-signal 7-job suite is the post-wave authority for oracles + fmt + lib-core.
-3. **Perf certification (≥5 trials)** still open; equal-work fixture automation is shipped (`scripts/program/core-loop-bench.sh`) and a 3-trial calibration is recorded in `PERF_BASELINE.md`.
+1. **rustfmt:** `rustfmt.toml` requires nightly (`imports_granularity`, `group_imports`). Stable `cargo fmt` mis-formats the tree — never use it to “fix” the repo. Gate is `scripts/program/fmt-check.sh` (nightly only). **Verified green** on Wave 8 tip `b7f51aa4`.
+2. **Full curated suite** not re-run end-to-end in one stamp on Wave 8 partial cert; high-signal 5-job suite is the fanout2 authority for oracles + fmt + lib-core.
+3. **Perf certification (≥5 trials)** recorded for equal-work core-loop absolute + paired self-pairs (`docs/program/PERF_BASELINE.md`). Still **not** a Git win claim; multi-host matrix open.
 
 ## Classification vocabulary (enforced by runner)
 
@@ -119,9 +142,9 @@ Results are never collapsed into a single pass rate without:
 
 ## Performance baseline
 
-**Calibration (not certification):** `docs/program/PERF_BASELINE.md` records
-absolute equal-work core-loop timings (n=3) with raw JSON under
-`artifacts/perf/`. Explicitly **not** a Git win claim.
+**n=5 Wave 8 sample (cert trial count met on this host):**  
+`docs/program/PERF_BASELINE.md` + `artifacts/perf/20260711T041555Z-*`.  
+Absolute equal-work core-loop timings only. Explicitly **not** a Git win claim.
 
 Existing budgets / other benches:
 
@@ -129,20 +152,22 @@ Existing budgets / other benches:
 - Criterion benches under objects/refs/oplog/cli/mount/semantic
 - Weekly `.github/workflows/benchmarks.yml`
 
-**Blocker for claiming speed / cert:** ≥5 paired trials on correct paths with
-raw artifacts; no early-exit gaming; no cross-tool claims from absolute-only
-calibration.
+**Still open for broader speed claims:** multi-host / platform matrix, quiet-host
+re-run, and any cross-tool comparison with equal work and require-success.
 
 ## How to refresh
 
 ```bash
-# High-signal post-wave set (example)
-export CARGO_TARGET_DIR=/tmp/heddle-cert-target
-for job in facade-render-free fmt-check git-process-lint roundtrip-fidelity \
-           commit-conformance lib-core formal-specs; do
-  BASELINE_OUT_DIR="artifacts/baseline/post-wave23-$job" \
+# High-signal Wave 8 set (example)
+export CARGO_TARGET_DIR=/tmp/heddle-cert-w8
+for job in facade-render-free fmt-check git-process-lint roundtrip-fidelity lib-core; do
+  BASELINE_OUT_DIR="artifacts/baseline/post-wave-fanout2-$job" \
     bash scripts/program/run-baseline.sh --job "$job"
 done
+# Perf cert sample
+export CARGO_TARGET_DIR=/tmp/heddle-w8-target
+cargo build --release -p heddle-cli --locked
+bash scripts/program/core-loop-bench.sh --trials 5 --warmup 1 --out-dir artifacts/perf
 # Full curated suite
 bash scripts/program/run-baseline.sh
 # inspect artifacts/baseline/<stamp>/summary.json
