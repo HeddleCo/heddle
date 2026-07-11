@@ -117,7 +117,8 @@ intent write and pack publish (Fable review, worth-fixing).
 
 - If install can complete (final pack + staged idx, or both finals) → **complete/cleanup** regardless of TTL.
 - Else if `created_unix + ttl < now` → **abort** (drop partial + staging + intent).
-- Else normal recovery (abort incomplete prepared; complete pack_published when staged idx present).
+- Else → **skip in progress** (do not abort a concurrent live install).
+- Install + recover hold `packs/.pack-install.lock` so expire-abort cannot run against a live holder.
 - Orphan `.staging/*` dirs with no matching intent and mtime older than TTL are swept (best-effort).
 
 ---
@@ -128,8 +129,10 @@ intent write and pack publish (Fable review, worth-fixing).
 |------|--------|
 | `journaled_install_produces_pair_and_cleans_intent` | Happy path + cleanup |
 | `recover_pack_published_completes_from_staging` | Complete after pack publish |
-| `recover_prepared_aborts_without_finals` | Abort clean staging |
-| `recover_pack_published_without_staging_idx_aborts_orphan_pack` | Abort when cannot complete |
+| `recover_prepared_aborts_without_finals_when_expired` | Expired Prepared → abort |
+| `recover_prepared_fresh_skips_in_progress` | Non-expired Prepared → skip (policy only) |
+| `flock_serializes_recover_against_expired_live_install` | **Flock load-bearing:** expired Prepared + concurrent recover while install lock held; recover blocks, `aborted==0`, staging survives |
+| `recover_pack_published_without_staging_idx_aborts_orphan_pack` | Expired stuck pack_published → abort |
 | `recover_prepared_with_pack_and_staging_idx_completes` | Phase-flip crash window |
 | `journaled_install_idempotent_when_pair_exists` | CAS idempotency |
 | `install_pack_bytes_journaled_happy_path` | In-memory journaled install |

@@ -101,7 +101,12 @@ pub struct PackInstallRecoverReport {
 const PACK_INSTALL_LOCK_NAME: &str = ".pack-install.lock";
 
 /// Exclusive install/recover lock for `packs_dir` (cross-thread + cross-process).
-fn acquire_pack_install_lock(packs_dir: &Path) -> io::Result<crate::lock::WriteLockGuard> {
+///
+/// `pub(crate)` so tests can hold a genuine flock across a barrier without
+/// faking mid-install state outside the lock.
+pub(crate) fn acquire_pack_install_lock(
+    packs_dir: &Path,
+) -> io::Result<crate::lock::WriteLockGuard> {
     create_dir_all_durable(packs_dir)?;
     let lock = RepoLock::at(packs_dir.join(PACK_INSTALL_LOCK_NAME));
     lock.write().map_err(|e| io::Error::other(e.to_string()))
@@ -832,78 +837,122 @@ mod tests {
         assert!(!intent_path(&packs, &install_id).exists());
     }
 
+    /// Proves the **flock** (not merely skip-on-fresh-intent) protects a live install.
+    ///
+    /// Interleaving that distinguishes the two protections:
+    /// - Intent is **backdated** (`created_unix = 1`) so TTL would abort if recover ran now.
+    /// - Thread A holds a genuine [`acquire_pack_install_lock`] across the mid-install window.
+    /// - Thread B calls `recover_..._with_ttl(Some(1))` and must **block** on the flock.
+    /// - A finishes under the lock then releases; B's recover sees no abandonable intent.
+    ///
+    /// Without the flock, B would abort the expired Prepared intent and delete A's staging.
     #[test]
-    fn concurrent_reload_does_not_abort_live_install() {
+    fn flock_serializes_recover_against_expired_live_install() {
         use std::{
             sync::{Arc, Barrier},
             thread,
+            time::{Duration, Instant},
         };
 
         let root = tempfile::tempdir().unwrap();
         let packs = Arc::new(root.path().join("packs"));
         create_dir_all_durable(&packs).unwrap();
 
-        // Thread A: plant a live Prepared install (mid-protocol), wait, then finish.
-        let barrier = Arc::new(Barrier::new(2));
+        // After this barrier: A holds flock + expired Prepared intent; B may call recover.
+        let planted_under_lock = Arc::new(Barrier::new(2));
+        // After this barrier: both sides done (optional join sync).
+        let both_done = Arc::new(Barrier::new(2));
+
         let packs_a = Arc::clone(&packs);
-        let barrier_a = Arc::clone(&barrier);
+        let planted_a = Arc::clone(&planted_under_lock);
+        let done_a = Arc::clone(&both_done);
+
         let installer = thread::spawn(move || {
             let packs = packs_a.as_path();
-            let install_id = "concurrent-live".to_string();
+            // Real install flock — same guard production install paths hold.
+            let guard = acquire_pack_install_lock(packs).expect("install lock");
+
+            let install_id = "flock-live".to_string();
             let stage = staging_dir(packs, &install_id);
             create_dir_all_durable(&stage).unwrap();
             let staging_pack = stage.join(STAGED_PACK_NAME);
             let staging_idx = stage.join(STAGED_IDX_NAME);
-            write_file_atomic(&staging_pack, b"conc-pack").unwrap();
-            write_file_atomic(&staging_idx, b"conc-idx").unwrap();
-            let dst_pack = packs.join("conc.pack");
-            let dst_idx = packs.join("conc.idx");
+            write_file_atomic(&staging_pack, b"flock-pack").unwrap();
+            write_file_atomic(&staging_idx, b"flock-idx").unwrap();
+            let dst_pack = packs.join("flock.pack");
+            let dst_idx = packs.join("flock.idx");
+
+            // Backdated → recover with TTL=1s would abort if it could run now.
             let mut intent = PackInstallIntent::new(
                 install_id.clone(),
-                "conc".into(),
+                "flock".into(),
                 staging_pack.clone(),
                 staging_idx.clone(),
                 dst_pack.clone(),
                 dst_idx.clone(),
             );
+            intent.created_unix = 1;
             write_intent(packs, &intent).unwrap();
-            // Signal recoverer: intent is Prepared, staging present.
-            barrier_a.wait();
-            // Wait until recoverer has run.
-            barrier_a.wait();
-            // Staging must still exist (recoverer did not abort).
+
+            // B may now call recover (will block on our flock).
+            planted_a.wait();
+
+            // Hold long enough that B is blocked inside acquire_pack_install_lock.
+            thread::sleep(Duration::from_millis(80));
+
+            // Staging must still exist — flock prevented expire-abort.
             assert!(
                 staging_pack.exists() && staging_idx.exists(),
-                "concurrent recover must not delete live staging"
+                "staging must survive while install flock is held against expire-TTL recover"
             );
-            // Finish install as the live writer would.
+            assert!(intent_path(packs, &install_id).exists());
+
+            // Finish under the same lock (real journaled install would).
             publish_file_durable(&staging_pack, &dst_pack).unwrap();
             intent.phase = PackInstallPhase::PackPublished;
             write_intent(packs, &intent).unwrap();
             publish_file_durable(&staging_idx, &dst_idx).unwrap();
             remove_staging(packs, &install_id);
             remove_intent(packs, &install_id).unwrap();
+
+            drop(guard); // release flock — recoverer proceeds
+
             assert!(dst_pack.exists() && dst_idx.exists());
+            done_a.wait();
         });
 
         let packs_b = Arc::clone(&packs);
-        let barrier_b = Arc::clone(&barrier);
+        let planted_b = Arc::clone(&planted_under_lock);
+        let done_b = Arc::clone(&both_done);
+
         let recoverer = thread::spawn(move || {
-            barrier_b.wait(); // wait until Prepared intent exists
-            let report = recover_pack_install_intents_with_ttl(packs_b.as_path(), Some(86_400))
-                .expect("recover");
-            assert_eq!(report.aborted, 0, "must not abort live install");
+            let packs = packs_b.as_path();
+            // Wait until A holds flock with expired Prepared intent planted.
+            planted_b.wait();
+
+            let t0 = Instant::now();
+            // TTL would expire the backdated intent; flock must serialize us.
+            let report =
+                recover_pack_install_intents_with_ttl(packs, Some(1)).expect("recover under flock");
+            let waited = t0.elapsed();
+
             assert!(
-                report.skipped_in_progress >= 1,
-                "expected skip of in-progress intent, got {report:?}"
+                waited >= Duration::from_millis(50),
+                "recover must block on install flock (elapsed {waited:?}); \
+                 if this is ~0ms the flock is not load-bearing"
             );
-            barrier_b.wait(); // let installer finish
+            // Installer finished under the lock before we ran; nothing left to abort.
+            assert_eq!(
+                report.aborted, 0,
+                "recover must not abort after installer finished under flock; report={report:?}"
+            );
+            assert!(packs.join("flock.pack").exists());
+            assert!(packs.join("flock.idx").exists());
+            done_b.wait();
         });
 
         installer.join().expect("installer");
         recoverer.join().expect("recoverer");
-        assert!(packs.join("conc.pack").exists());
-        assert!(packs.join("conc.idx").exists());
     }
 
     #[test]
