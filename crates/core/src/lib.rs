@@ -12,6 +12,7 @@ pub mod remote;
 pub mod save;
 pub mod status;
 pub mod thread;
+pub mod thread_lifecycle;
 pub mod thread_plan;
 pub mod thread_shaping;
 pub mod undo;
@@ -19,9 +20,12 @@ pub mod verify;
 pub mod workflow;
 
 pub use actor::{
-    ActorChainEntry, ActorEntryReport, ActorListReport, ActorShowReport, assemble_actor_entry,
-    filter_actors, filter_actors_ref, list_actors, list_actors_from_registry,
-    show_actor_by_session, show_actor_from_entry,
+    ActorChainEntry, ActorDoneOptions, ActorDonePlan, ActorEntryReport, ActorListReport,
+    ActorShowReport, ActorSpawnAttachMode, ActorSpawnError, ActorSpawnOptions, ActorSpawnPlan,
+    ActorSpawnThreadSource, assemble_actor_entry, build_spawn_entry, complete_actor_entry,
+    default_actor_thread_name, filter_actors, filter_actors_ref, is_explicit_identity, list_actors,
+    list_actors_from_registry, mark_actor_done, nonempty_attr, plan_actor_done, plan_actor_spawn,
+    resolve_spawn_thread_name, show_actor_by_session, show_actor_from_entry,
 };
 pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
 pub use contract::{
@@ -51,11 +55,14 @@ pub use objects::{
 };
 pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use remote::{
-    GitConfigContext, HostedPushPlan, IncludedGitRemoteConfigError, RemoteInfo, RemoteListReport,
+    GitConfigContext, HostedPushPlan, IncludedGitRemoteConfigError, PullPlan, PullPlanRequest,
+    PushPath, PushPlan, PushPlanRequest, RemoteInfo, RemoteListReport, RemotePreflightBlocker,
     all_threads_uses_single_mirror_push, default_pull_thread_name, default_push_thread_name,
-    git_overlay_current_thread_push_ok, list_plain_git_remotes, list_remotes, merged_remote_items,
-    plain_git_remote_items, plan_hosted_push, resolve_default_remote_name,
-    resolved_default_remote_name, show_plain_git_remote, show_remote, uses_git_overlay_mirror_rpc,
+    git_overlay_current_thread_push_ok, git_overlay_thread_mismatch_blocker,
+    list_plain_git_remotes, list_remotes, merged_remote_items, plain_git_remote_items,
+    plan_hosted_push, plan_pull, plan_push, pull_requires_clean_worktree, pull_will_materialize,
+    remote_missing_blocker, resolve_default_remote_name, resolved_default_remote_name,
+    show_plain_git_remote, show_remote, transport_mismatch_blocker, uses_git_overlay_mirror_rpc,
     uses_local_git_overlay_transport,
 };
 pub use save::{
@@ -79,6 +86,15 @@ pub use thread::{
     ThreadSummary, ThreadTaskSummary, collect_thread_summaries, find_thread_summary, list_threads,
     split_available_git_refs, thread_is_available_git_ref, thread_is_imported_git_ref,
     visibility_label,
+};
+pub use thread_lifecycle::{
+    CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadDropPlan,
+    ThreadPromoteOptions, ThreadPromotePlan, ThreadRefreshOptions, ThreadRefreshPlan,
+    contains_conflict_marker_bytes, format_refresh_conflict_markers, plan_clean_worktree_guard,
+    plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
+    promote_confirm_in_place_removal, promote_existing_checkout_path,
+    promote_in_place_conversion_candidate, resolve_promote_target_path,
+    should_materialize_refresh_conflict_markers, thread_mode_requires_unmount,
 };
 pub use thread_plan::{
     AutoWorkspaceDefault, ExplicitPathPlacement, ThreadBaseError, ThreadBaseSelection,
