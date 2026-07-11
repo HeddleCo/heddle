@@ -339,8 +339,12 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/cli/src",
         "crates/cli-shared/src",
         "crates/client/src",
+        // Facade and Git-projection engine must stay free of runtime `git`
+        // process spawns (program gap C4 / product contract).
+        "crates/core/src",
         "crates/crypto/src",
         "crates/daemon/src",
+        "crates/git-projection/src",
         "crates/grpc/src",
         "crates/ingest/src",
         "crates/merge/src",
@@ -351,6 +355,7 @@ fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
         "crates/refs/src",
         "crates/repo/src",
         "crates/runtime-bridge/src",
+        "crates/schema/src",
         "crates/semantic/src",
         "crates/state_review/src",
         "crates/weft-client-shim/src",
