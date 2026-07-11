@@ -128,10 +128,7 @@ async fn cmd_prove_start(cli: &Cli, args: ProveArgs) -> Result<()> {
     println!();
     println!("2. Commit and push it to {repo_arg} (you own the repo — the CLI does not push).");
     println!();
-    println!(
-        "3. Verify:  heddle prove submit {}",
-        challenge.challenge_id
-    );
+    println!("3. Verify:  heddle prove submit {}", challenge.challenge_id);
     Ok(())
 }
 

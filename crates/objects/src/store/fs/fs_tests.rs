@@ -1094,11 +1094,7 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     let probed = store.loose_blob_path(&hash);
     assert_eq!(probed, Some(path.clone()));
     assert!(
-        store
-            .verified_loose_blobs
-            .read()
-            .unwrap()
-            .contains(&hash),
+        store.verified_loose_blobs.read().unwrap().contains(&hash),
         "verified cache should pick up the hash after first probe"
     );
 
@@ -1141,7 +1137,10 @@ fn test_recent_object_cache_byte_budget_evicts_lru() {
         !cache.contains(&2),
         "LRU entry must be evicted when the byte budget is exceeded"
     );
-    assert!(cache.contains(&3), "freshly inserted entry must be retained");
+    assert!(
+        cache.contains(&3),
+        "freshly inserted entry must be retained"
+    );
 }
 
 /// A single entry larger than the whole budget is kept (soft cap): the

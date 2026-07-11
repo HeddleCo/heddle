@@ -4,6 +4,7 @@
 use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
 use objects::{
     object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
@@ -16,8 +17,6 @@ use sley::{
     Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
     StreamControl,
 };
-
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
 
 use super::{
     action_line::print_next,
@@ -373,8 +372,9 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
         .with_confidence(args.confidence)
         .with_worktree_status_options(worktree_status_options(Some(repo.config())));
     plan.require_clean_worktree = false; // dirty worktree is the input being saved
-    plan.precomputed_worktree_status =
-        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
+    plan.precomputed_worktree_status = Some(clone_git_overlay_worktree_status(
+        git_overlay_facts.worktree_status(),
+    ));
 
     let head_before = repo.head().ok().flatten();
     let save_start = Instant::now();
@@ -403,7 +403,10 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
                 ProfileField::millis("clean_check_status_ms", clean_check_status_ms),
                 ProfileField::millis("large_capture_preflight_ms", large_capture_preflight_ms),
                 ProfileField::millis("save_ms", save_ms),
-                ProfileField::millis("snapshot_tree_walk_ms", report.snapshot_profile.tree_walk_ms),
+                ProfileField::millis(
+                    "snapshot_tree_walk_ms",
+                    report.snapshot_profile.tree_walk_ms,
+                ),
                 ProfileField::millis(
                     "snapshot_state_ref_oplog_ms",
                     report.snapshot_profile.state_ref_oplog_ms,
@@ -509,8 +512,9 @@ fn commit_staged_index(
         .with_supplied_tree(index_tree)
         .with_worktree_status_options(worktree_status_options(Some(repo.config())));
     plan.require_clean_worktree = false;
-    plan.precomputed_worktree_status =
-        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
+    plan.precomputed_worktree_status = Some(clone_git_overlay_worktree_status(
+        git_overlay_facts.worktree_status(),
+    ));
     let git_previous_commit = git_head_oid(repo.root());
     let head_before = repo.head().ok().flatten();
     let report = execute_save(repo, plan).map_err(|err| {

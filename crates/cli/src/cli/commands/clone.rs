@@ -1237,12 +1237,9 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(
-        &user_config,
-        server_key,
-        HostedAuthMode::CredentialFallback,
-    )?
-    .with_allow_insecure(*insecure);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(*insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let json_output = should_output_json(cli, None);
@@ -1425,12 +1422,9 @@ async fn clone_monorepo(
     let user_config = UserConfig::load_default()?;
     // Security config validation must pass before any irreversible filesystem
     // mutation, exactly as `clone_network` does.
-    let session = HostedSession::build(
-        &user_config,
-        server_key,
-        HostedAuthMode::CredentialFallback,
-    )?
-    .with_allow_insecure(options.insecure);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(options.insecure);
 
     let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;

@@ -1605,9 +1605,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<StatusThreadSum
 
     let mut summaries = Vec::new();
     for name in names {
-        if let Some(summary) =
-            find_thread_summary_with_agents(repo, &name, &registry_entries)?
-        {
+        if let Some(summary) = find_thread_summary_with_agents(repo, &name, &registry_entries)? {
             summaries.push(summary);
         }
     }
@@ -1780,12 +1778,7 @@ fn primary_agent_entry_refs<'a>(entries: &[&'a AgentEntry]) -> Option<&'a AgentE
         .copied()
         .filter(|entry| entry.status == AgentStatus::Active)
         .max_by_key(|entry| entry.started_at)
-        .or_else(|| {
-            entries
-                .iter()
-                .copied()
-                .max_by_key(|entry| entry.started_at)
-        })
+        .or_else(|| entries.iter().copied().max_by_key(|entry| entry.started_at))
 }
 
 fn non_empty(value: String) -> Option<String> {

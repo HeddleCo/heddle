@@ -7,10 +7,10 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 use cli::cli::commands::cmd_context_reason_git;
-#[cfg(feature = "semantic")]
-use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::cmd_prove;
+#[cfg(feature = "semantic")]
+use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]

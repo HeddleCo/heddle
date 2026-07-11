@@ -180,6 +180,8 @@ pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
+#[cfg(feature = "client")]
+pub use prove::cmd_prove;
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
@@ -200,8 +202,6 @@ pub use session::{
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
-#[cfg(feature = "client")]
-pub use prove::cmd_prove;
 #[cfg(feature = "client")]
 pub use spool::cmd_spool;
 pub use stash::cmd_stash;

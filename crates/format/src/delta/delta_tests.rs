@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::{compute_delta, DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE};
+use super::{DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE, compute_delta};
 
 #[test]
 fn test_delta_roundtrip() {

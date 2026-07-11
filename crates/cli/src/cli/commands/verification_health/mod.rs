@@ -9,6 +9,9 @@
 
 use std::{collections::BTreeSet, path::Path};
 
+// Re-exported for unit tests in operator/thread_shaping modules.
+#[cfg(test)]
+pub(crate) use heddle_core::VerificationCheck;
 use heddle_core::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
@@ -19,9 +22,6 @@ pub(crate) use heddle_core::{
     RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
     verify::serialize_empty_action_as_null,
 };
-// Re-exported for unit tests in operator/thread_shaping modules.
-#[cfg(test)]
-pub(crate) use heddle_core::VerificationCheck;
 use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
@@ -207,9 +207,7 @@ pub(crate) fn build_verification_health_with_worktree_status(
     )
 }
 
-fn worktree_status_for_verification(
-    repo: &Repository,
-) -> repo::Result<Option<WorktreeStatus>> {
+fn worktree_status_for_verification(repo: &Repository) -> repo::Result<Option<WorktreeStatus>> {
     if repo.capability() == repo::RepositoryCapability::GitOverlay {
         repo.git_overlay_worktree_status()
     } else {

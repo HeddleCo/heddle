@@ -14,8 +14,10 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-pub use repo::{GitRefContentNamespace as RefNamespace, is_reserved_git_remote_name};
-pub use repo::{GitRefKind, ParsedGitRef, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
+pub use repo::{
+    GitRefContentNamespace as RefNamespace, GitRefKind, ParsedGitRef,
+    REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
+};
 use repo::{GitRefName, Repository as HeddleRepository};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
@@ -726,11 +728,7 @@ impl<'a> GitProjection<'a> {
         self.commit_message_overrides.insert(state_id, message);
     }
 
-    pub fn set_commit_parent_override(
-        &mut self,
-        state_id: ChangeId,
-        parents: Vec<ObjectId>,
-    ) {
+    pub fn set_commit_parent_override(&mut self, state_id: ChangeId, parents: Vec<ObjectId>) {
         self.commit_parent_overrides.insert(state_id, parents);
     }
 
@@ -2436,10 +2434,7 @@ pub fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
-pub fn delete_reference_if_present(
-    repo: &SleyRepository,
-    name: &str,
-) -> GitProjectionResult<()> {
+pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitProjectionResult<()> {
     delete_reference(repo, name, None, true)
 }
 
@@ -3972,9 +3967,12 @@ fn materialize_lossy_roots_from_residual_or_mirror(
         // oids; missing dependents (trees/blobs the residual root did not carry)
         // must be pulled from the mirror here or the checkout `.git` is silently
         // corrupt — commit present, closure absent.
-        if let Err(error) =
-            copy_reachable_objects_excluding(mirror_repo, object_repo, mirror_needed.iter().copied(), excluded)
-        {
+        if let Err(error) = copy_reachable_objects_excluding(
+            mirror_repo,
+            object_repo,
+            mirror_needed.iter().copied(),
+            excluded,
+        ) {
             // Do NOT tolerate the copy error merely because the ROOT commits are
             // readable — a readable commit whose tree/blob closure is missing is
             // exactly the silent-corruption case. Only tolerate the mirror being

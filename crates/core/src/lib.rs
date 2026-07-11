@@ -29,9 +29,10 @@ pub use merge::{
     MergeRelationKind, MergeReport, OperatorAction as MergeOperatorAction,
     OperatorCommandOutput as MergeOperatorCommandOutput, PreviewTarget, ThreadPreviewReport,
     ThreeWayMergeOutcome, apply_merged_tree, apply_merged_tree_external, bench_detect_renames,
-    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report, ensure_worktree_clean,
-    merge_thread, merge_thread_into_current, merge_thread_into_current_with_machine_contract,
-    prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
+    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
+    ensure_worktree_clean, merge_thread, merge_thread_into_current,
+    merge_thread_into_current_with_machine_contract, prepare_dir_for_file_replacement,
+    try_three_way_merge_between_tips,
 };
 pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,

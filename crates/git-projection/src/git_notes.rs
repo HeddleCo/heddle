@@ -229,9 +229,7 @@ pub fn read_note(
 }
 
 /// Read every portable Git↔Heddle identity recorded under `refs/notes/heddle`.
-pub fn read_identity_mappings(
-    repo: &Repository,
-) -> GitProjectionResult<Vec<(ChangeId, ObjectId)>> {
+pub fn read_identity_mappings(repo: &Repository) -> GitProjectionResult<Vec<(ChangeId, ObjectId)>> {
     read_all_notes(repo)?
         .into_iter()
         .map(|(oid, note)| Ok((ChangeId::parse(&note.change_id)?, oid)))
@@ -239,9 +237,7 @@ pub fn read_identity_mappings(
 }
 
 /// Read every (commit_oid → note) entry under `refs/notes/heddle`.
-pub fn read_all_notes(
-    repo: &Repository,
-) -> GitProjectionResult<HashMap<ObjectId, HeddleNote>> {
+pub fn read_all_notes(repo: &Repository) -> GitProjectionResult<HashMap<ObjectId, HeddleNote>> {
     let mut out = HashMap::new();
     for note_entry in repo.list_notes(&notes_ref()).map_err(git_err)? {
         let object = repo.read_object(&note_entry.blob).map_err(git_err)?;

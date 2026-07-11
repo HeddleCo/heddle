@@ -300,9 +300,7 @@ mod tests {
             AgentAttenuation {
                 agent_id: "agent-1".to_string(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
-                allowed_operations: Some(vec![
-                    r#"x" || true || $op == "y"#.to_string(),
-                ]),
+                allowed_operations: Some(vec![r#"x" || true || $op == "y"#.to_string()]),
                 allowed_resources: None,
             },
         )

@@ -194,9 +194,11 @@ where
             // A key appears at most once in `order`; if it was already
             // removed by a concurrent logical path we just skip.
             if let Some(evicted) = self.entries.remove(&oldest) {
-                self.cached_bytes = self
-                    .cached_bytes
-                    .saturating_sub(self.byte_budget.map(|_| (self.sizer)(&evicted)).unwrap_or(0));
+                self.cached_bytes = self.cached_bytes.saturating_sub(
+                    self.byte_budget
+                        .map(|_| (self.sizer)(&evicted))
+                        .unwrap_or(0),
+                );
             }
         }
     }

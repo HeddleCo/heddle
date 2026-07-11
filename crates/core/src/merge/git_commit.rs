@@ -10,7 +10,9 @@
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
 use objects::{
+    HeddleError, RecoveryDetails,
     object::{Attribution, ChangeId},
     store::ObjectStore,
 };
@@ -20,9 +22,6 @@ use sley::{
     CommitObject, GitObjectType, IndexWriteOptions, ObjectId as GitObjectId, RefPrecondition,
     ReferenceTarget, Repository as SleyRepository, plumbing::sley_object::EncodedObject,
 };
-
-use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
-use objects::{HeddleError, RecoveryDetails};
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -427,6 +426,10 @@ mod tests {
         assert_eq!(details.kind, "merge_git_commit_failed");
         assert!(details.error.contains("writing Git index"));
         assert!(details.error.contains("index locked"));
-        assert!(details.preserved.contains("Heddle merge state is preserved"));
+        assert!(
+            details
+                .preserved
+                .contains("Heddle merge state is preserved")
+        );
     }
 }

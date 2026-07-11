@@ -25,8 +25,7 @@ use sley::Repository as SleyRepository;
 
 use crate::{
     RepositoryVerificationState, build_repository_verification_health_with_worktree_status,
-    build_repository_verification_state,
-    build_repository_verification_state_with_worktree_status,
+    build_repository_verification_state, build_repository_verification_state_with_worktree_status,
 };
 
 /// How far a save should write through into Git (Git-overlay only).
@@ -239,10 +238,7 @@ pub fn plan_creates_new_state(plan: &SavePlan, has_current_state: bool) -> bool 
 }
 
 /// Whether this plan should perform a Git-overlay write-through.
-pub fn plan_writes_git_checkpoint(
-    plan: &SavePlan,
-    capability: RepositoryCapability,
-) -> bool {
+pub fn plan_writes_git_checkpoint(plan: &SavePlan, capability: RepositoryCapability) -> bool {
     plan.git_scope != GitScope::None && capability == RepositoryCapability::GitOverlay
 }
 
@@ -257,9 +253,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     // repos, so guard on the raw `git_scope` intent instead (the previous
     // `plan_writes_git_checkpoint(..) && capability != GitOverlay` was
     // self-contradictory and never fired).
-    if plan.git_scope != GitScope::None
-        && repo.capability() != RepositoryCapability::GitOverlay
-    {
+    if plan.git_scope != GitScope::None && repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(HeddleError::recovery(
             RecoveryDetails::safety_refusal(
                 "native_checkpoint_unavailable",
@@ -301,8 +295,10 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     if plan_writes_git_checkpoint(&plan, repo.capability()) {
         if plan.require_clean_worktree {
             let tree = repo.require_tree(&state.tree)?;
-            let status =
-                repo.compare_worktree_cached_detailed_with_options(&tree, &plan.worktree_status_options)?;
+            let status = repo.compare_worktree_cached_detailed_with_options(
+                &tree,
+                &plan.worktree_status_options,
+            )?;
             if !status.is_clean() {
                 return Err(anyhow!(HeddleError::recovery(
                     RecoveryDetails::safety_refusal(
@@ -597,17 +593,28 @@ fn is_commit_action(action: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use repo::RepositoryCapability;
+
+    use super::*;
 
     #[test]
     fn capture_always_uses_git_scope_none() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Capture, RepositoryCapability::GitOverlay, true, true),
+            plan_git_scope(
+                SaveVerb::Capture,
+                RepositoryCapability::GitOverlay,
+                true,
+                true
+            ),
             GitScope::None
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Capture, RepositoryCapability::NativeHeddle, false, false),
+            plan_git_scope(
+                SaveVerb::Capture,
+                RepositoryCapability::NativeHeddle,
+                false,
+                false
+            ),
             GitScope::None
         );
     }
@@ -615,7 +622,12 @@ mod tests {
     #[test]
     fn commit_native_never_writes_git() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::NativeHeddle, true, true),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::NativeHeddle,
+                true,
+                true
+            ),
             GitScope::None
         );
     }
@@ -623,15 +635,30 @@ mod tests {
     #[test]
     fn commit_git_overlay_routes_staged_vs_worktree() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, true, false),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                true,
+                false
+            ),
             GitScope::Staged
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, true, true),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                true,
+                true
+            ),
             GitScope::WorktreeAll
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, false, false),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                false,
+                false
+            ),
             GitScope::WorktreeAll
         );
     }
@@ -639,11 +666,21 @@ mod tests {
     #[test]
     fn checkpoint_routes_staged_flag() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Checkpoint, RepositoryCapability::GitOverlay, true, false),
+            plan_git_scope(
+                SaveVerb::Checkpoint,
+                RepositoryCapability::GitOverlay,
+                true,
+                false
+            ),
             GitScope::Staged
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Checkpoint, RepositoryCapability::GitOverlay, false, false),
+            plan_git_scope(
+                SaveVerb::Checkpoint,
+                RepositoryCapability::GitOverlay,
+                false,
+                false
+            ),
             GitScope::WorktreeAll
         );
     }
@@ -659,8 +696,8 @@ mod tests {
         assert!(!plan_creates_new_state(&checkpoint, true));
         assert!(plan_creates_new_state(&checkpoint, false));
 
-        let staged = SavePlan::commit("msg", attr, GitScope::Staged)
-            .with_supplied_tree(Tree::new());
+        let staged =
+            SavePlan::commit("msg", attr, GitScope::Staged).with_supplied_tree(Tree::new());
         assert!(plan_creates_new_state(&staged, true));
     }
 

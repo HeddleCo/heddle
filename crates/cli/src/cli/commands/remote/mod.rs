@@ -367,15 +367,11 @@ pub async fn cmd_push(
     // config must leave no partial state behind.
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
-        let allow_insecure = insecure
-            || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
+        let allow_insecure =
+            insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
         Some(
-            HostedSession::build(
-                &user_config,
-                server_key,
-                HostedAuthMode::CredentialFallback,
-            )?
-            .with_allow_insecure(allow_insecure),
+            HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+                .with_allow_insecure(allow_insecure),
         )
     } else {
         None

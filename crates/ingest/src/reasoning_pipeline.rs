@@ -1324,11 +1324,17 @@ mod tests {
 
         let old_deep = put_test_tree(
             &store,
-            vec![test_file("target.rs", old_leaf), test_file("stable.rs", stable)],
+            vec![
+                test_file("target.rs", old_leaf),
+                test_file("stable.rs", stable),
+            ],
         );
         let new_deep = put_test_tree(
             &store,
-            vec![test_file("target.rs", new_leaf), test_file("stable.rs", stable)],
+            vec![
+                test_file("target.rs", new_leaf),
+                test_file("stable.rs", stable),
+            ],
         );
         let old_mid = put_test_tree(&store, vec![test_dir("deep", old_deep)]);
         let new_mid = put_test_tree(&store, vec![test_dir("deep", new_deep)]);
@@ -1379,11 +1385,17 @@ mod tests {
         let unchanged_dir = put_test_tree(&store, vec![test_file("same.rs", same)]);
         let old_root = put_test_tree(
             &store,
-            vec![test_dir("lib", old_lib), test_dir("unchanged", unchanged_dir)],
+            vec![
+                test_dir("lib", old_lib),
+                test_dir("unchanged", unchanged_dir),
+            ],
         );
         let new_root = put_test_tree(
             &store,
-            vec![test_dir("lib", new_lib), test_dir("unchanged", unchanged_dir)],
+            vec![
+                test_dir("lib", new_lib),
+                test_dir("unchanged", unchanged_dir),
+            ],
         );
 
         let incremental = incremental_changed_files(&store, &old_root, &new_root);

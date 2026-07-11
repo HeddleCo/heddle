@@ -22,9 +22,9 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, anyhow};
 use cli_shared::UserConfig;
 use merge::{
-    ConflictLabels, MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy, RenameMatcherStats,
-    RenameOptions, SemanticMergeFn, SemanticSimilarityFn, detect_renames_between_trees,
-    merge_trees,
+    ConflictLabels, MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy,
+    RenameMatcherStats, RenameOptions, SemanticMergeFn, SemanticSimilarityFn,
+    detect_renames_between_trees, merge_trees,
 };
 use objects::{
     object::{Attribution, ChangeId, ContentHash, ThreadName, Tree},
@@ -95,7 +95,6 @@ pub struct RenameEntry {
     pub to: String,
     pub score: f64,
 }
-
 
 /// Operator action discriminator for merge reports (wire-compatible with CLI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -674,15 +673,13 @@ pub fn merge_thread_into_current_with_machine_contract(
             preview,
         )));
     }
-    if let Some(output) =
-        merge_freshness_preflight_output(
-            repo,
-            machine_contract,
-            &thread,
-            preview_report.as_ref(),
-            preview,
-        )?
-    {
+    if let Some(output) = merge_freshness_preflight_output(
+        repo,
+        machine_contract,
+        &thread,
+        preview_report.as_ref(),
+        preview,
+    )? {
         return Ok(output);
     }
     let preview_summary = build_preview_summary(preview_report.as_ref());
@@ -1498,7 +1495,6 @@ fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
 }
 
 fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
-
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
         .load(thread_id)?
@@ -2428,15 +2424,11 @@ fn merge_output_trust(
     Ok(trust)
 }
 
-
 fn worktree_status_options(config: Option<&repo::RepoConfig>) -> repo::WorktreeStatusOptions {
     UserConfig::default().worktree_status_options(config)
 }
 
-fn worktree_dirty(
-    repo: &Repository,
-    options: &repo::WorktreeStatusOptions,
-) -> Result<bool> {
+fn worktree_dirty(repo: &Repository, options: &repo::WorktreeStatusOptions) -> Result<bool> {
     if repo.current_state()?.is_none()
         && let Some(status) = repo.git_overlay_worktree_status()?
     {
@@ -2704,7 +2696,6 @@ fn override_trust_recommended_action(
 }
 
 fn trust_blocks_merge_preview(trust: &RepositoryVerificationState) -> bool {
-
     trust
         .checks
         .iter()
@@ -2730,7 +2721,12 @@ fn preview_list(paths: &[String], total: usize) -> String {
     if paths.is_empty() {
         return "none".to_string();
     }
-    let shown = paths.iter().take(LIMIT).cloned().collect::<Vec<_>>().join(", ");
+    let shown = paths
+        .iter()
+        .take(LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if total > LIMIT {
         format!("{shown} (+{} more)", total - LIMIT)
     } else {
@@ -2739,7 +2735,6 @@ fn preview_list(paths: &[String], total: usize) -> String {
 }
 
 fn is_real_merge_blocker(advisory: &str) -> bool {
-
     let lower = advisory.to_lowercase();
     lower.contains("path conflict")
 }
@@ -2813,10 +2808,7 @@ fn build_preview_summary(report: Option<&ThreadPreviewReport>) -> Vec<String> {
         if !report.heavy_impact_paths.is_empty() {
             lines.push(format!(
                 "heavy-impact change: {} — review broader impact before merging",
-                preview_list(
-                    &report.heavy_impact_paths,
-                    report.heavy_impact_paths.len(),
-                )
+                preview_list(&report.heavy_impact_paths, report.heavy_impact_paths.len(),)
             ));
         }
         lines.push(format!(
@@ -2861,10 +2853,7 @@ fn build_stale_preview_summary(report: &ThreadPreviewReport) -> Vec<String> {
     if !report.heavy_impact_paths.is_empty() {
         lines.push(format!(
             "heavy-impact change: {} — review broader impact before merging",
-            preview_list(
-                &report.heavy_impact_paths,
-                report.heavy_impact_paths.len(),
-            )
+            preview_list(&report.heavy_impact_paths, report.heavy_impact_paths.len(),)
         ));
     }
     lines.push(format!(

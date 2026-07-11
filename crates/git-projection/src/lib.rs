@@ -22,6 +22,6 @@ pub use git_core::{
     WriteThroughSkipReason,
 };
 pub use git_residual::{
-    BridgeMirrorRetirementStatus, ResidualObject, ResidualStore, RESIDUALS_DIR_NAME,
+    BridgeMirrorRetirementStatus, RESIDUALS_DIR_NAME, ResidualObject, ResidualStore,
     bridge_mirror_retirement_status, resolve_lossy_object,
 };

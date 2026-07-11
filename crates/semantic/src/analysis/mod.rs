@@ -15,8 +15,8 @@ mod analysis_tests;
 pub use analysis_aggregate::{
     AggregateKind, AggregatedChange, AggregationResult, aggregate_changes,
 };
-pub use analysis_classify::{classify_modification, classify_modification_with_confidence};
 pub(crate) use analysis_classify::classify_modification_with_parsed;
+pub use analysis_classify::{classify_modification, classify_modification_with_confidence};
 pub use analysis_functions::detect_function_changes;
 pub(crate) use analysis_functions::detect_function_changes_with_parsed;
 pub(crate) use analysis_imports::detect_import_changes_with_parsed;

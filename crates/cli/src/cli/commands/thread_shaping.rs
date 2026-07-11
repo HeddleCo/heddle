@@ -175,7 +175,10 @@ pub fn cmd_thread_absorb(
     let _ = ensure_current_state(
         &parent_repo,
         &user_config,
-        Some(format!("Bootstrap git-overlay before absorbing {}", child.thread)),
+        Some(format!(
+            "Bootstrap git-overlay before absorbing {}",
+            child.thread
+        )),
     )?;
     let output = merge_thread_into_current(
         &parent_repo,
@@ -343,7 +346,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         let _ = ensure_current_state(
             &repo,
             &UserConfig::load_default().unwrap_or_default(),
-            Some(format!("Bootstrap git-overlay before resolving {}", thread.id)),
+            Some(format!(
+                "Bootstrap git-overlay before resolving {}",
+                thread.id
+            )),
         )?;
         let preview =
             merge_thread_into_current(&repo, &thread.id, None, false, true, false, false, false)?;

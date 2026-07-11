@@ -736,7 +736,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let _ = ensure_current_state(
         &repo,
         &user_config,
-        Some(format!("Bootstrap git-overlay before landing {}", merge_thread.id)),
+        Some(format!(
+            "Bootstrap git-overlay before landing {}",
+            merge_thread.id
+        )),
     )?;
     let merge_output = merge_thread_into_current(
         &repo,

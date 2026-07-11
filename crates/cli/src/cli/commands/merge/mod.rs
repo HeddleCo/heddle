@@ -8,11 +8,19 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use heddle_core::merge::{
-    MergeReport,
-    merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
+// Re-export orchestration surface for other CLI commands and benches.
+pub use heddle_core::merge::{
+    ThreadPreviewReport, ThreeWayMergeOutcome, apply_merged_tree_external, bench_detect_renames,
+    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
+    merge_thread_into_current, prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
 };
-use heddle_core::verify::MachineContractInput;
+use heddle_core::{
+    merge::{
+        MergeReport,
+        merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
+    },
+    verify::MachineContractInput,
+};
 use repo::Repository;
 use serde_json::Value;
 
@@ -27,13 +35,6 @@ use super::{
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style},
     config::UserConfig,
-};
-
-// Re-export orchestration surface for other CLI commands and benches.
-pub use heddle_core::merge::{
-    ThreadPreviewReport, ThreeWayMergeOutcome, apply_merged_tree_external, bench_detect_renames,
-    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
-    merge_thread_into_current, prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
 };
 
 /// Historical wire name for the merge report type.

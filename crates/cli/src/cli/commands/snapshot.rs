@@ -4,11 +4,11 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
+use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
 use objects::{
     object::{Agent, Attribution, ChangeId, Principal, Tree},
     worktree::WorktreeStatus,
 };
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
 use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`

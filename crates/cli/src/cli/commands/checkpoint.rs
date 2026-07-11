@@ -213,9 +213,7 @@ fn create_git_checkpoint_inner(
     // state and this attribution is only a fallback identity for the commit.
     let attribution = if repo.current_state()?.is_some() {
         let principal = super::snapshot::resolve_principal(repo, &user_config)
-            .unwrap_or_else(|_| {
-                objects::object::Principal::new("Unknown", "unknown@example.com")
-            });
+            .unwrap_or_else(|_| objects::object::Principal::new("Unknown", "unknown@example.com"));
         Attribution::human(principal)
     } else {
         build_attribution(

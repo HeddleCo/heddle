@@ -423,8 +423,9 @@ fn object_type_from_tag(tag: u8) -> GitProjectionResult<GitObjectType> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use sley::Repository as SleyRepository;
+
+    use super::*;
 
     #[test]
     fn put_get_round_trip_and_hash_identity() {
@@ -509,7 +510,10 @@ committer A <a@e> 1 +0000\n\
         assert!(!store.has_residual(ObjectFormat::Sha1, &oid).unwrap());
         assert!(store.migrate_object_from_git_repo(&mirror, &oid).unwrap());
         assert!(store.has_residual(ObjectFormat::Sha1, &oid).unwrap());
-        let residual = store.get_residual(ObjectFormat::Sha1, &oid).unwrap().unwrap();
+        let residual = store
+            .get_residual(ObjectFormat::Sha1, &oid)
+            .unwrap()
+            .unwrap();
         assert_eq!(residual.body, b"migrated-bytes\n");
     }
 
@@ -566,8 +570,8 @@ committer A <a@e> 1 +0000\n\
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
         .unwrap();
-        let err = resolve_lossy_object(&store, None, ObjectFormat::Sha1, &missing, false)
-            .unwrap_err();
+        let err =
+            resolve_lossy_object(&store, None, ObjectFormat::Sha1, &missing, false).unwrap_err();
         assert!(
             err.to_string().contains("hard fidelity failure"),
             "unexpected: {err}"
