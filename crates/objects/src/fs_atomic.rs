@@ -616,6 +616,22 @@ pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Non-`EXDEV` rename failures propagate. Callers must not silently fall
 /// through to a raw in-place copy on unrelated errors (the previous
 /// streaming-pack install path did exactly that).
+/// Fsync an existing regular file's data blocks.
+///
+/// On Windows, `FlushFileBuffers` requires write access — a read-only
+/// `File::open` + `sync_all` returns `ERROR_ACCESS_DENIED` (code 5). Open
+/// with write so pack install / L8 journal publish works under Windows
+/// tempdirs (projfs smoke fixtures).
+fn fsync_file_data(path: &Path) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| enrich_fs_error(path, "opening", e))?;
+    file.sync_all()
+        .map_err(|e| enrich_fs_error(path, "syncing", e))
+}
+
 pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     create_dir_all_durable(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
@@ -624,11 +640,7 @@ pub fn publish_file_durable(src: &Path, dst: &Path) -> io::Result<()> {
     // the same-filesystem rename path: StreamingPackBuilder (and similar
     // staged writers) only `flush` buffered writers; without this fsync a
     // crash after rename can lose the published object.
-    {
-        let file = File::open(src).map_err(|e| enrich_fs_error(src, "opening", e))?;
-        file.sync_all()
-            .map_err(|e| enrich_fs_error(src, "syncing", e))?;
-    }
+    fsync_file_data(src)?;
 
     match fs::rename(src, dst) {
         Ok(()) => {}
@@ -655,11 +667,7 @@ fn publish_file_via_copy_durable(src: &Path, dst: &Path) -> io::Result<()> {
     let tmp = temp_path(dst);
     let result = (|| -> io::Result<()> {
         fs::copy(src, &tmp).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
-        {
-            let file = File::open(&tmp).map_err(|e| enrich_fs_error(&tmp, "opening", e))?;
-            file.sync_all()
-                .map_err(|e| enrich_fs_error(&tmp, "syncing", e))?;
-        }
+        fsync_file_data(&tmp)?;
         fs::rename(&tmp, dst).map_err(|e| enrich_rename_error(&tmp, dst, e))?;
         let _ = fs::remove_file(src);
         Ok(())
@@ -1081,6 +1089,26 @@ mod tests {
 
         assert!(!src.exists(), "source must be consumed by publish");
         assert_eq!(fs::read(&dst).unwrap(), b"pack-bytes");
+    }
+
+    /// Windows: FlushFileBuffers needs write access; read-only open +
+    /// sync_all fails with ERROR_ACCESS_DENIED and broke L8 pack install /
+    /// projfs fixture setup under tempdirs.
+    #[test]
+    fn publish_file_durable_syncs_source_without_permission_deny() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("staged.bin");
+        let dst = dir.path().join("final.bin");
+        fs::write(&src, b"need-fsync-before-rename").unwrap();
+        let result = publish_file_durable(&src, &dst);
+        if let Err(e) = &result {
+            assert!(
+                !is_permission_denied(e),
+                "publish_file_durable PermissionDenied on source fsync: {e}"
+            );
+        }
+        result.expect("publish_file_durable");
+        assert_eq!(fs::read(&dst).unwrap(), b"need-fsync-before-rename");
     }
 
     #[test]

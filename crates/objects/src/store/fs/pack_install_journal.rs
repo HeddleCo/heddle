@@ -602,10 +602,9 @@ fn hash_file_blake3(path: &Path) -> io::Result<[u8; 32]> {
 /// pack (that is the pack reader's job on first use). It rejects empty,
 /// garbage, and structurally invalid indexes so install idempotency cannot
 /// accept a corrupt pair.
-pub(crate) fn existing_pair_matches_pack_name(
-    packs_dir: &Path,
-    pack_name: &str,
-) -> io::Result<bool> {
+/// String-name entry for tests and external call sites that only have hex.
+#[cfg(test)]
+fn existing_pair_matches_pack_name(packs_dir: &Path, pack_name: &str) -> io::Result<bool> {
     let expected = pack_name_to_digest(pack_name)?;
     existing_pair_matches_digest(packs_dir, pack_name, &expected)
 }
@@ -1830,7 +1829,7 @@ mod tests {
         create_dir_all_durable(&packs).unwrap();
         let _ = install_pack_bytes_journaled(&packs, b"metrics-pack", &empty_idx_bytes()).unwrap();
         let after_install = pack_install_metrics_snapshot();
-        assert!(after_install.installs_ok >= before.installs_ok + 1);
+        assert!(after_install.installs_ok > before.installs_ok);
 
         // Plant expired prepared → recover aborts.
         let install_id = "metrics-abort";
@@ -1844,7 +1843,7 @@ mod tests {
         let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
         assert_eq!(report.aborted, 1);
         let after_abort = pack_install_metrics_snapshot();
-        assert!(after_abort.recover_aborted >= before_abort.recover_aborted + 1);
+        assert!(after_abort.recover_aborted > before_abort.recover_aborted);
     }
 
     #[cfg(unix)]
