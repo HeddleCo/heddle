@@ -24,8 +24,6 @@ Rules enforced by this tool's design:
     and equivalent correctness outside this runner.
 """
 
-MIN_TAIL_N = 30
-
 from __future__ import annotations
 
 import argparse
@@ -38,6 +36,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# p95/p99 require this many samples; below that fields are null.
+MIN_TAIL_N = 30
 
 
 def percentile(sorted_vals: list[float], p: float) -> float:

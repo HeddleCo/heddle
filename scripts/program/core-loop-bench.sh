@@ -296,10 +296,15 @@ for op in ops:
             "raw_trials": raw_trials,
         }
     )
+    p95 = (
+        f"{stats['p95_ms']:.1f} ms"
+        if stats["p95_ms"] is not None
+        else "n/a (n<30)"
+    )
     print(
         f"  {op['id']:<20} median={stats['median_ms']:.1f} ms  "
-        f"p95={stats['p95_ms']:.1f} ms  mean={stats['mean_ms']:.1f} ms  "
-        f"n={stats['n']}",
+        f"p95={p95}  mean={stats['mean_ms']:.1f} ms  "
+        f"n={stats['n']}  quality={stats.get('sample_quality', '?')}",
         file=sys.stderr,
     )
 
