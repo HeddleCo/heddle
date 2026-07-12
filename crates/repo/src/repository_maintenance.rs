@@ -1159,7 +1159,7 @@ mod tests {
             serde_json::to_vec_pretty(&json!({
                 "version": 2,
                 "install_id": install_id,
-                "pack_name": "aa",
+                "pack_name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "phase": "prepared",
                 "created_unix": 1,
             }))

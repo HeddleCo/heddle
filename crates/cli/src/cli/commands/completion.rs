@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 use heddle_core::completion_plan::{
-    CompletionShell, parse_completion_shell, unsupported_completion_shell,
+    CompletionShell, CompletionShellError, parse_completion_shell,
 };
 
 use super::advice::RecoveryAdvice;
@@ -15,25 +15,25 @@ pub fn cmd_completion(shell: String) -> Result<()> {
     let mut cmd = Cli::command();
 
     match parse_completion_shell(&shell) {
-        Some(CompletionShell::Bash) => {
+        Ok(CompletionShell::Bash) => {
             generate(Shell::Bash, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{BASH_DYNAMIC_COMPLETION}");
         }
-        Some(CompletionShell::Zsh) => {
+        Ok(CompletionShell::Zsh) => {
             generate(Shell::Zsh, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{ZSH_DYNAMIC_COMPLETION}");
         }
-        Some(CompletionShell::Fish) => {
+        Ok(CompletionShell::Fish) => {
             generate(Shell::Fish, &mut cmd, "heddle", &mut std::io::stdout());
             print!("{FISH_DYNAMIC_COMPLETION}");
         }
-        None => {
-            let bad = unsupported_completion_shell(&shell);
+        Err(CompletionShellError::Unsupported { shell }) => {
+            // Recovery copy lives in the CLI, not core.
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                bad.kind,
-                bad.summary,
-                bad.hint,
-                bad.example,
+                "completion_shell_unsupported",
+                format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
+                "Use one of: bash, zsh, fish.",
+                "heddle shell completion bash",
             )));
         }
     }

@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
-use heddle_core::maintenance_plan::{
-    inspect_change_monitor_line, inspect_commit_graph_line, inspect_pack_install_line,
-    inspect_packs_line, inspect_partial_fetch_line, inspect_pull_planner_cache_line,
-    inspect_ref_summary_index_line, inspect_refs_line, inspect_worktree_index_line,
-    run_commit_graph_now_line, run_pack_install_recover_detail_line,
-    run_pruned_pull_planner_entries_line,
-    run_pull_planner_cache_now_line, run_rebuilt_commit_graph_line,
-    run_rebuilt_pull_planner_cache_line, run_rebuilt_ref_summary_index_line,
-    run_rebuilt_worktree_index_line, run_ref_summary_now_line, run_refreshed_change_monitor_line,
-    run_unpaired_packs_pruned_line, run_worktree_index_now_line,
-};
+use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRunView};
 
 use crate::cli::{
     Cli, MaintenanceCommands,
@@ -28,73 +18,40 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             if should_output_json(cli, Some(repo.config())) {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
-                println!(
-                    "{}",
-                    inspect_commit_graph_line(
-                        report.commit_graph.present,
-                        report.commit_graph.node_count,
-                        report.commit_graph.bloom_covered_nodes
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_worktree_index_line(
-                        report.worktree_index.present,
-                        report.worktree_index.file_entries,
-                        report.worktree_index.directory_entries,
-                        report.worktree_index.untracked_directory_entries
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_change_monitor_line(
-                        &report.change_monitor.backend,
-                        &report.change_monitor.status
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_refs_line(
-                        report.ref_counts.threads,
-                        report.ref_counts.markers,
-                        report.ref_counts.remotes,
-                        report.ref_counts.remote_threads
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_ref_summary_index_line(
-                        report.ref_summary_index.present,
-                        report.ref_summary_index.valid,
-                        report.ref_summary_index.threads,
-                        report.ref_summary_index.markers,
-                        report.ref_summary_index.remotes,
-                        report.ref_summary_index.remote_threads
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_packs_line(report.pack_files.pack_count, report.pack_files.index_count)
-                );
-                println!(
-                    "{}",
-                    inspect_pack_install_line(
-                        report.pack_files.unpaired_pack_count,
-                        report.pack_files.pending_install_intents
-                    )
-                );
-                println!(
-                    "{}",
-                    inspect_partial_fetch_line(report.partial_fetch.missing_blob_count)
-                );
-                println!(
-                    "{}",
-                    inspect_pull_planner_cache_line(
-                        &report.pull_planner_cache.status,
-                        report.pull_planner_cache.manifest_count,
-                        report.pull_planner_cache.planner_entry_count
-                    )
-                );
+                let view = MaintenanceInspectView {
+                    commit_graph_present: report.commit_graph.present,
+                    commit_graph_nodes: report.commit_graph.node_count,
+                    commit_graph_bloom: report.commit_graph.bloom_covered_nodes,
+                    worktree_index_present: report.worktree_index.present,
+                    worktree_index_files: report.worktree_index.file_entries,
+                    worktree_index_directories: report.worktree_index.directory_entries,
+                    worktree_index_untracked_directories: report
+                        .worktree_index
+                        .untracked_directory_entries,
+                    change_monitor_backend: report.change_monitor.backend.clone(),
+                    change_monitor_status: report.change_monitor.status.clone(),
+                    refs_threads: report.ref_counts.threads,
+                    refs_markers: report.ref_counts.markers,
+                    refs_remotes: report.ref_counts.remotes,
+                    refs_remote_threads: report.ref_counts.remote_threads,
+                    ref_summary_present: report.ref_summary_index.present,
+                    ref_summary_valid: report.ref_summary_index.valid,
+                    ref_summary_threads: report.ref_summary_index.threads,
+                    ref_summary_markers: report.ref_summary_index.markers,
+                    ref_summary_remotes: report.ref_summary_index.remotes,
+                    ref_summary_remote_threads: report.ref_summary_index.remote_threads,
+                    pack_count: report.pack_files.pack_count,
+                    index_count: report.pack_files.index_count,
+                    unpaired_packs: report.pack_files.unpaired_pack_count,
+                    pending_install_intents: report.pack_files.pending_install_intents,
+                    missing_blob_count: report.partial_fetch.missing_blob_count,
+                    pull_planner_status: report.pull_planner_cache.status.clone(),
+                    pull_planner_manifests: report.pull_planner_cache.manifest_count,
+                    pull_planner_entries: report.pull_planner_cache.planner_entry_count,
+                };
+                for line in view.lines() {
+                    println!("{line}");
+                }
             }
         }
         MaintenanceCommands::Run => {
@@ -102,73 +59,32 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             if should_output_json(cli, Some(repo.config())) {
                 println!("{}", serde_json::to_string(&run)?);
             } else {
-                println!(
-                    "{}",
-                    run_rebuilt_commit_graph_line(run.rebuilt_commit_graph)
-                );
-                println!(
-                    "{}",
-                    run_rebuilt_ref_summary_index_line(run.rebuilt_ref_summary_index)
-                );
-                println!(
-                    "{}",
-                    run_rebuilt_worktree_index_line(run.rebuilt_worktree_index)
-                );
-                println!(
-                    "{}",
-                    run_refreshed_change_monitor_line(run.refreshed_change_monitor)
-                );
-                println!(
-                    "{}",
-                    run_rebuilt_pull_planner_cache_line(run.rebuilt_pull_planner_cache)
-                );
-                println!(
-                    "{}",
-                    run_pruned_pull_planner_entries_line(run.pruned_pull_planner_entries)
-                );
-                println!(
-                    "{}",
-                    run_pack_install_recover_detail_line(
-                        run.pack_install_intents_recovered_completed,
-                        run.pack_install_intents_aborted,
-                        run.pack_install_intents_skipped_in_progress,
-                        run.pack_install_intents_quarantined,
-                    )
-                );
-                println!(
-                    "{}",
-                    run_unpaired_packs_pruned_line(
-                        run.unpaired_packs_pruned,
-                        run.unpaired_pack_bytes_freed
-                    )
-                );
-                println!(
-                    "{}",
-                    run_commit_graph_now_line(
-                        run.report.commit_graph.node_count,
-                        run.report.commit_graph.bloom_covered_nodes
-                    )
-                );
-                println!(
-                    "{}",
-                    run_ref_summary_now_line(
-                        run.report.ref_summary_index.threads,
-                        run.report.ref_summary_index.markers,
-                        run.report.ref_summary_index.remotes,
-                        run.report.ref_summary_index.remote_threads
-                    )
-                );
-                println!(
-                    "{}",
-                    run_worktree_index_now_line(run.report.worktree_index.file_entries)
-                );
-                println!(
-                    "{}",
-                    run_pull_planner_cache_now_line(
-                        run.report.pull_planner_cache.manifest_count,
-                        run.report.pull_planner_cache.planner_entry_count
-                    )
-                );
+                let view = MaintenanceRunView {
+                    rebuilt_commit_graph: run.rebuilt_commit_graph,
+                    rebuilt_ref_summary_index: run.rebuilt_ref_summary_index,
+                    rebuilt_worktree_index: run.rebuilt_worktree_index,
+                    refreshed_change_monitor: run.refreshed_change_monitor,
+                    rebuilt_pull_planner_cache: run.rebuilt_pull_planner_cache,
+                    pruned_pull_planner_entries: run.pruned_pull_planner_entries,
+                    pack_install_completed: run.pack_install_intents_recovered_completed,
+                    pack_install_aborted: run.pack_install_intents_aborted,
+                    pack_install_skipped: run.pack_install_intents_skipped_in_progress,
+                    pack_install_quarantined: run.pack_install_intents_quarantined,
+                    unpaired_packs_pruned: run.unpaired_packs_pruned,
+                    unpaired_pack_bytes_freed: run.unpaired_pack_bytes_freed,
+                    commit_graph_nodes_now: run.report.commit_graph.node_count,
+                    commit_graph_bloom_now: run.report.commit_graph.bloom_covered_nodes,
+                    ref_summary_threads_now: run.report.ref_summary_index.threads,
+                    ref_summary_markers_now: run.report.ref_summary_index.markers,
+                    ref_summary_remotes_now: run.report.ref_summary_index.remotes,
+                    ref_summary_remote_threads_now: run.report.ref_summary_index.remote_threads,
+                    worktree_index_files_now: run.report.worktree_index.file_entries,
+                    pull_planner_manifests_now: run.report.pull_planner_cache.manifest_count,
+                    pull_planner_entries_now: run.report.pull_planner_cache.planner_entry_count,
+                };
+                for line in view.lines() {
+                    println!("{line}");
+                }
             }
         }
         MaintenanceCommands::Gc {

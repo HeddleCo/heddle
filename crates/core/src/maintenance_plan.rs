@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure maintenance inspect/run message assembly (no repo I/O).
+//! Pure maintenance inspect/run **fact** types + one human renderer each.
 //!
-//! Owns human summary line formatters for `heddle maintenance inspect`
-//! and `heddle maintenance run` from primitive report fields. Repo
-//! inspection and mutation stay CLI-owned.
+//! Not twenty public `format!` sentence factories. Callers pass structured
+//! fields; CLI prints `lines()`. Repo I/O stays outside this module.
 
 /// Re-export compact yes/no token (same as log/timeline fields).
 pub use crate::log_plan::yes_no;
@@ -13,183 +12,195 @@ pub fn presence(value: bool) -> &'static str {
     if value { "present" } else { "absent" }
 }
 
-/// `Commit graph: present|absent (nodes: N, bloom-covered: M)`.
-pub fn inspect_commit_graph_line(present: bool, nodes: usize, bloom: usize) -> String {
-    format!(
-        "Commit graph: {} (nodes: {}, bloom-covered: {})",
-        presence(present),
-        nodes,
-        bloom
-    )
+/// Structured facts for `heddle maintenance inspect` human output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceInspectView {
+    pub commit_graph_present: bool,
+    pub commit_graph_nodes: usize,
+    pub commit_graph_bloom: usize,
+    pub worktree_index_present: bool,
+    pub worktree_index_files: usize,
+    pub worktree_index_directories: usize,
+    pub worktree_index_untracked_directories: usize,
+    pub change_monitor_backend: String,
+    pub change_monitor_status: String,
+    pub refs_threads: usize,
+    pub refs_markers: usize,
+    pub refs_remotes: usize,
+    pub refs_remote_threads: usize,
+    pub ref_summary_present: bool,
+    pub ref_summary_valid: bool,
+    pub ref_summary_threads: usize,
+    pub ref_summary_markers: usize,
+    pub ref_summary_remotes: usize,
+    pub ref_summary_remote_threads: usize,
+    pub pack_count: usize,
+    pub index_count: usize,
+    pub unpaired_packs: usize,
+    pub pending_install_intents: usize,
+    pub missing_blob_count: usize,
+    pub pull_planner_status: String,
+    pub pull_planner_manifests: usize,
+    pub pull_planner_entries: usize,
 }
 
-/// `Worktree index: present|absent (files: F, directories: D, untracked directories: U)`.
-pub fn inspect_worktree_index_line(
-    present: bool,
-    files: usize,
-    directories: usize,
-    untracked_directories: usize,
-) -> String {
-    format!(
-        "Worktree index: {} (files: {}, directories: {}, untracked directories: {})",
-        presence(present),
-        files,
-        directories,
-        untracked_directories
-    )
+impl MaintenanceInspectView {
+    /// Human lines for inspect (stable order).
+    pub fn lines(&self) -> Vec<String> {
+        vec![
+            format!(
+                "Commit graph: {} (nodes: {}, bloom-covered: {})",
+                presence(self.commit_graph_present),
+                self.commit_graph_nodes,
+                self.commit_graph_bloom
+            ),
+            format!(
+                "Worktree index: {} (files: {}, directories: {}, untracked directories: {})",
+                presence(self.worktree_index_present),
+                self.worktree_index_files,
+                self.worktree_index_directories,
+                self.worktree_index_untracked_directories
+            ),
+            format!(
+                "Change monitor: {} / {}",
+                self.change_monitor_backend, self.change_monitor_status
+            ),
+            format!(
+                "Refs: {} threads, {} markers, {} remotes, {} remote threads",
+                self.refs_threads,
+                self.refs_markers,
+                self.refs_remotes,
+                self.refs_remote_threads
+            ),
+            format!(
+                "Ref summary index: {} (valid: {}, threads: {}, markers: {}, remotes: {}, remote threads: {})",
+                presence(self.ref_summary_present),
+                yes_no(self.ref_summary_valid),
+                self.ref_summary_threads,
+                self.ref_summary_markers,
+                self.ref_summary_remotes,
+                self.ref_summary_remote_threads
+            ),
+            format!(
+                "Packs: {} pack files, {} indexes",
+                self.pack_count, self.index_count
+            ),
+            format!(
+                "Pack install: {} unpaired packs, {} pending install intents",
+                self.unpaired_packs, self.pending_install_intents
+            ),
+            format!("Partial fetch: {} missing blobs", self.missing_blob_count),
+            format!(
+                "Pull planner cache: {} (manifests: {}, planner entries: {})",
+                self.pull_planner_status,
+                self.pull_planner_manifests,
+                self.pull_planner_entries
+            ),
+        ]
+    }
 }
 
-/// `Change monitor: BACKEND / STATUS`.
-pub fn inspect_change_monitor_line(backend: &str, status: &str) -> String {
-    format!("Change monitor: {backend} / {status}")
+/// Structured facts for `heddle maintenance run` human output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceRunView {
+    pub rebuilt_commit_graph: bool,
+    pub rebuilt_ref_summary_index: bool,
+    pub rebuilt_worktree_index: bool,
+    pub refreshed_change_monitor: bool,
+    pub rebuilt_pull_planner_cache: bool,
+    pub pruned_pull_planner_entries: usize,
+    pub pack_install_completed: u64,
+    pub pack_install_aborted: u64,
+    pub pack_install_skipped: u64,
+    pub pack_install_quarantined: u64,
+    pub unpaired_packs_pruned: u64,
+    pub unpaired_pack_bytes_freed: u64,
+    pub commit_graph_nodes_now: usize,
+    pub commit_graph_bloom_now: usize,
+    pub ref_summary_threads_now: usize,
+    pub ref_summary_markers_now: usize,
+    pub ref_summary_remotes_now: usize,
+    pub ref_summary_remote_threads_now: usize,
+    pub worktree_index_files_now: usize,
+    pub pull_planner_manifests_now: usize,
+    pub pull_planner_entries_now: usize,
 }
 
-/// `Refs: T threads, M markers, R remotes, RT remote threads`.
-pub fn inspect_refs_line(
-    threads: usize,
-    markers: usize,
-    remotes: usize,
-    remote_threads: usize,
-) -> String {
-    format!(
-        "Refs: {threads} threads, {markers} markers, {remotes} remotes, {remote_threads} remote threads"
-    )
+impl MaintenanceRunView {
+    /// Human lines for run (stable order).
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("Rebuilt commit graph: {}", yes_no(self.rebuilt_commit_graph)),
+            format!(
+                "Rebuilt ref summary index: {}",
+                yes_no(self.rebuilt_ref_summary_index)
+            ),
+            format!(
+                "Rebuilt worktree index: {}",
+                yes_no(self.rebuilt_worktree_index)
+            ),
+            format!(
+                "Refreshed change monitor: {}",
+                yes_no(self.refreshed_change_monitor)
+            ),
+            format!(
+                "Rebuilt pull planner cache: {}",
+                yes_no(self.rebuilt_pull_planner_cache)
+            ),
+            format!(
+                "Pruned pull planner entries: {}",
+                self.pruned_pull_planner_entries
+            ),
+        ];
+        let mut recover = format!(
+            "Pack install intents recovered: {} completed, {} aborted",
+            self.pack_install_completed, self.pack_install_aborted
+        );
+        if self.pack_install_skipped > 0 || self.pack_install_quarantined > 0 {
+            recover.push_str(&format!(
+                " (skipped in-progress: {}, quarantined: {})",
+                self.pack_install_skipped, self.pack_install_quarantined
+            ));
+        }
+        lines.push(recover);
+        lines.push(if self.unpaired_packs_pruned > 0 {
+            format!(
+                "Pruned {} unpaired packs (freed {} bytes)",
+                self.unpaired_packs_pruned, self.unpaired_pack_bytes_freed
+            )
+        } else {
+            "No unpaired packs to prune".to_string()
+        });
+        lines.push(format!(
+            "Commit graph now has {} nodes and {} Bloom-covered nodes",
+            self.commit_graph_nodes_now, self.commit_graph_bloom_now
+        ));
+        lines.push(format!(
+            "Ref summary index now covers {} threads, {} markers, {} remotes, and {} remote threads",
+            self.ref_summary_threads_now,
+            self.ref_summary_markers_now,
+            self.ref_summary_remotes_now,
+            self.ref_summary_remote_threads_now
+        ));
+        lines.push(format!(
+            "Worktree index now has {} files cached",
+            self.worktree_index_files_now
+        ));
+        lines.push(format!(
+            "Pull planner cache now has {} manifests and {} planner entries",
+            self.pull_planner_manifests_now, self.pull_planner_entries_now
+        ));
+        lines
+    }
 }
 
-/// Ref summary index inspect line.
-pub fn inspect_ref_summary_index_line(
-    present: bool,
-    valid: bool,
-    threads: usize,
-    markers: usize,
-    remotes: usize,
-    remote_threads: usize,
-) -> String {
-    format!(
-        "Ref summary index: {} (valid: {}, threads: {}, markers: {}, remotes: {}, remote threads: {})",
-        presence(present),
-        yes_no(valid),
-        threads,
-        markers,
-        remotes,
-        remote_threads
-    )
-}
-
-/// `Packs: P pack files, I indexes`.
-pub fn inspect_packs_line(pack_count: usize, index_count: usize) -> String {
-    format!("Packs: {pack_count} pack files, {index_count} indexes")
-}
-
-/// `Partial fetch: N missing blobs`.
-pub fn inspect_partial_fetch_line(missing_blob_count: usize) -> String {
-    format!("Partial fetch: {missing_blob_count} missing blobs")
-}
-
-/// Pull planner cache inspect line.
-pub fn inspect_pull_planner_cache_line(
-    status: &str,
-    manifests: usize,
-    planner_entries: usize,
-) -> String {
-    format!(
-        "Pull planner cache: {status} (manifests: {manifests}, planner entries: {planner_entries})"
-    )
-}
-
-/// `Rebuilt commit graph: yes|no`.
-pub fn run_rebuilt_commit_graph_line(rebuilt: bool) -> String {
-    format!("Rebuilt commit graph: {}", yes_no(rebuilt))
-}
-
-/// `Rebuilt ref summary index: yes|no`.
-pub fn run_rebuilt_ref_summary_index_line(rebuilt: bool) -> String {
-    format!("Rebuilt ref summary index: {}", yes_no(rebuilt))
-}
-
-/// `Rebuilt worktree index: yes|no`.
-pub fn run_rebuilt_worktree_index_line(rebuilt: bool) -> String {
-    format!("Rebuilt worktree index: {}", yes_no(rebuilt))
-}
-
-/// `Refreshed change monitor: yes|no`.
-pub fn run_refreshed_change_monitor_line(refreshed: bool) -> String {
-    format!("Refreshed change monitor: {}", yes_no(refreshed))
-}
-
-/// `Rebuilt pull planner cache: yes|no`.
-pub fn run_rebuilt_pull_planner_cache_line(rebuilt: bool) -> String {
-    format!("Rebuilt pull planner cache: {}", yes_no(rebuilt))
-}
-
-/// `Pruned pull planner entries: N`.
-pub fn run_pruned_pull_planner_entries_line(count: usize) -> String {
-    format!("Pruned pull planner entries: {count}")
-}
-
-/// Post-run commit graph size line.
-pub fn run_commit_graph_now_line(nodes: usize, bloom: usize) -> String {
-    format!("Commit graph now has {nodes} nodes and {bloom} Bloom-covered nodes")
-}
-
-/// Post-run ref summary coverage line.
-pub fn run_ref_summary_now_line(
-    threads: usize,
-    markers: usize,
-    remotes: usize,
-    remote_threads: usize,
-) -> String {
-    format!(
-        "Ref summary index now covers {threads} threads, {markers} markers, {remotes} remotes, and {remote_threads} remote threads"
-    )
-}
-
-/// Post-run worktree index size line.
-pub fn run_worktree_index_now_line(file_entries: usize) -> String {
-    format!("Worktree index now has {file_entries} files cached")
-}
-
-/// Post-run pull planner cache size line.
-pub fn run_pull_planner_cache_now_line(manifests: usize, planner_entries: usize) -> String {
-    format!(
-        "Pull planner cache now has {manifests} manifests and {planner_entries} planner entries"
-    )
-}
-
-/// L8 pack-install residual: unpaired packs + pending install intents.
-///
-/// `Pack install: U unpaired packs, P pending install intents`.
-pub fn inspect_pack_install_line(unpaired: usize, pending_intents: usize) -> String {
-    format!("Pack install: {unpaired} unpaired packs, {pending_intents} pending install intents")
-}
-
-/// L8 recover summary after `maintenance run` (or GC recover step).
-///
-/// `Pack install intents recovered: C completed, A aborted`.
-pub fn run_pack_install_recover_line(completed: u64, aborted: u64) -> String {
+/// Compact GC recover summary line.
+pub fn pack_install_recover_line(completed: u64, aborted: u64) -> String {
     format!("Pack install intents recovered: {completed} completed, {aborted} aborted")
 }
 
-/// Extended recover line including skip/quarantine counters when non-zero.
-pub fn run_pack_install_recover_detail_line(
-    completed: u64,
-    aborted: u64,
-    skipped: u64,
-    quarantined: u64,
-) -> String {
-    let mut line = run_pack_install_recover_line(completed, aborted);
-    if skipped > 0 || quarantined > 0 {
-        line.push_str(&format!(
-            " (skipped in-progress: {skipped}, quarantined: {quarantined})"
-        ));
-    }
-    line
-}
-
-/// L8 Option D unpaired-pack prune summary.
-///
-/// `Pruned N unpaired packs (freed B bytes)` / zero-friendly form.
-pub fn run_unpaired_packs_pruned_line(removed: u64, bytes_freed: u64) -> String {
+/// Compact unpaired-pack prune summary line (GC path).
+pub fn unpaired_packs_pruned_line(removed: u64, bytes_freed: u64) -> String {
     if removed > 0 {
         format!("Pruned {removed} unpaired packs (freed {bytes_freed} bytes)")
     } else {
@@ -202,101 +213,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn presence_and_yes_no() {
-        assert_eq!(presence(true), "present");
-        assert_eq!(presence(false), "absent");
-        assert_eq!(yes_no(true), "yes");
-        assert_eq!(yes_no(false), "no");
+    fn inspect_view_lines_include_packs_and_install() {
+        let v = MaintenanceInspectView {
+            commit_graph_present: true,
+            commit_graph_nodes: 10,
+            commit_graph_bloom: 4,
+            worktree_index_present: false,
+            worktree_index_files: 1,
+            worktree_index_directories: 2,
+            worktree_index_untracked_directories: 3,
+            change_monitor_backend: "fs_events".into(),
+            change_monitor_status: "ready".into(),
+            refs_threads: 1,
+            refs_markers: 2,
+            refs_remotes: 3,
+            refs_remote_threads: 4,
+            ref_summary_present: true,
+            ref_summary_valid: false,
+            ref_summary_threads: 1,
+            ref_summary_markers: 2,
+            ref_summary_remotes: 3,
+            ref_summary_remote_threads: 4,
+            pack_count: 2,
+            index_count: 2,
+            unpaired_packs: 1,
+            pending_install_intents: 2,
+            missing_blob_count: 5,
+            pull_planner_status: "ready".into(),
+            pull_planner_manifests: 1,
+            pull_planner_entries: 2,
+        };
+        let lines = v.lines();
+        assert!(lines[0].contains("Commit graph: present"));
+        assert!(lines.iter().any(|l| l.contains("Pack install: 1 unpaired")));
+        assert!(lines.iter().any(|l| l.contains("Partial fetch: 5")));
     }
 
     #[test]
-    fn inspect_lines() {
+    fn run_view_lines_include_recover_detail() {
+        let v = MaintenanceRunView {
+            rebuilt_commit_graph: true,
+            rebuilt_ref_summary_index: false,
+            rebuilt_worktree_index: true,
+            refreshed_change_monitor: false,
+            rebuilt_pull_planner_cache: true,
+            pruned_pull_planner_entries: 3,
+            pack_install_completed: 0,
+            pack_install_aborted: 1,
+            pack_install_skipped: 3,
+            pack_install_quarantined: 2,
+            unpaired_packs_pruned: 0,
+            unpaired_pack_bytes_freed: 0,
+            commit_graph_nodes_now: 9,
+            commit_graph_bloom_now: 2,
+            ref_summary_threads_now: 1,
+            ref_summary_markers_now: 2,
+            ref_summary_remotes_now: 3,
+            ref_summary_remote_threads_now: 4,
+            worktree_index_files_now: 42,
+            pull_planner_manifests_now: 1,
+            pull_planner_entries_now: 2,
+        };
+        let lines = v.lines();
+        assert!(lines.iter().any(|l| l.contains("skipped in-progress: 3")));
+        assert!(lines.iter().any(|l| l.contains("No unpaired packs")));
         assert_eq!(
-            inspect_commit_graph_line(true, 10, 4),
-            "Commit graph: present (nodes: 10, bloom-covered: 4)"
-        );
-        assert_eq!(
-            inspect_worktree_index_line(false, 1, 2, 3),
-            "Worktree index: absent (files: 1, directories: 2, untracked directories: 3)"
-        );
-        assert_eq!(
-            inspect_change_monitor_line("fs_events", "ready"),
-            "Change monitor: fs_events / ready"
-        );
-        assert_eq!(
-            inspect_refs_line(1, 2, 3, 4),
-            "Refs: 1 threads, 2 markers, 3 remotes, 4 remote threads"
-        );
-        assert!(inspect_ref_summary_index_line(true, false, 1, 2, 3, 4).contains("valid: no"));
-        assert_eq!(inspect_packs_line(2, 2), "Packs: 2 pack files, 2 indexes");
-        assert_eq!(
-            inspect_partial_fetch_line(5),
-            "Partial fetch: 5 missing blobs"
-        );
-        assert!(inspect_pull_planner_cache_line("ready", 1, 2).contains("manifests: 1"));
-        assert_eq!(
-            inspect_pack_install_line(1, 2),
-            "Pack install: 1 unpaired packs, 2 pending install intents"
-        );
-    }
-
-    #[test]
-    fn run_lines() {
-        assert_eq!(
-            run_rebuilt_commit_graph_line(true),
-            "Rebuilt commit graph: yes"
-        );
-        assert_eq!(
-            run_rebuilt_ref_summary_index_line(false),
-            "Rebuilt ref summary index: no"
-        );
-        assert_eq!(
-            run_rebuilt_worktree_index_line(true),
-            "Rebuilt worktree index: yes"
-        );
-        assert_eq!(
-            run_refreshed_change_monitor_line(false),
-            "Refreshed change monitor: no"
-        );
-        assert_eq!(
-            run_rebuilt_pull_planner_cache_line(true),
-            "Rebuilt pull planner cache: yes"
-        );
-        assert_eq!(
-            run_pruned_pull_planner_entries_line(3),
-            "Pruned pull planner entries: 3"
-        );
-        assert_eq!(
-            run_commit_graph_now_line(9, 2),
-            "Commit graph now has 9 nodes and 2 Bloom-covered nodes"
-        );
-        assert!(run_ref_summary_now_line(1, 2, 3, 4).contains("remote threads"));
-        assert_eq!(
-            run_worktree_index_now_line(42),
-            "Worktree index now has 42 files cached"
-        );
-        assert_eq!(
-            run_pull_planner_cache_now_line(1, 2),
-            "Pull planner cache now has 1 manifests and 2 planner entries"
-        );
-        assert_eq!(
-            run_pack_install_recover_line(2, 1),
+            pack_install_recover_line(2, 1),
             "Pack install intents recovered: 2 completed, 1 aborted"
         );
         assert_eq!(
-            run_pack_install_recover_detail_line(2, 1, 0, 0),
-            "Pack install intents recovered: 2 completed, 1 aborted"
-        );
-        assert!(
-            run_pack_install_recover_detail_line(0, 1, 3, 2)
-                .contains("skipped in-progress: 3")
-        );
-        assert_eq!(
-            run_unpaired_packs_pruned_line(0, 0),
-            "No unpaired packs to prune"
-        );
-        assert_eq!(
-            run_unpaired_packs_pruned_line(3, 99),
+            unpaired_packs_pruned_line(3, 99),
             "Pruned 3 unpaired packs (freed 99 bytes)"
         );
     }

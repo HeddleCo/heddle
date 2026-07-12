@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git-overlay guide content (machine path).
 //!
-//! Single typed value — not four micro-functions. Human ANSI formatting stays CLI.
+//! Single typed value — not micro-functions. Human ANSI formatting stays CLI.
+
+use serde::Serialize;
 
 /// Machine-facing git-overlay guide (JSON / structured output).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GitOverlayGuide {
     pub topic: &'static str,
     pub summary: &'static str,
@@ -29,22 +31,6 @@ pub const GIT_OVERLAY_GUIDE: GitOverlayGuide = GitOverlayGuide {
     ],
 };
 
-impl GitOverlayGuide {
-    /// Machine JSON object for the guide.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "topic": self.topic,
-            "summary": self.summary,
-            "steps": self.steps,
-        })
-    }
-}
-
-/// Backward-compatible alias for callers that want a function form.
-pub fn git_overlay_guide_json() -> serde_json::Value {
-    GIT_OVERLAY_GUIDE.to_json()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,7 +39,7 @@ mod tests {
     fn guide_shape() {
         assert_eq!(GIT_OVERLAY_GUIDE.topic, "git-overlay");
         assert_eq!(GIT_OVERLAY_GUIDE.steps.len(), 10);
-        let v = GIT_OVERLAY_GUIDE.to_json();
+        let v = serde_json::to_value(&GIT_OVERLAY_GUIDE).unwrap();
         assert_eq!(v["steps"].as_array().unwrap().len(), 10);
     }
 }

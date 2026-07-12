@@ -14,13 +14,17 @@ Writes JSON stats to artifacts/perf/<stamp>-<name>.json by default.
 Rules enforced by this tool's design:
   - Counterbalanced pair order: even trials A then B, odd trials B then A
     (AB, BA, AB, BA, ...) so first-in-pair bias is shared.
-  - Reports mean, median, p95, p99, min, max, stdev, and per-trial raw times.
-    Note: with small n (default 3), p95/p99 are near the max — use n>=30 for
-    meaningful tail estimates; this is calibration, not production SLOs.
+  - Reports mean, median, min, max, stdev, and per-trial raw times.
+  - p95/p99 are emitted only when n >= MIN_TAIL_N (30); below that they are
+    null with sample_quality=insufficient_for_tail. Default --trials 3 is
+    smoke/calibration only — use --trials 30+ for certification.
+  - A==B self-pairs are runner calibration, not performance evidence.
   - Requires successful exit codes by default (--no-require-success to disable).
   - Does NOT claim wins; only prints ratios. Caller must ensure equal work
     and equivalent correctness outside this runner.
 """
+
+MIN_TAIL_N = 30
 
 from __future__ import annotations
 
@@ -76,25 +80,33 @@ def summarize(times: list[float]) -> dict:
             "stdev_s": float("nan"),
             "min_s": float("nan"),
             "max_s": float("nan"),
-            "p95_s": float("nan"),
-            "p99_s": float("nan"),
+            "p95_s": None,
+            "p99_s": None,
+            "sample_quality": "empty",
             "raw_s": [],
         }
     s = sorted(times)
+    n = len(times)
+    tail_ok = n >= MIN_TAIL_N
     return {
-        "n": len(times),
+        "n": n,
         "mean_s": statistics.fmean(times),
         "median_s": statistics.median(times),
-        "stdev_s": statistics.stdev(times) if len(times) > 1 else 0.0,
+        "stdev_s": statistics.stdev(times) if n > 1 else 0.0,
         "min_s": s[0],
         "max_s": s[-1],
-        "p95_s": percentile(s, 95),
-        "p99_s": percentile(s, 99),
+        # Suppress tail percentiles when n is too small (Codex: default 3 trials
+        # must not look like a performance certificate).
+        "p95_s": percentile(s, 95) if tail_ok else None,
+        "p99_s": percentile(s, 99) if tail_ok else None,
+        "sample_quality": "tail_ok" if tail_ok else "insufficient_for_tail",
         "raw_s": times,
     }
 
 
-def ms(seconds: float) -> float:
+def ms(seconds: float | None) -> float | None:
+    if seconds is None:
+        return None
     if math.isnan(seconds):
         return float("nan")
     return round(seconds * 1000.0, 3)
@@ -106,7 +118,17 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--name", required=True, help="benchmark label used in output path")
-    ap.add_argument("--trials", type=int, default=3, help="paired trial count (default 3)")
+    ap.add_argument(
+        "--trials",
+        type=int,
+        default=3,
+        help=f"paired trial count (default 3 smoke; use >={MIN_TAIL_N} for cert tails)",
+    )
+    ap.add_argument(
+        "--cert",
+        action="store_true",
+        help=f"certification mode: force trials>={MIN_TAIL_N} if lower",
+    )
     ap.add_argument("--a", required=True, help="shell command A")
     ap.add_argument("--b", required=True, help="shell command B")
     ap.add_argument("--cwd", type=Path, default=None, help="working directory for both commands")
@@ -138,6 +160,12 @@ def main() -> int:
     if args.trials < 1:
         print("trials must be >= 1", file=sys.stderr)
         return 2
+    if args.cert and args.trials < MIN_TAIL_N:
+        print(
+            f"--cert: raising trials from {args.trials} to {MIN_TAIL_N}",
+            file=sys.stderr,
+        )
+        args.trials = MIN_TAIL_N
     if args.warmup < 0:
         print("warmup must be >= 0", file=sys.stderr)
         return 2
@@ -219,10 +247,12 @@ def main() -> int:
         out_s = dict(summary)
         for key in ("mean_s", "median_s", "stdev_s", "min_s", "max_s", "p95_s", "p99_s"):
             if key in out_s:
-                out_s[key.replace("_s", "_ms")] = ms(out_s[key])
+                val = out_s[key]
+                out_s[key.replace("_s", "_ms")] = None if val is None else ms(val)
         out_s["raw_ms"] = [ms(t) for t in out_s.get("raw_s", [])]
         return out_s
 
+    self_pair = args.a.strip() == args.b.strip()
     payload = {
         "schema_version": 1,
         "kind": "paired_bench",
@@ -230,10 +260,13 @@ def main() -> int:
         "timestamp_utc": stamp,
         "trials": args.trials,
         "warmup": args.warmup,
+        "min_tail_n": MIN_TAIL_N,
+        "cert_mode": args.cert,
         "require_success": args.require_success,
         "cwd": str(args.cwd) if args.cwd else None,
         "command_a": args.a,
         "command_b": args.b,
+        "self_pair_calibration": self_pair,
         "a": with_ms(summary_a),
         "b": with_ms(summary_b),
         "ratio_b_over_a_median": ratio_median,
@@ -242,8 +275,9 @@ def main() -> int:
         "notes": (
             "Counterbalanced pairs (AB, BA, AB, BA, ...). Does not assert "
             "correctness or equal work; only times process wall times. "
-            "p95/p99 with small n are not meaningful tail estimates. "
-            "Not a Git win claim; measurement calibration only."
+            f"p95/p99 are null when n < {MIN_TAIL_N} (insufficient for tail). "
+            "A==B self-pairs are runner calibration, not performance evidence. "
+            "Not a Git win claim."
         ),
     }
     out.write_text(json.dumps(payload, indent=2) + "\n")

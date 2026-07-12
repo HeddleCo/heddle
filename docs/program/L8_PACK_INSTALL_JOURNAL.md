@@ -116,11 +116,19 @@ TTL abort/complete, clock skew, fault-inject recover, metrics counters.
 
 ---
 
+## Security notes
+
+- Path containment uses **canonical** walks; lexical `starts_with` never
+  overrides a symlink escape (`.staging` → outside is rejected).
+- `pack_name` is exactly 64 lowercase hex (BLAKE3).
+- Existing-pair identity: pack hash match **and** index parses as `PackIndex`
+  (not a full pack/object correspondence proof — loader still validates on use).
+
 ## Residual
 
 - Full hosted product metrics pipeline (dashboards / multi-tenant SLOs).
 - Property/fuzz harness over the full fault matrix under process kill (not just
   in-process `maybe_fail_at`).
-- Further selective collapse of pure presentation `*_plan` string modules
-  (partial: `oss_plan`, `index_plan`, `switch_plan`, `collapse_plan`,
-  `completion_plan`).
+- Full TOCTOU resistance via directory-relative / no-follow open APIs on every
+  journal FS op (hostile symlink *layouts* are rejected; races between check
+  and mutation remain a platform-level concern).

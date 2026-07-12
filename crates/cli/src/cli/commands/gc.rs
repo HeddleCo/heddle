@@ -18,7 +18,7 @@ use heddle_core::{
         gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
         gc_status_token, plan_gc_dry_run,
     },
-    maintenance_plan::{run_pack_install_recover_line, run_unpaired_packs_pruned_line},
+    maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };
 use objects::store::{
     AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
@@ -166,7 +166,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         if !json {
             println!(
                 "{}",
-                run_pack_install_recover_line(recover.completed, recover.aborted)
+                pack_install_recover_line(recover.completed, recover.aborted)
             );
         }
         let (unpaired_removed, unpaired_bytes) = match repo.store() {
@@ -176,7 +176,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         if !json {
             println!(
                 "{}",
-                run_unpaired_packs_pruned_line(unpaired_removed, unpaired_bytes)
+                unpaired_packs_pruned_line(unpaired_removed, unpaired_bytes)
             );
         }
 

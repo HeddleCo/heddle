@@ -8,12 +8,15 @@
 # Usage:
 #   bash scripts/program/core-loop-bench.sh
 #   bash scripts/program/core-loop-bench.sh --heddle target/release/heddle --trials 3
+#   bash scripts/program/core-loop-bench.sh --cert   # forces n>=30 for tail stats
 #   bash scripts/program/core-loop-bench.sh --keep-fixture /tmp/heddle-core-loop-fixture
 #
 # Outputs:
 #   artifacts/perf/<stamp>-core-loop-absolute.json   multi-op absolute timings
 #   artifacts/perf/<stamp>-core-loop-<op>.json       optional per-op paired-bench (A==B)
 #
+# Default n=3 is smoke/calibration only. p95/p99 are null unless n>=30.
+# A==B self-pairs are runner calibration, not performance evidence.
 # This is measurement calibration, NOT a Git comparison or win claim.
 set -euo pipefail
 
@@ -28,13 +31,16 @@ OUT_DIR="${OUT_DIR:-$ROOT/artifacts/perf}"
 RUN_PAIRED=1
 FILE_COUNT=300
 THREAD_COUNT=24
+CERT=0
+MIN_TAIL_N=30
 
 usage() {
   cat <<'EOF'
 Usage: core-loop-bench.sh [options]
 
   --heddle PATH       Path to heddle release binary (default: target/release/heddle)
-  --trials N          Timed trials per operation (default: 3)
+  --trials N          Timed trials per operation (default: 3 smoke; use >=30 for cert)
+  --cert              Certification mode: force trials>=30 if lower
   --warmup N          Warmup rounds per operation (default: 1)
   --out-dir DIR       Artifact directory (default: artifacts/perf)
   --keep-fixture DIR  Keep fixture at DIR instead of temp cleanup
@@ -53,6 +59,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --heddle) HEDDLE_BIN="$2"; shift 2 ;;
     --trials) TRIALS="$2"; shift 2 ;;
+    --cert) CERT=1; shift ;;
     --warmup) WARMUP="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --keep-fixture) KEEP_FIXTURE="$2"; shift 2 ;;
@@ -63,6 +70,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$CERT" -eq 1 ]] && [[ "$TRIALS" -lt "$MIN_TAIL_N" ]]; then
+  echo "note: --cert raising trials from $TRIALS to $MIN_TAIL_N" >&2
+  TRIALS=$MIN_TAIL_N
+fi
 
 if [[ -z "$HEDDLE_BIN" ]]; then
   HEDDLE_BIN="$ROOT/target/release/heddle"
@@ -200,27 +212,35 @@ def percentile(sorted_vals: list[float], p: float) -> float:
     return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
 
 
+MIN_TAIL_N = 30
+
+
 def summarize(times: list[float]) -> dict:
     s = sorted(times)
+    n = len(times)
     mean = statistics.fmean(times)
     med = statistics.median(times)
-    stdev = statistics.stdev(times) if len(times) > 1 else 0.0
+    stdev = statistics.stdev(times) if n > 1 else 0.0
+    tail_ok = n >= MIN_TAIL_N
+    p95 = percentile(s, 95) if tail_ok else None
+    p99 = percentile(s, 99) if tail_ok else None
     return {
-        "n": len(times),
+        "n": n,
         "mean_s": mean,
         "median_s": med,
         "stdev_s": stdev,
         "min_s": s[0],
         "max_s": s[-1],
-        "p95_s": percentile(s, 95),
-        "p99_s": percentile(s, 99),
+        "p95_s": p95,
+        "p99_s": p99,
+        "sample_quality": "tail_ok" if tail_ok else "insufficient_for_tail",
         "mean_ms": mean * 1000.0,
         "median_ms": med * 1000.0,
         "stdev_ms": stdev * 1000.0,
+        "p95_ms": None if p95 is None else p95 * 1000.0,
+        "p99_ms": None if p99 is None else p99 * 1000.0,
         "min_ms": s[0] * 1000.0,
         "max_ms": s[-1] * 1000.0,
-        "p95_ms": percentile(s, 95) * 1000.0,
-        "p99_ms": percentile(s, 99) * 1000.0,
         "raw_s": times,
         "raw_ms": [t * 1000.0 for t in times],
     }

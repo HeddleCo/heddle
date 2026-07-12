@@ -237,18 +237,21 @@ pub(crate) fn validate_install_id(id: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Blake3 hex pack name (64 lowercase hex digits preferred; accept hex only).
+/// Content-addressed pack stem: exactly 64 lowercase hex digits (BLAKE3).
 pub(crate) fn validate_pack_name(name: &str) -> io::Result<()> {
-    if name.is_empty() || name.len() > 128 {
+    if name.len() != 64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "invalid pack_name length",
+            "pack_name must be exactly 64 lowercase hex digits (BLAKE3)",
         ));
     }
-    if !name.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "pack_name must be hexadecimal",
+            "pack_name must be lowercase hexadecimal",
         ));
     }
     Ok(())
@@ -296,58 +299,96 @@ fn dst_idx_path(packs_dir: &Path, pack_name: &str) -> PathBuf {
     packs_dir.join(format!("{pack_name}.idx"))
 }
 
-/// Ensure a reconstructed path stays under `packs_dir` after canonicalize of parent.
+/// True when `path` is `root` or a descendant (component-wise).
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+/// Ensure `candidate` cannot resolve outside `packs_dir`.
+///
+/// **Canonical containment is authoritative.** A lexical
+/// `candidate.starts_with(packs_dir)` must never override a canonical
+/// escape (classic case: `.staging` → symlink to `/tmp/evil`).
+///
+/// Walks every existing path component (including intermediate symlinks)
+/// and rejects any prefix whose `canonicalize` leaves `packs_dir`.
+/// Nonexistent trailing components are allowed only under a trusted base.
 fn assert_under_packs(packs_dir: &Path, candidate: &Path) -> io::Result<()> {
-    let packs_canon = fs::canonicalize(packs_dir).unwrap_or_else(|_| packs_dir.to_path_buf());
-    // Candidate may not exist yet — canonicalize parent + join leaf.
-    let parent = candidate.parent().unwrap_or(candidate);
-    let leaf = candidate
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path missing file name"))?;
-    let parent_canon = if parent.exists() {
-        fs::canonicalize(parent)?
-    } else {
-        // Walk up to first existing ancestor under packs
-        let mut cur = parent.to_path_buf();
-        while !cur.exists() {
-            if !cur.pop() {
-                break;
+    if !packs_dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "packs_dir does not exist for path containment check",
+        ));
+    }
+    let packs_canon = fs::canonicalize(packs_dir)?;
+
+    let rel = candidate.strip_prefix(packs_dir).or_else(|_| {
+        candidate.strip_prefix(&packs_canon).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is not under packs_dir",
+            )
+        })
+    })?;
+
+    for c in rel.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "path escapes packs_dir",
+                ));
             }
         }
-        let base = if cur.exists() {
-            fs::canonicalize(&cur)?
-        } else {
-            packs_canon.clone()
+    }
+
+    let mut cur = packs_canon.clone();
+    for c in rel.components() {
+        let Component::Normal(name) = c else {
+            continue;
         };
-        // Rebuild relative suffix from packs
-        base
-    };
-    let full = if parent.exists() {
-        parent_canon.join(leaf)
-    } else {
-        // For non-existent paths under packs_dir, check components only
-        for c in candidate
-            .strip_prefix(packs_dir)
-            .unwrap_or(candidate)
-            .components()
-        {
-            match c {
-                Component::Normal(_) | Component::CurDir => {}
-                _ => {
+        cur.push(name);
+        // symlink_metadata succeeds for files, dirs, and (possibly broken) symlinks.
+        match cur.symlink_metadata() {
+            Ok(_) => {
+                let canon = fs::canonicalize(&cur).map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!(
+                            "cannot resolve path under packs_dir ({}): {e}",
+                            cur.display()
+                        ),
+                    )
+                })?;
+                if !path_is_within(&canon, &packs_canon) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "path escapes packs_dir",
+                        "reconstructed path escapes packs_dir via symlink or mount",
                     ));
                 }
+                // Continue from resolved location so nested escapes are still caught.
+                cur = canon;
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Remaining names are pure (already validated as Normal components).
+                break;
+            }
+            Err(e) => return Err(e),
         }
-        return Ok(());
-    };
-    if !full.starts_with(&packs_canon) && !candidate.starts_with(packs_dir) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "reconstructed path escapes packs_dir",
-        ));
+    }
+    Ok(())
+}
+
+/// Reject hostile journal roots (`.staging`, `.install-intent`, `.pack-locks`
+/// as symlinks/mounts that escape `packs_dir`).
+fn ensure_journal_layout_safe(packs_dir: &Path) -> io::Result<()> {
+    create_dir_all_durable(packs_dir)?;
+    for name in [STAGING_DIR_NAME, INTENT_DIR_NAME, PACK_LOCKS_DIR_NAME] {
+        let p = packs_dir.join(name);
+        if p.symlink_metadata().is_ok() {
+            assert_under_packs(packs_dir, &p)?;
+        }
     }
     Ok(())
 }
@@ -528,7 +569,14 @@ fn hash_file_blake3_hex(path: &Path) -> io::Result<String> {
     Ok(format!("{}", hasher.finalize().to_hex()))
 }
 
-/// True when final pack+idx exist and pack content hashes to `pack_name`.
+/// True when a final pack+idx pair is safe to treat as already installed:
+/// pack content BLAKE3 equals `pack_name`, and the index **parses** as a
+/// [`crate::store::pack::PackIndex`].
+///
+/// This does **not** prove every index offset points at a live object in the
+/// pack (that is the pack reader's job on first use). It rejects empty,
+/// garbage, and structurally invalid indexes so install idempotency cannot
+/// accept a corrupt pair.
 pub(crate) fn existing_pair_matches_pack_name(
     packs_dir: &Path,
     pack_name: &str,
@@ -536,14 +584,28 @@ pub(crate) fn existing_pair_matches_pack_name(
     validate_pack_name(pack_name)?;
     let pack = dst_pack_path(packs_dir, pack_name);
     let idx = dst_idx_path(packs_dir, pack_name);
+    assert_under_packs(packs_dir, &pack)?;
+    assert_under_packs(packs_dir, &idx)?;
     if !pack.exists() || !idx.exists() {
+        return Ok(false);
+    }
+    // Symlink destinations must stay under packs (assert_under_packs) and the
+    // open path must be a regular file for install identity.
+    if !pack.is_file() || !idx.is_file() {
         return Ok(false);
     }
     if idx.metadata()?.len() == 0 {
         return Ok(false);
     }
     let digest = hash_file_blake3_hex(&pack)?;
-    Ok(digest.eq_ignore_ascii_case(pack_name))
+    if !digest.eq_ignore_ascii_case(pack_name) {
+        return Ok(false);
+    }
+    let idx_bytes = fs::read(&idx)?;
+    match crate::store::pack::PackIndex::from_bytes(&idx_bytes) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +620,9 @@ pub fn recover_pack_install_intents_with_ttl(
     packs_dir: &Path,
     ttl_secs: Option<i64>,
 ) -> io::Result<PackInstallRecoverReport> {
+    // Reject hostile journal roots (symlink escape) before any mutation.
+    ensure_journal_layout_safe(packs_dir)?;
+
     // Snapshot intent paths under a short global listing lock, then recover
     // each pack under its per-pack lock (try_lock → skip if install holds it).
     let intent_paths: Vec<PathBuf> = {
@@ -814,8 +879,9 @@ fn install_pack_bytes_journaled_inner(
     pack_data: &[u8],
     index_data: &[u8],
 ) -> io::Result<String> {
-    create_dir_all_durable(packs_dir)?;
+    ensure_journal_layout_safe(packs_dir)?;
     let pack_name = format!("{}", blake3::hash(pack_data).to_hex());
+    validate_pack_name(&pack_name)?;
 
     if existing_pair_matches_pack_name(packs_dir, &pack_name)? {
         return Ok(pack_name);
@@ -825,9 +891,12 @@ fn install_pack_bytes_journaled_inner(
     let install_id = new_install_id();
     validate_install_id(&install_id)?;
     let stage = staging_dir(packs_dir, &install_id);
+    assert_under_packs(packs_dir, &stage)?;
     create_dir_all_durable(&stage)?;
     let staging_pack = staging_pack_path(packs_dir, &install_id);
     let staging_idx = staging_idx_path(packs_dir, &install_id);
+    assert_under_packs(packs_dir, &staging_pack)?;
+    assert_under_packs(packs_dir, &staging_idx)?;
     write_file_atomic(&staging_pack, pack_data)?;
     fault_inject::maybe_fail_at("pack_install_after_stage_pack")?;
     write_file_atomic(&staging_idx, index_data)?;
@@ -843,6 +912,8 @@ fn install_pack_bytes_journaled_inner(
     }
     let dst_pack = dst_pack_path(packs_dir, &pack_name);
     let dst_idx = dst_idx_path(packs_dir, &pack_name);
+    assert_under_packs(packs_dir, &dst_pack)?;
+    assert_under_packs(packs_dir, &dst_idx)?;
     if dst_pack.exists() && !dst_idx.exists() {
         let _ = fs::remove_file(&dst_pack);
     }
@@ -901,7 +972,7 @@ fn install_pack_files_journaled_inner(
     pack_name: &str,
 ) -> io::Result<()> {
     validate_pack_name(pack_name)?;
-    create_dir_all_durable(packs_dir)?;
+    ensure_journal_layout_safe(packs_dir)?;
 
     if existing_pair_matches_pack_name(packs_dir, pack_name)? {
         let _ = fs::remove_file(src_pack_path);
@@ -912,9 +983,12 @@ fn install_pack_files_journaled_inner(
     let install_id = new_install_id();
     validate_install_id(&install_id)?;
     let stage = staging_dir(packs_dir, &install_id);
+    assert_under_packs(packs_dir, &stage)?;
     create_dir_all_durable(&stage)?;
     let staging_pack = staging_pack_path(packs_dir, &install_id);
     let staging_idx = staging_idx_path(packs_dir, &install_id);
+    assert_under_packs(packs_dir, &staging_pack)?;
+    assert_under_packs(packs_dir, &staging_idx)?;
     publish_file_durable(src_pack_path, &staging_pack)?;
     fault_inject::maybe_fail_at("pack_install_stream_after_stage_pack")?;
     publish_file_durable(src_index_path, &staging_idx)?;
@@ -927,6 +1001,8 @@ fn install_pack_files_journaled_inner(
     }
     let dst_pack = dst_pack_path(packs_dir, pack_name);
     let dst_idx = dst_idx_path(packs_dir, pack_name);
+    assert_under_packs(packs_dir, &dst_pack)?;
+    assert_under_packs(packs_dir, &dst_idx)?;
     if dst_pack.exists() && !dst_idx.exists() {
         let _ = fs::remove_file(&dst_pack);
     }
@@ -971,6 +1047,16 @@ mod tests {
         p
     }
 
+    /// Deterministic 64-char lowercase hex pack name from a seed.
+    fn pack_id(seed: &str) -> String {
+        format!("{}", blake3::hash(seed.as_bytes()).to_hex())
+    }
+
+    /// Minimal structurally valid pack index bytes.
+    fn empty_idx_bytes() -> Vec<u8> {
+        crate::store::pack::PackIndex::new().to_bytes()
+    }
+
     #[test]
     fn validate_ids_reject_path_traversal() {
         assert!(validate_install_id("../evil").is_err());
@@ -978,8 +1064,11 @@ mod tests {
         assert!(validate_install_id("").is_err());
         assert!(validate_pack_name("../x").is_err());
         assert!(validate_pack_name("not-hex!").is_err());
+        assert!(validate_pack_name("deadbeef").is_err()); // too short
+        assert!(validate_pack_name(&"A".repeat(64)).is_err()); // uppercase
         assert!(validate_install_id("abc-123_OK").is_ok());
-        assert!(validate_pack_name("deadbeef").is_ok());
+        assert!(validate_pack_name(&pack_id("ok")).is_ok());
+        assert_eq!(pack_id("ok").len(), 64);
     }
 
     #[test]
@@ -993,7 +1082,7 @@ mod tests {
         fs::write(&outside, b"secret").unwrap();
 
         let install_id = "malicious1";
-        let pack_name = "aa";
+        let pack_name = pack_id("malicious-pack");
         let intent_dir = intent_root(&packs);
         create_dir_all_durable(&intent_dir).unwrap();
         let forged = serde_json::json!({
@@ -1027,9 +1116,12 @@ mod tests {
         let intent_dir = intent_root(&packs);
         create_dir_all_durable(&intent_dir).unwrap();
         let path = intent_dir.join("weird.json");
+        let pn = pack_id("weird");
         fs::write(
             &path,
-            br#"{"version":99,"install_id":"x","pack_name":"aa","phase":"prepared","created_unix":1}"#,
+            format!(
+                r#"{{"version":99,"install_id":"x","pack_name":"{pn}","phase":"prepared","created_unix":1}}"#
+            ),
         )
         .unwrap();
 
@@ -1039,6 +1131,23 @@ mod tests {
         let q = quarantine_root(&packs);
         assert!(q.exists());
         assert!(fs::read_dir(&q).unwrap().count() >= 1);
+    }
+
+    #[test]
+    fn short_pack_name_in_intent_is_quarantined() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        create_dir_all_durable(&intent_root(&packs)).unwrap();
+        let path = intent_path(&packs, "shortname");
+        fs::write(
+            &path,
+            br#"{"version":2,"install_id":"shortname","pack_name":"aa","phase":"prepared","created_unix":1}"#,
+        )
+        .unwrap();
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
+        assert_eq!(report.quarantined, 1);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1057,20 +1166,25 @@ mod tests {
     }
 
     #[test]
-    fn existing_pair_requires_hash_match() {
+    fn existing_pair_requires_hash_match_and_valid_index() {
         let root = tempfile::tempdir().unwrap();
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
         let body = b"pack-body-xyz";
         let name = format!("{}", blake3::hash(body).to_hex());
         write_file_atomic(&dst_pack_path(&packs, &name), body).unwrap();
-        write_file_atomic(&dst_idx_path(&packs, &name), b"idx").unwrap();
+        write_file_atomic(&dst_idx_path(&packs, &name), &empty_idx_bytes()).unwrap();
         assert!(existing_pair_matches_pack_name(&packs, &name).unwrap());
 
-        // Wrong name for content.
-        write_file_atomic(&dst_pack_path(&packs, "00"), body).unwrap();
-        write_file_atomic(&dst_idx_path(&packs, "00"), b"idx").unwrap();
-        assert!(!existing_pair_matches_pack_name(&packs, "00").unwrap());
+        // Structurally invalid index → not a match.
+        write_file_atomic(&dst_idx_path(&packs, &name), b"not-an-index").unwrap();
+        assert!(!existing_pair_matches_pack_name(&packs, &name).unwrap());
+
+        // Wrong name for content (valid hex, wrong digest).
+        let wrong = pack_id("wrong-name-for-body");
+        write_file_atomic(&dst_pack_path(&packs, &wrong), body).unwrap();
+        write_file_atomic(&dst_idx_path(&packs, &wrong), &empty_idx_bytes()).unwrap();
+        assert!(!existing_pair_matches_pack_name(&packs, &wrong).unwrap());
     }
 
     #[test]
@@ -1079,7 +1193,7 @@ mod tests {
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
         let pack_bytes = b"real-pack-content-111";
-        let idx_bytes = b"real-idx";
+        let idx_bytes = empty_idx_bytes();
         let name = format!("{}", blake3::hash(pack_bytes).to_hex());
 
         // Corrupt pair with correct name but wrong content.
@@ -1087,7 +1201,7 @@ mod tests {
         write_file_atomic(&dst_idx_path(&packs, &name), b"x").unwrap();
         assert!(!existing_pair_matches_pack_name(&packs, &name).unwrap());
 
-        let out = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        let out = install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes).unwrap();
         assert_eq!(out, name);
         assert_eq!(fs::read(dst_pack_path(&packs, &name)).unwrap(), pack_bytes);
     }
@@ -1131,22 +1245,22 @@ mod tests {
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
 
-        let name = "deadbeef";
+        let name = pack_id("deadbeef-seed");
         let install_id = "test-install-1";
         validate_install_id(install_id).unwrap();
-        validate_pack_name(name).unwrap();
+        validate_pack_name(&name).unwrap();
         let stage = staging_dir(&packs, install_id);
         create_dir_all_durable(&stage).unwrap();
         write_file_atomic(&staging_pack_path(&packs, install_id), b"pack-body").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"idx-body").unwrap();
 
-        let dst_pack = dst_pack_path(&packs, name);
+        let dst_pack = dst_pack_path(&packs, &name);
         publish_file_durable(&staging_pack_path(&packs, install_id), &dst_pack).unwrap();
 
         let intent = PackInstallIntent {
             version: PACK_INSTALL_INTENT_VERSION,
             install_id: install_id.to_string(),
-            pack_name: name.to_string(),
+            pack_name: name.clone(),
             phase: PackInstallPhase::PackPublished,
             created_unix: 1,
         };
@@ -1156,8 +1270,8 @@ mod tests {
         assert_eq!(report.intents_seen, 1);
         assert_eq!(report.completed, 1);
         assert!(dst_pack.exists());
-        assert!(dst_idx_path(&packs, name).exists());
-        assert_eq!(fs::read(dst_idx_path(&packs, name)).unwrap(), b"idx-body");
+        assert!(dst_idx_path(&packs, &name).exists());
+        assert_eq!(fs::read(dst_idx_path(&packs, &name)).unwrap(), b"idx-body");
         assert!(!intent_path(&packs, install_id).exists());
     }
 
@@ -1172,13 +1286,13 @@ mod tests {
         write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
 
-        let mut intent = PackInstallIntent::new(install_id.into(), "aa".into());
+        let mut intent = PackInstallIntent::new(install_id.into(), pack_id("aa"));
         intent.created_unix = 1;
         write_intent(&packs, &intent).unwrap();
 
         let report = recover_pack_install_intents_with_ttl(&packs, Some(60)).unwrap();
         assert_eq!(report.aborted, 1);
-        assert!(!dst_pack_path(&packs, "aa").exists());
+        assert!(!dst_pack_path(&packs, &pack_id("aa")).exists());
         assert!(!intent_path(&packs, install_id).exists());
         assert!(!stage.exists());
     }
@@ -1196,7 +1310,7 @@ mod tests {
         write_file_atomic(&staging_pack, b"live-p").unwrap();
         write_file_atomic(&staging_idx, b"live-i").unwrap();
 
-        let intent = PackInstallIntent::new(install_id.into(), "bb".into());
+        let intent = PackInstallIntent::new(install_id.into(), pack_id("bb"));
         write_intent(&packs, &intent).unwrap();
 
         let report = recover_pack_install_intents_with_ttl(&packs, Some(86_400)).unwrap();
@@ -1211,15 +1325,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
-        let name = "cc";
+        let name = pack_id("cc");
         let install_id = "orph-1";
-        let dst_pack = dst_pack_path(&packs, name);
+        let dst_pack = dst_pack_path(&packs, &name);
         write_file_atomic(&dst_pack, b"only-pack").unwrap();
 
         let intent = PackInstallIntent {
             version: PACK_INSTALL_INTENT_VERSION,
             install_id: install_id.into(),
-            pack_name: name.into(),
+            pack_name: name,
             phase: PackInstallPhase::PackPublished,
             created_unix: 1,
         };
@@ -1254,7 +1368,7 @@ mod tests {
 
         let installer = thread::spawn(move || {
             let packs = packs_a.as_path();
-            let guard = acquire_pack_name_lock(packs, "dd").expect("pack lock");
+            let guard = acquire_pack_name_lock(packs, &pack_id("dd")).expect("pack lock");
 
             let install_id = "flock-live";
             let stage = staging_dir(packs, install_id);
@@ -1263,10 +1377,10 @@ mod tests {
             let staging_idx = staging_idx_path(packs, install_id);
             write_file_atomic(&staging_pack, b"flock-pack").unwrap();
             write_file_atomic(&staging_idx, b"flock-idx").unwrap();
-            let dst_pack = dst_pack_path(packs, "dd");
-            let dst_idx = dst_idx_path(packs, "dd");
+            let dst_pack = dst_pack_path(packs, &pack_id("dd"));
+            let dst_idx = dst_idx_path(packs, &pack_id("dd"));
 
-            let mut intent = PackInstallIntent::new(install_id.into(), "dd".into());
+            let mut intent = PackInstallIntent::new(install_id.into(), pack_id("dd"));
             intent.created_unix = 1; // looks expired under any short TTL
             write_intent(packs, &intent).unwrap();
 
@@ -1300,13 +1414,13 @@ mod tests {
                 recover_pack_install_intents_with_ttl(packs, Some(1)).expect("recover under pack lock");
             assert_eq!(mid.aborted, 0, "must not abort live install: {mid:?}");
             assert!(
-                mid.skipped_in_progress >= 1 || dst_pack_path(packs, "dd").exists(),
+                mid.skipped_in_progress >= 1 || dst_pack_path(packs, &pack_id("dd")).exists(),
                 "either skip in-progress or install already finished: {mid:?}"
             );
             done_b.wait();
             // After installer finishes, finals exist and no intent remains.
-            assert!(dst_pack_path(packs, "dd").exists());
-            assert!(dst_idx_path(packs, "dd").exists());
+            assert!(dst_pack_path(packs, &pack_id("dd")).exists());
+            assert!(dst_idx_path(packs, &pack_id("dd")).exists());
             assert!(!intent_path(packs, "flock-live").exists());
         });
 
@@ -1324,17 +1438,17 @@ mod tests {
         create_dir_all_durable(&stage).unwrap();
         write_file_atomic(&staging_pack_path(&packs, install_id), b"pack-x").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"idx-x").unwrap();
-        let dst_pack = dst_pack_path(&packs, "ee");
+        let dst_pack = dst_pack_path(&packs, &pack_id("ee"));
         publish_file_durable(&staging_pack_path(&packs, install_id), &dst_pack).unwrap();
 
-        let intent = PackInstallIntent::new(install_id.into(), "ee".into());
+        let intent = PackInstallIntent::new(install_id.into(), pack_id("ee"));
         write_intent(&packs, &intent).unwrap();
 
         let report = recover_pack_install_intents(&packs).unwrap();
         assert_eq!(report.completed, 1);
         assert!(dst_pack.exists());
-        assert!(dst_idx_path(&packs, "ee").exists());
-        assert_eq!(fs::read(dst_idx_path(&packs, "ee")).unwrap(), b"idx-x");
+        assert!(dst_idx_path(&packs, &pack_id("ee")).exists());
+        assert_eq!(fs::read(dst_idx_path(&packs, &pack_id("ee"))).unwrap(), b"idx-x");
     }
 
     #[test]
@@ -1345,7 +1459,8 @@ mod tests {
         let pack_bytes = b"idemp-pack-bytes";
         let name = format!("{}", blake3::hash(pack_bytes).to_hex());
         write_file_atomic(&dst_pack_path(&packs, &name), pack_bytes).unwrap();
-        write_file_atomic(&dst_idx_path(&packs, &name), b"i").unwrap();
+        write_file_atomic(&dst_idx_path(&packs, &name), &empty_idx_bytes()).unwrap();
+        assert!(existing_pair_matches_pack_name(&packs, &name).unwrap());
 
         let src_dir = root.path().join("src");
         create_dir_all_durable(&src_dir).unwrap();
@@ -1363,14 +1478,14 @@ mod tests {
         create_dir_all_durable(&packs).unwrap();
 
         let pack_bytes = b"in-memory-pack-body-zzz";
-        let idx_bytes = b"in-memory-idx-body-zzz";
+        let idx_bytes = empty_idx_bytes();
         let expected_name = format!("{}", blake3::hash(pack_bytes).to_hex());
 
-        let name = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        let name = install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes).unwrap();
         assert_eq!(name, expected_name);
         assert!(existing_pair_matches_pack_name(&packs, &name).unwrap());
 
-        let name2 = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        let name2 = install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes).unwrap();
         assert_eq!(name2, expected_name);
     }
 
@@ -1385,7 +1500,7 @@ mod tests {
         write_file_atomic(&staging_pack_path(&packs, install_id), b"stale-p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"stale-i").unwrap();
 
-        let mut intent = PackInstallIntent::new(install_id.into(), "ff".into());
+        let mut intent = PackInstallIntent::new(install_id.into(), pack_id("ff"));
         intent.created_unix = 1;
         write_intent(&packs, &intent).unwrap();
 
@@ -1401,20 +1516,20 @@ mod tests {
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
 
-        let name = "11";
+        let name = pack_id("11");
         let install_id = "ttl-complete-1";
         let stage = staging_dir(&packs, install_id);
         create_dir_all_durable(&stage).unwrap();
         write_file_atomic(&staging_pack_path(&packs, install_id), b"pack-ttl").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"idx-ttl").unwrap();
 
-        let dst_pack = dst_pack_path(&packs, name);
+        let dst_pack = dst_pack_path(&packs, &name);
         publish_file_durable(&staging_pack_path(&packs, install_id), &dst_pack).unwrap();
 
         let intent = PackInstallIntent {
             version: PACK_INSTALL_INTENT_VERSION,
             install_id: install_id.into(),
-            pack_name: name.into(),
+            pack_name: name.clone(),
             phase: PackInstallPhase::PackPublished,
             created_unix: 1,
         };
@@ -1422,7 +1537,7 @@ mod tests {
 
         let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
         assert_eq!(report.completed, 1);
-        assert!(dst_idx_path(&packs, name).exists());
+        assert!(dst_idx_path(&packs, &name).exists());
     }
 
     #[test]
@@ -1432,13 +1547,13 @@ mod tests {
         let packs = root.path().join("old").join("packs");
         create_dir_all_durable(&packs).unwrap();
         let install_id = "reloc1";
-        let name = "22";
+        let name = pack_id("22");
         create_dir_all_durable(&staging_dir(&packs, install_id)).unwrap();
         write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
         publish_file_durable(
             &staging_pack_path(&packs, install_id),
-            &dst_pack_path(&packs, name),
+            &dst_pack_path(&packs, &name),
         )
         .unwrap();
         // Restage idx after pack publish consumed staging pack
@@ -1446,7 +1561,7 @@ mod tests {
         let intent = PackInstallIntent {
             version: 2,
             install_id: install_id.into(),
-            pack_name: name.into(),
+            pack_name: name.clone(),
             phase: PackInstallPhase::PackPublished,
             created_unix: 1,
         };
@@ -1459,7 +1574,7 @@ mod tests {
 
         let report = recover_pack_install_intents(&new_packs).unwrap();
         assert_eq!(report.completed, 1);
-        assert!(dst_idx_path(&new_packs, name).exists());
+        assert!(dst_idx_path(&new_packs, &name).exists());
     }
 
     #[test]
@@ -1470,16 +1585,18 @@ mod tests {
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
         let pack_bytes = b"same-pack-concurrent-body";
-        let idx_bytes = b"same-idx";
+        let idx_bytes = empty_idx_bytes();
         let expected = format!("{}", blake3::hash(pack_bytes).to_hex());
 
         let packs1 = packs.clone();
         let packs2 = packs.clone();
+        let idx1 = idx_bytes.clone();
+        let idx2 = idx_bytes.clone();
         let t1 = thread::spawn(move || {
-            install_pack_bytes_journaled(&packs1, pack_bytes, idx_bytes).unwrap()
+            install_pack_bytes_journaled(&packs1, pack_bytes, &idx1).unwrap()
         });
         let t2 = thread::spawn(move || {
-            install_pack_bytes_journaled(&packs2, pack_bytes, idx_bytes).unwrap()
+            install_pack_bytes_journaled(&packs2, pack_bytes, &idx2).unwrap()
         });
         let n1 = t1.join().unwrap();
         let n2 = t2.join().unwrap();
@@ -1496,13 +1613,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
+        let idx_bytes = empty_idx_bytes();
 
         let mut handles = Vec::new();
         for i in 0..8u8 {
             let packs = packs.clone();
+            let idx_bytes = idx_bytes.clone();
             handles.push(thread::spawn(move || {
                 let pack_bytes = format!("many-pack-body-{i}").into_bytes();
-                let idx_bytes = format!("many-idx-{i}").into_bytes();
                 install_pack_bytes_journaled(&packs, &pack_bytes, &idx_bytes).unwrap()
             }));
         }
@@ -1528,7 +1646,7 @@ mod tests {
         write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
 
-        let mut intent = PackInstallIntent::new(install_id.into(), "aa".into());
+        let mut intent = PackInstallIntent::new(install_id.into(), pack_id("aa"));
         // Beyond skew tolerance — must not dodge expiry.
         intent.created_unix = unix_now().saturating_add(INTENT_CLOCK_SKEW_TOLERANCE_SECS + 10_000);
         write_intent(&packs, &intent).unwrap();
@@ -1548,7 +1666,7 @@ mod tests {
         write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
 
-        let mut intent = PackInstallIntent::new(install_id.into(), "bb".into());
+        let mut intent = PackInstallIntent::new(install_id.into(), pack_id("bb"));
         // Slightly ahead of wall clock (within tolerance) — still "in progress".
         intent.created_unix = unix_now().saturating_add(INTENT_CLOCK_SKEW_TOLERANCE_SECS / 2);
         write_intent(&packs, &intent).unwrap();
@@ -1566,12 +1684,12 @@ mod tests {
         create_dir_all_durable(&packs).unwrap();
 
         let pack_bytes = b"fault-inject-pack-body";
-        let idx_bytes = b"fault-inject-idx-body";
+        let idx_bytes = empty_idx_bytes();
         let expected = format!("{}", blake3::hash(pack_bytes).to_hex());
 
         let before_err = pack_install_metrics_snapshot().installs_err;
         let err = fault_inject::with_fault_points(&["pack_install_after_intent_prepared"], || {
-            install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes)
+            install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes)
         })
         .expect_err("fault should fire");
         assert!(
@@ -1600,7 +1718,7 @@ mod tests {
         assert_eq!(report.aborted, 1, "report={report:?}");
         assert_eq!(intent_count_json(&packs), 0);
 
-        let name = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        let name = install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes).unwrap();
         assert_eq!(name, expected);
         assert!(existing_pair_matches_pack_name(&packs, &expected).unwrap());
     }
@@ -1612,11 +1730,11 @@ mod tests {
         create_dir_all_durable(&packs).unwrap();
 
         let pack_bytes = b"fault-after-pack-publish-body";
-        let idx_bytes = b"fault-after-pack-publish-idx";
+        let idx_bytes = empty_idx_bytes();
         let expected = format!("{}", blake3::hash(pack_bytes).to_hex());
 
         let err = fault_inject::with_fault_points(&["pack_install_after_publish_pack"], || {
-            install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes)
+            install_pack_bytes_journaled(&packs, pack_bytes, &idx_bytes)
         })
         .expect_err("fault should fire after pack publish");
         assert!(err.to_string().contains("pack_install_after_publish_pack"));
@@ -1654,7 +1772,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let packs = root.path().join("packs");
         create_dir_all_durable(&packs).unwrap();
-        let _ = install_pack_bytes_journaled(&packs, b"metrics-pack", b"metrics-idx").unwrap();
+        let _ = install_pack_bytes_journaled(&packs, b"metrics-pack", &empty_idx_bytes()).unwrap();
         let after_install = pack_install_metrics_snapshot();
         assert!(after_install.installs_ok >= before.installs_ok + 1);
 
@@ -1663,7 +1781,7 @@ mod tests {
         create_dir_all_durable(&staging_dir(&packs, install_id)).unwrap();
         write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
         write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
-        let mut intent = PackInstallIntent::new(install_id.into(), "cc".into());
+        let mut intent = PackInstallIntent::new(install_id.into(), pack_id("cc"));
         intent.created_unix = 1;
         write_intent(&packs, &intent).unwrap();
         let before_abort = pack_install_metrics_snapshot();
@@ -1671,5 +1789,139 @@ mod tests {
         assert_eq!(report.aborted, 1);
         let after_abort = pack_install_metrics_snapshot();
         assert!(after_abort.recover_aborted >= before_abort.recover_aborted + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_under_packs_rejects_staging_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let outside = root.path().join("outside");
+        create_dir_all_durable(&outside).unwrap();
+
+        // Lexically under packs, but .staging is a symlink out.
+        symlink(&outside, packs.join(STAGING_DIR_NAME)).unwrap();
+
+        let stage = staging_dir(&packs, "id1");
+        let err = assert_under_packs(&packs, &stage).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+
+        // Journal layout guard must fail before install.
+        let err = ensure_journal_layout_safe(&packs).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+        let err = install_pack_bytes_journaled(&packs, b"x", &empty_idx_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_under_packs_rejects_intent_root_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let outside = root.path().join("outside-intent");
+        create_dir_all_durable(&outside).unwrap();
+        symlink(&outside, packs.join(INTENT_DIR_NAME)).unwrap();
+
+        let err = ensure_journal_layout_safe(&packs).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_under_packs_rejects_pack_locks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let outside = root.path().join("outside-locks");
+        create_dir_all_durable(&outside).unwrap();
+        symlink(&outside, packs.join(PACK_LOCKS_DIR_NAME)).unwrap();
+
+        let err = ensure_journal_layout_safe(&packs).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_under_packs_rejects_destination_file_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let outside = root.path().join("evil.pack");
+        fs::write(&outside, b"evil").unwrap();
+
+        let name = pack_id("symlink-dst");
+        let dst = dst_pack_path(&packs, &name);
+        symlink(&outside, &dst).unwrap();
+
+        let err = assert_under_packs(&packs, &dst).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+        // existing_pair must refuse a symlink-out destination (error or false).
+        let pair = existing_pair_matches_pack_name(&packs, &name);
+        assert!(
+            pair.as_ref().map(|v| !v).unwrap_or(true),
+            "pair={pair:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_under_packs_rejects_install_id_staging_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        create_dir_all_durable(&staging_root(&packs)).unwrap();
+        let outside = root.path().join("outside-stage-id");
+        create_dir_all_durable(&outside).unwrap();
+        let install_id = "symlink-stage-id";
+        symlink(&outside, staging_dir(&packs, install_id)).unwrap();
+
+        let pack_path = staging_pack_path(&packs, install_id);
+        let err = assert_under_packs(&packs, &pack_path).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("symlink"),
+            "err={err}"
+        );
+    }
+
+    #[test]
+    fn assert_under_packs_accepts_normal_reconstructed_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let name = pack_id("normal");
+        let install_id = "normal-id";
+        assert_under_packs(&packs, &dst_pack_path(&packs, &name)).unwrap();
+        assert_under_packs(&packs, &staging_pack_path(&packs, install_id)).unwrap();
+        assert_under_packs(&packs, &intent_path(&packs, install_id)).unwrap();
     }
 }
