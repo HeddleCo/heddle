@@ -6,6 +6,7 @@ import "google/protobuf/timestamp.proto";
 
 service RepoEventService {
   rpc SubscribeRepoEvents(SubscribeRepoEventsRequest) returns (stream RepoEvent);
+  rpc SubscribeRepoEventsMulti(SubscribeRepoEventsMultiRequest) returns (stream RepoEvent);
 }
 
 message SubscribeRepoEventsRequest {
@@ -13,6 +14,12 @@ message SubscribeRepoEventsRequest {
   string thread = 2;
   int64 after_event_id = 3;
   repeated string event_types = 4;
+}
+
+message SubscribeRepoEventsMultiRequest {
+  repeated string repo_paths = 1;
+  string thread = 2;
+  repeated string event_types = 3;
 }
 
 message RepoEvent {
@@ -27,4 +34,6 @@ message RepoEvent {
   string actor_subject = 9;
   string payload_json = 10;
   google.protobuf.Timestamp created_at = 11;
+  // Visible path of repo_id, for multi-repo client routing.
+  string repo_path = 12;
 }
