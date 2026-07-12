@@ -2084,6 +2084,10 @@ fn fetch_heddle_notes_into_repo(
         url,
         &[refspec],
         FetchOptions {
+            // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
+            filter_auto: false,
+            progress: None,
+            upload_pack_command: None,
             // sley 0.4.2 negotiation/shallow controls — heddle uses defaults
             // (no CLI override; use remote config), matching git's defaults.
             negotiation_include: None,
@@ -3745,6 +3749,10 @@ fn clone_url_to_bare_via_sley(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
+                // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
+                filter_auto: false,
+                progress: None,
+                upload_pack_command: None,
                 negotiation_include: None,
                 negotiation_restrict: None,
                 reject_shallow: false,
@@ -3986,6 +3994,10 @@ fn fetch_network_remote(
             url,
             &heddle_mirror_fetch_refspecs()?,
             FetchOptions {
+                // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
+                filter_auto: false,
+                progress: None,
+                upload_pack_command: None,
                 negotiation_include: None,
                 negotiation_restrict: None,
                 reject_shallow: false,
@@ -4126,6 +4138,9 @@ fn push_network_remote(
                 commands,
                 pack_objects,
                 options: PushOptions {
+                    // sley 0.5.0 additions — heddle uses git defaults.
+                    atomic: false,
+                    push_options: Vec::new(),
                     quiet: true,
                     force: force || force_transport_checks,
                     thin: sley::remote::PushThinMode::Auto,
