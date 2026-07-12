@@ -239,6 +239,13 @@ pub(crate) fn validate_install_id(id: &str) -> io::Result<()> {
 
 /// Content-addressed pack stem: exactly 64 lowercase hex digits (BLAKE3).
 pub(crate) fn validate_pack_name(name: &str) -> io::Result<()> {
+    pack_name_to_digest(name).map(|_| ())
+}
+
+/// Decode a validated `pack_name` to the native 32-byte BLAKE3 digest.
+///
+/// Prefer comparing digests over hex strings once past the FS/JSON boundary.
+pub(crate) fn pack_name_to_digest(name: &str) -> io::Result<[u8; 32]> {
     if name.len() != 64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -254,12 +261,26 @@ pub(crate) fn validate_pack_name(name: &str) -> io::Result<()> {
             "pack_name must be lowercase hexadecimal",
         ));
     }
-    Ok(())
+    let mut digest = [0u8; 32];
+    // decode_to_slice avoids an intermediate Vec; name is already length-checked.
+    hex::decode_to_slice(name.as_bytes(), &mut digest).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("pack_name hex decode failed: {e}"),
+        )
+    })?;
+    Ok(digest)
+}
+
+/// Hex form of a BLAKE3 digest for filenames / intent JSON (one allocation).
+fn digest_to_pack_name(digest: &[u8; 32]) -> String {
+    // blake3::Hash::to_hex is stack; to_string once at the FS boundary.
+    blake3::Hash::from_bytes(*digest).to_hex().to_string()
 }
 
 fn validate_intent_ids(intent: &PackInstallIntent) -> io::Result<()> {
     validate_install_id(&intent.install_id)?;
-    validate_pack_name(&intent.pack_name)?;
+    pack_name_to_digest(&intent.pack_name)?;
     Ok(())
 }
 
@@ -555,7 +576,8 @@ fn intent_expired(intent: &PackInstallIntent, ttl_secs: Option<i64>, now: i64) -
 // Existing pair identity validation
 // ---------------------------------------------------------------------------
 
-fn hash_file_blake3_hex(path: &Path) -> io::Result<String> {
+/// Stream-hash a pack file to a native 32-byte BLAKE3 digest (no hex).
+fn hash_file_blake3(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -566,12 +588,15 @@ fn hash_file_blake3_hex(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{}", hasher.finalize().to_hex()))
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// True when a final pack+idx pair is safe to treat as already installed:
 /// pack content BLAKE3 equals `pack_name`, and the index **parses** as a
 /// [`crate::store::pack::PackIndex`].
+///
+/// Identity is checked as **native digests** (`[u8; 32]`), not hex strings.
+/// Hex is only the durable/public form of `pack_name` on disk.
 ///
 /// This does **not** prove every index offset points at a live object in the
 /// pack (that is the pack reader's job on first use). It rejects empty,
@@ -581,7 +606,17 @@ pub(crate) fn existing_pair_matches_pack_name(
     packs_dir: &Path,
     pack_name: &str,
 ) -> io::Result<bool> {
-    validate_pack_name(pack_name)?;
+    let expected = pack_name_to_digest(pack_name)?;
+    existing_pair_matches_digest(packs_dir, pack_name, &expected)
+}
+
+/// Like [`existing_pair_matches_pack_name`], but reuses an already-decoded digest
+/// (install hot path: hash once in memory, compare file digest to those bytes).
+fn existing_pair_matches_digest(
+    packs_dir: &Path,
+    pack_name: &str,
+    expected: &[u8; 32],
+) -> io::Result<bool> {
     let pack = dst_pack_path(packs_dir, pack_name);
     let idx = dst_idx_path(packs_dir, pack_name);
     assert_under_packs(packs_dir, &pack)?;
@@ -597,8 +632,8 @@ pub(crate) fn existing_pair_matches_pack_name(
     if idx.metadata()?.len() == 0 {
         return Ok(false);
     }
-    let digest = hash_file_blake3_hex(&pack)?;
-    if !digest.eq_ignore_ascii_case(pack_name) {
+    let actual = hash_file_blake3(&pack)?;
+    if actual != *expected {
         return Ok(false);
     }
     let idx_bytes = fs::read(&idx)?;
@@ -880,10 +915,11 @@ fn install_pack_bytes_journaled_inner(
     index_data: &[u8],
 ) -> io::Result<String> {
     ensure_journal_layout_safe(packs_dir)?;
-    let pack_name = format!("{}", blake3::hash(pack_data).to_hex());
-    validate_pack_name(&pack_name)?;
+    // Hash once as native bytes; hex only for the FS/JSON name boundary.
+    let digest = *blake3::hash(pack_data).as_bytes();
+    let pack_name = digest_to_pack_name(&digest);
 
-    if existing_pair_matches_pack_name(packs_dir, &pack_name)? {
+    if existing_pair_matches_digest(packs_dir, &pack_name, &digest)? {
         return Ok(pack_name);
     }
 
@@ -906,7 +942,7 @@ fn install_pack_bytes_journaled_inner(
     let _guard = acquire_pack_name_lock(packs_dir, &pack_name)?;
     fault_inject::maybe_fail_at("pack_install_after_pack_lock")?;
 
-    if existing_pair_matches_pack_name(packs_dir, &pack_name)? {
+    if existing_pair_matches_digest(packs_dir, &pack_name, &digest)? {
         remove_staging(packs_dir, &install_id);
         return Ok(pack_name);
     }
@@ -918,7 +954,7 @@ fn install_pack_bytes_journaled_inner(
         let _ = fs::remove_file(&dst_pack);
     }
     if dst_pack.exists() && dst_idx.exists() {
-        if !existing_pair_matches_pack_name(packs_dir, &pack_name)? {
+        if !existing_pair_matches_digest(packs_dir, &pack_name, &digest)? {
             let _ = fs::remove_file(&dst_pack);
             let _ = fs::remove_file(&dst_idx);
         } else {
@@ -971,10 +1007,11 @@ fn install_pack_files_journaled_inner(
     src_index_path: &Path,
     pack_name: &str,
 ) -> io::Result<()> {
-    validate_pack_name(pack_name)?;
+    // Decode once; identity checks stay on native digests.
+    let expected = pack_name_to_digest(pack_name)?;
     ensure_journal_layout_safe(packs_dir)?;
 
-    if existing_pair_matches_pack_name(packs_dir, pack_name)? {
+    if existing_pair_matches_digest(packs_dir, pack_name, &expected)? {
         let _ = fs::remove_file(src_pack_path);
         let _ = fs::remove_file(src_index_path);
         return Ok(());
@@ -995,7 +1032,7 @@ fn install_pack_files_journaled_inner(
     fault_inject::maybe_fail_at("pack_install_stream_after_stage_idx")?;
 
     let _guard = acquire_pack_name_lock(packs_dir, pack_name)?;
-    if existing_pair_matches_pack_name(packs_dir, pack_name)? {
+    if existing_pair_matches_digest(packs_dir, pack_name, &expected)? {
         remove_staging(packs_dir, &install_id);
         return Ok(());
     }
@@ -1007,7 +1044,7 @@ fn install_pack_files_journaled_inner(
         let _ = fs::remove_file(&dst_pack);
     }
     if dst_pack.exists() && dst_idx.exists() {
-        if existing_pair_matches_pack_name(packs_dir, pack_name)? {
+        if existing_pair_matches_digest(packs_dir, pack_name, &expected)? {
             remove_staging(packs_dir, &install_id);
             return Ok(());
         }
@@ -1049,7 +1086,7 @@ mod tests {
 
     /// Deterministic 64-char lowercase hex pack name from a seed.
     fn pack_id(seed: &str) -> String {
-        format!("{}", blake3::hash(seed.as_bytes()).to_hex())
+        digest_to_pack_name(blake3::hash(seed.as_bytes()).as_bytes())
     }
 
     /// Minimal structurally valid pack index bytes.
@@ -1069,6 +1106,25 @@ mod tests {
         assert!(validate_install_id("abc-123_OK").is_ok());
         assert!(validate_pack_name(&pack_id("ok")).is_ok());
         assert_eq!(pack_id("ok").len(), 64);
+    }
+
+    #[test]
+    fn pack_name_digest_roundtrip_and_native_equality() {
+        let body = b"digest-native-eq";
+        let digest = *blake3::hash(body).as_bytes();
+        let name = digest_to_pack_name(&digest);
+        let parsed = pack_name_to_digest(&name).unwrap();
+        assert_eq!(parsed, digest);
+        // File identity uses bytes, not hex strings.
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        write_file_atomic(&dst_pack_path(&packs, &name), body).unwrap();
+        write_file_atomic(&dst_idx_path(&packs, &name), &empty_idx_bytes()).unwrap();
+        assert!(existing_pair_matches_digest(&packs, &name, &digest).unwrap());
+        let mut wrong = digest;
+        wrong[0] ^= 0xff;
+        assert!(!existing_pair_matches_digest(&packs, &name, &wrong).unwrap());
     }
 
     #[test]

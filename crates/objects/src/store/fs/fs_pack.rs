@@ -274,6 +274,7 @@ impl FsStore {
         // forward. The consolidated pack is content-addressed, so if it
         // happened to hash-collide with an old pack (a store that was
         // already a single consolidated pack) that file is excluded here.
+        // Stack hex digest; compare as &str — no format!/String intermediate.
         let new_pack_name = blake3::hash(&pack_data).to_hex();
         for (pack_path, index_path) in &old_pack_files {
             let is_new_pack = pack_path
@@ -347,8 +348,10 @@ impl FsStore {
             hasher.update(&buf[..n]);
         }
         drop(file);
+        // Native digest for potential callers; hex String only for the journal
+        // path/name boundary (filenames + intent JSON).
         let pack_hash = hasher.finalize();
-        let pack_name = format!("{}", pack_hash.to_hex());
+        let pack_name = pack_hash.to_hex().to_string();
 
         // L8 A+: durable staging + intent journal, then pack/index publish.
         // Recovery on reload finishes or aborts incomplete installs.
