@@ -561,8 +561,11 @@ impl PackedOpLogIndex {
         let mut batches = Vec::new();
 
         for record in batch_dir {
+            #[cfg(test)]
+            BATCH_DIR_RECORDS_VISITED.with(|visits| visits.set(visits.get() + 1));
             if record.newest_entry_id <= since_head_id {
-                continue;
+                // Fsck enforces newest-first order, so every remaining batch is also at/before it.
+                break;
             }
             if let Some(scope) = scope
                 && record.scope_state == ScopeState::None as u8
@@ -993,6 +996,11 @@ impl PackedOpLogIndex {
             HeddleError::InvalidObject("oplog index missing OpRecord schema version".to_string())
         })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BATCH_DIR_RECORDS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl PackedFooter {
@@ -3583,6 +3591,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 5, 6]
         );
+    }
+
+    #[test]
+    fn index_collect_batches_after_stops_at_newest_first_since_boundary() {
+        const BATCH_COUNT: u64 = 128;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(
+            (1..=BATCH_COUNT)
+                .map(|id| make_entry(id, None))
+                .collect(),
+        );
+        log.head_id = BATCH_COUNT;
+        log.save().unwrap();
+
+        let index = PackedOpLogIndex::open(&path).unwrap();
+        BATCH_DIR_RECORDS_VISITED.with(|visits| visits.set(0));
+        let batches = index
+            .collect_batches_after_scoped(BATCH_COUNT - 2, usize::MAX, |_| true, None)
+            .unwrap();
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
+            vec![BATCH_COUNT, BATCH_COUNT - 1]
+        );
+        BATCH_DIR_RECORDS_VISITED.with(|visits| {
+            assert_eq!(
+                visits.get(),
+                3,
+                "the newest-first batch directory must stop at the since boundary"
+            );
+        });
     }
 
     #[test]
