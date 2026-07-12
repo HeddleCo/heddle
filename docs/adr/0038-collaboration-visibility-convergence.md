@@ -12,6 +12,6 @@ Visibility conflicts create attention items and can block readiness when the rec
 
 Visibility conflicts use the shared collaboration conflict-resolution pattern with a visibility-specific payload. The operation cites the conflicting visibility operations, the chosen effective visibility, and the authority context for making that choice.
 
-**Status:** proposed
+**Status:** accepted
 
 **Considered Options:** Last-writer-wins visibility would be easy to implement, but it could silently expose restricted collaboration content. Always requiring single-writer visibility would reduce concurrency too much for local-first collaboration.

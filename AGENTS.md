@@ -33,6 +33,8 @@ Heddle is still moving quickly. Prefer the current model over preserving legacy 
 
 - Do not add backwards-compatibility shims unless the user explicitly asks for them.
 - When a model or API changes, it is acceptable to update callers, tests, and docs to the new behavior instead of keeping legacy support.
+- Do not use long explanatory comments, compatibility shims, fallback paths, or transitional adapters to compensate for a shallow or unclear module interface. Redesign the seam, complete the migration, or stop and ask for alignment.
+- Apply the same rule when touching existing code: remove obsolete shims and explanation-heavy workarounds when the owning module can make the invariant explicit instead.
 
 ## Project Overview
 

@@ -28,6 +28,14 @@ _Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
 A Heddle sidecar operating on an existing Git checkout. Active Git-overlay reads and writes use the checkout's real `.git` repository for Git commits, refs, packs, index, and worktree state; Heddle stores native metadata such as captures, threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
 _Avoid_: copied Git mirror, imported-only Git repo, hidden Git checkout
 
+**Native Heddle Repository**:
+A repository whose source history is stored in Heddle's native object model under `.heddle`. Git interoperability is an explicit projection, import, or export path rather than the active source store.
+_Avoid_: adopted Git Overlay, hidden Git repository, Git-backed Heddle repository
+
+**Repository Adoption**:
+The explicit transition from Git Overlay source storage into a Native Heddle Repository. Adoption is not normal Git Overlay initialization and is chosen when the repository needs Heddle-native source storage.
+_Avoid_: Git Overlay initialization, sidecar setup, ordinary Git import
+
 **Bridge Mirror**:
 The bare Git repository at `.heddle/git` used by explicit Git bridge import, export, sync, reconstruction, and maintenance paths. It is not the active Git-overlay repository and should not be described as the place where normal `status`, `commit`, `checkpoint`, or branch movement writes Git state.
 _Avoid_: active Git store, Git-overlay `.git`, canonical Git object store
