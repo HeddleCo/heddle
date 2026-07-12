@@ -158,6 +158,16 @@ pub struct VerificationClaimPolicyFacts {
     pub allow_matching_workflow_action: bool,
 }
 
+/// Trust-side facts for [`repository_verification_allows_success_claim`]
+/// (grouped so the claim helper stays under clippy's arg limit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationClaimTrustFacts<'a> {
+    pub verified: bool,
+    pub recommended_action: &'a str,
+    pub remote_drift: &'a str,
+    pub workflow_status: &'a str,
+}
+
 /// Whether operator output may claim success given verification state.
 ///
 /// `is_land_landed` is true when action is Land and status is landed.
@@ -165,26 +175,23 @@ pub struct VerificationClaimPolicyFacts {
 /// equality (caller supplies those facts).
 pub fn repository_verification_allows_success_claim(
     output_status: &str,
-    trust_verified: bool,
-    trust_recommended_action: &str,
-    trust_remote_drift: &str,
-    trust_workflow_status: &str,
+    trust: VerificationClaimTrustFacts<'_>,
     is_land_landed: bool,
     recommended_matches_trust: bool,
     policy: VerificationClaimPolicyFacts,
 ) -> bool {
-    if trust_verified || matches!(output_status, "blocked" | "failed") {
+    if trust.verified || matches!(output_status, "blocked" | "failed") {
         return true;
     }
     if policy.allow_land_publish_followup
         && is_land_landed
-        && trust_recommended_action == "heddle push"
-        && matches!(trust_remote_drift, "remote_untracked" | "remote_ahead")
+        && trust.recommended_action == "heddle push"
+        && matches!(trust.remote_drift, "remote_untracked" | "remote_ahead")
     {
         return true;
     }
     if policy.allow_matching_workflow_action
-        && trust_workflow_status == "ready"
+        && trust.workflow_status == "ready"
         && recommended_matches_trust
     {
         return true;
@@ -219,32 +226,41 @@ mod tests {
 
     #[test]
     fn verification_claim_and_land_rewrite() {
+        let verified = VerificationClaimTrustFacts {
+            verified: true,
+            recommended_action: "",
+            remote_drift: "",
+            workflow_status: "",
+        };
         assert!(repository_verification_allows_success_claim(
             "completed",
-            true,
-            "",
-            "",
-            "",
+            verified,
             false,
             false,
             VerificationClaimPolicyFacts::default()
         ));
+        let unverified = VerificationClaimTrustFacts {
+            verified: false,
+            recommended_action: "",
+            remote_drift: "",
+            workflow_status: "",
+        };
         assert!(!repository_verification_allows_success_claim(
             "completed",
-            false,
-            "",
-            "",
-            "",
+            unverified,
             false,
             false,
             VerificationClaimPolicyFacts::default()
         ));
+        let land_push = VerificationClaimTrustFacts {
+            verified: false,
+            recommended_action: "heddle push",
+            remote_drift: "remote_ahead",
+            workflow_status: "",
+        };
         assert!(repository_verification_allows_success_claim(
             "landed",
-            false,
-            "heddle push",
-            "remote_ahead",
-            "",
+            land_push,
             true,
             false,
             VerificationClaimPolicyFacts {

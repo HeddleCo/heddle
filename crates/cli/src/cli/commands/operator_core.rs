@@ -218,12 +218,15 @@ fn repository_verification_allows_success_claim(
     trust: &RepositoryVerificationState,
     policy: VerificationClaimPolicy,
 ) -> bool {
+    use heddle_core::VerificationClaimTrustFacts;
     core_repository_verification_allows_success_claim(
         &output.status,
-        trust.verified,
-        &trust.recommended_action,
-        &trust.remote_drift,
-        &trust.workflow_status,
+        VerificationClaimTrustFacts {
+            verified: trust.verified,
+            recommended_action: &trust.recommended_action,
+            remote_drift: &trust.remote_drift,
+            workflow_status: &trust.workflow_status,
+        },
         output.action == OperatorAction::Land && output.status == "landed",
         output
             .recommended_action

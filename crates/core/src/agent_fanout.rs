@@ -616,7 +616,7 @@ mod tests {
             active_thread_record: false,
             resolved_path: PathBuf::from("/tmp/a"),
         };
-        assert!(check_fanout_start_preflight(&[ok.clone()]).is_ok());
+        assert!(check_fanout_start_preflight(std::slice::from_ref(&ok)).is_ok());
 
         let mut live = ok.clone();
         live.has_live_owner = true;

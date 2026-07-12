@@ -154,10 +154,11 @@ pub use gc_plan::{
     gc_status_token, plan_gc_dry_run,
 };
 pub use harness_json::{
-    VerificationClaimPolicyFacts, first_value_string, map_from_pairs, merge_string_vec,
-    opencode_tool_name, opencode_tool_status, parse_relay_payload, raw_git_preservation_command,
-    repository_verification_allows_success_claim, value_array_join, value_cost_micros,
-    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
+    VerificationClaimPolicyFacts, VerificationClaimTrustFacts, first_value_string, map_from_pairs,
+    merge_string_vec, opencode_tool_name, opencode_tool_status, parse_relay_payload,
+    raw_git_preservation_command, repository_verification_allows_success_claim, value_array_join,
+    value_cost_micros, value_cost_micros_u64, value_string, value_string_array, value_u64,
+    value_u64_string,
 };
 pub use harness_policy::{
     ExplicitAgentBind, HarnessFingerprint, HarnessKind, HarnessProbeDecision, SegmentRotation,

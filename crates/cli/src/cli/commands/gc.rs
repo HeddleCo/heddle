@@ -111,10 +111,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             if bridge.is_initialized() {
                 let removed = bridge.prune_unreachable_mapping_entries()?;
                 summary.pruned_git_mapping_entries = removed;
-                if !json {
-                    if let Some(msg) = gc_pruned_git_mapping_message(removed) {
-                        println!("{msg}");
-                    }
+                if !json
+                    && let Some(msg) = gc_pruned_git_mapping_message(removed)
+                {
+                    println!("{msg}");
                 }
 
                 // Consolidate the Bridge Mirror (`.heddle/git`): pack its
@@ -127,10 +127,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 // `GitProjection::consolidate_mirror`.
                 let consolidated = bridge.consolidate_mirror()?;
                 summary.consolidated_mirror_loose = consolidated;
-                if !json {
-                    if let Some(msg) = gc_consolidated_mirror_message(consolidated) {
-                        println!("{msg}");
-                    }
+                if !json
+                    && let Some(msg) = gc_consolidated_mirror_message(consolidated)
+                {
+                    println!("{msg}");
                 }
             }
         }
@@ -213,10 +213,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         }
         if pinned_redactions > 0 {
             summary.preserved_redactions = pinned_redactions;
-            if !json {
-                if let Some(msg) = gc_preserved_redactions_message(pinned_redactions) {
-                    println!("{msg}");
-                }
+            if !json
+                && let Some(msg) = gc_preserved_redactions_message(pinned_redactions)
+            {
+                println!("{msg}");
             }
         }
     }
