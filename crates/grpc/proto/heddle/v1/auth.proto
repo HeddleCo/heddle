@@ -21,6 +21,7 @@ service AuthService {
   rpc IssueServiceAccountCredential(IssueServiceAccountCredentialRequest) returns (IssuedCredentialResponse);
   rpc RevokeServiceAccount(RevokeServiceAccountRequest) returns (DeleteResponse);
   rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  rpc RecordSubscription(RecordSubscriptionRequest) returns (RecordSubscriptionResponse);
   rpc IntrospectCredential(IntrospectCredentialRequest) returns (CredentialInfo);
   rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
   rpc ListScopeCapabilities(ListScopeCapabilitiesRequest) returns (ListScopeCapabilitiesResponse);
@@ -560,6 +561,10 @@ message WhoAmIResponse {
   // Web clients may use `roles` for UI gating but MUST NOT rely on it for
   // authorization decisions.
   repeated ResourceRole roles = 13;
+  // Account-level billing entitlement for the caller's subject. Surfaced for
+  // UX affordances only — servers enforce the effective plan on the gated
+  // RPCs, never the client. Absent (default) ⇒ treat as the free plan.
+  Entitlement entitlement = 14;
 }
 
 // A single role grant held by the caller on a namespace or repository.
@@ -570,6 +575,50 @@ message ResourceRole {
   string resource_kind = 2;
   // Role name: one of "reader", "developer", "maintainer", "admin", "owner".
   HostedRole role = 3;
+}
+
+// Billing plan tier. `product_id → plan` is mapped server-side by weft from
+// checked-in, fail-closed config; clients never assert a Plan on writes.
+enum Plan {
+  PLAN_UNSPECIFIED = 0;
+  PLAN_FREE = 1;
+  PLAN_BASIC = 2;
+  PLAN_PRO = 3;
+  PLAN_ORG = 4;
+}
+
+// Subscription lifecycle state, mirroring the provider's authoritative state.
+enum SubscriptionStatus {
+  SUBSCRIPTION_STATUS_UNSPECIFIED = 0;
+  ACTIVE = 1;
+  PAST_DUE = 2;
+  CANCELED = 3;
+  INCOMPLETE = 4;
+}
+
+// The account-level entitlement applied for a subject.
+message Entitlement {
+  Plan plan = 1;
+  SubscriptionStatus status = 2;
+  google.protobuf.Timestamp current_period_end = 3;
+}
+
+// Records/updates a subject's paid entitlement. A privilege-granting write —
+// weft gates it on the billing service account's `billing:write` Right and
+// maps `product_id → plan` from checked-in, fail-closed config.
+message RecordSubscriptionRequest {
+  string subject = 1;
+  string product_id = 2;
+  SubscriptionStatus status = 3;
+  string provider = 4;
+  string provider_customer_id = 5;
+  string provider_subscription_id = 6;
+  google.protobuf.Timestamp current_period_end = 7;
+  string event_id = 8;
+}
+
+message RecordSubscriptionResponse {
+  Entitlement entitlement = 1;
 }
 
 message IntrospectCredentialRequest {
