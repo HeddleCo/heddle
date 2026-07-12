@@ -15,7 +15,9 @@ use bytes::Bytes;
 
 use crate::{
     error::HeddleError,
-    fs_atomic::{enrich_fs_error, enrich_rename_error, sync_directory, temp_path},
+    fs_atomic::{
+        create_dir_all_durable, enrich_fs_error, enrich_rename_error, sync_directory, temp_path,
+    },
     store::Result,
 };
 
@@ -60,7 +62,7 @@ pub(super) fn write_atomic(
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("invalid atomic write path"))?;
-    std::fs::create_dir_all(parent)
+    create_dir_all_durable(parent)
         .map_err(|e| HeddleError::Io(enrich_fs_error(parent, "creating", e)))?;
 
     let temp_path = temp_path(path);

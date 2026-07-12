@@ -25,8 +25,7 @@ use sley::Repository as SleyRepository;
 
 use crate::{
     RepositoryVerificationState, build_repository_verification_health_with_worktree_status,
-    build_repository_verification_state,
-    build_repository_verification_state_with_worktree_status,
+    build_repository_verification_state, build_repository_verification_state_with_worktree_status,
 };
 
 /// How far a save should write through into Git (Git-overlay only).
@@ -239,11 +238,146 @@ pub fn plan_creates_new_state(plan: &SavePlan, has_current_state: bool) -> bool 
 }
 
 /// Whether this plan should perform a Git-overlay write-through.
-pub fn plan_writes_git_checkpoint(
-    plan: &SavePlan,
-    capability: RepositoryCapability,
-) -> bool {
+pub fn plan_writes_git_checkpoint(plan: &SavePlan, capability: RepositoryCapability) -> bool {
     plan.git_scope != GitScope::None && capability == RepositoryCapability::GitOverlay
+}
+
+/// Leaf path component for Git index → Heddle tree entry names.
+pub fn tree_leaf_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// Next-action after a git-projection commit from verification facts only.
+///
+/// Precedence: explicit trust recommendation → verify when untrusted → push
+/// when a default remote is configured.
+pub fn commit_next_action_from_trust(
+    recommended_action: &str,
+    verified: bool,
+    has_default_remote: bool,
+) -> Option<String> {
+    if !recommended_action.trim().is_empty() {
+        return Some(recommended_action.to_string());
+    }
+    if !verified {
+        return Some("heddle verify".to_string());
+    }
+    has_default_remote.then(|| "heddle push".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Git-projection commit index planning (pure)
+// ---------------------------------------------------------------------------
+
+/// Pure commit index plan for git-overlay `heddle commit` routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitGitIndexPlan {
+    pub commit_mode: &'static str,
+    pub has_staged_changes: bool,
+    pub staged_paths: Vec<String>,
+    pub unstaged_paths: Vec<String>,
+    pub untracked_paths: Vec<String>,
+    pub will_commit: Vec<String>,
+    pub preserved_after_commit: Vec<String>,
+}
+
+/// Split `unstaged: ` / `untracked: ` prefixed extra paths from status rows.
+pub fn split_git_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut unstaged_paths = Vec::new();
+    let mut untracked_paths = Vec::new();
+    for path in extra_paths {
+        if let Some(path) = path.strip_prefix("unstaged: ") {
+            unstaged_paths.push(path.to_string());
+        } else if let Some(path) = path.strip_prefix("untracked: ") {
+            untracked_paths.push(path.to_string());
+        }
+    }
+    (unstaged_paths, untracked_paths)
+}
+
+/// Plan commit scope from staged + extra worktree paths and `--all`.
+pub fn plan_commit_git_index(
+    staged_paths: &[String],
+    extra_paths: &[String],
+    include_all: bool,
+) -> CommitGitIndexPlan {
+    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
+    let has_staged_changes = !staged_paths.is_empty();
+    let mut will_commit = Vec::new();
+    if has_staged_changes {
+        will_commit.extend(staged_paths.iter().cloned());
+    }
+    if include_all || !has_staged_changes {
+        will_commit.extend(unstaged_paths.iter().cloned());
+        will_commit.extend(untracked_paths.iter().cloned());
+    }
+    let commit_mode = if has_staged_changes && include_all {
+        "worktree_all_explicit"
+    } else if has_staged_changes {
+        "staged_index"
+    } else if will_commit.is_empty() {
+        "none"
+    } else {
+        "worktree_all"
+    };
+    let preserved_after_commit = if has_staged_changes && !include_all {
+        extra_paths.to_vec()
+    } else {
+        Vec::new()
+    };
+    CommitGitIndexPlan {
+        commit_mode,
+        has_staged_changes,
+        staged_paths: staged_paths.to_vec(),
+        unstaged_paths,
+        untracked_paths,
+        will_commit,
+        preserved_after_commit,
+    }
+}
+
+/// Index-only plan: commit staged paths, preserve all extras.
+pub fn plan_commit_git_index_only(
+    staged_paths: &[String],
+    extra_paths: &[String],
+) -> CommitGitIndexPlan {
+    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
+    CommitGitIndexPlan {
+        commit_mode: "staged_index",
+        has_staged_changes: !staged_paths.is_empty(),
+        staged_paths: staged_paths.to_vec(),
+        unstaged_paths,
+        untracked_paths,
+        will_commit: staged_paths.to_vec(),
+        preserved_after_commit: extra_paths.to_vec(),
+    }
+}
+
+/// Human scope line for git-projection commit text mode.
+pub fn commit_scope_text(commit_mode: &str) -> &'static str {
+    match commit_mode {
+        "staged_index" => {
+            "staged Git index only; unstaged and untracked paths stay in the worktree"
+        }
+        "worktree_all_explicit" => "all staged, unstaged, and untracked worktree changes (--all)",
+        "worktree_all" => "all unstaged and untracked worktree changes",
+        "none" => "no Git paths",
+        _ => "Git worktree changes",
+    }
+}
+
+/// Annotate a commit summary when staged-only commit leaves extras behind.
+pub fn staged_commit_summary(
+    summary: &str,
+    staged_path_count: usize,
+    extra_path_count: usize,
+) -> String {
+    if extra_path_count == 0 {
+        return summary.to_string();
+    }
+    format!(
+        "{summary} (committed {staged_path_count} staged path(s); left {extra_path_count} unstaged/untracked path(s) in the worktree)"
+    )
 }
 
 /// Execute a save: optional Heddle snapshot + optional Git checkpoint write-through.
@@ -257,9 +391,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     // repos, so guard on the raw `git_scope` intent instead (the previous
     // `plan_writes_git_checkpoint(..) && capability != GitOverlay` was
     // self-contradictory and never fired).
-    if plan.git_scope != GitScope::None
-        && repo.capability() != RepositoryCapability::GitOverlay
-    {
+    if plan.git_scope != GitScope::None && repo.capability() != RepositoryCapability::GitOverlay {
         return Err(anyhow!(HeddleError::recovery(
             RecoveryDetails::safety_refusal(
                 "native_checkpoint_unavailable",
@@ -301,8 +433,10 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     if plan_writes_git_checkpoint(&plan, repo.capability()) {
         if plan.require_clean_worktree {
             let tree = repo.require_tree(&state.tree)?;
-            let status =
-                repo.compare_worktree_cached_detailed_with_options(&tree, &plan.worktree_status_options)?;
+            let status = repo.compare_worktree_cached_detailed_with_options(
+                &tree,
+                &plan.worktree_status_options,
+            )?;
             if !status.is_clean() {
                 return Err(anyhow!(HeddleError::recovery(
                     RecoveryDetails::safety_refusal(
@@ -597,17 +731,28 @@ fn is_commit_action(action: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use repo::RepositoryCapability;
+
+    use super::*;
 
     #[test]
     fn capture_always_uses_git_scope_none() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Capture, RepositoryCapability::GitOverlay, true, true),
+            plan_git_scope(
+                SaveVerb::Capture,
+                RepositoryCapability::GitOverlay,
+                true,
+                true
+            ),
             GitScope::None
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Capture, RepositoryCapability::NativeHeddle, false, false),
+            plan_git_scope(
+                SaveVerb::Capture,
+                RepositoryCapability::NativeHeddle,
+                false,
+                false
+            ),
             GitScope::None
         );
     }
@@ -615,7 +760,12 @@ mod tests {
     #[test]
     fn commit_native_never_writes_git() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::NativeHeddle, true, true),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::NativeHeddle,
+                true,
+                true
+            ),
             GitScope::None
         );
     }
@@ -623,15 +773,30 @@ mod tests {
     #[test]
     fn commit_git_overlay_routes_staged_vs_worktree() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, true, false),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                true,
+                false
+            ),
             GitScope::Staged
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, true, true),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                true,
+                true
+            ),
             GitScope::WorktreeAll
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Commit, RepositoryCapability::GitOverlay, false, false),
+            plan_git_scope(
+                SaveVerb::Commit,
+                RepositoryCapability::GitOverlay,
+                false,
+                false
+            ),
             GitScope::WorktreeAll
         );
     }
@@ -639,11 +804,21 @@ mod tests {
     #[test]
     fn checkpoint_routes_staged_flag() {
         assert_eq!(
-            plan_git_scope(SaveVerb::Checkpoint, RepositoryCapability::GitOverlay, true, false),
+            plan_git_scope(
+                SaveVerb::Checkpoint,
+                RepositoryCapability::GitOverlay,
+                true,
+                false
+            ),
             GitScope::Staged
         );
         assert_eq!(
-            plan_git_scope(SaveVerb::Checkpoint, RepositoryCapability::GitOverlay, false, false),
+            plan_git_scope(
+                SaveVerb::Checkpoint,
+                RepositoryCapability::GitOverlay,
+                false,
+                false
+            ),
             GitScope::WorktreeAll
         );
     }
@@ -659,8 +834,8 @@ mod tests {
         assert!(!plan_creates_new_state(&checkpoint, true));
         assert!(plan_creates_new_state(&checkpoint, false));
 
-        let staged = SavePlan::commit("msg", attr, GitScope::Staged)
-            .with_supplied_tree(Tree::new());
+        let staged =
+            SavePlan::commit("msg", attr, GitScope::Staged).with_supplied_tree(Tree::new());
         assert!(plan_creates_new_state(&staged, true));
     }
 
@@ -707,5 +882,46 @@ mod tests {
         assert_eq!(staged.git_scope, GitScope::Staged);
         assert!(!staged.require_clean_worktree);
         assert!(staged.reuse_current_state);
+    }
+
+    #[test]
+    fn tree_leaf_name_and_commit_next_action() {
+        assert_eq!(tree_leaf_name("a/b/c.rs"), "c.rs");
+        assert_eq!(tree_leaf_name("solo"), "solo");
+        assert_eq!(
+            commit_next_action_from_trust("heddle push", false, false).as_deref(),
+            Some("heddle push")
+        );
+        assert_eq!(
+            commit_next_action_from_trust("", false, true).as_deref(),
+            Some("heddle verify")
+        );
+        assert_eq!(
+            commit_next_action_from_trust("", true, true).as_deref(),
+            Some("heddle push")
+        );
+        assert_eq!(commit_next_action_from_trust("", true, false), None);
+    }
+
+    #[test]
+    fn commit_git_index_plan_modes() {
+        let staged = vec!["a.rs".into()];
+        let extra = vec!["unstaged: b.rs".into(), "untracked: c.rs".into()];
+        let staged_only = plan_commit_git_index(&staged, &extra, false);
+        assert_eq!(staged_only.commit_mode, "staged_index");
+        assert_eq!(staged_only.will_commit, vec!["a.rs"]);
+        assert_eq!(staged_only.preserved_after_commit.len(), 2);
+
+        let all = plan_commit_git_index(&staged, &extra, true);
+        assert_eq!(all.commit_mode, "worktree_all_explicit");
+        assert_eq!(all.will_commit.len(), 3);
+
+        let index_only = plan_commit_git_index_only(&staged, &extra);
+        assert_eq!(index_only.commit_mode, "staged_index");
+        assert_eq!(index_only.will_commit, vec!["a.rs"]);
+
+        assert!(commit_scope_text("staged_index").contains("staged Git index"));
+        assert!(staged_commit_summary("ok", 1, 2).contains("left 2 unstaged/untracked"));
+        assert_eq!(staged_commit_summary("ok", 1, 0), "ok");
     }
 }

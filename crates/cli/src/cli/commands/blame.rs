@@ -4,6 +4,7 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};
+use heddle_core::{fit_author as core_fit_author, summarize_context_line};
 use objects::{
     object::{
         AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
@@ -314,15 +315,7 @@ fn collect_file_context(
 }
 
 fn summarize_context(content: &str) -> String {
-    let first_line = content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    if first_line.len() <= 88 {
-        first_line.to_string()
-    } else {
-        format!("{}...", &first_line[..85])
-    }
+    summarize_context_line(content)
 }
 
 fn find_file_in_tree(repo: &Repository, tree: &Tree, file: &Path) -> Result<ContentHash> {
@@ -426,36 +419,8 @@ fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<
     Ok(infos)
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
-}
-
-/// Fit an attribution string (`Name <email>`) into `max_len` characters
-/// without losing semantic information. The default truncation cuts
-/// `"Ada Lovelace <ada@really.long.example.com>"` to `"Ada Lovelace <ada..."` —
-/// which keeps the noise (`<ada...`) and drops the signal (the actual
-/// name and email host). Strategy:
-///
-/// 1. If the full string fits, return it.
-/// 2. If the name half alone fits, drop the email entirely.
-/// 3. Otherwise truncate the name with an ellipsis.
 fn fit_author(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_string();
-    }
-    // Parse `Name <email>`: split at the first ` <` so we keep the
-    // name intact even when it contains spaces.
-    if let Some(angle) = s.find(" <") {
-        let name = &s[..angle];
-        if name.len() <= max_len {
-            return name.to_string();
-        }
-    }
-    truncate(s, max_len)
+    core_fit_author(s, max_len)
 }
 
 #[cfg(test)]

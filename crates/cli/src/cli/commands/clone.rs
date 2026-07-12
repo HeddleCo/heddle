@@ -14,7 +14,18 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedRefEntry, PullMaterialization};
-use heddle_core::status::next_action::canonical_git_import_ref_command;
+use heddle_core::{
+    CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
+    UnsupportedCloneFlag, plan_clone, status::next_action::canonical_git_import_ref_command,
+};
+#[cfg(feature = "client")]
+use heddle_core::{
+    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
+    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
+    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
+    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
+    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
+};
 use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
@@ -69,9 +80,6 @@ struct CloneOptions {
     depth: Option<u32>,
     lazy: bool,
     filter: Option<String>,
-    /// Recursive monorepo clone: resolve the hosted root spool's child tree and
-    /// clone every child at its anchored state into its mount path.
-    recursive: bool,
     /// Allow cleartext to non-loopback hosts for this clone. Only read on
     /// the network clone paths, which are gated behind the `client`
     /// feature; a build without `client` never reads this field back out
@@ -176,85 +184,163 @@ pub async fn cmd_clone(
     recursive: bool,
     insecure: bool,
 ) -> Result<()> {
-    let local_path = Path::new(&local);
-    let options = CloneOptions {
-        thread,
-        depth: depth.filter(|depth| *depth > 0),
-        lazy,
-        filter,
-        recursive,
-        insecure,
+    let local_path = PathBuf::from(&local);
+
+    // Cheap remote classification for pure planning (parse may resolve DNS
+    // / check path existence; no clone FS body or hosted pull yet).
+    let parse_result = RemoteTarget::parse(&remote);
+    let remote_source = match &parse_result {
+        Ok(RemoteTarget::Local(path)) => CloneRemoteSource::Local {
+            path: path.clone(),
+            has_heddle: path.join(".heddle").exists(),
+            is_git: open_repo(path).is_ok(),
+        },
+        Ok(RemoteTarget::Network { repo_path, .. }) => CloneRemoteSource::Network {
+            has_repo_path: repo_path.is_some(),
+        },
+        Err(_) => CloneRemoteSource::Unparsed,
     };
 
-    if local_path.exists() {
-        return Err(anyhow!(clone_destination_exists_advice(&local)));
-    }
+    let plan = plan_clone(
+        &ClonePlanOptions {
+            remote: remote.clone(),
+            local: local_path.clone(),
+            thread,
+            depth,
+            lazy,
+            filter,
+            recursive,
+            insecure,
+        },
+        &ClonePlanFacts {
+            destination_exists: local_path.exists(),
+            remote_source,
+        },
+    )
+    .map_err(clone_plan_error_to_anyhow)?;
 
-    // Parse the remote URL
+    let options = CloneOptions {
+        thread: plan.thread.clone(),
+        depth: plan.depth,
+        lazy: plan.lazy,
+        filter: plan.filter.clone(),
+        // Network paths honor the planned security preflight; local paths
+        // ignore insecure (clone_local discards it). Recursive monorepo vs
+        // single-repo is carried on `plan.mode`, not on CloneOptions.
+        insecure: plan.security.allow_insecure,
+    };
+
     #[cfg(feature = "client")]
     let server_key = credential_key_from_remote_url(&remote);
-    let target = match RemoteTarget::parse(&remote) {
-        Ok(target) => target,
-        Err(_) => {
-            // A monorepo clone is a hosted-spool operation; a Git-overlay or
-            // unparseable remote can't carry a child tree. Reject before any
-            // transport work so the user gets a clear message.
-            if options.recursive {
-                return Err(anyhow!(monorepo_requires_hosted_remote_advice(&remote)));
-            }
-            if looks_like_local_path(&remote) {
-                return Err(anyhow!(clone_remote_not_found_advice(Path::new(&remote))));
-            }
-            if looks_like_git_overlay_url(&remote) {
-                return clone_git_overlay_url(cli, &remote, local_path, &options);
-            }
-            return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
-        }
-    };
 
-    match target {
-        RemoteTarget::Local(remote_path) => {
-            if options.recursive {
-                return Err(anyhow!(monorepo_requires_hosted_remote_advice(&remote)));
-            }
-            if !remote_path.join(".heddle").exists() && open_repo(&remote_path).is_ok() {
-                return clone_git_overlay_path(cli, &remote_path, local_path, &options);
-            }
-            clone_local(cli, &remote_path, local_path, &options).await?;
+    match plan.mode {
+        CloneMode::LocalHeddle { remote_path } => {
+            clone_local(cli, &remote_path, &plan.destination, &options).await?;
         }
-        RemoteTarget::Network { addr, repo_path } => {
+        CloneMode::LocalGitOverlay { remote_path } => {
+            clone_git_overlay_path(cli, &remote_path, &plan.destination, &options)?;
+        }
+        CloneMode::GitOverlayUrl => {
+            clone_git_overlay_url(cli, &remote, &plan.destination, &options)?;
+        }
+        CloneMode::NetworkHosted { recursive } => {
+            let (addr, repo_path) = match parse_result {
+                Ok(RemoteTarget::Network { addr, repo_path }) => (addr, repo_path),
+                _ => {
+                    return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
+                }
+            };
             #[cfg(feature = "client")]
-            if options.recursive {
-                clone_monorepo(
-                    cli,
-                    addr,
-                    repo_path.as_deref(),
-                    local_path,
-                    &options,
-                    server_key,
-                    hosted_endpoint_spec(&remote),
-                )
-                .await?;
-            } else {
-                clone_network(
-                    cli,
-                    addr,
-                    repo_path.as_deref(),
-                    local_path,
-                    &options,
-                    server_key,
-                    hosted_endpoint_spec(&remote),
-                )
-                .await?;
+            {
+                // Security preflight is already assembled on the plan; session
+                // build + TLS validation still run inside network/monorepo
+                // bodies before any destination mutation.
+                let _ = &plan.security;
+                if recursive {
+                    clone_monorepo(
+                        cli,
+                        addr,
+                        repo_path.as_deref(),
+                        &plan.destination,
+                        &options,
+                        server_key,
+                        hosted_endpoint_spec(&remote),
+                    )
+                    .await?;
+                } else {
+                    clone_network(
+                        cli,
+                        addr,
+                        repo_path.as_deref(),
+                        &plan.destination,
+                        &options,
+                        server_key,
+                        hosted_endpoint_spec(&remote),
+                    )
+                    .await?;
+                }
             }
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path);
-            #[cfg(not(feature = "client"))]
-            return Err(anyhow!(network_clone_unavailable_advice()));
+            {
+                let _ = (addr, repo_path, recursive, &plan.security);
+                return Err(anyhow!(network_clone_unavailable_advice()));
+            }
         }
     }
 
     Ok(())
+}
+
+fn clone_plan_error_to_anyhow(err: ClonePlanError) -> anyhow::Error {
+    match err {
+        ClonePlanError::DestinationExists { path } => {
+            anyhow!(clone_destination_exists_advice(&path.display().to_string()))
+        }
+        ClonePlanError::MonorepoRequiresHosted { remote } => {
+            anyhow!(monorepo_requires_hosted_remote_advice(&remote))
+        }
+        ClonePlanError::RemoteLooksLikeMissingLocalPath { remote } => {
+            anyhow!(clone_remote_not_found_advice(Path::new(&remote)))
+        }
+        ClonePlanError::InvalidRemoteUrl { remote } => {
+            anyhow!(clone_invalid_remote_url_advice(&remote))
+        }
+        ClonePlanError::UnsupportedOption { flag, mode, value } => match mode {
+            "local" => {
+                let detail = match flag {
+                    UnsupportedCloneFlag::Filter => value.as_deref().unwrap_or(""),
+                    UnsupportedCloneFlag::Lazy => "true",
+                    UnsupportedCloneFlag::Depth => "",
+                };
+                anyhow!(local_clone_option_unsupported_advice(flag.as_str(), detail))
+            }
+            "monorepo" => anyhow!(RecoveryAdvice::safety_refusal(
+                "monorepo_clone_option_unsupported",
+                format!(
+                    "{} is not supported with --recursive monorepo clones",
+                    flag.as_str()
+                ),
+                format!(
+                    "Run the monorepo clone without `{}`, or clone the individual spool with `{}` non-recursively.",
+                    flag.as_str(),
+                    flag.as_str()
+                ),
+                format!(
+                    "`{}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk",
+                    flag.as_str()
+                ),
+                "accepting the flag could leave nodes materialized under mismatched fetch semantics",
+                "no destination directory or spool content was written",
+                "heddle clone <hosted-spool> <path> --recursive",
+                vec!["heddle clone <hosted-spool> <path> --recursive".to_string()],
+            )),
+            // git-overlay (and any unexpected mode label): map to overlay advice
+            _ => anyhow!(unsupported_git_overlay_clone_option_advice(
+                flag.as_str(),
+                value.as_deref()
+            )),
+        },
+    }
 }
 
 fn clone_invalid_remote_url_advice(remote: &str) -> RecoveryAdvice {
@@ -281,20 +367,6 @@ fn clone_destination_exists_advice(local: &str) -> RecoveryAdvice {
         "heddle clone <remote> <new-path>",
         vec!["heddle clone <remote> <new-path>".to_string()],
     )
-}
-
-fn looks_like_local_path(remote: &str) -> bool {
-    let path = Path::new(remote);
-    path.is_absolute()
-        || remote == "."
-        || remote == ".."
-        || remote.starts_with("./")
-        || remote.starts_with("../")
-        || remote.starts_with("~/")
-}
-
-fn looks_like_git_overlay_url(remote: &str) -> bool {
-    remote.contains("://") || remote.starts_with("git@")
 }
 
 fn clone_git_overlay_url(
@@ -327,38 +399,20 @@ fn clone_git_overlay_path(
 }
 
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
-/// any filesystem or network work runs. The wire-level plumbing in
-/// `clone_url_to_bare` can already negotiate shallow + partial-clone
-/// capabilities, but the ingest-backed import step requires every blob
-/// and parent commit to be present locally. Until ingest learns
-/// to tolerate missing objects, accepting these flags would just trade
-/// an upfront rejection for a half-built clone that fails partway
-/// through import. Each flag has its own message so the error stays
-/// scannable.
+/// any filesystem or network work runs. Pure validation lives in
+/// `heddle_core::validate_clone_mode_options`; this wrapper maps errors to
+/// recovery advice for the git-overlay execution path and unit tests.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
-    if let Some(filter) = options.filter.as_deref() {
-        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
-            "--filter",
-            Some(filter)
-        )));
-    }
-    if options.lazy {
-        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
-            "--lazy", None
-        )));
-    }
-    if options.depth.is_some() {
-        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
-            "--depth", None
-        )));
-    }
-    Ok(())
+    heddle_core::validate_clone_mode_options(
+        &CloneMode::GitOverlayUrl,
+        options.depth,
+        options.lazy,
+        options.filter.as_deref(),
+    )
+    .map_err(clone_plan_error_to_anyhow)
 }
 
-fn unsupported_git_overlay_clone_option_advice(
-    flag: &'static str,
-    value: Option<&str>,
-) -> RecoveryAdvice {
+fn unsupported_git_overlay_clone_option_advice(flag: &str, value: Option<&str>) -> RecoveryAdvice {
     let flag_with_value = value
         .map(|value| format!("{flag} {value}"))
         .unwrap_or_else(|| flag.to_string());
@@ -967,7 +1021,6 @@ async fn clone_local(
         depth,
         lazy,
         filter,
-        recursive: _,
         insecure: _,
     } = options;
     let depth = *depth;
@@ -1223,7 +1276,6 @@ async fn clone_network(
         depth,
         lazy,
         filter,
-        recursive: _,
         insecure,
     } = options;
     let depth = *depth;
@@ -1237,12 +1289,9 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let session = HostedSession::build(
-        &user_config,
-        server_key,
-        HostedAuthMode::CredentialFallback,
-    )?
-    .with_allow_insecure(*insecure);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(*insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let json_output = should_output_json(cli, None);
@@ -1384,19 +1433,18 @@ async fn clone_network(
 /// 1. Connect to the hosted server and `ResolveMonorepo(root_path)` — the
 ///    server returns the caller's coherent visible slice (per-child
 ///    visibility, cycle guard, depth bound).
-/// 2. [`MonorepoClonePlan::from_resolved`] walks that tree into a flat, ordered
-///    set of per-spool clone ops (root at the destination root, each child at
-///    `<parent>/<mount_name>`, each pinned to its resolved `content_state`)
-///    plus the set of withheld (EdgeSkip) child edges.
-/// 3. For each op, reuse the per-spool hosted-content path to materialize that
-///    spool at its anchored state into its mount path.
-/// 4. Report skipped children — unreadable / cycle / depth-bounded edges are
-///    surfaced, never fatal.
+/// 2. Map the transport tree into pure [`MonorepoNodeFacts`], then
+///    [`plan_monorepo_clone`] selects children, anchors mount paths, and
+///    orders per-node work (root first, pre-order) plus withheld edges.
+/// 3. Expand each selected node into pure [`MonorepoNodeExecutionStep`]s via
+///    [`plan_monorepo_execution`], validate ordering invariants, then execute
+///    FS / hosted I/O per step (progress labels stay pure in core).
+/// 4. Assemble placed/skipped summary and report — unreadable / cycle /
+///    depth-bounded edges are surfaced, never fatal.
 ///
-/// The plan-walk (step 2) is unit-proven in `heddle_client::grpc_hosted::monorepo`.
-/// The per-node fetch/materialize (step 3) reuses the existing single-spool
-/// hosted-clone machinery; a full live end-to-end clone against a running weft
-/// is a manual/dev-image check.
+/// Pure planning, validation, progress labels, and result summary (steps 2–4
+/// facts) live in `heddle_core::clone_plan` and are unit-tested there. This
+/// function owns hosted RPC and per-node materialize I/O.
 #[cfg(feature = "client")]
 async fn clone_monorepo(
     cli: &Cli,
@@ -1407,8 +1455,6 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use heddle_client::grpc_hosted::MonorepoClonePlan;
-
     use crate::{
         client::{HostedAuthMode, HostedSession},
         config::UserConfig,
@@ -1425,12 +1471,9 @@ async fn clone_monorepo(
     let user_config = UserConfig::load_default()?;
     // Security config validation must pass before any irreversible filesystem
     // mutation, exactly as `clone_network` does.
-    let session = HostedSession::build(
-        &user_config,
-        server_key,
-        HostedAuthMode::CredentialFallback,
-    )?
-    .with_allow_insecure(options.insecure);
+    let session =
+        HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+            .with_allow_insecure(options.insecure);
 
     let json_output = should_output_json(cli, None);
     let mut client = session.connect(addr).await?;
@@ -1448,71 +1491,70 @@ async fn clone_monorepo(
     }
 
     // Resolve the whole child tree into the caller's coherent visible slice,
-    // then translate it into per-spool clone ops + skipped edges.
+    // then pure-plan placement, work order, and per-node steps (no FS yet).
     let resolved = client.resolve_monorepo(root_path, None).await?;
-    let plan = MonorepoClonePlan::from_resolved(&resolved);
+    let facts = monorepo_node_facts_from_resolved(&resolved);
+    let clone_plan = plan_monorepo_clone(&facts);
+    let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
+    // Ordering invariants (Init before Fetch, paired fetch/materialize, …)
+    // before any irreversible per-node I/O.
+    validate_monorepo_execution(&exec).map_err(|err| anyhow!(err))?;
 
     // Guard the destination: remove it on any failure so a partial monorepo
     // isn't left behind (armed only if it didn't already exist).
     let mut cleanup = CloneDestinationCleanup::new(local_path);
     fs::create_dir_all(local_path)?;
 
-    let mut cloned_ops = 0usize;
-    for op in &plan.ops {
-        let dest = op.dest_path(local_path);
-        // Children mount under the root, whose directory already exists; create
-        // any intermediate mount directories.
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        clone_one_spool_op(
+    let total_nodes = exec.node_count();
+    for (node_index, node_exec) in exec.nodes.iter().enumerate() {
+        let dest = node_exec.node.dest_path(local_path);
+        execute_monorepo_node_steps(
             &mut client,
-            &op.spool_id,
-            op.content_state,
+            node_exec,
             &dest,
             &endpoint_spec,
+            node_index,
+            total_nodes,
         )
         .await
         .with_context(|| {
             format!(
                 "failed to clone spool '{}' into {}",
-                op.spool_id,
+                node_exec.node.spool_id,
                 dest.display()
             )
         })?;
-        cloned_ops += 1;
     }
 
     cleanup.disarm();
 
+    let summary = assemble_monorepo_clone_result_summary(&exec);
+
     // Report the outcome, including every withheld child edge.
     if json_output {
-        let output = monorepo_clone_output_json(local_path, &plan);
+        let output = monorepo_clone_output_json(local_path, &summary);
         crate::cli::render::write_json_stdout(&output)?;
     } else {
+        // Counts/copy from pure summary; CLI owns markers and bold root.
+        let unit = if summary.placed_count == 1 {
+            "spool"
+        } else {
+            "spools"
+        };
         println!(
-            "{} Cloned monorepo {} ({} spool{} placed).",
+            "{} Cloned monorepo {} ({} {} placed).",
             style::ok_marker(),
             style::bold(root_path),
-            cloned_ops,
-            if cloned_ops == 1 { "" } else { "s" },
+            summary.placed_count,
+            unit,
         );
-        for op in &plan.ops {
-            let rel = if op.rel_path.as_os_str().is_empty() {
-                ".".to_string()
-            } else {
-                op.rel_path.display().to_string()
-            };
-            println!("  {} <- {}", style::dim(&rel), op.spool_id);
+        for placed in &summary.placed {
+            let rel = monorepo_rel_display(&placed.rel_path);
+            println!("  {} <- {}", style::dim(&rel), placed.spool_id);
         }
-        if plan.skipped.is_empty() {
-            // No withheld edges — the slice is the full monorepo.
-        } else {
-            println!(
-                "  {} child spool(s) skipped (not part of your coherent slice):",
-                plan.skipped.len()
-            );
-            for sk in &plan.skipped {
+        if let Some(header) = summary.skipped_header() {
+            println!("  {header}");
+            for sk in &summary.skipped {
                 println!(
                     "    {} ({}) at {} — {}",
                     sk.mount_name,
@@ -1526,107 +1568,143 @@ async fn clone_monorepo(
     Ok(())
 }
 
-/// JSON envelope for a monorepo clone: the placed ops + the skipped edges.
+/// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
+///
+/// Parses content-state bytes into [`ChangeId`]; malformed/absent states map
+/// to `None` (empty checkout), matching prior client planner policy.
+#[cfg(feature = "client")]
+fn monorepo_node_facts_from_resolved(node: &grpc::heddle::v1::MonorepoNode) -> MonorepoNodeFacts {
+    use objects::object::ChangeId;
+
+    let content_state = node
+        .content_state
+        .as_deref()
+        .and_then(|bytes| ChangeId::try_from_slice(bytes).ok());
+    let edges = node
+        .edges
+        .iter()
+        .map(|edge| {
+            let skip_reason = edge.skipped.and_then(MonorepoEdgeSkipReason::from_wire_i32);
+            MonorepoEdgeFacts {
+                mount_name: edge.mount_name.clone(),
+                child_spool_id: edge.child_spool_id.clone(),
+                child: edge
+                    .subtree
+                    .as_ref()
+                    .map(|subtree| monorepo_node_facts_from_resolved(subtree)),
+                skip_reason,
+            }
+        })
+        .collect();
+    MonorepoNodeFacts {
+        spool_id: node.spool_id.clone(),
+        content_state,
+        edges,
+    }
+}
+
+/// JSON envelope for a monorepo clone from the pure result summary.
 #[cfg(feature = "client")]
 fn monorepo_clone_output_json(
     local_path: &Path,
-    plan: &heddle_client::grpc_hosted::MonorepoClonePlan,
+    summary: &MonorepoCloneResultSummary,
 ) -> serde_json::Value {
-    let placed: Vec<_> = plan
-        .ops
-        .iter()
-        .map(|op| {
-            serde_json::json!({
-                "spool_id": op.spool_id,
-                "path": op.rel_path.display().to_string(),
-                "content_state": op.content_state.map(|s| s.to_string()),
-            })
-        })
-        .collect();
-    let skipped: Vec<_> = plan
-        .skipped
-        .iter()
-        .map(|sk| {
-            serde_json::json!({
-                "child_spool_id": sk.child_spool_id,
-                "mount_name": sk.mount_name,
-                "path": sk.rel_path.display().to_string(),
-                "reason": sk.reason_label(),
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "output_kind": "clone_monorepo",
-        "action": "clone",
-        "status": "cloned",
-        "success": true,
-        "transport": "heddle",
-        "local": local_path.display().to_string(),
-        "placed": placed,
-        "skipped": skipped,
-    })
+    serde_json::to_value(assemble_monorepo_clone_json_report(local_path, summary))
+        .expect("monorepo clone report serializes")
 }
 
-/// Materialize a single spool at `content_state` into `dest`, reusing the
-/// hosted-content fetch path. `content_state == None` (spool has no content
-/// head yet) leaves an empty initialized repo at the mount point so the layout
-/// stays coherent.
+/// Execute pure per-node monorepo steps with hosted/FS I/O helpers.
+///
+/// Step order and gating come from [`plan_monorepo_node_steps`]; ordering is
+/// pre-validated by [`validate_monorepo_execution`]. This only performs side
+/// effects. Empty content plans omit fetch/materialize so the mount is an
+/// initialized empty repo (layout stays coherent).
 #[cfg(feature = "client")]
-async fn clone_one_spool_op(
+async fn execute_monorepo_node_steps(
     client: &mut heddle_client::grpc_hosted::HostedGrpcClient,
-    spool_id: &str,
-    content_state: Option<objects::object::ChangeId>,
+    node_exec: &MonorepoNodeExecution,
     dest: &Path,
     endpoint_spec: &str,
+    node_index: usize,
+    total_nodes: usize,
 ) -> Result<()> {
-    fs::create_dir_all(dest)?;
-    let repo = Repository::init(dest)?;
+    let spool_id = node_exec.node.spool_id.as_str();
+    // Repository is opened by InitRepo and reused by later steps.
+    let mut repo: Option<Repository> = None;
 
-    if let Some(state) = content_state {
-        // Fetch the exact resolved state's object closure. A `target_state`
-        // pull is thread-agnostic on the server (see `locally_complete_*`), so
-        // the anchored state — not a thread tip — is what gets materialized.
-        client.fetch_state(&repo, spool_id, "main", state).await?;
-        repo.goto_from_materialized_state(&state, None)
-            .context("failed to materialize monorepo node worktree")?;
+    for step in &node_exec.steps {
+        let progress = monorepo_execution_progress(node_index, total_nodes, step);
+        match step {
+            MonorepoNodeExecutionStep::ValidateDest => {
+                // Children mount under the root, whose directory already exists;
+                // create any intermediate mount directories and the dest itself.
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed at {}", progress.label()))?;
+                }
+                fs::create_dir_all(dest)
+                    .with_context(|| format!("failed at {}", progress.label()))?;
+            }
+            MonorepoNodeExecutionStep::InitRepo => {
+                repo = Some(
+                    Repository::init(dest)
+                        .with_context(|| format!("failed at {}", progress.label()))?,
+                );
+            }
+            MonorepoNodeExecutionStep::FetchContent { state } => {
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo FetchContent requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
+                // Fetch the exact resolved state's object closure. A
+                // `target_state` pull is thread-agnostic on the server (see
+                // `locally_complete_*`), so the anchored state — not a thread
+                // tip — is what gets materialized.
+                client
+                    .fetch_state(repo, spool_id, "main", *state)
+                    .await
+                    .with_context(|| format!("failed at {}", progress.label()))?;
+            }
+            MonorepoNodeExecutionStep::MaterializeState { state } => {
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo MaterializeState requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
+                repo.goto_from_materialized_state(state, None)
+                    .with_context(|| {
+                        format!(
+                            "failed to materialize monorepo node worktree ({})",
+                            progress.label()
+                        )
+                    })?;
+            }
+            MonorepoNodeExecutionStep::RecordMapping => {
+                let repo = repo.as_ref().with_context(|| {
+                    format!(
+                        "monorepo RecordMapping requires InitRepo first ({})",
+                        progress.label()
+                    )
+                })?;
+                // Seed origin so each placed spool tracks its own hosted upstream.
+                configure_hosted_clone_origin(repo, endpoint_spec, spool_id)
+                    .with_context(|| format!("failed at {}", progress.label()))?;
+            }
+        }
     }
-
-    // Seed origin so each placed spool tracks its own hosted upstream.
-    configure_hosted_clone_origin(&repo, endpoint_spec, spool_id)?;
     Ok(())
 }
 
-/// Reject `--depth`/`--lazy`/`--filter` for monorepo clones. Each of these
-/// changes what content a single-spool pull produces; composing them across a
-/// multi-spool anchored-state walk is out of scope for the first cut.
+/// Reject `--depth`/`--lazy`/`--filter` for monorepo clones. Pure validation
+/// lives in `heddle_core::validate_monorepo_clone_options`; this wrapper maps
+/// errors for the monorepo execution path.
 #[cfg(feature = "client")]
 fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {
-    let flag = if options.filter.is_some() {
-        Some("--filter")
-    } else if options.lazy {
-        Some("--lazy")
-    } else if options.depth.is_some() {
-        Some("--depth")
-    } else {
-        None
-    };
-    if let Some(flag) = flag {
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "monorepo_clone_option_unsupported",
-            format!("{flag} is not supported with --recursive monorepo clones"),
-            format!(
-                "Run the monorepo clone without `{flag}`, or clone the individual spool with `{flag}` non-recursively."
-            ),
-            format!(
-                "`{flag}` changes single-spool pull semantics that don't compose across the anchored-state monorepo walk"
-            ),
-            "accepting the flag could leave nodes materialized under mismatched fetch semantics",
-            "no destination directory or spool content was written",
-            "heddle clone <hosted-spool> <path> --recursive",
-            vec!["heddle clone <hosted-spool> <path> --recursive".to_string()],
-        )));
-    }
-    Ok(())
+    validate_monorepo_clone_options(options.depth, options.lazy, options.filter.as_deref())
+        .map_err(clone_plan_error_to_anyhow)
 }
 
 fn monorepo_requires_hosted_remote_advice(remote: &str) -> RecoveryAdvice {
@@ -1958,7 +2036,6 @@ mod tests {
             depth,
             lazy,
             filter: filter.map(str::to_string),
-            recursive: false,
             insecure: false,
         }
     }

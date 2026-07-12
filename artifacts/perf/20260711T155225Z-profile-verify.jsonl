@@ -1,0 +1,4 @@
+{"schema":"heddle-cli-profile/v1","command":"verify","exit_status":"error","phases":[{"name":"verify plain git probe","metrics":{"plain_git_probe_ms":{"value":0,"unit":"milliseconds"}}},{"name":"verify repo open","metrics":{"repo_open_ms":{"value":0,"unit":"milliseconds"}}},{"name":"verify repository checks","metrics":{"verification_ms":{"value":11,"unit":"milliseconds"}}},{"name":"verify command body","metrics":{"command_body_ms":{"value":15,"unit":"milliseconds"}}}],"totals":{"command_body_ms":{"value":15,"unit":"milliseconds"},"config_load_ms":{"value":0,"unit":"milliseconds"},"logging_init_ms":{"value":0,"unit":"milliseconds"},"total_ms":{"value":18,"unit":"milliseconds"}}}
+Error: Repository is not verified: uncaptured
+Next: heddle commit -m "..."
+Also: heddle capture -m "..."

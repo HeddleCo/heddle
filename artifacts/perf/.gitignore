@@ -1,0 +1,4 @@
+# Track JSON summaries and docs; ignore large local binary copies.
+bin/
+__pycache__/
+*.pyc

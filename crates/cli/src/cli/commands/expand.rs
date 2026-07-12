@@ -217,7 +217,7 @@ fn print_human(output: &ExpandOutput) {
 }
 
 fn short_oid(oid: &str) -> &str {
-    oid.get(..12).unwrap_or(oid)
+    heddle_core::short_oid(oid)
 }
 
 impl From<State> for ExpandedCaptureOutput {

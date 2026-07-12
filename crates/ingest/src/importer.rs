@@ -25,7 +25,7 @@ use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
-        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
+        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder, SyncData},
     },
     util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
@@ -507,7 +507,7 @@ struct PackedImportStats {
     lossy_entries: Vec<LossyImportEntry>,
 }
 
-struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
+struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> {
     git: &'a GitSource,
     map: &'a mut ShaMap,
     builder: StreamingPackBuilder<W>,
@@ -515,7 +515,7 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
     options: ImportOptions,
 }
 
-impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> {
+impl<'a, W: std::io::Write + std::io::Read + std::io::Seek + SyncData> PackedImport<'a, W> {
     fn new(
         git: &'a GitSource,
         map: &'a mut ShaMap,

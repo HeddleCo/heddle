@@ -2,6 +2,7 @@
 //! Index command - inspect and manage the worktree index.
 
 use anyhow::Result;
+use heddle_core::index_plan::{index_missing_message, plan_index_absent_dump};
 use repo::WorktreeIndex;
 use serde::Serialize;
 
@@ -62,15 +63,15 @@ pub fn cmd_index(cli: &Cli, dump: bool) -> Result<()> {
         return Ok(());
     }
 
-    if dump {
-        if !index_path.exists() {
-            println!(
-                "No index found at {}. Run a snapshot or status command first.",
-                index_path.display()
-            );
-            return Ok(());
-        }
+    if plan_index_absent_dump(dump, index_path.exists()) {
+        println!(
+            "{}",
+            index_missing_message(&index_path.display().to_string())
+        );
+        return Ok(());
+    }
 
+    if dump {
         println!("{}", WorktreeIndex::dump_from_path(&index_path)?);
     }
 

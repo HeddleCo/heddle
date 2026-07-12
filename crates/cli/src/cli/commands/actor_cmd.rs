@@ -4,14 +4,22 @@
 //! Actors are Heddle's native record of an active harness or agent identity
 //! working on a thread. They are user-facing handles over the lightweight
 //! registry stored in `.heddle/agents/`.
+//!
+//! List/show/spawn/done domain assembly and pure planning live in
+//! `heddle_core::actor`. This module owns implicit session resolution,
+//! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use chrono::Utc;
+use heddle_core::{
+    ActorEntryReport, ActorListReport, ActorSpawnError, ActorSpawnOptions, assemble_actor_entry,
+    build_spawn_entry, list_actors, mark_actor_done, plan_actor_done, plan_actor_spawn,
+    show_actor_from_entry,
+};
 use objects::{
     object::ThreadName,
-    store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
+    store::{AgentEntry, AgentRegistry, AgentStatus},
 };
-use repo::{Repository, ThreadId};
+use repo::Repository;
 use serde::Serialize;
 
 use super::{
@@ -26,72 +34,9 @@ use super::{
 use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize)]
-struct ActorOutput {
-    session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_instance_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_parent_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_instance_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    heddle_session_id: Option<String>,
-    thread: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread_id: Option<String>,
-    base_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
-    usage_summary: AgentUsageSummary,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_progress_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    report_flush_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attach_reason: Option<String>,
-    attach_precedence: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    winning_attach_rule: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_confidence: Option<f32>,
-    status: String,
-    started_at: String,
-    actor_chain: Vec<ActorChainOutput>,
-}
-
-#[derive(Serialize)]
-struct ActorChainOutput {
-    session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_parent_actor_key: Option<String>,
-    thread: String,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-}
-
-#[derive(Serialize)]
 struct ActorSingleOutput {
     output_kind: &'static str,
-    actor: ActorOutput,
+    actor: ActorEntryReport,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -99,7 +44,7 @@ struct ActorSingleOutput {
 #[derive(Serialize)]
 struct ActorListOutput {
     output_kind: &'static str,
-    actors: Vec<ActorOutput>,
+    actors: Vec<ActorEntryReport>,
     active_only: bool,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -207,60 +152,6 @@ struct ActorEnvironmentOutput {
     signals: Vec<String>,
 }
 
-impl From<ActorChainNode> for ActorChainOutput {
-    fn from(node: ActorChainNode) -> Self {
-        Self {
-            session_id: node.session_id,
-            native_actor_key: node.native_actor_key,
-            native_parent_actor_key: node.native_parent_actor_key,
-            thread: node.thread,
-            status: node.status.to_string(),
-            provider: node.provider,
-            model: node.model,
-            harness: node.harness,
-        }
-    }
-}
-
-impl From<&AgentEntry> for ActorOutput {
-    fn from(entry: &AgentEntry) -> Self {
-        Self {
-            session_id: entry.session_id.clone(),
-            client_instance_id: entry.client_instance_id.clone(),
-            native_actor_key: entry.native_actor_key.clone(),
-            native_parent_actor_key: entry.native_parent_actor_key.clone(),
-            native_instance_key: entry.native_instance_key.clone(),
-            heddle_session_id: entry.heddle_session_id.clone(),
-            thread: entry.thread.clone(),
-            thread_id: entry.thread_id.clone(),
-            base_state: entry.base_state.clone(),
-            path: entry.path.as_ref().map(|path| path.display().to_string()),
-            provider: entry.provider.clone(),
-            model: entry.model.clone(),
-            harness: entry.harness.clone(),
-            thinking_level: entry.thinking_level.clone(),
-            usage_summary: entry.usage_summary.clone(),
-            last_progress_at: entry.last_progress_at.map(|ts| ts.to_rfc3339()),
-            report_flush_state: entry.report_flush_state.clone(),
-            attach_reason: entry.attach_reason.clone(),
-            attach_precedence: entry.attach_precedence.clone(),
-            winning_attach_rule: entry.winning_attach_rule.clone(),
-            probe_source: entry.probe_source.clone(),
-            probe_confidence: entry.probe_confidence,
-            status: entry.status.to_string(),
-            started_at: entry.started_at.to_rfc3339(),
-            actor_chain: vec![],
-        }
-    }
-}
-
-impl ActorOutput {
-    fn with_chain(mut self, chain: Vec<ActorChainNode>) -> Self {
-        self.actor_chain = chain.into_iter().map(ActorChainOutput::from).collect();
-        self
-    }
-}
-
 pub async fn cmd_actor_spawn(
     cli: &Cli,
     thread: Option<String>,
@@ -268,13 +159,6 @@ pub async fn cmd_actor_spawn(
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
-    // A user-supplied `--thread` name is a creation boundary (spawn mints or
-    // attaches the named thread), so reject an unsafe name before any ref is
-    // written. The generated `actor/<session>` fallback is safe by construction.
-    // (heddle#464 close-the-class.)
-    if let Some(name) = thread.as_deref() {
-        ThreadId::new(name).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
-    }
     let repo = cli.open_repo()?;
 
     let base_state = repo.head()?.ok_or_else(|| {
@@ -283,127 +167,61 @@ pub async fn cmd_actor_spawn(
         ))
     })?;
 
-    // `--no-thread` attaches the actor to the current lane rather than minting
-    // a fresh `actor/<session>` thread. `current_lane()` is the single source
-    // of truth for "is there a lane to attach to?": it consults the git-overlay
-    // HEAD state, so a detached Git HEAD reports no lane even when `.heddle/HEAD`
-    // still names a stale attached thread. Resolve it up front so we fail
-    // cleanly before creating any registry entry. The same predicate drives the
-    // `actor explain` recommendation, so recommend and execute never disagree.
-    let attach_thread = if no_thread {
-        match repo.current_lane()? {
-            Some(lane) => Some(ThreadName::new(lane)),
-            None => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
-        }
-    } else {
-        None
-    };
+    // `current_lane()` is the single source of truth for "is there a lane to
+    // attach to?": it consults the git-overlay HEAD state, so a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale
+    // attached thread. The same predicate drives the `actor explain`
+    // recommendation, so recommend and execute never disagree.
+    let current_lane = repo.current_lane()?;
 
-    let explicit_identity = provider
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty())
-        || model.as_ref().is_some_and(|value| !value.trim().is_empty());
     let probe = crate::harness::probe_current_process_harness(
         &repo,
         provider.clone().filter(|value| !value.trim().is_empty()),
         model.clone().filter(|value| !value.trim().is_empty()),
         None,
     )?;
-    let resolved_provider = provider
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| probe.provider.clone());
-    let resolved_model = model
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| probe.model.clone());
-    let probe_source = if explicit_identity {
-        Some("explicit_payload".to_string())
-    } else {
-        probe.probe_source.clone()
-    };
-    let probe_confidence = if explicit_identity {
-        Some(1.0)
-    } else {
-        probe.confidence
-    };
+
+    let plan = plan_actor_spawn(&ActorSpawnOptions {
+        thread,
+        no_thread,
+        current_lane,
+        provider,
+        model,
+        probe_provider: probe.provider.clone(),
+        probe_model: probe.model.clone(),
+        harness: probe.harness.clone(),
+        thinking_level: probe.thinking_level.clone(),
+        probe_source: probe.probe_source.clone(),
+        probe_confidence: probe.confidence,
+        base_state_full: base_state.to_string_full(),
+        base_state_short: base_state.short(),
+    })
+    .map_err(map_actor_spawn_error)?;
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let thread_name = match &attach_thread {
-            Some(current) => current.clone(),
-            None => ThreadName::new(
-                thread
-                    .clone()
-                    .unwrap_or_else(|| format!("actor/{session_id}")),
-            ),
-        };
+        let entry = build_spawn_entry(
+            &plan,
+            session_id,
+            Some(std::process::id()),
+            Some(objects::store::generate_agent_id()),
+            chrono::Utc::now(),
+        );
+        let thread_name = ThreadName::new(entry.thread.clone());
 
         // In `--no-thread` mode we attach to the existing current thread
         // and never create a ref, so no stray thread is left behind.
-        if attach_thread.is_none() && repo.refs().get_thread(&thread_name)?.is_none() {
+        if plan.mint_thread_if_missing && repo.refs().get_thread(&thread_name)?.is_none() {
             repo.refs().set_thread(&thread_name, &base_state)?;
         }
 
-        Ok(AgentEntry {
-            session_id: session_id.to_string(),
-            client_instance_id: None,
-            native_actor_key: None,
-            native_parent_actor_key: None,
-            native_instance_key: None,
-            heddle_session_id: None,
-            thread_id: None,
-            thread: thread_name.to_string(),
-            pid: Some(std::process::id()),
-            boot_id: None,
-            liveness_path: None,
-            heartbeat_at: Some(Utc::now()),
-            anchor_state: Some(base_state.to_string_full()),
-            anchor_root: None,
-            reservation_token: Some(objects::store::generate_agent_id()),
-            path: None,
-            base_state: base_state.short(),
-            started_at: Utc::now(),
-            provider: resolved_provider.clone(),
-            model: resolved_model.clone(),
-            harness: probe.harness.clone(),
-            thinking_level: probe.thinking_level.clone(),
-            usage_summary: AgentUsageSummary::default(),
-            last_progress_at: None,
-            report_flush_state: None,
-            attach_reason: Some(if attach_thread.is_some() {
-                format!(
-                    "actor {session_id} was attached to the current thread {thread_name} without minting a new thread"
-                )
-            } else {
-                format!("actor {session_id} was spawned explicitly on thread {thread_name}")
-            }),
-            task_assignment_id: None,
-            attach_precedence: vec![
-                if attach_thread.is_some() {
-                    "no-thread-attach".to_string()
-                } else {
-                    "explicit-actor-spawn".to_string()
-                },
-            ],
-            winning_attach_rule: Some(if attach_thread.is_some() {
-                "no-thread-attach".to_string()
-            } else {
-                "explicit-actor-spawn".to_string()
-            }),
-            probe_source: probe_source.clone(),
-            probe_confidence,
-            status: AgentStatus::Active,
-            completed_at: None,
-            context_queries: vec![],
-        })
+        Ok(entry)
     })?;
 
     if should_output_json(cli, None) {
-        let chain = registry.actor_chain_for_session(&entry.session_id)?;
         let output = ActorSingleOutput {
             output_kind: "actor_spawn",
-            actor: ActorOutput::from(&entry).with_chain(chain),
+            actor: assemble_actor_entry(&registry, &entry)?,
             trust: build_repository_verification_state(&repo),
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -425,54 +243,27 @@ pub async fn cmd_actor_spawn(
     Ok(())
 }
 
+fn map_actor_spawn_error(err: ActorSpawnError) -> anyhow::Error {
+    match err {
+        ActorSpawnError::InvalidThreadName(err) => anyhow!(thread_name_invalid_advice(&err)),
+        ActorSpawnError::NoCurrentLane => anyhow!(actor_spawn_no_thread_detached_advice()),
+    }
+}
+
 pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
     let repo = cli.open_repo()?;
-    let registry = AgentRegistry::new(repo.heddle_dir());
-
-    let mut entries = registry.list()?;
-    if active_only {
-        entries.retain(|entry| entry.status == AgentStatus::Active);
-    }
+    let report = list_actors(&repo, active_only)?;
 
     if should_output_json(cli, None) {
         let output = ActorListOutput {
-            output_kind: "actor_list",
-            actors: entries.iter().map(ActorOutput::from).collect(),
-            active_only,
+            output_kind: report.output_kind,
+            actors: report.actors,
+            active_only: report.active_only,
             trust: build_repository_verification_state(&repo),
         };
         println!("{}", serde_json::to_string(&output)?);
-    } else if entries.is_empty() {
-        println!("No actors.");
     } else {
-        println!("Actors:");
-        for entry in &entries {
-            println!(
-                "  {} [{}] thread:{} base:{}",
-                entry.session_id, entry.status, entry.thread, entry.base_state
-            );
-            if let Some(path) = &entry.path {
-                println!("    path: {}", path.display());
-            }
-            if let Some(harness) = &entry.harness {
-                println!("    harness: {}", harness);
-            }
-            if let Some(actor) =
-                crate::cli::render::actor_display(entry.provider.as_deref(), entry.model.as_deref())
-            {
-                println!("    actor: {}", actor);
-            }
-            if let Some(thinking_level) = &entry.thinking_level {
-                println!("    thinking: {}", thinking_level);
-            }
-            if let Some(probe_source) = &entry.probe_source {
-                if let Some(confidence) = entry.probe_confidence {
-                    println!("    detected: {} ({:.2})", probe_source, confidence);
-                } else {
-                    println!("    detected: {}", probe_source);
-                }
-            }
-        }
+        render_actor_list(&report);
     }
 
     Ok(())
@@ -482,68 +273,108 @@ pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()>
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
+    let show = show_actor_from_entry(&registry, &entry)?;
 
     if should_output_json(cli, None) {
-        let chain = registry.actor_chain_for_session(&entry.session_id)?;
         let output = ActorSingleOutput {
             output_kind: "actor_show",
-            actor: ActorOutput::from(&entry).with_chain(chain),
+            actor: show.actor,
             trust: build_repository_verification_state(&repo),
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor: {}", entry.session_id);
-        println!("Thread: {}", entry.thread);
-        println!("Status: {}", entry.status);
-        println!("Base state: {}", entry.base_state);
-        if let Some(heddle_session_id) = &entry.heddle_session_id {
-            println!("Heddle session: {}", heddle_session_id);
-        }
-        if let Some(client_instance_id) = &entry.client_instance_id {
-            println!("Client instance: {}", client_instance_id);
-        }
-        if let Some(native_actor_key) = &entry.native_actor_key {
-            println!("Native actor: {}", native_actor_key);
-        }
-        if let Some(native_parent_actor_key) = &entry.native_parent_actor_key {
-            println!("Native parent: {}", native_parent_actor_key);
-        }
-        if let Some(native_instance_key) = &entry.native_instance_key {
-            println!("Native instance: {}", native_instance_key);
-        }
-        if let Some(path) = &entry.path {
-            println!("Path: {}", path.display());
-        }
-        if let Some(provider) = &entry.provider {
-            println!("Provider: {}", provider);
-        }
-        if let Some(model) = &entry.model {
-            println!("Model: {}", model);
-        }
-        if let Some(harness) = &entry.harness {
-            println!("Harness: {}", harness);
-        }
-        if let Some(thinking_level) = &entry.thinking_level {
-            println!("Thinking: {}", thinking_level);
-        }
-        if let Some(report_flush_state) = &entry.report_flush_state {
-            println!("Report flush: {}", report_flush_state);
-        }
-        if let Some(attach_reason) = &entry.attach_reason {
-            println!("Attach: {}", attach_reason);
-        }
-        print_actor_chain(&registry, &entry)?;
+        render_actor_show(&show.actor);
     }
 
     Ok(())
+}
+
+fn render_actor_list(report: &ActorListReport) {
+    if report.actors.is_empty() {
+        println!("No actors.");
+        return;
+    }
+    println!("Actors:");
+    for entry in &report.actors {
+        println!(
+            "  {} [{}] thread:{} base:{}",
+            entry.session_id, entry.status, entry.thread, entry.base_state
+        );
+        if let Some(path) = &entry.path {
+            println!("    path: {}", path);
+        }
+        if let Some(harness) = &entry.harness {
+            println!("    harness: {}", harness);
+        }
+        if let Some(actor) =
+            crate::cli::render::actor_display(entry.provider.as_deref(), entry.model.as_deref())
+        {
+            println!("    actor: {}", actor);
+        }
+        if let Some(thinking_level) = &entry.thinking_level {
+            println!("    thinking: {}", thinking_level);
+        }
+        if let Some(probe_source) = &entry.probe_source {
+            if let Some(confidence) = entry.probe_confidence {
+                println!("    detected: {} ({:.2})", probe_source, confidence);
+            } else {
+                println!("    detected: {}", probe_source);
+            }
+        }
+    }
+}
+
+fn render_actor_show(actor: &ActorEntryReport) {
+    println!("Actor: {}", actor.session_id);
+    println!("Thread: {}", actor.thread);
+    println!("Status: {}", actor.status);
+    println!("Base state: {}", actor.base_state);
+    if let Some(heddle_session_id) = &actor.heddle_session_id {
+        println!("Heddle session: {}", heddle_session_id);
+    }
+    if let Some(client_instance_id) = &actor.client_instance_id {
+        println!("Client instance: {}", client_instance_id);
+    }
+    if let Some(native_actor_key) = &actor.native_actor_key {
+        println!("Native actor: {}", native_actor_key);
+    }
+    if let Some(native_parent_actor_key) = &actor.native_parent_actor_key {
+        println!("Native parent: {}", native_parent_actor_key);
+    }
+    if let Some(native_instance_key) = &actor.native_instance_key {
+        println!("Native instance: {}", native_instance_key);
+    }
+    if let Some(path) = &actor.path {
+        println!("Path: {}", path);
+    }
+    if let Some(provider) = &actor.provider {
+        println!("Provider: {}", provider);
+    }
+    if let Some(model) = &actor.model {
+        println!("Model: {}", model);
+    }
+    if let Some(harness) = &actor.harness {
+        println!("Harness: {}", harness);
+    }
+    if let Some(thinking_level) = &actor.thinking_level {
+        println!("Thinking: {}", thinking_level);
+    }
+    if let Some(report_flush_state) = &actor.report_flush_state {
+        println!("Report flush: {}", report_flush_state);
+    }
+    if let Some(attach_reason) = &actor.attach_reason {
+        println!("Attach: {}", attach_reason);
+    }
+    print_actor_chain(&actor.actor_chain);
 }
 
 pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
-    registry.update_status(&entry.session_id, AgentStatus::Complete)?;
-    let summary = find_thread_summary(&repo, &entry.thread)?;
+    let plan = plan_actor_done(&entry);
+    mark_actor_done(&registry, &plan.session_id)?;
+    let summary = find_thread_summary(&repo, &plan.thread)?;
     let recommended_action = summary.as_ref().and_then(|thread| {
         actor_done_recommended_action(&thread.name, &thread.coordination_status.to_string())
     });
@@ -552,9 +383,9 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
     if should_output_json(cli, None) {
         let output = ActorDoneOutput {
             output_kind: "actor_done",
-            session_id: entry.session_id,
+            session_id: plan.session_id.clone(),
             status: "complete",
-            thread: entry.thread,
+            thread: plan.thread.clone(),
             coordination_status: summary
                 .as_ref()
                 .map(|thread| thread.coordination_status.to_string()),
@@ -564,7 +395,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Actor '{}' marked as complete.", entry.session_id);
+        println!("Actor '{}' marked as complete.", plan.session_id);
         if let Some(thread) = summary {
             println!(
                 "Thread '{}' is {}.",
@@ -886,10 +717,9 @@ fn no_active_actor_advice() -> RecoveryAdvice {
     )
 }
 
-fn print_actor_chain(registry: &AgentRegistry, entry: &AgentEntry) -> Result<()> {
-    let chain = registry.actor_chain_for_session(&entry.session_id)?;
+fn print_actor_chain(chain: &[heddle_core::ActorChainEntry]) {
     if chain.len() <= 1 {
-        return Ok(());
+        return;
     }
     println!("Actor chain:");
     for (idx, node) in chain.iter().enumerate() {
@@ -908,5 +738,4 @@ fn print_actor_chain(registry: &AgentRegistry, entry: &AgentEntry) -> Result<()>
             arrow, label, node.status, node.thread, parent
         );
     }
-    Ok(())
 }

@@ -12,15 +12,17 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use heddle_core::{
     ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
-    MachineContractInput, MaterializedThreadInfo, StatusDetail, StatusOptions,
-    StatusReport as StatusOutput, changes_from_worktree_status, changes_paths,
-    fast_short_status_report, status as core_status,
+    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
+    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
+    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
+    status_combined_verdict,
 };
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
+#[cfg(feature = "client")]
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 use tokio::time::{Duration, sleep};
@@ -33,12 +35,8 @@ use tracing::debug;
 
 use super::{
     action_line::print_command,
-    git_projection::{GitIndexPlan, git_index_plan_for_root},
     next_action::{NextActionValidationContext, write_command_json},
-    verification_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe, repository_setup_guidance,
-        serialize_empty_action_as_null,
-    },
+    verification_health::repository_setup_guidance,
 };
 #[cfg(feature = "client")]
 use crate::config::UserConfig;
@@ -46,28 +44,6 @@ use crate::{
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     perf::{ProfileField, ProfileMode, emit_profile, profile_enabled, profile_mode},
 };
-
-#[derive(Serialize)]
-struct PlainGitStatusOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
-    storage_model: String,
-    heddle_initialized: bool,
-    git_branch: Option<String>,
-    path: String,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
-    thread_health: String,
-    changed_path_count: usize,
-    changes: ChangesInfo,
-    git_index: Option<CoreGitIndexPlan>,
-}
 
 fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
     let Some(profile) = profile else {
@@ -196,15 +172,11 @@ pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
     let Ok(output) = build_status_output(cli, true) else {
         return Ok(None);
     };
-    let repo = cli.open_repo().ok();
-    let current_lane = repo
-        .as_ref()
-        .and_then(|repo| repo.current_lane().ok())
-        .flatten();
+    // Short status already carries the current lane on `output.thread` from
+    // the single open in `build_status_command_output` — do not re-open.
     let subject = output
         .thread
         .as_deref()
-        .or(current_lane.as_deref())
         .or_else(|| output.current_state.as_ref().map(|_| "detached"));
     let Some(subject) = subject else {
         return Ok(None);
@@ -225,37 +197,18 @@ pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
     Ok(Some(segment))
 }
 
-fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput>> {
+fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusReport>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let Some(probe) = build_plain_git_verification_probe(start)? else {
-        return Ok(None);
-    };
-    let changes = changes_from_worktree_status(&probe.changes);
-    let changed_path_count = probe.changes.change_count();
-    let trust = probe.trust;
-    let git_index = git_index_plan_for_root(&probe.root)?.map(core_git_index_plan);
-    Ok(Some(PlainGitStatusOutput {
-        output_kind: "status",
-        repository_capability: "plain-git".to_string(),
-        repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-        storage_model: "git-only".to_string(),
-        heddle_initialized: false,
-        git_branch: probe.git_branch,
-        path: probe.root.display().to_string(),
-        recommended_action: trust.recommended_action.clone(),
-        recommended_action_template: trust.recommended_action_template.clone(),
-        recovery_commands: trust.recovery_commands.clone(),
-        recovery_action_templates: trust.recovery_action_templates.clone(),
-        thread_health: trust.status.clone(),
-        changed_path_count,
-        changes,
-        git_index,
-        trust,
-    }))
+    Ok(plain_git_status_report(
+        start,
+        &MachineContractInput::from_coverage(
+            super::verification_health::machine_contract_coverage(),
+        ),
+    )?)
 }
 
-fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
+fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusReport, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
         write_command_json(
             output,
@@ -313,7 +266,11 @@ struct StatusCommandOutput {
 fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOutput> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
+    // Single open for the whole command: inject into ExecutionContext so core
+    // does not re-open, and attribute open cost here for truthful profiles.
+    let repo_open_start = Instant::now();
     let repo = Repository::open(&start)?;
+    let cli_repo_open_ms = repo_open_start.elapsed().as_millis();
     let repo_config = repo.config().clone();
     let as_json = should_output_json(cli, Some(&repo_config));
     let compact_json = as_json && output_is_compact(cli);
@@ -331,7 +288,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         .start_path(start.clone())
         .repo(repo)
         .build();
-    let output = core_status(
+    let mut output = core_status(
         &ctx,
         StatusOptions::new(detail, status_options)
             .with_start_path(start)
@@ -339,6 +296,9 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
+    // Core reports 0 for injected repos; fold the shell open into the profile
+    // so `repo_open_ms` reflects real work on this path.
+    output.profile.repo_open_ms += cli_repo_open_ms;
     debug!(
         repo_open_ms = output.profile.repo_open_ms,
         body_ms = output.profile.build_total_ms,
@@ -350,18 +310,6 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         report: output,
         render_json: as_json,
     })
-}
-
-fn core_git_index_plan(plan: GitIndexPlan) -> CoreGitIndexPlan {
-    CoreGitIndexPlan {
-        commit_mode: plan.commit_mode,
-        has_staged_changes: plan.has_staged_changes,
-        staged_paths: plan.staged_paths,
-        unstaged_paths: plan.unstaged_paths,
-        untracked_paths: plan.untracked_paths,
-        will_commit: plan.will_commit,
-        preserved_after_commit: plan.preserved_after_commit,
-    }
 }
 
 fn cli_coordination_status(status: CoordinationStatus) -> super::thread::CoordinationStatus {
@@ -546,7 +494,7 @@ impl super::compact::CompactProjection for StatusOutput {
     }
 }
 
-impl super::compact::CompactProjection for PlainGitStatusOutput {
+impl super::compact::CompactProjection for PlainGitStatusReport {
     fn compact(&self) -> super::compact::CompactOutput {
         let (next_action, next_action_template) =
             compact_next_action(&self.recommended_action, &self.recommended_action_template);
@@ -685,7 +633,7 @@ fn short_status_subject(output: &StatusOutput) -> &str {
         .unwrap_or("repository")
 }
 
-fn render_short_plain_git_status(output: &PlainGitStatusOutput) {
+fn render_short_plain_git_status(output: &PlainGitStatusReport) {
     render_short_changes(&output.changes);
     if output.changes.is_empty() {
         println!(
@@ -885,9 +833,13 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
     // signals non-clean whenever either axis is, so the default reader
     // never loses the "something's wrong" signal — `-v` then tells
     // them which axis. JSON is unaffected (both fields always emitted).
-    let (verdict, verdict_reason) = status_combined_verdict(output);
-    println!("Verdict: {}", style::thread_state(&verdict));
-    if let Some(reason) = verdict_reason {
+    let verdict = status_combined_verdict(
+        &output.thread_health,
+        output.coordination_status,
+        output.coordination_blocked_by_trust,
+    );
+    println!("Verdict: {}", style::thread_state(&verdict.word));
+    if let Some(reason) = verdict.reason {
         println!("  {}", style::dim(reason));
     }
     if verbose {
@@ -1340,59 +1292,7 @@ fn human_status_blocker_text(blocker: &str) -> String {
 }
 
 fn git_setup_line(output: &StatusOutput) -> Option<String> {
-    status_repository_setup_guidance(&output.trust).map(|setup| setup.setup_line)
-}
-
-struct StatusRepositorySetupGuidance {
-    setup_line: String,
-}
-
-fn status_repository_setup_guidance(
-    trust: &heddle_core::RepositoryVerificationState,
-) -> Option<StatusRepositorySetupGuidance> {
-    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
-        return None;
-    }
-    let action = trust.recommended_action.trim();
-    if action.is_empty() {
-        return None;
-    }
-    let kind = status_repository_setup_action_kind(action);
-    let setup_line = match kind {
-        StatusRepositorySetupActionKind::Init => {
-            format!("Git repo detected; initialize Heddle with {action}")
-        }
-        StatusRepositorySetupActionKind::Adopt => {
-            format!("Git repo detected; connect this branch with {action}")
-        }
-        StatusRepositorySetupActionKind::GitImport => {
-            format!("Git history not imported; import it with {action}")
-        }
-        StatusRepositorySetupActionKind::Other => {
-            format!("Run {action} to clear the primary setup blocker")
-        }
-    };
-    Some(StatusRepositorySetupGuidance { setup_line })
-}
-
-#[derive(Clone, Copy)]
-enum StatusRepositorySetupActionKind {
-    Init,
-    Adopt,
-    GitImport,
-    Other,
-}
-
-fn status_repository_setup_action_kind(action: &str) -> StatusRepositorySetupActionKind {
-    if action == "heddle init" {
-        StatusRepositorySetupActionKind::Init
-    } else if action.starts_with("heddle adopt") {
-        StatusRepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle import git") {
-        StatusRepositorySetupActionKind::GitImport
-    } else {
-        StatusRepositorySetupActionKind::Other
-    }
+    repository_setup_guidance(&output.trust).map(|setup| setup.setup_line)
 }
 
 #[cfg(test)]
@@ -1500,182 +1400,11 @@ fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
     }
 }
 
-fn human_thread_health(status: &str) -> String {
-    match status {
-        "needs_init" => "setup needed".to_string(),
-        "needs_import" => "setup needed".to_string(),
-        "git_branch_advanced" => "Git branch advanced outside Heddle".to_string(),
-        "needs_reconcile" => "Git/Heddle mismatch".to_string(),
-        "needs_checkpoint" => "checkpoint needed".to_string(),
-        "dirty_worktree" | "uncaptured" => "work in progress".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Severity rank for the `thread_health` axis. Higher = more
-/// blocking. Drives which axis a non-clean combined verdict surfaces.
-fn health_severity(thread_health: &str) -> u8 {
-    match thread_health {
-        "clean" => 0,
-        "needs_reconcile" | "git_branch_advanced" => 4,
-        "needs_init" | "needs_import" => 3,
-        "needs_checkpoint" => 2,
-        // dirty_worktree / uncaptured / unknown: local work in progress.
-        _ => 1,
-    }
-}
-
-/// Severity rank for the coordination axis. Ahead / merge-ready are
-/// non-clean but benign forward states, so they rank below the
-/// integration blockers (diverged / blocked).
-fn coordination_severity(status: &CoordinationStatus) -> u8 {
-    match status {
-        CoordinationStatus::Clean => 0,
-        CoordinationStatus::Ahead | CoordinationStatus::MergeReady => 1,
-        CoordinationStatus::Diverged => 3,
-        CoordinationStatus::Blocked => 4,
-    }
-}
-
-/// Combine the PRE-override (genuine, from `build_thread_view`) coordination
-/// status with the trust/health override. The override may re-encode a
-/// dirty / uncaptured / unverified-trust *health* blocker onto the
-/// coordination axis (as a maskable trust-derived `Blocked`) ONLY when the
-/// pre-override axis was genuinely CLEAN. Any genuine non-clean state from
-/// `build_thread_view` — `Blocked`, `Diverged`, `Ahead`, `MergeReady`, or a
-/// variant added later — wins: it is preserved as-is and stays surfaceable
-/// even when the worktree is also dirty, so the health blocker never hides
-/// the real coordination state.
-///
-/// Returns the final `coordination_status` and `coordination_blocked_by_trust`
-/// — the latter true ONLY when the resulting `Blocked`'s sole source is the
-/// trust/health path (i.e. a genuinely-clean axis was re-encoded). Keying the
-/// whole rule on the single "was the pre-override axis genuinely clean?"
-/// predicate — derived from `coordination_axis_clean`, an exhaustive match,
-/// NOT a hardcoded state list — is what closes the masking class: a new
-/// `CoordinationStatus` variant is covered automatically and can never be
-/// silently re-stamped as trust-derived (cid 3328810941).
-#[cfg(test)]
-fn resolve_coordination_with_trust(
-    pre_override: CoordinationStatus,
-    blocked_by_trust: bool,
-    needs_checkpoint: bool,
-) -> (CoordinationStatus, bool) {
-    // The pre-override status comes straight from `build_thread_view`, so it
-    // carries no trust encoding — read its genuine cleanliness with
-    // `blocked_by_trust = false`.
-    let pre_override_clean = coordination_axis_clean(&pre_override, false);
-    let trust_override = blocked_by_trust && !needs_checkpoint;
-    // Re-encode (and mark maskable) ONLY a genuinely-clean axis; a genuine
-    // non-clean state is preserved and never marked trust-only.
-    let mask_as_trust = trust_override && pre_override_clean;
-    let coordination_status = if mask_as_trust {
-        CoordinationStatus::Blocked
-    } else {
-        pre_override
-    };
-    (coordination_status, mask_as_trust)
-}
-
-/// Single source of truth for "is the coordination axis genuinely
-/// (non-trust) clean?". `coordination_status` is overloaded: the status
-/// builder re-encodes a dirty / uncaptured / unverified-trust *health*
-/// blocker by forcing `coordination_status = Blocked` (build sites ~571
-/// short-path, ~956 trust override), carrying `blocked_by_trust = true`.
-/// That Blocked is a health signal, so the coordination axis is
-/// effectively clean — the health axis owns the blocker. A genuine
-/// inter-thread Blocked from `build_thread_view` (`ThreadState::Blocked`
-/// or concurrent actives) carries `blocked_by_trust = false` and is
-/// NEVER masked, even when the worktree is also dirty — a real
-/// inter-thread block can co-exist with local WIP and must still
-/// surface. Keying on the Blocked's *provenance* (this flag), not on
-/// `thread_health` cleanliness, is what keeps those two cases apart.
-/// Both the human `-v` render and the combined verdict route through
-/// here so they can't drift.
-fn coordination_axis_clean(coordination: &CoordinationStatus, blocked_by_trust: bool) -> bool {
-    match coordination {
-        CoordinationStatus::Clean => true,
-        CoordinationStatus::Blocked => blocked_by_trust,
-        CoordinationStatus::Ahead
-        | CoordinationStatus::Diverged
-        | CoordinationStatus::MergeReady => false,
-    }
-}
-
-/// Pure core of the combined verdict: which axes are effectively clean
-/// and the resulting reason line. Split from rendering so it is
-/// unit-testable without constructing a full `StatusOutput`.
-fn combined_verdict_axes(
-    thread_health: &str,
-    coordination: &CoordinationStatus,
-    coordination_blocked_by_trust: bool,
-) -> (bool, bool, Option<&'static str>) {
-    let health_clean = thread_health == "clean";
-    let coordination_clean = coordination_axis_clean(coordination, coordination_blocked_by_trust);
-    let reason = match (health_clean, coordination_clean) {
-        (true, true) => None,
-        (false, false) => Some("checkout health and thread coordination both need attention"),
-        (false, true) => Some("checkout health needs attention"),
-        (true, false) => Some("thread coordination needs attention"),
-    };
-    (health_clean, coordination_clean, reason)
-}
-
-/// Combined top-line verdict for the default long view. Returns the
-/// styled verdict word plus an optional one-line reason.
-///
-/// `clean` only when BOTH the health and coordination axes are
-/// *effectively* clean; otherwise the more-severe axis is surfaced as
-/// the verdict word so a reader of the default view still learns the
-/// checkout is not clean. Ties favour the local health axis — that's the
-/// blocker the user usually acts on first. The reason names which axis
-/// (or both) is at fault; `-v` then prints the per-axis detail.
-fn status_combined_verdict(output: &StatusOutput) -> (String, Option<&'static str>) {
-    let (health_clean, coordination_clean, reason) = combined_verdict_axes(
-        &output.thread_health,
-        &output.coordination_status,
-        output.coordination_blocked_by_trust,
-    );
-    if health_clean && coordination_clean {
-        return ("clean".to_string(), None);
-    }
-    // Surface health when it's the (or the more-severe) non-clean axis,
-    // and always when the coordination axis is only health-encoded — in
-    // that case the health blocker is the real story.
-    let surface_health = !health_clean
-        && (coordination_clean
-            || health_severity(&output.thread_health)
-                >= coordination_severity(&output.coordination_status));
-    let word = if surface_health {
-        human_thread_health(&output.thread_health)
-    } else {
-        human_coordination_status(output)
-    };
-    (word, reason)
-}
-
 fn human_coordination_status(output: &StatusOutput) -> String {
     coordination_label(
         &output.coordination_status,
         output.coordination_blocked_by_trust,
     )
-}
-
-/// Render the coordination axis for the `-v` view. A trust-derived `Blocked`
-/// (sole source = the health override, so `coordination_axis_clean` reports
-/// the axis effectively clean) shows as "work in progress" — the health axis
-/// owns the blocker. Every genuine coordination state renders under its own
-/// name: a genuine inter-thread `Blocked` and the non-clean siblings
-/// (`Diverged` / `Ahead` / `MergeReady`) are never hidden behind the WIP mask.
-/// Split from the `StatusOutput` wrapper so the render path is unit-testable.
-fn coordination_label(coordination: &CoordinationStatus, blocked_by_trust: bool) -> String {
-    if matches!(coordination, CoordinationStatus::Blocked)
-        && coordination_axis_clean(coordination, blocked_by_trust)
-    {
-        "work in progress".to_string()
-    } else {
-        coordination.to_string()
-    }
 }
 
 fn local_work_in_progress(output: &StatusOutput) -> bool {
@@ -1829,16 +1558,17 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
-    use heddle_core::ActorInfo;
+    use heddle_core::{
+        ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
+        repository_mode_label,
+    };
     use repo::{AgentUsageSummary, Repository};
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
-        ChangesInfo, CoordinationStatus, MaterializedThreadInfo, PlainGitStatusOutput,
-        RepositoryVerificationState, assess_materialized_threads, build_status_output,
-        combined_verdict_axes, coordination_axis_clean, coordination_label,
-        render_status_materialized, resolve_coordination_with_trust,
+        MaterializedThreadInfo, assess_materialized_threads, build_status_output,
+        render_status_materialized,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -2055,269 +1785,9 @@ mod tests {
         render_status_materialized(&fresh_only, false);
     }
 
-    #[test]
-    fn dirty_wip_combined_verdict_reason_is_health_only() {
-        // (a) Repro: a dirty/uncaptured checkout re-encodes its health
-        // blocker as a *trust-derived* `coordination_status = Blocked`
-        // (`coordination_blocked_by_trust = true`). The combined verdict
-        // must NOT double-count that as a coordination failure — the
-        // reason is the health/WIP reason alone, and the axis masks.
-        for health in ["dirty_worktree", "uncaptured"] {
-            let (health_clean, coordination_clean, reason) =
-                combined_verdict_axes(health, &CoordinationStatus::Blocked, true);
-            assert!(!health_clean, "{health} is a non-clean health state");
-            assert!(
-                coordination_clean,
-                "{health}'s trust-derived Blocked is a health-signal encoding → coordination effectively clean"
-            );
-            assert!(
-                coordination_axis_clean(&CoordinationStatus::Blocked, true),
-                "{health}: trust-derived Blocked must mask (work in progress)"
-            );
-            assert_eq!(
-                reason,
-                Some("checkout health needs attention"),
-                "{health}: reason must be health-only, not a coordination/both warning"
-            );
-            let reason = reason.unwrap();
-            assert!(
-                !reason.contains("coordination") && !reason.contains("both need attention"),
-                "{health}: reason must not mention coordination: {reason}"
-            );
-        }
-    }
-
-    #[test]
-    fn trust_blocked_combined_verdict_reason_is_health_only() {
-        // (a') The same masking covers a trust-blocked WIP checkout: its
-        // Blocked is the verification health signal (trust-derived), not
-        // coordination.
-        let (_, coordination_clean, reason) =
-            combined_verdict_axes("git_branch_advanced", &CoordinationStatus::Blocked, true);
-        assert!(coordination_clean);
-        assert_eq!(reason, Some("checkout health needs attention"));
-    }
-
-    #[test]
-    fn genuine_blocked_surfaces_even_when_worktree_dirty() {
-        // (b) THE LEAK (cid 3327990627). A *genuine* inter-thread block —
-        // `build_thread_view` set `coordination_status = Blocked` from
-        // `ThreadState::Blocked`, carrying `coordination_blocked_by_trust
-        // = false` — can co-exist with local WIP, where
-        // `describe_thread_advice` reports a non-clean `thread_health`
-        // (e.g. `dirty_worktree`). r2 keyed the mask on health
-        // cleanliness, so this Blocked was wrongly masked as "work in
-        // progress" and the verdict named only checkout health, hiding
-        // the real coordination block until the worktree was cleaned.
-        // The provenance-keyed mask must NOT mask it: a non-trust Blocked
-        // is always a genuine coordination block.
-        //
-        // The current (a)/(b) inputs differ ONLY in provenance — same
-        // `thread_health="dirty_worktree"`, same `Blocked` — which is why
-        // a `thread_health`-keyed helper cannot tell them apart and the
-        // provenance flag is required.
-        for health in ["dirty_worktree", "uncaptured"] {
-            assert!(
-                !coordination_axis_clean(&CoordinationStatus::Blocked, false),
-                "{health}: a genuine (non-trust) Blocked must never mask, even when health is dirty"
-            );
-            let (health_clean, coordination_clean, reason) =
-                combined_verdict_axes(health, &CoordinationStatus::Blocked, false);
-            assert!(!health_clean, "{health} is a non-clean health state");
-            assert!(
-                !coordination_clean,
-                "{health}: a genuine inter-thread Blocked is a real coordination block"
-            );
-            assert_eq!(
-                reason,
-                Some("checkout health and thread coordination both need attention"),
-                "{health}: the verdict reason must name the coordination block, not just health"
-            );
-            assert!(
-                reason.unwrap().contains("coordination"),
-                "{health}: reason must surface coordination: {reason:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn genuine_coordination_states_still_surface() {
-        // (c) A real inter-thread coordination state with clean health
-        // must still be reported by the combined verdict. A clean-health
-        // Blocked is genuine (`coordination_blocked_by_trust = false`).
-        for coordination in [
-            CoordinationStatus::Ahead,
-            CoordinationStatus::Diverged,
-            CoordinationStatus::MergeReady,
-            CoordinationStatus::Blocked,
-        ] {
-            assert!(
-                !coordination_axis_clean(&coordination, false),
-                "{coordination:?} as a genuine (non-trust) state is never clean"
-            );
-            let (health_clean, coordination_clean, reason) =
-                combined_verdict_axes("clean", &coordination, false);
-            assert!(health_clean && !coordination_clean);
-            assert_eq!(
-                reason,
-                Some("thread coordination needs attention"),
-                "{coordination:?}: combined verdict must name coordination"
-            );
-        }
-    }
-
-    #[test]
-    fn both_axes_clean_verdict_has_no_reason() {
-        // (d) All clean → clean verdict, no reason.
-        let (health_clean, coordination_clean, reason) =
-            combined_verdict_axes("clean", &CoordinationStatus::Clean, false);
-        assert!(health_clean && coordination_clean);
-        assert_eq!(reason, None);
-    }
-
-    /// Every `CoordinationStatus` variant, so the table below is driven from
-    /// the enum rather than a hardcoded subset — a newly added variant fails
-    /// to compile here until it is listed, which is what keeps the
-    /// close-the-class coverage honest.
-    const ALL_COORDINATION_STATES: [CoordinationStatus; 5] = [
-        CoordinationStatus::Clean,
-        CoordinationStatus::Ahead,
-        CoordinationStatus::Diverged,
-        CoordinationStatus::Blocked,
-        CoordinationStatus::MergeReady,
-    ];
-
-    #[test]
-    fn coordination_provenance_survives_trust_override_across_all_states() {
-        // (b'') CLOSE-THE-CLASS (cid 3328810941), generalising r4's
-        // Blocked-only ordering fix (cid 3328765243). The trust/health
-        // override re-encodes a dirty / unverified checkout as a maskable
-        // `coordination_status = Blocked`. It may do so — and mark the axis
-        // trust-only/maskable — ONLY when the PRE-override coordination was
-        // genuinely CLEAN. Every genuine non-clean state from
-        // `build_thread_view` (`Blocked`, `Diverged`, `Ahead`, `MergeReady`,
-        // …) must WIN over the override: preserved as-is, never marked
-        // trust-only, surfacing in the combined verdict and the `-v` label
-        // even with a dirty worktree. r4 special-cased only `Blocked`, so on
-        // the pre-fix code the `Diverged` / `Ahead` / `MergeReady` × dirty
-        // cells leaked (re-stamped to a masked trust-only `Blocked`).
-        //
-        // The table is keyed off `coordination_axis_clean(&state, false)` —
-        // the single source of truth for "is the genuine axis clean?" — NOT a
-        // hardcoded clean/non-clean split, which is what proves the class is
-        // closed: a new variant is classified automatically.
-        for pre_override in ALL_COORDINATION_STATES {
-            let genuinely_clean = coordination_axis_clean(&pre_override, false);
-            for &trust_verified in &[true, false] {
-                // `blocked_by_trust = !trust.verified`; a dirty/unverified
-                // worktree (trust_verified == false) drives the override.
-                let blocked_by_trust = !trust_verified;
-                let (coordination, blocked_by_trust_only) =
-                    resolve_coordination_with_trust(pre_override, blocked_by_trust, false);
-                let health = if trust_verified {
-                    "clean"
-                } else {
-                    "dirty_worktree"
-                };
-                let (health_clean, coordination_clean, reason) =
-                    combined_verdict_axes(health, &coordination, blocked_by_trust_only);
-                let label = coordination_label(&coordination, blocked_by_trust_only);
-                let ctx = format!("{pre_override:?} / trust_verified={trust_verified}");
-
-                assert_eq!(
-                    health_clean, trust_verified,
-                    "{ctx}: health axis cleanliness"
-                );
-
-                if genuinely_clean {
-                    // Genuinely-clean axis: any override is its SOLE source, so
-                    // the axis masks as work-in-progress (the health axis owns
-                    // the blocker) — this cell must STAY masked.
-                    assert!(
-                        coordination_clean,
-                        "{ctx}: a genuinely-clean axis stays effectively clean"
-                    );
-                    if trust_verified {
-                        assert_eq!(reason, None, "{ctx}: all-clean → no reason");
-                        assert_eq!(label, "clean", "{ctx}: clean axis renders as clean");
-                    } else {
-                        assert_eq!(
-                            reason,
-                            Some("checkout health needs attention"),
-                            "{ctx}: clean axis + dirty worktree → health-only WIP (coordination masked)"
-                        );
-                        assert_eq!(
-                            label, "work in progress",
-                            "{ctx}: a sole-trust-derived Blocked renders as WIP, never a coordination state"
-                        );
-                    }
-                } else {
-                    // Genuine non-clean state: WINS over the override.
-                    assert_eq!(
-                        coordination, pre_override,
-                        "{ctx}: a genuine non-clean state must be preserved, not re-stamped to Blocked"
-                    );
-                    assert!(
-                        !blocked_by_trust_only,
-                        "{ctx}: a genuine non-clean axis is never marked trust-only/maskable"
-                    );
-                    assert!(
-                        !coordination_clean,
-                        "{ctx}: a genuine non-clean axis must surface, even with a dirty worktree"
-                    );
-                    let reason = reason.expect("a non-clean axis always yields a verdict reason");
-                    assert!(
-                        reason.contains("coordination"),
-                        "{ctx}: the default verdict reason must name coordination: {reason}"
-                    );
-                    if !trust_verified {
-                        assert_eq!(
-                            reason, "checkout health and thread coordination both need attention",
-                            "{ctx}: dirty worktree + genuine coordination state → BOTH axes surface"
-                        );
-                    }
-                    assert_eq!(
-                        label,
-                        pre_override.to_string(),
-                        "{ctx}: -v must show the genuine Coordination state, not the WIP mask"
-                    );
-                    assert_ne!(
-                        label, "work in progress",
-                        "{ctx}: a genuine coordination state must never be hidden behind WIP"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn needs_checkpoint_suppresses_the_trust_override() {
-        // `needs_checkpoint` short-circuits the override regardless of state:
-        // a genuine block is preserved, and a clean axis is left clean rather
-        // than re-encoded to a trust-derived Blocked.
-        let (coordination, blocked_by_trust_only) =
-            resolve_coordination_with_trust(CoordinationStatus::Blocked, true, true);
-        assert!(matches!(coordination, CoordinationStatus::Blocked));
-        assert!(
-            !blocked_by_trust_only,
-            "needs_checkpoint suppresses the override; genuine block wins"
-        );
-
-        let (coordination, blocked_by_trust_only) =
-            resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
-        assert!(
-            matches!(coordination, CoordinationStatus::Clean),
-            "no override → axis stays clean"
-        );
-        assert!(!blocked_by_trust_only);
-    }
-
-    /// Action-field presence contract (HeddleCo/heddle#645): an empty
-    /// `recommended_action` must serialize as `null`, never `""` — the
-    /// serialization-boundary walker hard-fails the whole command on a
-    /// raw empty. `PlainGitStatusOutput.recommended_action` is cloned
-    /// from `trust.recommended_action`, which CAN legitimately be empty;
-    /// this pins the safe-by-construction wire shape.
+    /// Action-field presence contract (HeddleCo/heddle#645): empty
+    /// `recommended_action` serializes as `null` via core's
+    /// `PlainGitStatusReport` (assembly + serde live in heddle-core).
     #[test]
     fn plain_git_status_serializes_empty_recommended_action_as_null() {
         let machine_contract_coverage =
@@ -2351,10 +1821,10 @@ mod tests {
             recovery_action_templates: Vec::new(),
             checks: Vec::new(),
         };
-        let output = PlainGitStatusOutput {
+        let output = PlainGitStatusReport {
             output_kind: "status",
             repository_capability: "plain-git".to_string(),
-            repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+            repository_label: repository_mode_label("plain-git", "git-only"),
             storage_model: "git-only".to_string(),
             heddle_initialized: false,
             git_branch: Some("main".to_string()),
@@ -2365,11 +1835,7 @@ mod tests {
             recovery_action_templates: trust.recovery_action_templates.clone(),
             thread_health: trust.status.clone(),
             changed_path_count: 0,
-            changes: ChangesInfo {
-                modified: Vec::new(),
-                added: Vec::new(),
-                deleted: Vec::new(),
-            },
+            changes: ChangesInfo::default(),
             git_index: None,
             trust,
         };

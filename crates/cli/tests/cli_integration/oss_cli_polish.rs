@@ -650,8 +650,8 @@ fn status_short_reports_clean_state_instead_of_silence() {
     .unwrap();
     assert_eq!(
         native_clean.trim(),
-        "repository clean",
-        "clean native short status should be one compact line: {native_clean:?}"
+        "main clean",
+        "clean native short status should name the default thread: {native_clean:?}"
     );
 
     std::fs::write(native.path().join("draft.txt"), "draft\n").unwrap();

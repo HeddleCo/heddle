@@ -2,6 +2,22 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    AutoLandPolicyInput, LandPushOptions, LandPushPlanError,
+    auto_land_policy_blockers as core_auto_land_policy_blockers,
+    integrated_land_next_action as core_integrated_land_next_action,
+    integration_blocker_recommended_action as core_integration_blocker_recommended_action,
+    integration_blockers as core_integration_blockers,
+    land_blockers_for_preview as core_land_blockers_for_preview,
+    land_checkpoint_message as core_land_checkpoint_message,
+    land_performed_steps as core_land_performed_steps,
+    land_skipped_steps as core_land_skipped_steps, land_text_step as core_land_text_step,
+    land_warnings_for_preview as core_land_warnings_for_preview,
+    non_staleness_blockers as core_non_staleness_blockers,
+    op_targets_merge_state as core_op_targets_merge_state, plan_land_push,
+    recovery_scope_checkout as core_recovery_scope_checkout,
+    should_squash_land as core_should_squash_land,
+};
 use objects::{
     object::{ChangeId, State, ThreadName},
     store::ObjectStore,
@@ -20,7 +36,7 @@ use super::{
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
-        exit_if_blocked_operator_status,
+        fail_if_blocked_operator_status,
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -297,23 +313,27 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             vec![switch_command, land_command],
         )));
     };
-    if args.push && args.no_push {
-        return Err(anyhow!(RecoveryAdvice::land_push_option_conflict(
-            &thread.id
-        )));
-    }
-    if let Some(remote) = args.remote.as_deref()
-        && !args.push
-    {
-        return Err(anyhow!(RecoveryAdvice::land_remote_requires_push(
-            &thread.id, remote,
-        )));
-    }
-    let should_push = args.push;
+    let push_plan = match plan_land_push(&LandPushOptions {
+        push: args.push,
+        no_push: args.no_push,
+        remote: args.remote.clone(),
+    }) {
+        Ok(plan) => plan,
+        Err(LandPushPlanError::OptionConflict) => {
+            return Err(anyhow!(RecoveryAdvice::land_push_option_conflict(
+                &thread.id
+            )));
+        }
+        Err(LandPushPlanError::RemoteRequiresPush { remote }) => {
+            return Err(anyhow!(RecoveryAdvice::land_remote_requires_push(
+                &thread.id, &remote,
+            )));
+        }
+    };
+    let should_push = push_plan.should_push;
     let planned_push_remote = if should_push {
-        match args
+        match push_plan
             .remote
-            .clone()
             .or(super::remote::resolved_default_remote_name(&repo)?)
         {
             Some(remote) => Some(remote),
@@ -736,7 +756,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let _ = ensure_current_state(
         &repo,
         &user_config,
-        Some(format!("Bootstrap git-overlay before landing {}", merge_thread.id)),
+        Some(format!(
+            "Bootstrap git-overlay before landing {}",
+            merge_thread.id
+        )),
     )?;
     let merge_output = merge_thread_into_current(
         &repo,
@@ -892,7 +915,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
 }
 
 fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
-    !args.no_squash && user_config.land.squash
+    core_should_squash_land(args.no_squash, user_config.land.squash)
 }
 
 fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Result<bool> {
@@ -1078,17 +1101,7 @@ fn land_performed_steps(
     checkpointed: bool,
     pushed: bool,
 ) -> Vec<String> {
-    [
-        (captured, "capture"),
-        (synced, "sync"),
-        (integrated, "merge"),
-        (checkpointed, "checkpoint"),
-        (pushed, "push"),
-    ]
-    .into_iter()
-    .filter(|&(done, _step)| done)
-    .map(|(_done, step)| step.to_string())
-    .collect()
+    core_land_performed_steps(captured, synced, integrated, checkpointed, pushed)
 }
 
 fn land_skipped_steps(
@@ -1098,19 +1111,7 @@ fn land_skipped_steps(
     checkpointed: bool,
     pushed: bool,
 ) -> Vec<String> {
-    [
-        (!captured, "capture(no changes)"),
-        (!synced, "sync(current)"),
-        (!integrated, "merge(blocked)"),
-        (!checkpointed && integrated, "checkpoint(not needed)"),
-        (!checkpointed && !integrated, "checkpoint(not reached)"),
-        (!pushed && integrated, "push(not requested)"),
-        (!pushed && !integrated, "push(not reached)"),
-    ]
-    .into_iter()
-    .filter(|&(skipped, _step)| skipped)
-    .map(|(_skipped, step)| step.to_string())
-    .collect()
+    core_land_skipped_steps(captured, synced, integrated, checkpointed, pushed)
 }
 
 fn integrated_land_next_action(
@@ -1118,14 +1119,7 @@ fn integrated_land_next_action(
     pushed: bool,
     trust: &RepositoryVerificationState,
 ) -> Option<String> {
-    if !integrated {
-        return None;
-    }
-    if !pushed && trust.recommended_action == "heddle push" {
-        Some(trust.recommended_action.clone())
-    } else {
-        Some("heddle thread cleanup --merged --dry-run".to_string())
-    }
+    core_integrated_land_next_action(integrated, pushed, &trust.recommended_action)
 }
 
 fn land_checkpoint_message(
@@ -1134,30 +1128,19 @@ fn land_checkpoint_message(
     explicit: Option<&str>,
     prefer_land_subject: bool,
 ) -> String {
-    if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
-        return message.to_string();
-    }
-    if prefer_land_subject {
-        return format!("Land {}", thread.id);
-    }
-    if let Some(intent) = thread
+    let intent = thread
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
         .and_then(|state_id| repo.store().get_state(&state_id).ok().flatten())
-        .and_then(|state| state.intent)
-        .filter(|intent| !intent.trim().is_empty())
-    {
-        return intent;
-    }
-    if let Some(task) = thread
-        .task
-        .as_deref()
-        .filter(|task| !task.trim().is_empty())
-    {
-        return task.to_string();
-    }
-    format!("Land {}", thread.id)
+        .and_then(|state| state.intent);
+    core_land_checkpoint_message(
+        explicit,
+        prefer_land_subject,
+        &thread.id,
+        intent.as_deref(),
+        thread.task.as_deref(),
+    )
 }
 
 fn resolve_thread(
@@ -1298,41 +1281,7 @@ fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) ->
 }
 
 fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
-    match op {
-        OpRecord::Snapshot { new_state, .. } => change_id_matches_display(new_state, merge_state),
-        OpRecord::Checkpoint { state, .. } => change_id_matches_display(state, merge_state),
-        OpRecord::Goto { target, .. } => change_id_matches_display(target, merge_state),
-        OpRecord::FastForward { post_target_id, .. } => {
-            change_id_matches_display(post_target_id, merge_state)
-        }
-        // These records don't advance HEAD/thread to a merge target the land
-        // flow tracks. Enumerated explicitly (no wildcard) so a new
-        // state-advancing variant must be considered as a possible merge
-        // target here (heddle#354 r9).
-        OpRecord::ThreadCreate { .. }
-        | OpRecord::ThreadDelete { .. }
-        | OpRecord::ThreadUpdate { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::MarkerCreate { .. }
-        | OpRecord::MarkerDelete { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::EphemeralThreadCollapse { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::GitCheckpoint { .. }
-        | OpRecord::RemoteThreadUpdate { .. }
-        | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => false,
-    }
-}
-
-fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {
-    id.short() == display || id.to_string_full() == display
+    core_op_targets_merge_state(op, merge_state)
 }
 
 fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {
@@ -1362,75 +1311,35 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
     Ok(target.short())
 }
 
-const AUTO_LAND_CONFIDENCE_THRESHOLD: f32 = 0.75;
-const AUTO_LAND_CONFIDENCE_RECOVERY_ACTION: &str =
-    "heddle commit -m \"...\" --confidence <confidence>";
-
 pub(crate) fn integration_blockers(
     repo: &Repository,
     thread: &Thread,
     preview: &super::merge::ThreadPreviewReport,
 ) -> Vec<String> {
-    let manual_resolution_current = manual_resolution_current(repo, thread);
-    let mut blockers = if manual_resolution_current {
-        Vec::new()
-    } else {
-        non_staleness_blockers(&preview.blockers)
-    };
-    blockers.extend(auto_land_policy_blockers(repo, thread));
-    blockers
+    core_integration_blockers(
+        manual_resolution_current(repo, thread),
+        &preview.blockers,
+        auto_land_policy_input(repo, thread),
+    )
 }
 
 pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
-    let mut blockers = Vec::new();
-    let agent_authored = thread_is_agent_authored(repo, thread);
-    if agent_authored
-        && let Some(confidence) = thread.confidence_summary.value
-        && confidence < AUTO_LAND_CONFIDENCE_THRESHOLD
-    {
-        blockers.push(format!(
-            "confidence {:.2} is below the auto-land threshold of 0.75",
-            confidence
-        ));
+    core_auto_land_policy_blockers(auto_land_policy_input(repo, thread))
+}
+
+fn auto_land_policy_input(repo: &Repository, thread: &Thread) -> AutoLandPolicyInput {
+    AutoLandPolicyInput {
+        agent_authored: thread_is_agent_authored(repo, thread),
+        confidence: thread.confidence_summary.value,
+        tests_passed: thread.verification_summary.tests_passed,
     }
-    if matches!(thread.verification_summary.tests_passed, Some(false)) {
-        blockers.push("verification summary reports failing tests".to_string());
-    }
-    blockers
 }
 
 pub(crate) fn integration_blocker_recommended_action(
     blockers: &[String],
     scope_to_checkout: Option<&std::path::Path>,
 ) -> Option<String> {
-    blockers
-        .iter()
-        .any(|blocker| {
-            blocker.starts_with("confidence ")
-                || blocker == "verification summary reports failing tests"
-        })
-        .then(|| auto_land_confidence_recovery_action(scope_to_checkout))
-}
-
-/// The `confidence`/`verification` policy blocker is cleared by re-capturing the
-/// thread's state with a fresh confidence. That capture must land in the
-/// *thread's* checkout, not whatever checkout `ready`/`land` was invoked from —
-/// running an unscoped `heddle commit` from the parent of an isolated
-/// agent-authored thread commits the parent and never updates the blocked
-/// thread. When the thread's checkout differs from the current one, scope the
-/// recovery with the global `--repo` flag so the capture targets the thread.
-/// (heddle#464.)
-fn auto_land_confidence_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
-    match scope_to_checkout {
-        Some(path) => format!(
-            "heddle --repo {} {}",
-            crate::cli::render::shell_quote(&path.display().to_string()),
-            AUTO_LAND_CONFIDENCE_RECOVERY_ACTION
-                .strip_prefix("heddle ")
-                .expect("recovery action is a heddle command"),
-        ),
-        None => AUTO_LAND_CONFIDENCE_RECOVERY_ACTION.to_string(),
-    }
+    core_integration_blocker_recommended_action(blockers, scope_to_checkout)
 }
 
 /// Returns the thread's recorded checkout iff it is a real, distinct path from
@@ -1442,57 +1351,18 @@ pub(crate) fn recovery_scope_checkout(
     thread: &Thread,
     current_checkout: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let execution_path = &thread.execution_path;
-    if execution_path.as_os_str().is_empty() {
-        return None;
-    }
-    let canonical =
-        |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    (canonical(execution_path) != canonical(current_checkout)).then(|| execution_path.clone())
+    core_recovery_scope_checkout(&thread.execution_path, current_checkout)
 }
 
 fn land_blockers_for_preview(
     preview: &super::merge::ThreadPreviewReport,
     blockers: &[String],
 ) -> Vec<String> {
-    let mut out = blockers.to_vec();
-    if preview.conflict_count > 0 {
-        out.push(format!(
-            "{} path conflict(s) need manual resolution",
-            preview.conflict_count
-        ));
-        out.extend(
-            preview
-                .conflicts
-                .iter()
-                .map(|path| format!("conflict: {path}")),
-        );
-    }
-    out.sort();
-    out.dedup();
-    out
+    core_land_blockers_for_preview(preview, blockers)
 }
 
 fn land_warnings_for_preview(preview: &super::merge::ThreadPreviewReport) -> Vec<String> {
-    let mut warnings = preview
-        .blockers
-        .iter()
-        .filter(|blocker| is_heavy_impact_advisory(blocker))
-        .cloned()
-        .collect::<Vec<_>>();
-    if warnings.is_empty() && !preview.heavy_impact_paths.is_empty() {
-        warnings.push(format!(
-            "Heavy-impact change: {} — review broader impact before merging",
-            preview.heavy_impact_paths.join(", ")
-        ));
-    }
-    warnings.sort();
-    warnings.dedup();
-    warnings
-}
-
-fn is_heavy_impact_advisory(blocker: &str) -> bool {
-    blocker.to_lowercase().contains("heavy-impact change")
+    core_land_warnings_for_preview(preview)
 }
 
 fn manual_resolution_current(repo: &Repository, thread: &Thread) -> bool {
@@ -1529,13 +1399,7 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
 }
 
 pub(crate) fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
-    blockers
-        .iter()
-        .filter(|blocker| {
-            !blocker.contains(" is stale against ") && !is_heavy_impact_advisory(blocker)
-        })
-        .cloned()
-        .collect()
+    core_non_staleness_blockers(blockers)
 }
 
 impl super::compact::CompactProjection for SyncOutput {
@@ -1688,31 +1552,18 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             print_next(next);
         }
     }
-    exit_if_blocked_operator_status(&output.operator.status);
-    Ok(())
+    fail_if_blocked_operator_status(&output.operator.status)
 }
 
 fn land_text_step(step: &str) -> String {
-    match step {
-        "capture" => "saved".to_string(),
-        "sync" => "refreshed".to_string(),
-        "merge" => "merged".to_string(),
-        "checkpoint" => "committed".to_string(),
-        "push" => "pushed".to_string(),
-        "capture(no changes)" => "no unsaved changes".to_string(),
-        "sync(current)" => "already refreshed".to_string(),
-        "merge(blocked)" => "merge blocked".to_string(),
-        "checkpoint(not needed)" => "no Git commit needed".to_string(),
-        "checkpoint(not reached)" => "Git commit not reached".to_string(),
-        "push(not requested)" => "push not requested".to_string(),
-        "push(not reached)" => "push not reached".to_string(),
-        other => other.to_string(),
-    }
+    core_land_text_step(step)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    use heddle_core::AUTO_LAND_CONFIDENCE_RECOVERY_ACTION;
 
     use super::*;
     use crate::cli::commands::command_catalog::validate_recommended_action;

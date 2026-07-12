@@ -4,6 +4,9 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use heddle_core::switch_plan::{
+    SwitchVerifyPlan, is_head_alias, plan_switch_worktree_verify, switch_success_message,
+};
 use repo::Repository;
 use serde::Serialize;
 use tracing::debug;
@@ -46,7 +49,7 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
     let repo_open_ms = repo_open_start.elapsed().as_millis();
     let body_start = Instant::now();
 
-    if matches!(target.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
+    if is_head_alias(&target) && repo.current_state()?.is_none() {
         ensure_current_state(
             &repo,
             &UserConfig::load_default()?,
@@ -55,16 +58,18 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
     }
     let target_id = resolve_state_id(&repo, &target)?;
 
-    let current_worktree_verified_clean = if !force {
-        ensure_worktree_clean(&repo, "switch")?;
-        if let Some(current) = repo.current_state()? {
-            let _ = repo.require_tree(&current.tree)?;
-            true
-        } else {
-            false
+    let verify_plan = plan_switch_worktree_verify(force);
+    let current_worktree_verified_clean = match verify_plan {
+        SwitchVerifyPlan::RequireClean => {
+            ensure_worktree_clean(&repo, "switch")?;
+            if let Some(current) = repo.current_state()? {
+                let _ = repo.require_tree(&current.tree)?;
+                true
+            } else {
+                false
+            }
         }
-    } else {
-        false
+        SwitchVerifyPlan::Skip => false,
     };
 
     let target_state = require_resolved_state(&repo, &target_id)?;
@@ -90,7 +95,7 @@ pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Resu
         output_kind: "thread_switch",
         target: target_id.short(),
         intent: target_state.intent.clone(),
-        message: format!("Now at: {}", target_id.short()),
+        message: switch_success_message(&target_id.short()),
     };
 
     if should_output_json(cli, Some(repo.config())) {

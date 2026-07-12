@@ -4,11 +4,14 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
 use objects::{
     object::{Agent, Attribution, ChangeId, Principal, Tree},
     worktree::WorktreeStatus,
 };
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
 use repo::{Repository, SessionManager, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
@@ -23,7 +26,6 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
-    error_envelope::print_error_with_hint,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::complete_current_thread_manual_resolution,
     thread::find_active_thread_entry,
@@ -163,12 +165,6 @@ struct AgentEnv {
     segment: Option<String>,
 }
 
-/// Stable exit code emitted when capture aborts because the filesystem
-/// is out of space. Mirrors the POSIX ENOSPC value (28) so shell users
-/// and supervisors that already classify "disk full" by OS code see a
-/// matching signal from heddle.
-pub const CAPTURE_EXIT_DISK_FULL: i32 = 28;
-
 pub async fn cmd_snapshot(
     cli: &Cli,
     intent: Option<String>,
@@ -236,14 +232,12 @@ pub async fn cmd_snapshot(
             // ENOSPC is the only mid-capture failure where the user's
             // working tree is guaranteed safe (we never touched it) and
             // the recovery is mechanical (free disk, re-run). Surface
-            // that contract through the shared advice/envelope renderer
-            // while preserving the stable exit code. Every other error
-            // bubbles through `?` unchanged so the existing diagnostics
-            // path keeps working.
+            // that contract through typed RecoveryAdvice so `main`
+            // prints the envelope and maps `capture_out_of_space` →
+            // IoErr (74). Every other error bubbles through `?`
+            // unchanged so the existing diagnostics path keeps working.
             if is_disk_full_anyhow(&err) {
-                let err = anyhow!(capture_disk_full_advice(&err));
-                print_error_with_hint(cli, &err);
-                std::process::exit(CAPTURE_EXIT_DISK_FULL);
+                return Err(anyhow!(capture_disk_full_advice(&err)));
             }
             return Err(err);
         }
@@ -490,8 +484,7 @@ fn preflight_large_capture_with_status(
     let total = status.change_count();
     let delete_count = status.deleted.len();
     let add_count = status.added.len();
-    let large_capture = total > 100 || delete_count > 25 || add_count > 100;
-    if !large_capture {
+    if !large_capture_requires_force(total, delete_count, add_count) {
         return Ok(());
     }
 
@@ -1127,9 +1120,7 @@ pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
 }
 
 fn is_default_unknown_principal(principal: &Principal) -> bool {
-    principal.name.trim().is_empty()
-        || principal.email.trim().is_empty()
-        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+    principal_lacks_accountable_identity(&principal.name, &principal.email)
 }
 
 /// Walks the `anyhow::Error` source chain looking for an underlying

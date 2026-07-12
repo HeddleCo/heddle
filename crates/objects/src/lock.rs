@@ -223,7 +223,7 @@ impl RepoLock {
 
     fn ensure_lock_dir(&self) -> Result<()> {
         if let Some(parent) = self.lock_path.parent() {
-            std::fs::create_dir_all(parent).map_err(LockError::Io)?;
+            crate::fs_atomic::create_dir_all_durable(parent).map_err(LockError::Io)?;
         }
         Ok(())
     }

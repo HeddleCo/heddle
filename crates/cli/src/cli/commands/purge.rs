@@ -7,6 +7,7 @@
 //! `--force` is the explicit confirmation step.
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 use objects::object::ChangeId;
 use oplog::OpLogRecorder;
 use repo::Repository;
@@ -57,12 +58,8 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         .get_principal()
         .with_context(|| "resolve current principal")?;
 
-    if !args.force {
-        let force_command = format!(
-            "heddle redact purge apply {} --path {} --force",
-            state.short(),
-            args.path
-        );
+    if matches!(plan_purge_apply(args.force), PurgeApplyPlan::RequiresForce) {
+        let force_command = purge_force_command(&state.short(), &args.path);
         return Err(anyhow!(RecoveryAdvice::destructive_requires_force(
             "purge",
             format!(
@@ -86,21 +83,14 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
             .record_purge(redaction_id, &blob, Some(&scope))?;
     }
 
-    let mut message = format!(
-        "purged blob {} at {} in {} ({} redaction(s) marked)",
-        blob.short(),
-        args.path,
-        state.short(),
+    let message = purge_apply_message(
+        &blob.short(),
+        &args.path,
+        &state.short(),
         outcome.redactions_marked,
+        outcome.blob_bytes_removed,
+        outcome.blob_remains_in_pack,
     );
-    if !outcome.blob_bytes_removed {
-        message.push_str("\n  note: no loose copy was on disk (already gone or only in a pack)");
-    }
-    if outcome.blob_remains_in_pack {
-        message.push_str(
-            "\n  warning: bytes remain in a pack file — repack required for full removal",
-        );
-    }
 
     let ignore_hint = super::redact::ignore_hint_for_path(repo, &args.path)?;
 

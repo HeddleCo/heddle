@@ -2,6 +2,7 @@
 //! Session management commands.
 
 use anyhow::Result;
+use heddle_core::session_list_status;
 use objects::object::{Session, SessionSegment};
 use repo::SessionManager;
 use serde::Serialize;
@@ -239,15 +240,10 @@ pub async fn cmd_session_list(cli: &Cli, active_only: bool) -> Result<()> {
 
         println!("Sessions:");
         for session in sessions {
-            let status = if session.is_active() {
-                "active"
-            } else {
-                "ended"
-            };
             println!(
                 "  {} [{}] - {} segments - {}",
                 session.id,
-                status,
+                session_list_status(session.is_active()),
                 session.segments.len(),
                 session.created_at.format("%Y-%m-%d %H:%M")
             );

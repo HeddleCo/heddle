@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context mutation commands: set, edit, supersede, rm.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use chrono::Utc;
+use heddle_core::{
+    ContextContentPlanError, ContextRmPlanError, count_active_annotations, next_annotation_tags,
+    plan_annotation_content_source, plan_context_rm, supersede_reuses_original_scope,
+    supersede_reuses_original_target,
+};
 use objects::{
     lock::RepositoryLockExt,
-    object::{Annotation, AnnotationStatus, ContextBlob},
+    object::{Annotation, ContextBlob},
 };
 use repo::compute_rewrite_pct;
 
@@ -21,6 +26,18 @@ use crate::{
     },
     config::UserConfig,
 };
+
+/// Map pure content-source refusal to CLI recovery advice.
+fn content_source_advice(err: ContextContentPlanError) -> RecoveryAdvice {
+    match err {
+        ContextContentPlanError::Required => RecoveryAdvice::invalid_usage(
+            err.kind(),
+            "Provide annotation content with -m or --file",
+            "Pass `-m <text>` or `--file <path>` with annotation content.",
+            "heddle context set --path <path> -m \"...\"",
+        ),
+    }
+}
 
 /// Set a context annotation on a file path or state target.
 #[allow(clippy::too_many_arguments)]
@@ -39,6 +56,8 @@ pub async fn cmd_context_set(
     let scope = parse_scope(scope.as_deref())?;
     target.validate_scope(&scope)?;
     let kind = parse_kind(Some(&kind))?;
+    plan_annotation_content_source(message.is_some(), file.is_some())
+        .map_err(|err| anyhow!(content_source_advice(err)))?;
     let content = read_annotation_content(message, file)?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -90,13 +109,11 @@ pub async fn cmd_context_set(
             })
         );
     } else {
+        let active = count_active_annotations(&blob.annotations);
         println!(
             "Annotated {} ({} active annotation{})",
             label,
-            blob.annotations
-                .iter()
-                .filter(|annotation| annotation.status == AnnotationStatus::Active)
-                .count(),
+            active,
             if blob.annotations.len() == 1 { "" } else { "s" }
         );
     }
@@ -113,6 +130,8 @@ pub async fn cmd_context_edit(
     file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
+    plan_annotation_content_source(message.is_some(), file.is_some())
+        .map_err(|err| anyhow!(content_source_advice(err)))?;
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
@@ -134,11 +153,7 @@ pub async fn cmd_context_edit(
         Some(kind) => parse_kind(Some(kind))?,
         None => current.kind,
     };
-    let next_tags = if tags.is_empty() {
-        current.tags.clone()
-    } else {
-        tags
-    };
+    let next_tags = next_annotation_tags(&current.tags, tags);
     annotation.scope = resolve_scope_at_target(&repo, &target, annotation.scope.clone())?;
     let source_hash = compute_source_hash(&repo, &target, &annotation.scope);
     let user_config = UserConfig::load_default()?;
@@ -195,6 +210,8 @@ pub async fn cmd_context_supersede(
     file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
+    plan_annotation_content_source(message.is_some(), file.is_some())
+        .map_err(|err| anyhow!(content_source_advice(err)))?;
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
@@ -209,13 +226,15 @@ pub async fn cmd_context_supersede(
     let original_annotation = original_blob.annotations[index].clone();
     let original_revision = original_annotation.current_revision().cloned().unwrap();
 
-    let target = match (path, state) {
-        (None, None) => original_target.clone(),
-        (path, state) => resolve_target(&repo, path, state)?,
+    let target = if supersede_reuses_original_target(path.as_deref(), state.as_deref()) {
+        original_target.clone()
+    } else {
+        resolve_target(&repo, path, state)?
     };
-    let replacement_scope = match scope.as_deref() {
-        Some(scope) => parse_scope(Some(scope))?,
-        None => original_annotation.scope.clone(),
+    let replacement_scope = if supersede_reuses_original_scope(scope.as_deref()) {
+        original_annotation.scope.clone()
+    } else {
+        parse_scope(scope.as_deref())?
     };
     target.validate_scope(&replacement_scope)?;
     let replacement_scope = resolve_scope_at_target(&repo, &target, replacement_scope)?;
@@ -300,14 +319,14 @@ pub async fn cmd_context_rm(
             "heddle context list",
         )));
     };
-    if !all && scope.is_none() {
-        return Err(anyhow::anyhow!(RecoveryAdvice::invalid_usage(
-            "context_remove_scope_required",
+    plan_context_rm(all, scope.is_some()).map_err(|err| match err {
+        ContextRmPlanError::ScopeRequired => anyhow!(RecoveryAdvice::invalid_usage(
+            err.kind(),
             "Specify --scope to remove specific annotations, or --all to remove all",
             "Pass `--scope <scope>` to remove one scope, or `--all` to remove all annotations at the target.",
             "heddle context rm --path <path> --scope file",
-        )));
-    }
+        )),
+    })?;
     let scope_filter = if all {
         None
     } else {

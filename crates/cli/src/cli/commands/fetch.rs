@@ -426,14 +426,9 @@ fn augment_missing_blob_error(repo: &Repository, err: anyhow::Error) -> anyhow::
     let Ok(missing) = repo.missing_blobs() else {
         return err;
     };
-    if missing.is_empty() {
-        return err;
+    let shorts: Vec<String> = missing.into_iter().map(|hash| hash.short()).collect();
+    match heddle_core::format_missing_blobs_suffix(&shorts) {
+        Some(suffix) => anyhow::anyhow!("{err}; {suffix}"),
+        None => err,
     }
-
-    let missing = missing
-        .into_iter()
-        .map(|hash| hash.short())
-        .collect::<Vec<_>>()
-        .join(", ");
-    anyhow::anyhow!("{err}; missing blobs: {missing}")
 }

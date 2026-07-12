@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use heddle_core::visibility_tier_label;
 use objects::object::{ChangeId, StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
@@ -32,13 +33,7 @@ pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
 
 /// The team id / scope label carried by a non-public tier, for output.
 fn tier_label(tier: &VisibilityTier) -> Option<&str> {
-    match tier {
-        VisibilityTier::TeamScoped { team_id } => Some(team_id),
-        VisibilityTier::Restricted { scope_label } | VisibilityTier::Private { scope_label } => {
-            Some(scope_label)
-        }
-        VisibilityTier::Public | VisibilityTier::Internal => None,
-    }
+    visibility_tier_label(tier)
 }
 
 fn resolve_state(repo: &Repository, spec: &str) -> Result<ChangeId> {

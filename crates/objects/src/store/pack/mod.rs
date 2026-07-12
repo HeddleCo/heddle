@@ -26,7 +26,7 @@ pub use shared::{
     decompress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, has_zstd_magic,
     try_decode_tagged_entry_header, verify_container, write_container_header,
 };
-pub use streaming_builder::StreamingPackBuilder;
+pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

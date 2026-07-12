@@ -145,9 +145,7 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
         match validate_browser_url(&url) {
             Ok(()) => {
                 if let Err(_e) = open_url(&url) {
-                    eprintln!(
-                        "Could not open browser automatically. Please open the URL above."
-                    );
+                    eprintln!("Could not open browser automatically. Please open the URL above.");
                 }
             }
             Err(err) => {
@@ -324,9 +322,8 @@ async fn cmd_create_service_token(
     // the PEM (and including it in JSON).
     let key_path = resolve_service_account_key_path(&name, key_out.as_deref())?;
     if let Some(parent) = key_path.parent() {
-        objects::fs_atomic::create_private_dir_all(parent).with_context(|| {
-            format!("creating private key directory {}", parent.display())
-        })?;
+        objects::fs_atomic::create_private_dir_all(parent)
+            .with_context(|| format!("creating private key directory {}", parent.display()))?;
     }
     objects::fs_atomic::write_file_atomic_secret(&key_path, private_key_pem.as_bytes())
         .with_context(|| format!("writing private key to {}", key_path.display()))?;
@@ -429,7 +426,10 @@ async fn cmd_create_service_token(
 ///
 /// Prefers an explicit `--key-out` path; otherwise writes under
 /// `<heddle_home>/service-accounts/<sanitized-name>.pem`.
-fn resolve_service_account_key_path(name: &str, key_out: Option<&str>) -> Result<std::path::PathBuf> {
+fn resolve_service_account_key_path(
+    name: &str,
+    key_out: Option<&str>,
+) -> Result<std::path::PathBuf> {
     if let Some(path) = key_out {
         return Ok(std::path::PathBuf::from(path));
     }
@@ -874,10 +874,7 @@ pub(crate) fn validate_browser_url(url: &str) -> Result<()> {
     }
 
     // Authority ends at the first path/query/fragment delimiter.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     if authority.is_empty() {
         bail!("browser URL is missing a host");
     }

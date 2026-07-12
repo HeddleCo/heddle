@@ -4,6 +4,9 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
+};
 use objects::store::ObjectStore;
 use repo::{MergeState, Repository};
 use serde::Serialize;
@@ -202,11 +205,7 @@ fn cmd_resolve_file(
     force: bool,
 ) -> Result<()> {
     let merge_state = load_merge_state_or_advice(merge_manager, "resolve merge conflict")?;
-    if !merge_state
-        .conflicts
-        .iter()
-        .any(|conflict| conflict == path)
-    {
+    if !path_is_active_conflict(&merge_state.conflicts, path) {
         return Err(anyhow!(path_not_in_active_merge_advice(path)));
     }
     resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
@@ -304,16 +303,10 @@ fn ensure_resolved_file_has_no_conflict_markers(
     let full_path = repo.root().join(path);
     let content = fs::read(&full_path)
         .with_context(|| format!("read resolved conflict candidate {}", full_path.display()))?;
-    if contains_conflict_markers(&content) {
+    if contains_line_start_conflict_markers(&content) {
         return Err(anyhow!(conflict_markers_still_present_advice(path)));
     }
     Ok(())
-}
-
-fn contains_conflict_markers(content: &[u8]) -> bool {
-    content.split(|byte| *byte == b'\n').any(|line| {
-        line.starts_with(b"<<<<<<<") || line.starts_with(b"=======") || line.starts_with(b">>>>>>>")
-    })
 }
 
 fn resolve_file_with_version(
@@ -372,12 +365,7 @@ fn load_merge_state_or_advice(
 }
 
 fn unresolved_paths(merge_state: &MergeState) -> Vec<String> {
-    merge_state
-        .conflicts
-        .iter()
-        .filter(|conflict| !merge_state.resolved.contains(conflict))
-        .cloned()
-        .collect()
+    unresolved_conflict_paths(&merge_state.conflicts, &merge_state.resolved)
 }
 
 fn no_merge_in_progress_advice(action: &'static str) -> RecoveryAdvice {

@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
-use std::{collections::BTreeSet, path::PathBuf};
-
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use heddle_core::{
+    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReleaseKind,
+    AgentReservationReport, FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec,
+    FanoutPlan, FanoutPlanError, FanoutPlanRequest, assemble_agent_reservation,
+    assemble_agent_reservation_list, assemble_fanout_plan_report, check_agent_capture_thread,
+    check_fanout_start_preflight, fanout_child_body, fanout_parent_delegated_by,
+    fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
+    select_fanout_parent_thread, session_is_active, touch_agent_heartbeat, touch_agent_release,
+};
 use objects::{
     object::ThreadName,
     store::{
@@ -39,7 +46,6 @@ use crate::cli::{
         AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
         AgentTaskStatusArg, AgentTaskUpdateArgs, ThreadStartArgs, WorkspaceModeArg,
     },
-    render::shell_quote,
     should_output_json,
 };
 
@@ -155,22 +161,28 @@ pub(crate) struct AgentFanoutCommandOutput {
 
 impl From<&AgentEntry> for AgentReservationOutput {
     fn from(entry: &AgentEntry) -> Self {
+        AgentReservationOutput::from(assemble_agent_reservation(entry))
+    }
+}
+
+impl From<AgentReservationReport> for AgentReservationOutput {
+    fn from(report: AgentReservationReport) -> Self {
         Self {
-            session_id: entry.session_id.clone(),
-            reservation_token: entry.reservation_token.clone(),
-            thread: entry.thread.clone(),
-            anchor_state: entry.anchor_state.clone(),
-            anchor_root: entry.anchor_root.clone(),
-            task_assignment_id: entry.task_assignment_id.clone(),
-            status: entry.status.to_string(),
-            path: entry.path.as_ref().map(|path| path.display().to_string()),
-            task: entry.attach_reason.clone(),
-            provider: entry.provider.clone(),
-            model: entry.model.clone(),
-            harness: entry.harness.clone(),
-            thinking_level: entry.thinking_level.clone(),
-            probe_source: entry.probe_source.clone(),
-            probe_confidence: entry.probe_confidence,
+            session_id: report.session_id,
+            reservation_token: report.reservation_token,
+            thread: report.thread,
+            anchor_state: report.anchor_state,
+            anchor_root: report.anchor_root,
+            task_assignment_id: report.task_assignment_id,
+            status: report.status,
+            path: report.path,
+            task: report.task,
+            provider: report.provider,
+            model: report.model,
+            harness: report.harness,
+            thinking_level: report.thinking_level,
+            probe_source: report.probe_source,
+            probe_confidence: report.probe_confidence,
         }
     }
 }
@@ -630,10 +642,10 @@ fn ensure_thread_record(
 pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
+    let now = Utc::now();
     let entry = registry
         .update_entry(&args.session, |entry| {
-            entry.heartbeat_at = Some(Utc::now());
-            entry.last_progress_at = Some(Utc::now());
+            touch_agent_heartbeat(entry, now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
     render_agent_reservation_envelope(&repo, &entry)
@@ -643,18 +655,13 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let status = match args.status {
-        AgentReleaseStatusArg::Complete => AgentStatus::Complete,
-        AgentReleaseStatusArg::Abandoned => AgentStatus::Abandoned,
+        AgentReleaseStatusArg::Complete => AgentReleaseKind::Complete.to_status(),
+        AgentReleaseStatusArg::Abandoned => AgentReleaseKind::Abandoned.to_status(),
     };
+    let now = Utc::now();
     let entry = registry
         .update_entry(&args.session, |entry| {
-            entry.status = status.clone();
-            entry.completed_at = match entry.status {
-                AgentStatus::Active => None,
-                AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => {
-                    Some(Utc::now())
-                }
-            };
+            touch_agent_release(entry, status.clone(), now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
     render_agent_reservation_envelope(&repo, &entry)
@@ -668,22 +675,17 @@ pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
         // "who is alive?" see a pid-checked, current view.
         registry.reap_dead()?;
     }
-    let entries: Vec<_> = registry
-        .list()?
-        .into_iter()
-        .filter(|entry| {
-            args.thread
-                .as_ref()
-                .is_none_or(|thread| &entry.thread == thread)
-        })
-        .filter(|entry| !args.alive_only || entry.status == AgentStatus::Active)
-        .map(|entry| AgentReservationOutput::from(&entry))
-        .collect();
+    let list =
+        assemble_agent_reservation_list(registry.list()?, args.thread.clone(), args.alive_only);
     render_agent_list(
         AgentReservationListOutput {
-            reservations: entries,
-            alive_only: args.alive_only,
-            thread: args.thread.clone(),
+            reservations: list
+                .reservations
+                .into_iter()
+                .map(AgentReservationOutput::from)
+                .collect(),
+            alive_only: list.alive_only,
+            thread: list.thread,
             trust: build_repository_verification_state(&repo),
         },
         should_output_json(cli, Some(repo.config())),
@@ -706,39 +708,51 @@ pub fn cmd_agent_fanout(cli: &Cli, command: AgentFanoutCommands) -> Result<()> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct FanoutLaneSpec {
-    thread: String,
-    path: PathBuf,
-    title: String,
-}
-
 fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let lanes = parse_fanout_lanes(&args.lane)?;
     let (base_state, base_root) = fanout_base(&repo)?;
     let parent_thread = fanout_parent_thread(&repo)?;
-    let output = build_fanout_output(
-        &repo,
-        "agent_fanout_plan",
-        args.title,
-        parent_thread,
+    let plan = plan_fanout(&FanoutPlanRequest {
+        title: args.title,
+        lanes: args.lane,
+        coordination_discussion_id: args.coordination_discussion_id,
         base_state,
         base_root,
-        args.coordination_discussion_id,
-        None,
-        lanes
+        parent_thread,
+    })
+    .map_err(map_fanout_plan_error)?;
+    let report = assemble_fanout_plan_report(&plan);
+    let output = AgentFanoutOutput {
+        output_kind: report.output_kind,
+        title: report.title,
+        parent_thread: report.parent_thread,
+        base_state: report.base_state,
+        base_root: report.base_root,
+        coordination_discussion_id: report.coordination_discussion_id,
+        parent_task: None,
+        lanes: report
+            .lanes
             .into_iter()
             .map(|lane| AgentFanoutLaneOutput {
                 thread: lane.thread,
-                path: lane.path.display().to_string(),
+                path: lane.path,
                 title: lane.title,
                 task: None,
-                session_id: None,
-                status: "planned".to_string(),
+                session_id: lane.session_id,
+                status: lane.status,
             })
             .collect(),
-    );
+        commands: report
+            .commands
+            .into_iter()
+            .map(|command| AgentFanoutCommandOutput {
+                lane_thread: command.lane_thread,
+                command: command.command,
+                argv: command.argv,
+            })
+            .collect(),
+        trust: build_repository_verification_state(&repo),
+    };
     render_agent_fanout_output(output, should_output_json(cli, Some(repo.config())))
 }
 
@@ -753,33 +767,42 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     }
     ensure_worktree_clean(&repo, "agent fanout start")?;
 
-    let lanes = parse_fanout_lanes(&args.lane)?;
     let (base_state, base_root) = fanout_base(&repo)?;
     let parent_thread = fanout_parent_thread(&repo)?;
-    preflight_fanout_start(&repo, &lanes)?;
+    let plan = plan_fanout(&FanoutPlanRequest {
+        title: args.title.clone(),
+        lanes: args.lane,
+        coordination_discussion_id: args.coordination_discussion_id.clone(),
+        base_state: base_state.clone(),
+        base_root: base_root.clone(),
+        parent_thread: parent_thread.clone(),
+    })
+    .map_err(map_fanout_plan_error)?;
+    preflight_fanout_start_io(&repo, &plan.nodes)?;
     let store = AgentTaskStore::new(repo.heddle_dir());
 
-    let mut parent = AgentTaskRecord::new(String::new(), args.title.clone(), parent_thread.clone());
-    parent.body = fanout_parent_body(&lanes);
+    let mut parent = AgentTaskRecord::new(String::new(), plan.title.clone(), parent_thread.clone());
+    parent.body = plan.parent_body.clone();
     parent.base_state = Some(base_state.clone());
     parent.base_root = Some(base_root.clone());
-    parent.coordination_discussion_id = args.coordination_discussion_id.clone();
+    parent.coordination_discussion_id = plan.coordination_discussion_id.clone();
     parent.allow_offline = true;
-    parent.delegated_by = Some("heddle agent fanout start".to_string());
+    parent.delegated_by = Some(fanout_parent_delegated_by().to_string());
     parent.status = AgentTaskStatus::InProgress;
     let parent = store.create(parent)?;
 
+    let attach_rule = fanout_start_attach_rule();
     let mut created_task_ids = vec![parent.task_id.clone()];
     let start_result = (|| -> Result<Vec<AgentFanoutLaneOutput>> {
         let mut outputs = Vec::new();
-        for lane in lanes {
+        for lane in &plan.nodes {
             let mut child =
                 AgentTaskRecord::new(String::new(), lane.title.clone(), lane.thread.clone());
-            child.body = format!("Fan-out child lane for parent task {}", parent.task_id);
+            child.body = fanout_child_body(&parent.task_id);
             child.base_state = Some(base_state.clone());
             child.base_root = Some(base_root.clone());
             child.parent_task_id = Some(parent.task_id.clone());
-            child.coordination_discussion_id = args.coordination_discussion_id.clone();
+            child.coordination_discussion_id = plan.coordination_discussion_id.clone();
             child.allow_offline = true;
             child.delegated_by = Some(parent.task_id.clone());
             child.status = AgentTaskStatus::InProgress;
@@ -814,16 +837,14 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                 let _ = registry.update_entry(session_id, |entry| {
                     entry.task_assignment_id = Some(child.task_id.clone());
                     entry.attach_reason = Some(lane.title.clone());
-                    entry
-                        .attach_precedence
-                        .push("agent-fanout-start".to_string());
-                    entry.winning_attach_rule = Some("agent-fanout-start".to_string());
+                    entry.attach_precedence.push(attach_rule.to_string());
+                    entry.winning_attach_rule = Some(attach_rule.to_string());
                 })?;
             }
             outputs.push(AgentFanoutLaneOutput {
-                thread: lane.thread,
+                thread: lane.thread.clone(),
                 path: lane.path.display().to_string(),
-                title: lane.title,
+                title: lane.title.clone(),
                 task: Some(AgentTaskOutput::from(&child)),
                 session_id,
                 status: "started".to_string(),
@@ -840,17 +861,8 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
         }
     };
 
-    let output = build_fanout_output(
-        &repo,
-        "agent_fanout_start",
-        args.title,
-        parent_thread,
-        base_state,
-        base_root,
-        args.coordination_discussion_id,
-        Some(AgentTaskOutput::from(&parent)),
-        outputs,
-    );
+    let output =
+        build_fanout_start_output(&repo, &plan, Some(AgentTaskOutput::from(&parent)), outputs);
     render_agent_fanout_output(output, should_output_json(cli, Some(repo.config())))
 }
 
@@ -990,52 +1002,30 @@ fn agent_task_status_from_arg(status: &AgentTaskStatusArg) -> AgentTaskStatus {
     }
 }
 
-fn parse_fanout_lanes(raw_lanes: &[String]) -> Result<Vec<FanoutLaneSpec>> {
-    if raw_lanes.is_empty() {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+fn map_fanout_plan_error(err: FanoutPlanError) -> anyhow::Error {
+    match err {
+        FanoutPlanError::LaneRequired => anyhow!(RecoveryAdvice::invalid_usage(
             "agent_fanout_lane_required",
             "agent fanout requires at least one --lane <thread>=<path>:<title>",
             "Pass --lane once for each child checkout to create.",
             "heddle agent fanout plan --title <title> --lane <thread>=<path>:<title>",
-        )));
+        )),
+        FanoutPlanError::LaneInvalid { raw } => anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_lane_invalid",
+            format!("invalid fanout lane '{raw}'"),
+            "Use <thread>=<path>:<title>. Thread, path, and title must all be non-empty.",
+            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
+        )),
+        FanoutPlanError::InvalidThreadName { source, .. } => {
+            anyhow!(thread_name_invalid_advice(&source))
+        }
+        FanoutPlanError::DuplicateThread { thread } => anyhow!(fanout_lane_unavailable_advice(
+            "agent_fanout_duplicate_thread",
+            &thread,
+            format!("fanout lane '{thread}' is listed more than once"),
+            "Use each child thread name once per fanout.",
+        )),
     }
-    raw_lanes.iter().map(|raw| parse_fanout_lane(raw)).collect()
-}
-
-fn parse_fanout_lane(raw: &str) -> Result<FanoutLaneSpec> {
-    let (thread, rest) = raw.split_once('=').ok_or_else(|| {
-        anyhow!(RecoveryAdvice::invalid_usage(
-            "agent_fanout_lane_invalid",
-            format!("invalid fanout lane '{raw}'"),
-            "Use <thread>=<path>:<title>.",
-            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
-        ))
-    })?;
-    let (path, title) = rest.split_once(':').ok_or_else(|| {
-        anyhow!(RecoveryAdvice::invalid_usage(
-            "agent_fanout_lane_invalid",
-            format!("invalid fanout lane '{raw}'"),
-            "Use <thread>=<path>:<title>.",
-            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
-        ))
-    })?;
-    let thread = thread.trim();
-    let path = path.trim();
-    let title = title.trim();
-    if path.is_empty() || title.is_empty() {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
-            "agent_fanout_lane_invalid",
-            format!("invalid fanout lane '{raw}'"),
-            "Thread, path, and title must all be non-empty.",
-            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
-        )));
-    }
-    ThreadId::new(thread).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
-    Ok(FanoutLaneSpec {
-        thread: thread.to_string(),
-        path: PathBuf::from(path),
-        title: title.to_string(),
-    })
 }
 
 fn fanout_base(repo: &Repository) -> Result<(String, String)> {
@@ -1051,17 +1041,9 @@ fn fanout_base(repo: &Repository) -> Result<(String, String)> {
 
 fn fanout_parent_thread(repo: &Repository) -> Result<String> {
     Ok(match repo.head_ref()? {
-        Head::Attached { thread } => thread.to_string(),
-        Head::Detached { .. } => "detached".to_string(),
+        Head::Attached { thread } => select_fanout_parent_thread(Some(thread.as_str())),
+        Head::Detached { .. } => select_fanout_parent_thread(None),
     })
-}
-
-fn fanout_parent_body(lanes: &[FanoutLaneSpec]) -> String {
-    lanes
-        .iter()
-        .map(|lane| format!("- {}: {}", lane.thread, lane.title))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
@@ -1072,74 +1054,69 @@ fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
     }
 }
 
-fn preflight_fanout_start(repo: &Repository, lanes: &[FanoutLaneSpec]) -> Result<()> {
-    let mut seen_threads = BTreeSet::new();
-    let mut seen_paths = BTreeSet::new();
+/// I/O preflight for fanout start after pure [`plan_fanout`].
+///
+/// Gathers live facts (reservations, refs, thread records, resolved paths),
+/// then applies pure [`check_fanout_start_preflight`].
+fn preflight_fanout_start_io(repo: &Repository, lanes: &[FanoutNodeSpec]) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
+    let mut facts = Vec::with_capacity(lanes.len());
     for lane in lanes {
-        if !seen_threads.insert(lane.thread.clone()) {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_duplicate_thread",
-                lane,
-                format!("fanout lane '{}' is listed more than once", lane.thread),
-                "Use each child thread name once per fanout.",
-            )));
-        }
-        if super::thread::find_active_thread_entry(repo, &lane.thread)?.is_some() {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_live_owner",
-                lane,
-                format!(
-                    "fanout lane '{}' already has an active agent reservation",
-                    lane.thread
-                ),
-                "Release the active reservation or choose a fresh child thread.",
-            )));
-        }
-        if repo
-            .refs()
-            .get_thread(&ThreadName::new(&lane.thread))?
-            .is_some()
-        {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_thread_exists",
-                lane,
-                format!("fanout lane '{}' already exists", lane.thread),
-                "Choose a fresh child thread or inspect the existing thread before retrying.",
-            )));
-        }
-        if let Some(existing) = manager.find_by_thread(&lane.thread)?
-            && existing.state == ThreadState::Active
-        {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_thread_exists",
-                lane,
-                format!(
-                    "fanout lane '{}' already has an active thread record",
-                    lane.thread
-                ),
-                "Drop or finish the existing thread before reusing the lane name.",
-            )));
-        }
         let prepared = plan_worktree_target(repo, &lane.path, Some(&lane.thread))?;
-        if !seen_paths.insert(prepared.path.clone()) {
-            return Err(anyhow!(fanout_lane_unavailable_advice(
-                "agent_fanout_duplicate_path",
-                lane,
-                format!(
-                    "fanout lane '{}' resolves to a checkout path used by another lane",
-                    lane.thread
-                ),
-                "Use a distinct checkout path for each child lane.",
-            )));
-        }
+        let active_thread_record = match manager.find_by_thread(&lane.thread)? {
+            Some(existing) => existing.state == ThreadState::Active,
+            None => false,
+        };
+        facts.push(FanoutLaneAvailability {
+            thread: lane.thread.clone(),
+            has_live_owner: super::thread::find_active_thread_entry(repo, &lane.thread)?.is_some(),
+            thread_ref_exists: repo
+                .refs()
+                .get_thread(&ThreadName::new(&lane.thread))?
+                .is_some(),
+            active_thread_record,
+            resolved_path: prepared.path,
+        });
+    }
+    if let Err(block) = check_fanout_start_preflight(&facts) {
+        return Err(anyhow!(fanout_lane_preflight_block_advice(block)));
     }
     Ok(())
 }
 
+fn fanout_lane_preflight_block_advice(block: FanoutLanePreflightBlock) -> RecoveryAdvice {
+    let thread = block.thread().to_string();
+    match block {
+        FanoutLanePreflightBlock::LiveOwner { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_live_owner",
+            &thread,
+            format!("fanout lane '{thread}' already has an active agent reservation"),
+            "Release the active reservation or choose a fresh child thread.",
+        ),
+        FanoutLanePreflightBlock::ThreadExists { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_thread_exists",
+            &thread,
+            format!("fanout lane '{thread}' already exists"),
+            "Choose a fresh child thread or inspect the existing thread before retrying.",
+        ),
+        FanoutLanePreflightBlock::ActiveThreadRecord { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_thread_exists",
+            &thread,
+            format!("fanout lane '{thread}' already has an active thread record"),
+            "Drop or finish the existing thread before reusing the lane name.",
+        ),
+        FanoutLanePreflightBlock::DuplicatePath { .. } => fanout_lane_unavailable_advice(
+            "agent_fanout_duplicate_path",
+            &thread,
+            format!("fanout lane '{thread}' resolves to a checkout path used by another lane"),
+            "Use a distinct checkout path for each child lane.",
+        ),
+    }
+}
+
 fn fanout_lane_unavailable_advice(
     kind: &'static str,
-    lane: &FanoutLaneSpec,
+    thread: &str,
     error: String,
     guidance: &'static str,
 ) -> RecoveryAdvice {
@@ -1147,65 +1124,26 @@ fn fanout_lane_unavailable_advice(
         kind,
         error,
         guidance,
-        format!(
-            "heddle agent fanout plan --title <title> --lane {}=<path>:<title>",
-            lane.thread
-        ),
+        format!("heddle agent fanout plan --title <title> --lane {thread}=<path>:<title>"),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_fanout_output(
+fn build_fanout_start_output(
     repo: &Repository,
-    output_kind: &'static str,
-    title: String,
-    parent_thread: String,
-    base_state: String,
-    base_root: String,
-    coordination_discussion_id: Option<String>,
+    plan: &FanoutPlan,
     parent_task: Option<AgentTaskOutput>,
     lanes: Vec<AgentFanoutLaneOutput>,
 ) -> AgentFanoutOutput {
-    let commands = if output_kind == "agent_fanout_plan" {
-        let mut argv = vec![
-            "heddle".to_string(),
-            "agent".to_string(),
-            "fanout".to_string(),
-            "start".to_string(),
-            "--title".to_string(),
-            title.clone(),
-        ];
-        if let Some(discussion_id) = coordination_discussion_id.as_ref() {
-            argv.push("--coordination-discussion-id".to_string());
-            argv.push(discussion_id.clone());
-        }
-        for lane in &lanes {
-            argv.push("--lane".to_string());
-            argv.push(format!("{}={}:{}", lane.thread, lane.path, lane.title));
-        }
-        let command = argv
-            .iter()
-            .map(|arg| shell_quote(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        vec![AgentFanoutCommandOutput {
-            lane_thread: "all".to_string(),
-            command,
-            argv,
-        }]
-    } else {
-        Vec::new()
-    };
     AgentFanoutOutput {
-        output_kind,
-        title,
-        parent_thread,
-        base_state,
-        base_root,
-        coordination_discussion_id,
+        output_kind: "agent_fanout_start",
+        title: plan.title.clone(),
+        parent_thread: plan.parent_thread.clone(),
+        base_state: plan.base_state.clone(),
+        base_root: plan.base_root.clone(),
+        coordination_discussion_id: plan.coordination_discussion_id.clone(),
         parent_task,
         lanes,
-        commands,
+        commands: Vec::new(),
         trust: build_repository_verification_state(repo),
     }
 }
@@ -1371,13 +1309,13 @@ fn validate_active_session(
     registry: &AgentRegistry,
     session_id: &str,
 ) -> Result<objects::store::AgentEntry> {
+    let now = Utc::now();
     let entry = registry
         .update_entry(session_id, |entry| {
-            entry.heartbeat_at = Some(Utc::now());
-            entry.last_progress_at = Some(Utc::now());
+            touch_agent_heartbeat(entry, now);
         })?
         .ok_or_else(|| anyhow!(agent_session_not_found_advice(session_id)))?;
-    if entry.status != AgentStatus::Active {
+    if !session_is_active(&entry.status) {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "agent_session_inactive",
             format!(
@@ -1402,50 +1340,57 @@ pub async fn cmd_agent_capture(
     cli: &Cli,
     args: crate::cli::cli_args::AgentCaptureArgs,
 ) -> Result<()> {
+    let plan = plan_agent_capture(&AgentCaptureOptions {
+        session: args.session.clone(),
+        message: args.message.clone(),
+        confidence: args.confidence,
+    })
+    .map_err(|err| anyhow!(err))?;
     let repo_path = cli
         .repo
         .clone()
         .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
     let repo = Repository::open(&repo_path)?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let entry = validate_active_session(&registry, &args.session)?;
+    let entry = validate_active_session(&registry, &plan.session)?;
 
     // Confirm the reservation still names the thread the caller is
     // attached to. We don't switch threads here — the agent must
     // already be on its reserved thread when invoking capture.
-    if let Some(current) = repo.current_lane()?
-        && current != entry.thread
+    if let AgentCaptureThreadCheck::Mismatch {
+        reserved_thread,
+        current_thread,
+    } = check_agent_capture_thread(&entry.thread, repo.current_lane()?.as_deref())
     {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "agent_session_thread_mismatch",
             format!(
-                "agent session '{}' reserved thread '{}', but the current thread is '{}'",
-                args.session, entry.thread, current
+                "agent session '{}' reserved thread '{reserved_thread}', but the current thread is '{current_thread}'",
+                plan.session
             ),
             format!(
-                "Switch to the reserved thread with `heddle switch {}` before capturing.",
-                entry.thread
+                "Switch to the reserved thread with `heddle switch {reserved_thread}` before capturing."
             ),
             format!(
-                "session {} owns thread {}, current checkout is attached to {}",
-                args.session, entry.thread, current
+                "session {} owns thread {reserved_thread}, current checkout is attached to {current_thread}",
+                plan.session
             ),
             "capturing from the wrong thread would attribute work to a reservation that does not own this checkout",
             "the session heartbeat was refreshed, but no capture, refs, or worktree changes were applied",
-            format!("heddle switch {}", entry.thread),
-            vec![format!("heddle switch {}", entry.thread)],
+            format!("heddle switch {reserved_thread}"),
+            vec![format!("heddle switch {reserved_thread}")],
         )));
     }
 
     super::snapshot::cmd_snapshot(
         cli,
-        args.message.clone(),
-        args.confidence,
+        plan.message.clone(),
+        plan.confidence,
         false,
         super::snapshot::SnapshotAgentOverrides {
             provider: entry.provider.clone(),
             model: entry.model.clone(),
-            session: Some(args.session.clone()),
+            session: Some(plan.session.clone()),
             segment: None,
             policy: None,
             no_policy: false,
@@ -1459,20 +1404,26 @@ pub async fn cmd_agent_capture(
 /// for `heddle ready` that ensures the caller still owns the
 /// reservation it's trying to mark ready.
 pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyArgs) -> Result<()> {
+    let options = AgentReadyOptions {
+        session: args.session.clone(),
+        message: args.message.clone(),
+        confidence: args.confidence,
+    };
     let repo_path = cli
         .repo
         .clone()
         .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
     let repo = Repository::open(&repo_path)?;
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let entry = validate_active_session(&registry, &args.session)?;
+    let entry = validate_active_session(&registry, &options.session)?;
+    let plan = plan_agent_ready(&entry, &options).map_err(|err| anyhow!(err))?;
 
     super::ready_cmd::cmd_ready(
         cli,
         crate::cli::cli_args::ReadyArgs {
-            thread: Some(entry.thread.clone()),
-            message: args.message.clone(),
-            confidence: args.confidence,
+            thread: Some(plan.thread),
+            message: plan.message,
+            confidence: plan.confidence,
         },
     )
     .await

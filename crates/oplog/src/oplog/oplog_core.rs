@@ -9,6 +9,7 @@ use std::{
 use chrono::Utc;
 use objects::{
     error::{HeddleError, Result},
+    fs_atomic::create_dir_all_durable,
     lock::{RepoLock, WriteLockGuard},
     object::Principal,
     sync::LockExt,
@@ -49,8 +50,8 @@ impl OpLog {
 
     /// Initialize the oplog directory and create an empty oplog.bin.
     pub fn init(&self) -> Result<()> {
-        std::fs::create_dir_all(self.oplog_dir())?;
-        std::fs::create_dir_all(self.root.join("locks"))?;
+        create_dir_all_durable(&self.oplog_dir())?;
+        create_dir_all_durable(&self.root.join("locks"))?;
         let path = self.oplog_path();
         if !path.exists() {
             let log = PackedOpLog::new(path);
@@ -459,8 +460,8 @@ impl OpLog {
     /// stay centralized.
     #[cfg(feature = "bench")]
     pub fn write_entries_for_bench(&self, entries: Vec<OpEntry>) -> Result<()> {
-        std::fs::create_dir_all(self.oplog_dir())?;
-        std::fs::create_dir_all(self.root.join("locks"))?;
+        create_dir_all_durable(&self.oplog_dir())?;
+        create_dir_all_durable(&self.root.join("locks"))?;
         let head_id = entries.last().map(|entry| entry.id).unwrap_or(0);
         let mut packed = PackedOpLog::new(self.oplog_path());
         packed.entries = entries;

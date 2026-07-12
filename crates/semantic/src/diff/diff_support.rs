@@ -12,9 +12,9 @@ use objects::object::{DiffKind, FileChange, FileChangeSet, SemanticChange};
 use super::{diff_options::SemanticDiffOptions, diff_types::SemanticFallbackReason};
 use crate::{
     analysis::{
-        classify_modification_with_confidence, classify_modification_with_parsed,
-        detect_file_renames, detect_function_changes_with_parsed,
-        detect_import_changes_with_parsed, AggregationResult,
+        AggregationResult, classify_modification_with_confidence,
+        classify_modification_with_parsed, detect_file_renames,
+        detect_function_changes_with_parsed, detect_import_changes_with_parsed,
     },
     parser::ParsedFile,
 };

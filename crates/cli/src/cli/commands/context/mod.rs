@@ -380,42 +380,6 @@ pub(crate) fn apply_new_state(repo: &Repository, state: &State) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn filter_annotations<'a>(
-    annotations: &'a [Annotation],
-    scope: Option<&str>,
-    tag: Option<&str>,
-    include_superseded: bool,
-) -> Result<Vec<&'a Annotation>> {
-    let scope_filter = if let Some(s) = scope {
-        Some(parse_scope(Some(s))?)
-    } else {
-        None
-    };
-
-    Ok(annotations
-        .iter()
-        .filter(|annotation| {
-            if !include_superseded && annotation.status == AnnotationStatus::Superseded {
-                return false;
-            }
-            if let Some(ref scope) = scope_filter
-                && !annotation.scope.matches(scope)
-            {
-                return false;
-            }
-            if let Some(tag) = tag {
-                let Some(current) = annotation.current_revision() else {
-                    return false;
-                };
-                if !current.tags.iter().any(|candidate| candidate == tag) {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect())
-}
-
 pub(crate) fn print_context_get(
     cli: &Cli,
     target: &ContextTarget,
@@ -463,17 +427,7 @@ pub(crate) fn print_context_get(
 /// If range is None, returns the full source.
 /// Lines are 1-indexed, inclusive.
 fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
-    let Some((start, end)) = range else {
-        return source.to_vec();
-    };
-    let text = std::str::from_utf8(source).unwrap_or("");
-    let lines: Vec<&str> = text.lines().collect();
-    let start_idx = (start as usize).saturating_sub(1);
-    let end_idx = (end as usize).min(lines.len());
-    if start_idx >= lines.len() {
-        return Vec::new();
-    }
-    lines[start_idx..end_idx].join("\n").into_bytes()
+    heddle_core::extract_scope_bytes(source, range)
 }
 
 fn advance_head(repo: &Repository, state: &State) -> Result<()> {

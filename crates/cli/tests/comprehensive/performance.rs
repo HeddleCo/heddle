@@ -128,7 +128,9 @@ fn print_snapshot_cli_report(
 fn test_snapshot_performance_small_repo() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
-    let max_duration = performance_budget(Duration::from_millis(500), Duration::from_secs(1));
+    // Debug budget: L8 pack-install journal adds durable fsyncs; parallel
+    // comprehensive harness adds scheduler noise. Keep release tight.
+    let max_duration = performance_budget(Duration::from_millis(500), Duration::from_secs(2));
 
     assert_performance(
         "snapshot small repo",

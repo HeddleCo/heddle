@@ -7,10 +7,10 @@ use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 use cli::cli::commands::cmd_context_reason_git;
-#[cfg(feature = "semantic")]
-use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::cmd_prove;
+#[cfg(feature = "semantic")]
+use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::cmd_spool;
 #[cfg(feature = "git-overlay")]
@@ -932,7 +932,12 @@ async fn async_main() -> Result<()> {
         Err(err) if is_broken_pipe_error(&err) => Ok(()),
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);
-            print_error_with_hint(&cli, &err);
+            // OutcomeExit means the command already rendered its report
+            // (operator envelope, eligibility output, …); skip a second
+            // error envelope so JSON/text stay single-stream contracts.
+            if !HeddleExitCode::is_quiet_outcome(&err) {
+                print_error_with_hint(&cli, &err);
+            }
             std::process::exit(code.into());
         }
     }

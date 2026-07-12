@@ -214,6 +214,28 @@ fn open_accepts_supported_repository_format() {
     Repository::open(temp_dir.path()).expect("supported repo format should open");
 }
 
+/// Mutating commands historically bootstrap plain Git via `Repository::open`.
+/// Observe-only CLI paths (status/verify/doctor) must not call open until a
+/// `.heddle` sidecar already exists — see `verify_execution_context_from_cli`.
+#[test]
+fn open_bootstraps_plain_git_sidecar_for_mutators() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let repo = Repository::open(root).expect("open should bootstrap plain Git for mutators");
+    assert!(
+        root.join(".heddle").is_dir(),
+        "open should create the Heddle sidecar for mutators"
+    );
+    assert_eq!(
+        repo.capability(),
+        crate::RepositoryCapability::GitOverlay,
+        "bootstrapped plain Git should be git-overlay"
+    );
+}
+
 #[test]
 fn open_fails_when_required_migration_fails() {
     let temp_dir = TempDir::new().unwrap();

@@ -6,6 +6,26 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    GitOverlayPushTracking, GitRemoteConfigured, LocalTransferSummary, PushFailure, PushOutcome,
+    PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
+    first_multi_thread_push_failure, format_mirror_failure_text, format_mirror_success_text,
+    format_multi_ref_push_progress, format_push_outcome_text, format_pushing_to,
+    git_overlay_push_execution_facts, heddle_single_push_execution_facts_from_local,
+    is_native_transport_mismatch, looks_like_git_remote_url, looks_like_remote_location,
+    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
+    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
+    refuse_named_thread_tip_overwrite, remote_urls_match, transport_error_message,
+    uses_local_git_overlay_transport,
+};
+#[cfg(feature = "client")]
+use heddle_core::{
+    HostedPushPlan, HostedPushResult, HostedPushResultFields, all_threads_mirror_coverage_note,
+    format_connected_to, format_remote_state_detail, heddle_single_push_execution_facts,
+    hosted_spool_display_path, message_indicates_already_exists,
+    multi_ref_progress_from_hosted_thread, parse_hosted_push_result, plan_hosted_push,
+    redact_internal_hosted_paths, remote_push_failure, uses_git_overlay_mirror_rpc,
+};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
@@ -104,52 +124,11 @@ pub(crate) struct GitOverlayConfiguredRemote {
     url: String,
 }
 
+/// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
 #[derive(Debug, Clone, Serialize)]
 struct PushOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    pushed: bool,
-    changed: bool,
-    transport: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    push_scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ref_scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_notes_ref: Option<&'static str>,
-    /// The refs this push actually wrote at the destination. On the
-    /// Git-overlay refs path (`transport: "git"`) these are full Git ref
-    /// names — `refs/heads/<thread>`, `refs/notes/heddle`, `refs/tags/<tag>`
-    /// — sorted, empty for a no-op push, verifiable with `git ls-remote`.
-    /// On the native Heddle transport it is omitted for a single-thread push
-    /// but, for `--all-threads` (heddle#838), lists the Heddle thread names
-    /// that were pushed so the caller can see exactly which threads landed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refs_written: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_notes_visibility_warning: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_tracking_remote: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_remote_configured: Option<GitRemoteConfiguredOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_upstream_configured: Option<GitUpstreamConfiguredOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tags_included: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    force: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    force_discard_warning: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objects: Option<usize>,
+    #[serde(flatten)]
+    outcome: PushOutcome,
     next_action: Option<String>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
@@ -160,19 +139,25 @@ struct PushOutput {
     trust: RepositoryVerificationState,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct GitRemoteConfiguredOutput {
-    name: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GitUpstreamConfiguredOutput {
-    branch: String,
-    remote: String,
+fn push_output_from_outcome(
+    outcome: PushOutcome,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let action = ActionFields::from_action(&trust.recommended_action);
+    PushOutput {
+        outcome,
+        next_action: action.action.clone(),
+        next_action_template: action.template.clone(),
+        recommended_action: action.action,
+        recommended_action_template: action.template,
+        trust,
+    }
 }
 
 /// Execute push command.
+///
+/// Pure orchestration (`plan_push`) runs first; network / git I/O bodies stay
+/// in this module and consume plan fields.
 ///
 /// `mirror` is an ad-hoc dual-push escape hatch (heddle#25): after the
 /// primary push to the Heddle/git-overlay remote succeeds, also push to
@@ -190,12 +175,52 @@ pub async fn cmd_push(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
-    if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
-        return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
-    }
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }
+
+    let has_default_remote = resolved_default_remote_name(&repo)?.is_some();
+    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
+    let uses_local_overlay = uses_local_git_overlay_transport(
+        repo.capability(),
+        repo.hosted_enabled(),
+        push_uses_hosted_network,
+    );
+    // Discover native-heddle local target under local overlay (I/O fact for plan).
+    let native_local_path = if uses_local_overlay {
+        let default_remote_name = if remote.is_none() {
+            resolved_default_remote_name(&repo)?
+        } else {
+            None
+        };
+        let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
+        native_heddle_local_push_target(&repo, remote_arg)?
+    } else {
+        None
+    };
+    // Match preflight_native_remote_transport: overlay capability never
+    // treats a git URL as a native-transport mismatch.
+    let remote_is_git_local_or_url = matches!(
+        classify_remote_spec(&repo, remote.as_deref()),
+        Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl)
+    );
+    let transport_mismatch =
+        is_native_transport_mismatch(repo.capability(), remote_is_git_local_or_url);
+    let head = repo.head_ref()?;
+    let plan = plan_push(&PushPlanRequest {
+        capability: repo.capability(),
+        hosted_enabled: repo.hosted_enabled(),
+        uses_hosted_network: push_uses_hosted_network,
+        remote: remote.clone(),
+        has_default_remote,
+        thread: thread.clone(),
+        all_threads,
+        force,
+        head,
+        native_local_heddle_target: native_local_path.is_some(),
+        transport_mismatch,
+    })
+    .map_err(|blocker| map_remote_preflight_blocker(blocker, "push", remote.as_deref()))?;
 
     // `pre_push` JSON-protocol hook fires before any push work, on every
     // path (git-overlay local target, git-overlay refs push, and native
@@ -223,26 +248,22 @@ pub async fn cmd_push(
         auto_capture_command_boundary(cli, &repo, &user_config, AutoCaptureTrigger::Push)?;
     }
 
-    let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
-
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && !repo.hosted_enabled()
-        && !push_uses_hosted_network
-    {
-        let default_remote_name = if remote.is_none() {
-            resolved_default_remote_name(&repo)?
-        } else {
-            None
-        };
-        let remote_arg = remote.as_deref().or(default_remote_name.as_deref());
-        if let Some(target_path) = native_heddle_local_push_target(&repo, remote_arg)? {
-            if all_threads {
-                push_local_all_threads(&repo, &target_path, force, cli).await?;
+    match &plan.path {
+        PushPath::LocalNativeHeddle {
+            all_threads: path_all_threads,
+        } => {
+            let target_path = native_local_path.expect("plan selected local native heddle path");
+            if *path_all_threads {
+                push_local_all_threads(&repo, &target_path, &plan, cli).await?;
             } else {
-                let state_id =
-                    resolve_push_state_id(&repo, &user_config, state, thread.as_deref(), force)?;
-                let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
-                push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
+                let state_id = resolve_push_state_id(
+                    &repo,
+                    &user_config,
+                    state,
+                    thread.as_deref(),
+                    plan.force,
+                )?;
+                push_local(&repo, &target_path, &state_id, &plan.track_name, &plan, cli).await?;
             }
             // Ad-hoc dual-push parity (heddle#25): mirror runs on the
             // local-target overlay path too, best-effort.
@@ -254,106 +275,39 @@ pub async fn cmd_push(
             run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
             return Ok(());
         }
-        // The git-overlay refs path pushes whatever's attached to HEAD
-        // when scope is CurrentThread. If the user named a different
-        // thread explicitly (positional or `--thread`) we must NOT
-        // silently push the wrong branch — refuse and tell them to
-        // switch first or use `--all-threads`.
-        if !all_threads && let Some(requested) = thread.as_deref() {
-            let attached = match repo.head_ref()? {
-                Head::Attached { thread } => Some(thread.to_string()),
-                Head::Detached { .. } => None,
-            };
-            if attached.as_deref() != Some(requested) {
-                let attached_label = attached
-                    .as_deref()
-                    .map(|t| format!("'{t}'"))
-                    .unwrap_or_else(|| "detached HEAD".to_string());
-                return Err(anyhow!(
-                    "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}.\nNext: heddle thread switch {requested} && heddle push, or pass --all-threads"
-                ));
-            }
-        }
-        let (remote_name, scope, current_thread, tracking_refresh, refs_written, trust) =
-            push_git_overlay_refs(&repo, remote.as_deref(), all_threads, force)?;
-        if should_output_json(cli, Some(repo.config())) {
+        PushPath::LocalGitOverlayRefs {
+            all_threads: path_all_threads,
+        } => {
+            // Thread mismatch already refused by plan_push.
+            let (remote_name, _scope, current_thread, tracking_refresh, refs_written, trust) =
+                push_git_overlay_refs(&repo, remote.as_deref(), *path_all_threads, plan.force)?;
             let output = git_overlay_push_output(
+                &plan,
                 remote_name,
-                scope,
                 current_thread,
                 tracking_refresh,
                 refs_written,
-                force,
                 trust,
             );
-            crate::cli::render::write_json_stdout(&output)?;
-        } else {
-            println!(
-                "{} pushed {} to {} ({})",
-                style::ok_marker(),
-                match scope {
-                    GitPushScope::CurrentThread => current_thread
-                        .as_deref()
-                        .map(|thread| format!("thread {}", style::bold(thread)))
-                        .unwrap_or_else(|| "current thread".to_string()),
-                    GitPushScope::AllThreads => "all threads".to_string(),
-                },
-                style::bold(&remote_name),
-                match scope {
-                    GitPushScope::CurrentThread => "branch + refs/notes/heddle; tags skipped",
-                    GitPushScope::AllThreads => "all threads + Git tags + refs/notes/heddle",
-                }
-            );
-            if force {
-                println!(
-                    "Force: remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded."
-                );
+            if should_output_json(cli, Some(repo.config())) {
+                crate::cli::render::write_json_stdout(&output)?;
+            } else {
+                render_push_outcome_text(&output.outcome, None, &output.trust);
             }
-            println!(
-                "Git interop: published {}; ordinary `git log --all` may show Heddle metadata commits.",
-                style::bold("refs/notes/heddle")
-            );
-            if let Some(refresh) = tracking_refresh.as_ref() {
-                if let Some(configured) = &refresh.configured_remote {
-                    println!(
-                        "Git tracking: configured remote {} -> {} for future fetch/push.",
-                        style::bold(&configured.name),
-                        style::dim(&configured.url)
-                    );
-                }
-                if let Some(branch) = &refresh.upstream_branch {
-                    println!(
-                        "Git tracking: branch {} tracks {}/{}.",
-                        style::bold(branch),
-                        style::bold(&refresh.remote_name),
-                        branch
-                    );
-                }
+            // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
+            // `--mirror` fires here too, best-effort, after the primary push.
+            if let Some(mirror_remote) = mirror.as_deref() {
+                let mut bridge = GitProjection::new(&repo);
+                let outcome = bridge.push(mirror_remote);
+                render_mirror_outcome(cli, &repo, mirror_remote, outcome);
             }
-            println!(
-                "Workspace: {}",
-                if trust.verified {
-                    style::accent("verified")
-                } else {
-                    style::warn(&trust.status)
-                }
-            );
-            if !trust.recommended_action.is_empty() {
-                print_next(&trust.recommended_action);
-            }
+            run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
+            return Ok(());
         }
-        // Ad-hoc dual-push parity for the git-overlay branch (heddle#25):
-        // `--mirror` fires here too, best-effort, after the primary push.
-        if let Some(mirror_remote) = mirror.as_deref() {
-            let mut bridge = GitProjection::new(&repo);
-            let outcome = bridge.push(mirror_remote);
-            render_mirror_outcome(cli, &repo, mirror_remote, outcome);
+        PushPath::NativeRemote { .. } => {
+            // Transport mismatch already refused by plan_push.
         }
-        run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
-        return Ok(());
     }
-
-    preflight_native_remote_transport(&repo, remote.as_deref(), "push")?;
 
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
@@ -367,15 +321,11 @@ pub async fn cmd_push(
     // config must leave no partial state behind.
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
-        let allow_insecure = insecure
-            || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
+        let allow_insecure =
+            insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
         Some(
-            HostedSession::build(
-                &user_config,
-                server_key,
-                HostedAuthMode::CredentialFallback,
-            )?
-            .with_allow_insecure(allow_insecure),
+            HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
+                .with_allow_insecure(allow_insecure),
         )
     } else {
         None
@@ -393,7 +343,7 @@ pub async fn cmd_push(
     // a mismatched existing named thread (heddle#837). `--all-threads`
     // supersedes an explicit single-thread `--state`/`[THREAD]` — it pushes
     // everything.
-    let single_state_id = if all_threads {
+    let single_state_id = if plan.all_threads {
         None
     } else {
         Some(resolve_push_state_id(
@@ -401,21 +351,21 @@ pub async fn cmd_push(
             &user_config,
             state,
             thread.as_deref(),
-            force,
+            plan.force,
         )?)
     };
 
-    let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
+    let track_name = plan.track_name.as_str();
 
     match target {
         RemoteTarget::Local(path) => {
-            if all_threads {
-                push_local_all_threads(&repo, &path, force, cli).await?;
+            if plan.all_threads {
+                push_local_all_threads(&repo, &path, &plan, cli).await?;
             } else {
                 let state_id = single_state_id
                     .as_ref()
                     .expect("single-thread push resolves a state");
-                push_local(&repo, &path, state_id, &track_name, force, cli).await?;
+                push_local(&repo, &path, state_id, track_name, &plan, cli).await?;
             }
         }
         RemoteTarget::Network { addr, repo_path } => {
@@ -430,9 +380,10 @@ pub async fn cmd_push(
                         .as_ref()
                         .context("network client config was not prevalidated")?,
                     state_id: single_state_id.as_ref(),
-                    track_name: &track_name,
-                    force,
-                    all_threads,
+                    track_name,
+                    force: plan.force,
+                    all_threads: plan.all_threads,
+                    plan: &plan,
                     cli,
                 },
             )
@@ -456,6 +407,163 @@ pub async fn cmd_push(
     run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
 
     Ok(())
+}
+
+pub(super) fn map_remote_preflight_blocker(
+    blocker: RemotePreflightBlocker,
+    action: &str,
+    remote_arg: Option<&str>,
+) -> anyhow::Error {
+    match blocker {
+        RemotePreflightBlocker::MissingRemote => {
+            anyhow!(RecoveryAdvice::remote_not_configured(action))
+        }
+        RemotePreflightBlocker::TransportMismatch => anyhow!(
+            RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
+        ),
+        RemotePreflightBlocker::GitOverlayThreadMismatch {
+            requested,
+            attached,
+        } => {
+            let failure =
+                PushFailure::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
+                    requested: requested.clone(),
+                    attached: attached.clone(),
+                });
+            let attached_label = attached
+                .as_deref()
+                .map(|t| format!("'{t}'"))
+                .unwrap_or_else(|| "detached HEAD".to_string());
+            anyhow!(RecoveryAdvice::safety_refusal(
+                failure.advice_kind(),
+                format!(
+                    "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}"
+                ),
+                failure.recovery_hint(),
+                format!(
+                    "requested thread '{requested}' is not the attached git-overlay HEAD thread"
+                ),
+                "pushing a non-attached git-overlay thread would ship the wrong branch ref",
+                "repository state, refs, remote configuration, and worktree files were left unchanged",
+                failure.primary_command(),
+                vec![
+                    failure.primary_command(),
+                    "heddle push --all-threads".to_string(),
+                ],
+            ))
+        }
+    }
+}
+
+/// Map a typed [`PushFailure`] to RecoveryAdvice / anyhow for CLI exit.
+pub(super) fn map_push_failure(failure: PushFailure) -> anyhow::Error {
+    match failure {
+        PushFailure::Preflight(blocker) => map_remote_preflight_blocker(blocker, "push", None),
+        PushFailure::NamedThreadTipMismatch {
+            thread,
+            tip_short,
+            current_short,
+        } => {
+            let failure = named_thread_tip_mismatch_failure(&thread, &tip_short, &current_short);
+            anyhow!(RecoveryAdvice::safety_refusal(
+                failure.advice_kind(),
+                failure.to_string(),
+                failure.recovery_hint(),
+                format!(
+                    "named thread '{thread}' tip {tip_short} differs from current checkout {current_short}"
+                ),
+                format!(
+                    "pushing the current checkout under '{thread}' would overwrite a mismatched thread tip"
+                ),
+                "repository state, refs, remote configuration, and worktree files were left unchanged",
+                failure.primary_command(),
+                vec![
+                    failure.primary_command(),
+                    format!("heddle push --force {thread}"),
+                ],
+            ))
+        }
+        PushFailure::RemoteFailed { track_name, error } => {
+            #[cfg(feature = "client")]
+            {
+                anyhow!(RecoveryAdvice::remote_push_failed(&track_name, &error))
+            }
+            #[cfg(not(feature = "client"))]
+            {
+                anyhow!("failed to push thread '{track_name}': {error}")
+            }
+        }
+    }
+}
+
+/// Print unstyled domain push text with CLI markers / emphasis.
+fn render_push_outcome_text(
+    outcome: &PushOutcome,
+    track_name: Option<&str>,
+    trust: &RepositoryVerificationState,
+) {
+    let text = format_push_outcome_text(outcome, track_name);
+    // Restyle headline pieces lightly: keep domain wording, add ok marker.
+    println!("{} {}", style::ok_marker(), text.headline);
+    for line in &text.detail_lines {
+        if let Some(rest) = line.strip_prefix("Force: ") {
+            println!("Force: {rest}");
+        } else if let Some(rest) = line.strip_prefix("Git interop: published ") {
+            // Domain line is "Git interop: published refs/notes/heddle; …"
+            if let Some((notes, tail)) = rest.split_once(';') {
+                println!(
+                    "Git interop: published {};{}",
+                    style::bold(notes.trim()),
+                    tail
+                );
+            } else {
+                println!("{line}");
+            }
+        } else if let Some(rest) = line.strip_prefix("Git tracking: configured remote ") {
+            // "name -> url for future…"
+            if let Some((name, after)) = rest.split_once(" -> ") {
+                if let Some((url, tail)) = after.split_once(" for future") {
+                    println!(
+                        "Git tracking: configured remote {} -> {} for future{tail}",
+                        style::bold(name),
+                        style::dim(url)
+                    );
+                } else {
+                    println!("{line}");
+                }
+            } else {
+                println!("{line}");
+            }
+        } else if let Some(rest) = line.strip_prefix("Git tracking: branch ") {
+            // "branch tracks remote/branch."
+            if let Some((branch, after)) = rest.split_once(" tracks ") {
+                if let Some((remote, branch2)) = after.trim_end_matches('.').split_once('/') {
+                    println!(
+                        "Git tracking: branch {} tracks {}/{branch2}.",
+                        style::bold(branch),
+                        style::bold(remote),
+                    );
+                } else {
+                    println!("{line}");
+                }
+            } else {
+                println!("{line}");
+            }
+        } else {
+            println!("{line}");
+        }
+    }
+    println!(
+        "Workspace: {}",
+        if trust.verified {
+            style::accent("verified")
+        } else {
+            style::warn(&trust.status)
+        }
+    );
+    if !trust.recommended_action.is_empty() {
+        print_next(&trust.recommended_action);
+    }
 }
 
 /// `post_push` JSON-protocol hook. Best-effort; fires after a successful
@@ -504,11 +612,13 @@ fn render_mirror_outcome(
                 });
                 eprintln!("{}", record);
             } else {
-                println!(
-                    "{} mirrored to {}",
-                    style::ok_marker(),
-                    style::bold(mirror_remote)
-                );
+                // Domain owns unstyled wording; CLI adds marker + bold remote.
+                let line = format_mirror_success_text(mirror_remote);
+                if let Some(remote) = line.strip_prefix("mirrored to ") {
+                    println!("{} mirrored to {}", style::ok_marker(), style::bold(remote));
+                } else {
+                    println!("{} {line}", style::ok_marker());
+                }
             }
         }
         Err(err) => {
@@ -520,122 +630,67 @@ fn render_mirror_outcome(
                 });
                 eprintln!("{}", record);
             } else {
-                eprintln!(
-                    "{} mirror push to {} failed (primary push still succeeded): {}",
-                    style::warn_marker(),
-                    style::bold(mirror_remote),
-                    err
-                );
+                let line = format_mirror_failure_text(mirror_remote, &err.to_string());
+                // Restyle the remote name while keeping domain wording.
+                if let Some(rest) = line.strip_prefix("mirror push to ") {
+                    if let Some((remote, tail)) = rest.split_once(" failed ") {
+                        eprintln!(
+                            "{} mirror push to {} failed {tail}",
+                            style::warn_marker(),
+                            style::bold(remote),
+                        );
+                    } else {
+                        eprintln!("{} {line}", style::warn_marker());
+                    }
+                } else {
+                    eprintln!("{} {line}", style::warn_marker());
+                }
             }
         }
     }
 }
 
 fn git_overlay_push_output(
+    plan: &PushPlan,
     remote_name: String,
-    scope: GitPushScope,
     current_thread: Option<String>,
     tracking_refresh: Option<GitOverlayTrackingRefresh>,
     refs_written: Vec<String>,
-    force: bool,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    let tracking_remote = tracking_refresh
-        .as_ref()
-        .map(|refresh| refresh.remote_name.clone());
-    let configured_remote = tracking_refresh
-        .as_ref()
-        .and_then(|refresh| refresh.configured_remote.as_ref())
-        .map(|remote| GitRemoteConfiguredOutput {
-            name: remote.name.clone(),
-            url: remote.url.clone(),
-        });
-    let upstream_configured = tracking_refresh
-        .as_ref()
-        .and_then(|refresh| refresh.upstream_branch.as_ref())
-        .map(|branch| GitUpstreamConfiguredOutput {
-            branch: branch.clone(),
-            remote: tracking_remote
-                .clone()
-                .unwrap_or_else(|| "origin".to_string()),
-        });
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: "pushed",
-        success: true,
-        pushed: true,
-        changed: true,
-        transport: "git",
-        remote: Some(remote_name),
-        push_scope: Some(match scope {
-            GitPushScope::CurrentThread => "current_thread",
-            GitPushScope::AllThreads => "all_threads",
+    let tracking = tracking_refresh.map(|refresh| GitOverlayPushTracking {
+        remote_name: refresh.remote_name,
+        configured_remote: refresh.configured_remote.map(|remote| GitRemoteConfigured {
+            name: remote.name,
+            url: remote.url,
         }),
-        ref_scope: Some(match scope {
-            GitPushScope::CurrentThread => "branch_and_heddle_notes",
-            GitPushScope::AllThreads => "all_threads_tags_and_heddle_notes",
-        }),
-        git_notes_ref: Some("refs/notes/heddle"),
-        refs_written: Some(refs_written),
-        git_notes_visibility_warning: Some(
-            "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
-        ),
-        git_tracking_remote: tracking_remote,
-        git_remote_configured: configured_remote,
-        git_upstream_configured: upstream_configured,
-        tags_included: Some(matches!(scope, GitPushScope::AllThreads)),
-        force: Some(force),
-        force_discard_warning: force.then_some(
-            "remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded",
-        ),
-        thread: current_thread,
-        state: None,
-        objects: None,
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+        upstream_branch: refresh.upstream_branch,
+    });
+    let outcome = build_push_outcome(
+        plan,
+        git_overlay_push_execution_facts(remote_name, current_thread, refs_written, tracking),
+    );
+    push_output_from_outcome(outcome, trust)
 }
 
+#[cfg(feature = "client")]
 fn heddle_push_output(
+    plan: &PushPlan,
     state: Option<String>,
     objects: Option<usize>,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: "pushed",
-        success: true,
-        pushed: true,
-        changed: true,
-        transport: "heddle",
-        remote: None,
-        push_scope: None,
-        ref_scope: None,
-        git_notes_ref: None,
-        refs_written: None,
-        git_notes_visibility_warning: None,
-        git_tracking_remote: None,
-        git_remote_configured: None,
-        git_upstream_configured: None,
-        tags_included: None,
-        force: None,
-        force_discard_warning: None,
-        thread: None,
-        state,
-        objects,
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+    let outcome = build_push_outcome(plan, heddle_single_push_execution_facts(state, objects));
+    push_output_from_outcome(outcome, trust)
+}
+
+fn heddle_push_output_from_local(
+    plan: &PushPlan,
+    summary: &LocalTransferSummary,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let outcome = build_push_outcome(plan, heddle_single_push_execution_facts_from_local(summary));
+    push_output_from_outcome(outcome, trust)
 }
 
 /// JSON output for a native `--all-threads` push (heddle#838). `refs_written`
@@ -643,43 +698,17 @@ fn heddle_push_output(
 /// sorted; `success`/`pushed` are false if any thread failed. `push_scope`
 /// mirrors the git-overlay path's `"all_threads"`.
 fn heddle_all_threads_push_output(
-    mut pushed: Vec<String>,
+    plan: &PushPlan,
+    pushed: Vec<String>,
     failures: &[(String, String)],
     objects: usize,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = ActionFields::from_action(&trust.recommended_action);
-    let ok = failures.is_empty();
-    pushed.sort();
-    PushOutput {
-        output_kind: "push",
-        action: "push",
-        status: if ok { "pushed" } else { "partial" },
-        success: ok,
-        pushed: ok,
-        changed: true,
-        transport: "heddle",
-        remote: None,
-        push_scope: Some("all_threads"),
-        ref_scope: None,
-        git_notes_ref: None,
-        refs_written: Some(pushed),
-        git_notes_visibility_warning: None,
-        git_tracking_remote: None,
-        git_remote_configured: None,
-        git_upstream_configured: None,
-        tags_included: None,
-        force: None,
-        force_discard_warning: None,
-        thread: None,
-        state: None,
-        objects: Some(objects),
-        next_action: action.action.clone(),
-        next_action_template: action.template.clone(),
-        recommended_action: action.action,
-        recommended_action_template: action.template,
-        trust,
-    }
+    let outcome = build_push_outcome(
+        plan,
+        multi_thread_push_execution_facts(pushed, failures, objects),
+    );
+    push_output_from_outcome(outcome, trust)
 }
 
 fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()> {
@@ -828,16 +857,6 @@ pub(super) fn is_local_git_repository(path: &Path) -> bool {
         return true;
     }
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
-}
-
-fn looks_like_git_remote_url(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("ssh://")
-        || lower.starts_with("git://")
-        || lower.ends_with(".git")
-        || (value.contains('@') && value.contains(':'))
 }
 
 fn refresh_git_tracking_after_overlay_push(
@@ -1052,37 +1071,6 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
-fn remote_urls_match(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let left_path = Path::new(left);
-    let right_path = Path::new(right);
-    match (left_path.canonicalize(), right_path.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn looks_like_remote_location(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.contains("://")
-        || value.contains('\\')
-}
-
-fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Result<String> {
-    if let Some(requested) = requested {
-        return Ok(requested.to_string());
-    }
-
-    match repo.head_ref()? {
-        Head::Attached { thread } => Ok(thread.to_string()),
-        Head::Detached { .. } => Ok("main".to_string()),
-    }
-}
-
 /// Resolve the state a `push` should upload for a single-thread push
 /// (heddle#837).
 ///
@@ -1132,20 +1120,19 @@ fn resolve_push_state_id(
         Some("Bootstrap git-overlay before push".to_string()),
     )?;
 
-    // heddle#837 guard: if the user named an EXISTING thread whose tip differs
-    // from what we're about to push, refuse unless forced — otherwise we'd
-    // overwrite an unrelated thread's ref with the current checkout's state.
+    // heddle#837 guard: pure refuse decision; I/O only gathers tip/current facts.
     // A non-existent named thread falls through (push creates it on the remote).
-    if let Some(thread_name) = thread
-        && !force
-        && let Some(tip) = repo.refs().get_thread(&ThreadName::new(thread_name))?
-        && tip != current
-    {
-        return Err(anyhow!(
-            "thread '{thread_name}' already exists at {} but the current checkout is {}; refusing to overwrite it.\nNext: switch to that thread's checkout (heddle thread switch {thread_name}), or pass --force to push the current state under '{thread_name}'.",
-            tip.short(),
-            current.short(),
-        ));
+    if let Some(thread_name) = thread {
+        let tip = repo.refs().get_thread(&ThreadName::new(thread_name))?;
+        let existing_tip_differs = tip.as_ref().is_some_and(|tip| tip != &current);
+        if refuse_named_thread_tip_overwrite(force, Some(thread_name), existing_tip_differs) {
+            let tip = tip.expect("existing_tip_differs implies tip present");
+            return Err(map_push_failure(named_thread_tip_mismatch_failure(
+                thread_name,
+                tip.short().to_string(),
+                current.short().to_string(),
+            )));
+        }
     }
 
     Ok(current)
@@ -1156,15 +1143,21 @@ async fn push_local(
     target_path: &std::path::Path,
     state_id: &objects::object::ChangeId,
     track_name: &str,
-    _force: bool,
+    plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
+    let target_label = format!("file://{}", target_path.display());
     if !should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{} pushing to {}",
-            style::working_marker(),
-            style::dim(&format!("file://{}", target_path.display()))
-        );
+        let working = format_pushing_to(&target_label);
+        if let Some(target) = working.strip_prefix("pushing to ") {
+            println!(
+                "{} pushing to {}",
+                style::working_marker(),
+                style::dim(target)
+            );
+        } else {
+            println!("{} {working}", style::working_marker());
+        }
     }
 
     let target_repo = Repository::open(target_path)?;
@@ -1178,9 +1171,21 @@ async fn push_local(
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_push_output(Some(state_id.to_string()), Some(objects_copied), trust);
+        let summary = LocalTransferSummary {
+            state: Some(state_id.to_string()),
+            objects: Some(objects_copied),
+        };
+        let output = heddle_push_output_from_local(plan, &summary, trust);
         crate::cli::render::write_json_stdout(&output)?;
     } else {
+        // Domain owns unstyled text; CLI styles the primary line + detail lines.
+        let trust = build_repository_verification_state(repo);
+        let summary = LocalTransferSummary {
+            state: Some(state_id.short().to_string()),
+            objects: Some(objects_copied),
+        };
+        let output = heddle_push_output_from_local(plan, &summary, trust);
+        let text = format_push_outcome_text(&output.outcome, Some(track_name));
         println!(
             "{} pushed {} to {} ({})",
             style::ok_marker(),
@@ -1188,6 +1193,14 @@ async fn push_local(
             style::bold(track_name),
             style::count(objects_copied, "object")
         );
+        debug_assert!(
+            text.headline.contains(track_name),
+            "domain headline should name the track: {}",
+            text.headline
+        );
+        for line in &text.detail_lines {
+            println!("{line}");
+        }
     }
 
     Ok(())
@@ -1233,16 +1246,24 @@ fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
 async fn push_local_all_threads(
     repo: &Repository,
     target_path: &std::path::Path,
-    _force: bool,
+    plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
     let json = should_output_json(cli, Some(repo.config()));
+    let target_label = format!("file://{}", target_path.display());
     if !json {
-        println!(
-            "{} pushing all threads to {}",
-            style::working_marker(),
-            style::dim(&format!("file://{}", target_path.display()))
-        );
+        let begin = multi_ref_push_begin(target_label);
+        // Domain line is unstyled; keep working marker + dim target styling.
+        let line = format_multi_ref_push_progress(&begin);
+        if let Some(target) = line.strip_prefix("pushing all threads to ") {
+            println!(
+                "{} pushing all threads to {}",
+                style::working_marker(),
+                style::dim(target)
+            );
+        } else {
+            println!("{} {line}", style::working_marker());
+        }
     }
 
     let target_repo = Repository::open(target_path)?;
@@ -1266,6 +1287,12 @@ async fn push_local_all_threads(
                 total_objects += copied;
                 pushed.push(thread.name.clone());
                 if !json {
+                    let event = multi_ref_thread_succeeded_local(
+                        thread.name.clone(),
+                        Some(thread.state.short().to_string()),
+                        Some(copied),
+                    );
+                    let domain_line = format_multi_ref_push_progress(&event);
                     println!(
                         "{} pushed {} to {} ({})",
                         style::ok_marker(),
@@ -1273,16 +1300,31 @@ async fn push_local_all_threads(
                         style::bold(&thread.name),
                         style::count(copied, "object")
                     );
+                    debug_assert_eq!(
+                        domain_line,
+                        format!(
+                            "pushed {} to {} ({})",
+                            thread.state.short(),
+                            thread.name,
+                            if copied == 1 {
+                                "1 object".to_string()
+                            } else {
+                                format!("{copied} objects")
+                            }
+                        ),
+                        "styled local multi-thread success must match domain progress line"
+                    );
                 }
             }
             Err(err) => {
-                failures.push((thread.name.clone(), err.to_string()));
+                let error = transport_error_message(Some(&err.to_string()));
+                failures.push((thread.name.clone(), error.clone()));
                 if !json {
+                    let event = multi_ref_thread_failed(thread.name.clone(), Some(&error));
                     eprintln!(
-                        "{} failed to push {}: {}",
+                        "{} {}",
                         style::warn_marker(),
-                        style::bold(&thread.name),
-                        err
+                        format_multi_ref_push_progress(&event)
                     );
                 }
             }
@@ -1291,24 +1333,14 @@ async fn push_local_all_threads(
 
     if json {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_all_threads_push_output(pushed, &failures, total_objects, trust);
+        let output = heddle_all_threads_push_output(plan, pushed, &failures, total_objects, trust);
         crate::cli::render::write_json_stdout(&output)?;
     }
 
-    if let Some((name, err)) = failures.first() {
-        return Err(anyhow!("failed to push thread '{name}': {err}"));
+    if let Some(failure) = first_multi_thread_push_failure(&failures) {
+        return Err(map_push_failure(failure));
     }
     Ok(())
-}
-
-/// Whether a hosted `--all-threads` push collapses to a SINGLE mirror push
-/// instead of the per-thread native fan-out. True for git-overlay repos: the
-/// default mirror push (#846) already ships every ref (= every thread) in one
-/// transfer, so looping per thread would re-upload the identical pack T times.
-/// Native (non-overlay) repos keep the #838 per-thread fan-out.
-#[cfg(feature = "client")]
-fn all_threads_uses_single_mirror_push(capability: RepositoryCapability) -> bool {
-    capability == RepositoryCapability::GitOverlay
 }
 
 #[cfg(feature = "client")]
@@ -1320,11 +1352,12 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .with_human_signature_callback(crate::client::cli_human_signature_callback());
 
     if !should_output_json(options.cli, Some(repo.config())) {
-        println!(
-            "{} connected to {}",
-            style::ok_marker(),
-            style::dim(&options.addr.to_string())
-        );
+        let line = format_connected_to(&options.addr.to_string());
+        if let Some(addr) = line.strip_prefix("connected to ") {
+            println!("{} connected to {}", style::ok_marker(), style::dim(addr));
+        } else {
+            println!("{} {line}", style::ok_marker());
+        }
     }
 
     let repo_path = match options.repo_path {
@@ -1339,7 +1372,11 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // and re-upload the identical full pack once per thread and print a
     // misleading "pushed to <thread>" line each time. Short-circuit it to a
     // single projection push below; only the non-Git-backed path loops.
-    if options.all_threads && !all_threads_uses_single_mirror_push(repo.capability()) {
+    // Plan is pure (capability + flag); network bodies stay here.
+    if matches!(
+        plan_hosted_push(repo.capability(), options.all_threads),
+        HostedPushPlan::NativePerThreadFanout
+    ) {
         return push_network_all_threads(repo, &mut client, &repo_path, &options).await;
     }
 
@@ -1379,39 +1416,56 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     // Clear the live progress line so the result message starts clean on a TTY.
     clear_line(&progress);
 
-    if result.success {
-        if should_output_json(options.cli, Some(repo.config())) {
-            let trust = build_repository_verification_state(repo);
-            let output = heddle_push_output(result.new_state.map(|s| s.to_string()), None, trust);
-            crate::cli::render::write_json_stdout(&output)?;
-        } else {
-            println!(
-                "{} pushed to {}",
-                style::ok_marker(),
-                style::bold(options.track_name)
-            );
-            if options.all_threads {
-                // Single Git Projection push covers every ref/thread.
+    // CLI maps wire/protobuf transport fields → pure domain fields; core
+    // parses success/failure and builds execution facts / outcome.
+    let fields = HostedPushResultFields {
+        success: result.success,
+        new_state: result.new_state.map(|s| s.to_string()),
+        error: result.error,
+    };
+    match parse_hosted_push_result(options.track_name, &fields) {
+        HostedPushResult::Success { state } => {
+            if should_output_json(options.cli, Some(repo.config())) {
+                let trust = build_repository_verification_state(repo);
+                let output = heddle_push_output(options.plan, state, None, trust);
+                crate::cli::render::write_json_stdout(&output)?;
+            } else {
+                let trust = build_repository_verification_state(repo);
+                let output = heddle_push_output(options.plan, state.clone(), None, trust);
+                let text = format_push_outcome_text(&output.outcome, Some(options.track_name));
                 println!(
-                    "{}",
-                    style::dim(
-                        "Git Projection push covers all threads (every ref shipped in one transfer)"
-                    )
+                    "{} pushed to {}",
+                    style::ok_marker(),
+                    style::bold(options.track_name)
                 );
-            }
-            if let Some(new_state) = result.new_state {
-                println!(
-                    "{}",
-                    style::field("remote state", &style::change_id(&new_state.to_string()))
+                debug_assert!(
+                    text.headline.contains(options.track_name) || text.headline.contains("pushed"),
+                    "domain headline: {}",
+                    text.headline
                 );
+                for line in &text.detail_lines {
+                    println!("{line}");
+                }
+                if let Some(note) = all_threads_mirror_coverage_note(options.all_threads) {
+                    // Single Git Projection push covers every ref/thread.
+                    println!("{}", style::dim(note));
+                }
+                if let Some(new_state) = state {
+                    let detail = format_remote_state_detail(&new_state);
+                    if let Some(state_val) = detail.strip_prefix("remote state: ") {
+                        println!(
+                            "{}",
+                            style::field("remote state", &style::change_id(state_val))
+                        );
+                    } else {
+                        println!("{detail}");
+                    }
+                }
             }
         }
-    } else {
-        let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow::anyhow!(RecoveryAdvice::remote_push_failed(
-            options.track_name,
-            &err
-        )));
+        HostedPushResult::Failed(failure) => {
+            return Err(map_push_failure(failure));
+        }
     }
 
     Ok(())
@@ -1429,7 +1483,7 @@ async fn push_network_one_thread(
     force: bool,
     progress: &objects::Progress,
 ) -> Result<wire::PushComplete> {
-    let result = if repo.capability() == RepositoryCapability::GitOverlay {
+    let result = if uses_git_overlay_mirror_rpc(repo.capability()) {
         // Default (heddle#846): push ALL git-overlay refs in one multi-ref
         // git-mirror transfer through weft's git lane, with live progress.
         // Native heddle conversion stays opt-in via `heddle adopt`.
@@ -1482,42 +1536,70 @@ async fn push_network_all_threads(
         )
         .await;
         match outcome {
-            Ok(result) if result.success => {
-                pushed.push(thread.name.clone());
-                if !json {
-                    println!(
-                        "{} pushed to {}",
-                        style::ok_marker(),
-                        style::bold(&thread.name)
-                    );
-                    if let Some(new_state) = result.new_state {
-                        println!(
-                            "{}",
-                            style::field("remote state", &style::change_id(&new_state.to_string()))
-                        );
+            Ok(result) => {
+                let fields = HostedPushResultFields {
+                    success: result.success,
+                    new_state: result.new_state.map(|s| s.to_string()),
+                    error: result.error,
+                };
+                match parse_hosted_push_result(&thread.name, &fields) {
+                    HostedPushResult::Success { state } => {
+                        pushed.push(thread.name.clone());
+                        if !json {
+                            let event =
+                                multi_ref_progress_from_hosted_thread(&thread.name, &fields);
+                            let line = format_multi_ref_push_progress(&event);
+                            // Prefer historical two-line shape when a remote state is present;
+                            // domain still owns the single-line progress contract for asserts.
+                            println!(
+                                "{} pushed to {}",
+                                style::ok_marker(),
+                                style::bold(&thread.name)
+                            );
+                            if let Some(new_state) = state {
+                                let detail = format_remote_state_detail(&new_state);
+                                if let Some(state_val) = detail.strip_prefix("remote state: ") {
+                                    println!(
+                                        "{}",
+                                        style::field("remote state", &style::change_id(state_val))
+                                    );
+                                } else {
+                                    println!("{detail}");
+                                }
+                            }
+                            debug_assert!(
+                                line.contains(&thread.name),
+                                "progress line should name thread: {line}"
+                            );
+                        }
+                    }
+                    HostedPushResult::Failed(failure) => {
+                        let err = match failure {
+                            PushFailure::RemoteFailed { error, .. } => error,
+                            other => other.to_string(),
+                        };
+                        failures.push((thread.name.clone(), err));
+                        if !json {
+                            let event =
+                                multi_ref_progress_from_hosted_thread(&thread.name, &fields);
+                            eprintln!(
+                                "{} {}",
+                                style::warn_marker(),
+                                format_multi_ref_push_progress(&event)
+                            );
+                        }
                     }
                 }
             }
-            Ok(result) => {
-                let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-                failures.push((thread.name.clone(), err.clone()));
-                if !json {
-                    eprintln!(
-                        "{} failed to push {}: {}",
-                        style::warn_marker(),
-                        style::bold(&thread.name),
-                        err
-                    );
-                }
-            }
             Err(err) => {
-                failures.push((thread.name.clone(), err.to_string()));
+                let error = transport_error_message(Some(&err.to_string()));
+                failures.push((thread.name.clone(), error.clone()));
                 if !json {
+                    let event = multi_ref_thread_failed(thread.name.clone(), Some(&error));
                     eprintln!(
-                        "{} failed to push {}: {}",
+                        "{} {}",
                         style::warn_marker(),
-                        style::bold(&thread.name),
-                        err
+                        format_multi_ref_push_progress(&event)
                     );
                 }
             }
@@ -1526,12 +1608,12 @@ async fn push_network_all_threads(
 
     if json {
         let trust = build_repository_verification_state(repo);
-        let output = heddle_all_threads_push_output(pushed, &failures, 0, trust);
+        let output = heddle_all_threads_push_output(options.plan, pushed, &failures, 0, trust);
         crate::cli::render::write_json_stdout(&output)?;
     }
 
-    if let Some((name, err)) = failures.first() {
-        return Err(anyhow!(RecoveryAdvice::remote_push_failed(name, err)));
+    if let Some(failure) = first_multi_thread_push_failure(&failures) {
+        return Err(map_push_failure(failure));
     }
     Ok(())
 }
@@ -1551,9 +1633,9 @@ async fn auto_provision_hosted_repo(
             AutoProvisionedHostedRepo::Existing(derived_full_path)
         }
         Err(err) => {
-            return Err(anyhow!(RecoveryAdvice::remote_push_failed(
+            return Err(map_push_failure(remote_push_failure(
                 options.track_name,
-                &auto_provision_create_error_message(&slug, &err),
+                Some(&auto_provision_create_error_message(&slug, &err)),
             )));
         }
     };
@@ -1567,7 +1649,7 @@ async fn auto_provision_hosted_repo(
 
     if !should_output_json(options.cli, Some(repo.config())) {
         let display_full_path =
-            hosted_spool_display_path(&namespace, &slug, provisioned_repo.full_path());
+            hosted_spool_display_path(&namespace.slug, &slug, provisioned_repo.full_path());
         println!(
             "{} {} hosted spool {}",
             style::ok_marker(),
@@ -1635,11 +1717,6 @@ fn auto_provision_create_already_exists(err: &ProtocolError) -> bool {
 }
 
 #[cfg(feature = "client")]
-fn message_indicates_already_exists(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("already exists")
-}
-
-#[cfg(feature = "client")]
 fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> String {
     let error = match err {
         ProtocolError::Remote(_) | ProtocolError::LockError(_) => err.client_message(),
@@ -1648,39 +1725,6 @@ fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> Strin
     format!(
         "could not create hosted spool '{slug}': {error}. Pass a full hosted remote path or choose another local folder name"
     )
-}
-
-#[cfg(feature = "client")]
-fn hosted_spool_display_path(
-    namespace: &wire::HostedNamespaceInfo,
-    slug: &str,
-    full_path: &str,
-) -> String {
-    if hosted_path_contains_internal_user_namespace(full_path) && !namespace.slug.is_empty() {
-        format!("{}/{}", namespace.slug, slug)
-    } else {
-        full_path.to_string()
-    }
-}
-
-#[cfg(feature = "client")]
-fn redact_internal_hosted_paths(message: &str) -> String {
-    message
-        .split_whitespace()
-        .map(|part| {
-            if hosted_path_contains_internal_user_namespace(part) {
-                "[user namespace]"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(feature = "client")]
-fn hosted_path_contains_internal_user_namespace(value: &str) -> bool {
-    value.contains("__users/")
 }
 
 #[cfg(feature = "client")]
@@ -1785,6 +1829,8 @@ struct PushNetworkOptions<'a> {
     /// heddle#838: fan out over every pushable thread instead of the single
     /// `track_name`/`state_id`.
     all_threads: bool,
+    /// Pure orchestration plan (outcome assembly + routing policy).
+    plan: &'a PushPlan,
     cli: &'a Cli,
 }
 
@@ -1810,22 +1856,7 @@ mod git_overlay_config_atomic_tests {
         assert_eq!(spool_slug_from_local_name("---"), "");
     }
 
-    /// A git-overlay `--all-threads` hosted push collapses to a SINGLE mirror
-    /// push (mirror ships every ref = every thread), while a native repo keeps
-    /// the #838 per-thread fan-out. This drives the branch condition in
-    /// `push_network`.
-    #[cfg(feature = "client")]
-    #[test]
-    fn git_overlay_all_threads_hosted_push_is_single_mirror() {
-        assert!(
-            all_threads_uses_single_mirror_push(RepositoryCapability::GitOverlay),
-            "git-overlay --all-threads must collapse to one mirror push",
-        );
-        assert!(
-            !all_threads_uses_single_mirror_push(RepositoryCapability::NativeHeddle),
-            "native --all-threads must keep the per-thread fan-out (#838)",
-        );
-    }
+    // Capability / push-routing pure decisions live in heddle_core::remote.
 
     #[cfg(feature = "client")]
     #[test]
@@ -1897,7 +1928,7 @@ mod git_overlay_config_atomic_tests {
         };
 
         assert_eq!(
-            hosted_spool_display_path(&namespace, "demo-repo", "__users/user-1/demo-repo"),
+            hosted_spool_display_path(&namespace.slug, "demo-repo", "__users/user-1/demo-repo"),
             "alice/demo-repo"
         );
 

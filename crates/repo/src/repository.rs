@@ -31,13 +31,13 @@ mod repository_provenance;
 mod repository_resolve;
 #[path = "repository_signing.rs"]
 mod repository_signing;
-pub use repository_signing::ResignOutcome;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
+
 use chrono::Utc;
 pub use commit_graph::{CommitGraphIndex, find_merge_base};
 #[cfg(feature = "async-source")]
@@ -81,6 +81,7 @@ pub use repository_maintenance::{
 };
 pub use repository_materialization::WarmCanonicalStoreStats;
 pub use repository_partial_fetch::MissingBlob;
+pub use repository_signing::ResignOutcome;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
@@ -96,6 +97,7 @@ use sley::{
     ShortStatusOptions as SleyShortStatusOptions, StatusUntrackedMode as SleyStatusUntrackedMode,
     StreamControl as SleyStreamControl,
 };
+
 use crate::{GitRefContentNamespace, GitRefName};
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
@@ -114,34 +116,6 @@ mod repository_worktree_status;
 mod status_tracked_refresh;
 #[path = "status_untracked_scan.rs"]
 mod status_untracked_scan;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
@@ -494,8 +468,7 @@ impl Repository {
         // See docs/perf/cli-core-loop-todo.md ("Reduce repo-open work by
         // skipping migration/hydrator probes when a repo has a clean
         // schema ledger and no lazy-hydrator file").
-        let hydrator_path =
-            crate::lazy_hydrator::LazyHydratorConfig::path_in(self.heddle_dir());
+        let hydrator_path = crate::lazy_hydrator::LazyHydratorConfig::path_in(self.heddle_dir());
         let schema_clean = crate::migration::is_schema_ledger_complete(self.heddle_dir());
         let no_lazy_hydrator = !hydrator_path.exists();
         if schema_clean && no_lazy_hydrator {
@@ -835,6 +808,11 @@ impl Repository {
             current = dir.parent();
         }
 
+        // Mutating commands historically rely on open() bootstrapping a plain
+        // Git tree into a Git-overlay sidecar (import/thread/start/marker…).
+        // Observe-only commands (status/verify/doctor) must NOT call open on
+        // plain Git — they take the plain-Git probe path so they never create
+        // `.heddle`. See `verify_execution_context_from_cli`.
         if let Some(git_root) = discovered_git_root {
             ensure_git_overlay_exclude(&git_root)?;
             Self::bootstrap_git_overlay(&git_root)?;

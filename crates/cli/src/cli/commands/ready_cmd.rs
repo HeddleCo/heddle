@@ -3,12 +3,18 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
-use objects::object::Tree;
-use repo::{
-    GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
-    ThreadFreshness, ThreadState,
+use heddle_core::{
+    ReadyDecisionInput, classify_ready_decision, has_integration_target,
+    ready_freshness_summary as core_ready_freshness_summary,
+    ready_integration_summary as core_ready_integration_summary,
+    ready_merge_type_summary as core_ready_merge_type_summary,
+    ready_report_recommended_action as core_ready_report_recommended_action,
+    ready_scoped_next_action as core_ready_scoped_next_action,
+    ready_status_summary as core_ready_status_summary, ready_verification_preflight_blocks,
+    status::next_action::non_empty_action,
 };
+use objects::object::Tree;
+use repo::{Repository, ThreadFreshness, ThreadState};
 use serde::{
     Serialize, Serializer,
     ser::{Error as SerError, SerializeStruct},
@@ -21,7 +27,7 @@ use super::{
     next_action::{NextActionValidationContext, normalized_action, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
-        exit_if_blocked_operator_status,
+        fail_if_blocked_operator_status,
     },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
@@ -310,8 +316,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         thread = refresh_thread(&repo, &thread.id, cli)?;
         report = build_thread_preview_report(&repo, &mut thread, true)?;
     }
-    let has_integration_target = report.merge_relation != "no_target";
-    if has_integration_target {
+    if has_integration_target(&report.merge_relation) {
         let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);
         if !policy_blockers.is_empty() {
             for blocker in policy_blockers {
@@ -330,22 +335,21 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             report.thread_health = "blocked".to_string();
         }
     }
-    if !has_integration_target && report.conflict_count == 0 && report.blockers.is_empty() {
+    let decision = classify_ready_decision(ReadyDecisionInput {
+        merge_relation: &report.merge_relation,
+        captured,
+        thread_already_ready: thread.state == ThreadState::Ready,
+        conflict_count: report.conflict_count,
+        blockers: &report.blockers,
+    });
+    if !decision.has_integration_target && decision.integration_clear {
         report.recommended_action.clear();
         report.refresh_recommended_action_metadata();
         report.thread_health = "clean".to_string();
     }
-    let already_ready = has_integration_target
-        && !captured
-        && thread.state == ThreadState::Ready
-        && report.conflict_count == 0
-        && report.blockers.is_empty();
 
-    let ready_without_target =
-        !has_integration_target && report.conflict_count == 0 && report.blockers.is_empty();
-
-    if !already_ready && has_integration_target {
-        thread.state = if report.conflict_count == 0 && report.blockers.is_empty() {
+    if !decision.already_ready && decision.has_integration_target {
+        thread.state = if decision.integration_clear {
             ThreadState::Ready
         } else {
             ThreadState::Blocked
@@ -354,19 +358,18 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         manager.save(&thread)?;
         report.thread_state = thread.state.to_string();
     }
-    if has_integration_target
+    if decision.has_integration_target
         && thread.state == ThreadState::Ready
-        && report.conflict_count == 0
-        && report.blockers.is_empty()
+        && decision.integration_clear
     {
         report.thread_health = "ready".to_string();
         report.recommended_action = land_local_command(&thread.id);
         report.refresh_recommended_action_metadata();
     }
 
-    let message = if already_ready {
+    let message = if decision.already_ready {
         format!("Thread '{}' is already ready", thread.id)
-    } else if ready_without_target {
+    } else if decision.ready_without_target {
         format!(
             "Thread '{}' is clean; no integration target is configured",
             thread.id
@@ -381,7 +384,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let import_hint = repo.git_import_guidance()?;
     let mut trust = build_repository_verification_state(&repo);
     let report_recommended_action = ready_report_recommended_action(&report);
-    let recommended_action = ready_scoped_next_action(
+    let recommended_action = core_ready_scoped_next_action(
         operation.as_ref(),
         remote_tracking.as_ref(),
         import_hint.as_ref(),
@@ -408,7 +411,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
     let recommended_action_value = normalized_action(recommended_action.clone());
 
-    let status = if thread.state == ThreadState::Ready || !has_integration_target {
+    let status = if decision.operator_completed {
         "completed"
     } else {
         "blocked"
@@ -445,24 +448,6 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     write_ready_output(cli, &repo, &output)?;
 
     Ok(())
-}
-
-fn ready_scoped_next_action(
-    operation: Option<&RepositoryOperationStatus>,
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    import_hint: Option<&GitImportGuidance>,
-    thread_action: Option<&str>,
-) -> String {
-    effective_next_action(
-        NextActionInput::default(operation, remote_tracking, import_hint, thread_action).ready(),
-    )
-}
-
-fn ready_verification_preflight_blocks(trust: &RepositoryVerificationState) -> bool {
-    matches!(
-        trust.status.as_str(),
-        "needs_init" | "needs_import" | "needs_reconcile" | "git_branch_advanced"
-    )
 }
 
 fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Result<()> {
@@ -518,8 +503,7 @@ fn write_ready_output_inner(
             write_preview_report(output, output.operator.recommended_action.as_deref());
         }
     }
-    exit_if_blocked_operator_status(&output.operator.status);
-    Ok(())
+    fail_if_blocked_operator_status(&output.operator.status)
 }
 
 fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
@@ -761,11 +745,11 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
 }
 
 fn ready_status_summary(report: &ThreadPreviewReport) -> String {
-    if report.merge_relation == "no_target" && report.blockers.is_empty() {
-        "clean".to_string()
-    } else {
-        report.thread_health.replace('_', " ")
-    }
+    core_ready_status_summary(
+        &report.merge_relation,
+        report.blockers.is_empty(),
+        &report.thread_health,
+    )
 }
 
 fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
@@ -793,33 +777,15 @@ fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
 }
 
 fn ready_integration_summary(report: &ThreadPreviewReport) -> String {
-    if report.merge_relation == "no_target" {
-        "n/a (no integration target configured)".to_string()
-    } else if report.merge_relation == "not_checked" {
-        "not checked (readiness checks did not run)".to_string()
-    } else if report.merge_relation == "blocked" {
-        "not checked (repository verification is blocked)".to_string()
-    } else {
-        "configured".to_string()
-    }
+    core_ready_integration_summary(&report.merge_relation)
 }
 
 fn ready_freshness_summary(report: &ThreadPreviewReport) -> String {
-    match report.merge_relation.as_str() {
-        "no_target" => "n/a (no integration target configured)".to_string(),
-        "not_checked" => "not checked (readiness checks did not run)".to_string(),
-        "blocked" => "not checked (repository verification is blocked)".to_string(),
-        _ => report.freshness.replace('_', " "),
-    }
+    core_ready_freshness_summary(&report.merge_relation, &report.freshness)
 }
 
 fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
-    match report.merge_relation.as_str() {
-        "no_target" => "n/a (no integration target configured)".to_string(),
-        "not_checked" => "not checked (readiness checks did not run)".to_string(),
-        "blocked" => "not checked (repository verification is blocked)".to_string(),
-        other => ready_merge_type_label(other),
-    }
+    core_ready_merge_type_summary(&report.merge_relation)
 }
 
 fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
@@ -834,20 +800,8 @@ fn ready_checks_label(checks: &ReadyChecksSummary) -> String {
     format!("{} ({})", checks.status.replace('_', " "), checks.reason)
 }
 
-fn ready_merge_type_label(result: &str) -> String {
-    match result {
-        "fast_forward" => "fast-forward".to_string(),
-        "already_integrated" => "already integrated".to_string(),
-        "no_target" => "none configured".to_string(),
-        other => other.replace('_', " "),
-    }
-}
-
 fn ready_report_recommended_action(report: &ThreadPreviewReport) -> Option<String> {
-    if report.merge_relation == "no_target" {
-        return None;
-    }
-    normalized_action(report.recommended_action.clone())
+    core_ready_report_recommended_action(&report.merge_relation, &report.recommended_action)
 }
 
 fn trust_blocked_report_for(
@@ -880,9 +834,6 @@ fn trust_blocked_report_for(
 
 #[cfg(test)]
 mod tests {
-    use heddle_core::status::next_action as core_next_action;
-    use repo::{OperationKind, OperationScope};
-
     use super::*;
     use crate::cli::commands::verification_health;
 
@@ -904,84 +855,6 @@ mod tests {
             recommended_action: recommended_action.to_string(),
             recommended_action_template: verification_health::action_template(recommended_action),
             thread_health: "ready".to_string(),
-        }
-    }
-
-    fn operation(action: &str) -> RepositoryOperationStatus {
-        RepositoryOperationStatus {
-            scope: OperationScope::Heddle,
-            kind: OperationKind::Merge,
-            in_progress: true,
-            state: "in_progress".to_string(),
-            message: "merge in progress".to_string(),
-            next_action: action.to_string(),
-        }
-    }
-
-    fn remote(upstream: &str, ahead: usize, behind: usize) -> GitRemoteTrackingStatus {
-        GitRemoteTrackingStatus {
-            branch: "feature".to_string(),
-            upstream: upstream.to_string(),
-            ahead,
-            behind,
-            local_oid: Some("local".to_string()),
-            upstream_oid: Some("upstream".to_string()),
-            upstream_is_undone_checkpoint: false,
-            message: String::new(),
-            next_action: String::new(),
-        }
-    }
-
-    fn import_hint() -> GitImportGuidance {
-        GitImportGuidance {
-            current_branch: "feature".to_string(),
-            missing_branch_count: 1,
-            missing_branches: vec!["feature".to_string()],
-            recommended_command: "heddle adopt --ref feature".to_string(),
-        }
-    }
-
-    #[test]
-    fn ready_cli_path_matches_core_next_action_matrix() {
-        let operation = operation("heddle continue");
-        let remote_ahead = remote("origin/feature", 1, 0);
-        let remote_diverged = remote("origin/feature", 1, 1);
-        let hint = import_hint();
-
-        for (operation, remote_tracking, import_hint, fallback) in [
-            (
-                Some(&operation),
-                None,
-                None,
-                Some("heddle land --thread feature --no-push"),
-            ),
-            (
-                None,
-                Some(&remote_ahead),
-                None,
-                Some("heddle land --thread feature --no-push"),
-            ),
-            (None, Some(&remote_diverged), None, None),
-            (
-                None,
-                None,
-                None,
-                Some("heddle land --thread feature --no-push"),
-            ),
-            (None, None, Some(&hint), None),
-        ] {
-            let cli_action =
-                ready_scoped_next_action(operation, remote_tracking, import_hint, fallback);
-            let core_action = core_next_action::effective_next_action(
-                core_next_action::NextActionInput::default(
-                    operation,
-                    remote_tracking,
-                    import_hint,
-                    fallback,
-                )
-                .ready(),
-            );
-            assert_eq!(cli_action, core_action);
         }
     }
 

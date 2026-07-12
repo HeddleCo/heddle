@@ -2,6 +2,7 @@
 //! Monitor inspection command.
 
 use anyhow::Result;
+use heddle_core::monitor_plan::monitor_human_lines;
 use serde::Serialize;
 
 use crate::cli::{Cli, should_output_json, worktree_status_options};
@@ -37,16 +38,15 @@ pub fn cmd_monitor(cli: &Cli, paths: bool, serve: bool) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Backend: {}", output.backend);
-        println!("Status: {}", output.status);
-        if let Some(reason) = &output.reason {
-            println!("Reason: {}", reason);
-        }
-        println!("Changed paths: {}", output.changed_path_count);
-        if paths {
-            for path in &output.changed_paths {
-                println!("  {}", path);
-            }
+        for line in monitor_human_lines(
+            &output.backend,
+            &output.status,
+            output.reason.as_deref(),
+            output.changed_path_count,
+            &output.changed_paths,
+            paths,
+        ) {
+            println!("{line}");
         }
     }
 

@@ -61,12 +61,7 @@ HEDDLE_ASSERTER_SEARCH_DIRS, HEDDLE_VERIFICATION_OWNER_ALLOWLIST)"
             println!("ok: exempt: {key} — {}", hit.label);
             continue;
         }
-        eprintln!(
-            "::error::{} at {}: {}",
-            hit.label,
-            key,
-            hit.snippet.trim()
-        );
+        eprintln!("::error::{} at {}: {}", hit.label, key, hit.snippet.trim());
         failed += 1;
     }
 
@@ -203,9 +198,8 @@ mod tests {
 
     #[test]
     fn flags_repository_health_builder() {
-        let hits = scan_source(
-            "pub fn build_repository_verification_health_with_worktree_status() {}",
-        );
+        let hits =
+            scan_source("pub fn build_repository_verification_health_with_worktree_status() {}");
         assert_eq!(hits.len(), 1);
     }
 

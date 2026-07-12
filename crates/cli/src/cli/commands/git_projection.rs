@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git Projection command implementations.
 
-use std::{collections::BTreeMap, fs, path::Path, time::Instant};
+use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::{
+    CommitGitIndexPlan, GitScope, SavePlan, SaveVerb, commit_next_action_from_trust,
+    commit_scope_text as core_commit_scope_text, execute_save, plan_commit_git_index,
+    plan_commit_git_index_only, plan_git_scope,
+    staged_commit_summary as core_staged_commit_summary, tree_leaf_name,
+};
 use objects::{
     object::{Agent, Blob, ChangeId, ContentHash, Principal, ThreadName, Tree, TreeEntry},
     store::ObjectStore,
@@ -16,8 +22,6 @@ use sley::{
     Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
     StreamControl,
 };
-
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save, plan_git_scope};
 
 use super::{
     action_line::print_next,
@@ -373,8 +377,9 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
         .with_confidence(args.confidence)
         .with_worktree_status_options(worktree_status_options(Some(repo.config())));
     plan.require_clean_worktree = false; // dirty worktree is the input being saved
-    plan.precomputed_worktree_status =
-        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
+    plan.precomputed_worktree_status = Some(clone_git_overlay_worktree_status(
+        git_overlay_facts.worktree_status(),
+    ));
 
     let head_before = repo.head().ok().flatten();
     let save_start = Instant::now();
@@ -403,7 +408,10 @@ pub async fn cmd_commit_git_projection(cli: &Cli, args: CommitArgs) -> Result<()
                 ProfileField::millis("clean_check_status_ms", clean_check_status_ms),
                 ProfileField::millis("large_capture_preflight_ms", large_capture_preflight_ms),
                 ProfileField::millis("save_ms", save_ms),
-                ProfileField::millis("snapshot_tree_walk_ms", report.snapshot_profile.tree_walk_ms),
+                ProfileField::millis(
+                    "snapshot_tree_walk_ms",
+                    report.snapshot_profile.tree_walk_ms,
+                ),
                 ProfileField::millis(
                     "snapshot_state_ref_oplog_ms",
                     report.snapshot_profile.state_ref_oplog_ms,
@@ -509,8 +517,9 @@ fn commit_staged_index(
         .with_supplied_tree(index_tree)
         .with_worktree_status_options(worktree_status_options(Some(repo.config())));
     plan.require_clean_worktree = false;
-    plan.precomputed_worktree_status =
-        Some(clone_git_overlay_worktree_status(git_overlay_facts.worktree_status()));
+    plan.precomputed_worktree_status = Some(clone_git_overlay_worktree_status(
+        git_overlay_facts.worktree_status(),
+    ));
     let git_previous_commit = git_head_oid(repo.root());
     let head_before = repo.head().ok().flatten();
     let report = execute_save(repo, plan).map_err(|err| {
@@ -565,14 +574,7 @@ fn commit_staged_index(
 }
 
 fn staged_commit_summary(summary: &str, intent: &GitIndexIntent) -> String {
-    if intent.extra_paths.is_empty() {
-        return summary.to_string();
-    }
-    format!(
-        "{summary} (committed {} staged path(s); left {} unstaged/untracked path(s) in the worktree)",
-        intent.staged_paths.len(),
-        intent.extra_paths.len()
-    )
+    core_staged_commit_summary(summary, intent.staged_paths.len(), intent.extra_paths.len())
 }
 
 fn require_commit_message(message: Option<String>) -> Result<String> {
@@ -612,113 +614,36 @@ pub(crate) struct GitIndexPlan {
     pub(crate) preserved_after_commit: Vec<String>,
 }
 
+impl From<CommitGitIndexPlan> for GitIndexPlan {
+    fn from(plan: CommitGitIndexPlan) -> Self {
+        Self {
+            commit_mode: plan.commit_mode,
+            has_staged_changes: plan.has_staged_changes,
+            staged_paths: plan.staged_paths,
+            unstaged_paths: plan.unstaged_paths,
+            untracked_paths: plan.untracked_paths,
+            will_commit: plan.will_commit,
+            preserved_after_commit: plan.preserved_after_commit,
+        }
+    }
+}
+
 impl GitIndexPlan {
     pub(crate) fn from_intent(intent: &GitIndexIntent, include_all: bool) -> Self {
-        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
-        let has_staged_changes = !intent.staged_paths.is_empty();
-        let mut will_commit = Vec::new();
-        if has_staged_changes {
-            will_commit.extend(intent.staged_paths.iter().cloned());
-        }
-        if include_all || !has_staged_changes {
-            will_commit.extend(unstaged_paths.iter().cloned());
-            will_commit.extend(untracked_paths.iter().cloned());
-        }
-        let commit_mode = if has_staged_changes && include_all {
-            "worktree_all_explicit"
-        } else if has_staged_changes {
-            "staged_index"
-        } else if will_commit.is_empty() {
-            "none"
-        } else {
-            "worktree_all"
-        };
-        let preserved_after_commit = if has_staged_changes && !include_all {
-            intent.extra_paths.clone()
-        } else {
-            Vec::new()
-        };
-        Self {
-            commit_mode,
-            has_staged_changes,
-            staged_paths: intent.staged_paths.clone(),
-            unstaged_paths,
-            untracked_paths,
-            will_commit,
-            preserved_after_commit,
-        }
+        plan_commit_git_index(&intent.staged_paths, &intent.extra_paths, include_all).into()
     }
 
     /// Plan for an index-only commit: checkpoint exactly the staged index (which
     /// may be empty, as on the `--no-all` path) and preserve every unstaged or
     /// untracked worktree path. Never sweeps the worktree.
     pub(crate) fn index_only(intent: &GitIndexIntent) -> Self {
-        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
-        Self {
-            commit_mode: "staged_index",
-            has_staged_changes: !intent.staged_paths.is_empty(),
-            staged_paths: intent.staged_paths.clone(),
-            unstaged_paths,
-            untracked_paths,
-            will_commit: intent.staged_paths.clone(),
-            preserved_after_commit: intent.extra_paths.clone(),
-        }
+        plan_commit_git_index_only(&intent.staged_paths, &intent.extra_paths).into()
     }
 }
 
-/// True when `root` is itself the top of a Git worktree, not merely
-/// nested inside one. A Heddle thread checkout now lives under the parent
-/// repo's `.heddle/threads/` (heddle#572); it's a *native* isolated
-/// checkout that shares the parent's object store but is NOT a Git
-/// worktree of its own. Bare git discovery walks up the directory tree,
-/// so from inside such a checkout it would find the PARENT repo's `.git`
-/// and read its index/HEAD as though they belonged to the checkout.
-/// Requiring the discovered worktree to equal `root` keeps git-index
-/// inspection scoped to genuine git-overlay roots — and matches the
-/// pre-#572 behaviour where a sibling checkout had no git above it at all.
-fn git_worktree_rooted_at(root: &Path) -> bool {
-    match SleyRepository::discover(root) {
-        Ok(git) => git_worktree_matches_root(&git, root),
-        Err(_) => false,
-    }
-}
-
-fn git_worktree_matches_root(git: &SleyRepository, root: &Path) -> bool {
-    git.workdir()
-        .is_some_and(|workdir| paths_equal(&workdir, root))
-}
-
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize();
-    let right = right.canonicalize();
-    match (left, right) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan>> {
-    if !git_worktree_rooted_at(root) {
-        return Ok(None);
-    }
-    Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent_for_root(root)?,
-        false,
-    )))
-}
-
-fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut unstaged_paths = Vec::new();
-    let mut untracked_paths = Vec::new();
-    for path in extra_paths {
-        if let Some(path) = path.strip_prefix("unstaged: ") {
-            unstaged_paths.push(path.to_string());
-        } else if let Some(path) = path.strip_prefix("untracked: ") {
-            untracked_paths.push(path.to_string());
-        }
-    }
-    (unstaged_paths, untracked_paths)
-}
+// Plain-Git observe-path index planning lives in
+// `heddle_core::git_index_plan_for_root` / `plain_git_status_report`. Overlay
+// commit paths below use repo-scoped `git_index_intent_for_repo`.
 
 fn empty_git_index() -> Index {
     Index {
@@ -743,20 +668,6 @@ fn git_index_intent_for_repo(repo: &Repository) -> Result<GitIndexIntent> {
         .git_overlay_sley_repository()?
         .ok_or_else(|| anyhow!("failed to inspect Git index before commit"))?;
     git_index_intent(repo, &git)
-}
-
-pub(crate) fn git_index_intent_for_root(root: &Path) -> Result<GitIndexIntent> {
-    let ignore_patterns = git_ignore_patterns_for_root(root)?;
-    git_index_intent_for_root_with_ignore(root, &ignore_patterns)
-}
-
-fn git_index_intent_for_root_with_ignore(
-    root: &Path,
-    ignore_patterns: &[String],
-) -> Result<GitIndexIntent> {
-    let git =
-        SleyRepository::discover(root).context("failed to inspect Git index before commit")?;
-    git_index_intent_for_root_with_ignore_and_repo(root, ignore_patterns, &git)
 }
 
 fn git_index_intent_for_root_with_ignore_and_repo(
@@ -817,33 +728,6 @@ fn status_row_is_gitlink_worktree_only(entry: ShortStatusRow<'_>) -> bool {
         && (entry.index_mode == Some(GIT_MODE_COMMIT)
             || entry.head_mode == Some(GIT_MODE_COMMIT)
             || entry.worktree_mode == Some(GIT_MODE_COMMIT))
-}
-
-fn git_ignore_patterns_for_root(root: &Path) -> Result<Vec<String>> {
-    let git = SleyRepository::discover(root)
-        .context("failed to inspect Git ignore files before commit")?;
-    let mut patterns = Vec::new();
-    append_ignore_file_patterns(&mut patterns, &root.join(".gitignore"))?;
-    append_ignore_file_patterns(&mut patterns, &git.git_dir().join("info").join("exclude"))?;
-    Ok(patterns)
-}
-
-fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read ignore file {}", path.display()))?;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if !patterns.iter().any(|pattern| pattern == trimmed) {
-            patterns.push(trimmed.to_string());
-        }
-    }
-    Ok(())
 }
 
 fn git_index_tree(repo: &Repository) -> Result<Tree> {
@@ -975,7 +859,7 @@ fn import_index_blob(
 }
 
 fn leaf_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+    tree_leaf_name(path)
 }
 
 fn unmerged_git_index_advice(path: &str) -> RecoveryAdvice {
@@ -1009,16 +893,11 @@ fn git_path_from_bstring(path: &GitBString) -> String {
 }
 
 fn commit_next_action(trust: &RepositoryVerificationState) -> Option<String> {
-    if !trust.recommended_action.trim().is_empty() {
-        return Some(trust.recommended_action.clone());
-    }
-    if !trust.verified {
-        return Some("heddle verify".to_string());
-    }
-    trust
-        .default_remote
-        .as_ref()
-        .map(|_| "heddle push".to_string())
+    commit_next_action_from_trust(
+        &trust.recommended_action,
+        trust.verified,
+        trust.default_remote.is_some(),
+    )
 }
 
 fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> {
@@ -1178,15 +1057,7 @@ fn render_git_projection_commit(
 }
 
 fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
-    match plan.commit_mode {
-        "staged_index" => {
-            "staged Git index only; unstaged and untracked paths stay in the worktree"
-        }
-        "worktree_all_explicit" => "all staged, unstaged, and untracked worktree changes (--all)",
-        "worktree_all" => "all unstaged and untracked worktree changes",
-        "none" => "no Git paths",
-        _ => "Git worktree changes",
-    }
+    core_commit_scope_text(plan.commit_mode)
 }
 
 pub async fn cmd_switch_git_projection(cli: &Cli, args: SwitchArgs) -> Result<()> {

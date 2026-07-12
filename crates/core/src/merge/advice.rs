@@ -125,7 +125,11 @@ pub(crate) fn source_thread_uncaptured_work(
     let stash = format!("heddle --repo {repo_arg} stash push -m \"Save source work\"");
     // Error copy mirrors `main`: signal the preview/merge did not run so callers
     // don't mistake the refusal for an up-to-date result.
-    let did_not_run = if preview { "merge preview did not run" } else { "merge did not run" };
+    let did_not_run = if preview {
+        "merge preview did not run"
+    } else {
+        "merge did not run"
+    };
     let error = format!(
         "Thread '{thread_id}' has uncaptured work in {checkout_path} ({path_summary}); {did_not_run}"
     );

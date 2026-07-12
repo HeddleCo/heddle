@@ -99,8 +99,8 @@ macro_rules! authed_call {
 fn default_spool_settings_request() -> grpc::heddle::v1::SpoolSettings {
     use grpc::heddle::v1::{
         SpoolBootstrapKind, SpoolBootstrapSyncDirection, SpoolChildPolicy, SpoolHoldLifecycle,
-        SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior, SpoolVisibility,
-        SpoolWritePolicy,
+        SpoolInitialTooling, SpoolSettings, SpoolStateVisibility, SpoolSyncBehavior,
+        SpoolVisibility, SpoolWritePolicy,
     };
 
     SpoolSettings {

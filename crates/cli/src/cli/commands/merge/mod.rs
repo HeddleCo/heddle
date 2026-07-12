@@ -8,11 +8,20 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use heddle_core::merge::{
-    MergeReport,
-    merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
+// Re-export orchestration surface for other CLI commands and benches.
+pub use heddle_core::merge::{
+    ThreadPreviewReport, ThreeWayMergeOutcome, apply_merged_tree_external, bench_detect_renames,
+    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
+    merge_thread_into_current, prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
 };
-use heddle_core::verify::MachineContractInput;
+use heddle_core::{
+    merge::{
+        MergeReport,
+        merge_thread_into_current_with_machine_contract as core_merge_thread_into_current,
+    },
+    rewrite_land_action_for_default_remote, scope_action_to_repo as core_scope_action_to_repo,
+    verify::MachineContractInput,
+};
 use repo::Repository;
 use serde_json::Value;
 
@@ -20,20 +29,14 @@ use super::{
     action_line::print_nested_next,
     advice::RecoveryAdvice,
     next_action::{NextActionValidationContext, write_command_json},
-    operator_core::blocked_operator_exit_code,
+    operator_core::is_blocked_operator_status,
     snapshot::ensure_current_state,
     verification_health::repository_verification_blocked_advice,
 };
 use crate::{
     cli::{Cli, output_is_compact, should_output_json, style},
     config::UserConfig,
-};
-
-// Re-export orchestration surface for other CLI commands and benches.
-pub use heddle_core::merge::{
-    ThreadPreviewReport, ThreeWayMergeOutcome, apply_merged_tree_external, bench_detect_renames,
-    bench_find_merge_base, bench_three_way_merge, build_thread_preview_report,
-    merge_thread_into_current, prepare_dir_for_file_replacement, try_three_way_merge_between_tips,
+    exit::OutcomeExit,
 };
 
 /// Historical wire name for the merge report type.
@@ -125,19 +128,23 @@ pub fn cmd_merge(
         return Err(anyhow!(merge_preview_blocked_advice(&output)));
     }
 
-    let exit_code = merge_output_exit_code(&output);
+    let should_fail = merge_output_should_fail(&output);
     render_merge_output(cli, &repo, output)?;
-    if let Some(code) = exit_code {
-        std::process::exit(code);
+    if should_fail {
+        // Envelope already on stdout/stderr; map to DataErr (65) via main.
+        return Err(anyhow!(OutcomeExit::data_err()));
     }
     Ok(())
 }
 
-fn merge_output_exit_code(output: &MergeOutput) -> Option<i32> {
+/// Preview that ran successfully stays exit 0 even when the report would
+/// block an apply. Apply / failed-preview paths fail when the operator
+/// status is blocked or failed (catalogued as DataErr 65 for conflicts).
+fn merge_output_should_fail(output: &MergeOutput) -> bool {
     if output.preview_only && !preview_did_not_run(output) {
-        return None;
+        return false;
     }
-    blocked_operator_exit_code(&output.operator.status)
+    is_blocked_operator_status(&output.operator.status)
 }
 
 /// Core builds `heddle land ... --no-push` recommendations because it can't
@@ -154,20 +161,14 @@ fn merge_output_exit_code(output: &MergeOutput) -> Option<i32> {
 /// established `merge --preview` guidance for such repos.
 fn rewrite_land_recommendations_for_remote(repo: &Repository, output: &mut MergeOutput) {
     let has_push_target = heddle_core::status::default_remote_name(repo).is_some();
-    if !has_push_target {
-        return;
-    }
-    let rewrite = |action: Option<String>| -> Option<String> {
-        action.map(|action| {
-            if action.contains(" land ") && action.contains("--no-push") {
-                action.replace("--no-push", "--push")
-            } else {
-                action
-            }
-        })
-    };
-    output.operator.recommended_action = rewrite(output.operator.recommended_action.take());
-    output.operator.next_action = rewrite(output.operator.next_action.take());
+    output.operator.recommended_action = rewrite_land_action_for_default_remote(
+        output.operator.recommended_action.as_deref(),
+        has_push_target,
+    );
+    output.operator.next_action = rewrite_land_action_for_default_remote(
+        output.operator.next_action.as_deref(),
+        has_push_target,
+    );
 }
 
 fn scope_merge_recommendations_to_cli_repo(cli: &Cli, output: &mut MergeOutput) {
@@ -187,28 +188,7 @@ fn scope_merge_recommendations_to_cli_repo(cli: &Cli, output: &mut MergeOutput) 
 }
 
 fn scope_action_to_repo(action: &str, repo_path: &Path) -> String {
-    let Some(rest) = action.strip_prefix("heddle ") else {
-        return action.to_string();
-    };
-    if rest.starts_with("--repo ") || rest.starts_with("-R ") {
-        return action.to_string();
-    }
-    format!(
-        "heddle --repo {} {rest}",
-        quote_recommended_action_arg(&repo_path.display().to_string())
-    )
-}
-
-fn quote_recommended_action_arg(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'))
-    {
-        value.to_string()
-    } else {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    }
+    core_scope_action_to_repo(action, &repo_path.display().to_string())
 }
 
 fn current_thread_name(repo: &Repository) -> String {

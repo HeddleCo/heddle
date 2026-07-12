@@ -11,6 +11,8 @@ use objects::{
     object::{ChangeId, ThreadName},
 };
 
+#[cfg(test)]
+use super::packed_refs::PackedRefs;
 use super::{
     RefManager, RefUpdate, format_change_id_text, parse_change_id_text,
     reconcile::{LoadRequest, Loaded},
@@ -21,9 +23,6 @@ use super::{
         describe_head, matches_expectation,
     },
 };
-
-#[cfg(test)]
-use super::packed_refs::PackedRefs;
 use crate::fs_atomic::{stage_temp_files_durable, sync_directory};
 
 enum PackedRemove {

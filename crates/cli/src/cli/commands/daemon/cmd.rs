@@ -17,6 +17,13 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use heddle_core::daemon_plan::{
+    daemon_health_failed_kind, daemon_materialized_thread_line, daemon_materialized_threads_header,
+    daemon_not_running_status_token, daemon_running_status_token, daemon_short_tree,
+    daemon_shutdown_refused_kind, daemon_status_not_running_line, daemon_status_running_line,
+    daemon_stop_not_running_line, daemon_stop_status_token, daemon_stop_stopped_line,
+    daemon_unexpected_response_kind,
+};
 use repo::daemon::{
     MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
 };
@@ -91,11 +98,14 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
         repo::thread_manifest::list_thread_manifests(&heddle_dir).unwrap_or_default();
     let materialized_threads = materialized
         .iter()
-        .map(|manifest| MaterializedThreadStatus {
-            thread: manifest.thread.clone(),
-            state: manifest.state_id.to_string(),
-            files: manifest.file_count,
-            tree: manifest.tree_hash.to_string()[..12].to_string(),
+        .map(|manifest| {
+            let tree_full = manifest.tree_hash.to_string();
+            MaterializedThreadStatus {
+                thread: manifest.thread.clone(),
+                state: manifest.state_id.to_string(),
+                files: manifest.file_count,
+                tree: daemon_short_tree(&tree_full).to_string(),
+            }
         })
         .collect::<Vec<_>>();
     let endpoint_path = mount_daemon_endpoint_path(&repo_root).display().to_string();
@@ -109,7 +119,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
         }) => {
             if json {
                 let output = DaemonStatusOutput {
-                    status: "running",
+                    status: daemon_running_status_token(),
                     running: true,
                     endpoint_path,
                     ok,
@@ -123,14 +133,20 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                 return Ok(());
             } else {
                 println!(
-                    "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
-                    materialized.len()
+                    "{}",
+                    daemon_status_running_line(
+                        ok,
+                        version,
+                        uptime_s,
+                        mount_count,
+                        materialized.len(),
+                    )
                 );
             }
         }
         Some(MountDaemonResponse::Error { code, message, .. }) => {
             return Err(anyhow!(daemon_response_refusal(
-                "daemon_health_failed",
+                daemon_health_failed_kind(),
                 format!("daemon health failed: [{code}] {message}"),
                 format!("daemon returned error code {code}: {message}"),
                 "heddle daemon status",
@@ -138,7 +154,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
         }
         Some(other) => {
             return Err(anyhow!(daemon_response_refusal(
-                "daemon_unexpected_response",
+                daemon_unexpected_response_kind(),
                 format!("unexpected daemon response: {other:?}"),
                 format!(
                     "daemon returned a response variant that `status` cannot interpret: {other:?}"
@@ -149,7 +165,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
         None => {
             if json {
                 let output = DaemonStatusOutput {
-                    status: "not_running",
+                    status: daemon_not_running_status_token(),
                     running: false,
                     endpoint_path,
                     ok: false,
@@ -163,22 +179,27 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                 return Ok(());
             } else {
                 println!(
-                    "daemon: not running (no live endpoint at {}) materialized_count={}",
-                    mount_daemon_endpoint_path(&repo_root).display(),
-                    materialized.len()
+                    "{}",
+                    daemon_status_not_running_line(
+                        &mount_daemon_endpoint_path(&repo_root).display().to_string(),
+                        materialized.len(),
+                    )
                 );
             }
         }
     }
     if !materialized.is_empty() {
-        println!("materialized threads:");
+        println!("{}", daemon_materialized_threads_header());
         for s in &materialized {
+            let tree_full = s.tree_hash.to_string();
             println!(
-                "  {} (state={}, files={}, tree={})",
-                s.thread,
-                s.state_id,
-                s.file_count,
-                &s.tree_hash.to_string()[..12]
+                "{}",
+                daemon_materialized_thread_line(
+                    &s.thread,
+                    &s.state_id.to_string(),
+                    s.file_count,
+                    daemon_short_tree(&tree_full),
+                )
             );
         }
     }
@@ -221,7 +242,7 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
         Some(MountDaemonResponse::Shutdown { ok: true, .. }) => {}
         Some(MountDaemonResponse::Error { code, message, .. }) => {
             return Err(anyhow!(daemon_response_refusal(
-                "daemon_shutdown_refused",
+                daemon_shutdown_refused_kind(),
                 format!("daemon refused shutdown: [{code}] {message}"),
                 format!("daemon returned error code {code}: {message}"),
                 "heddle daemon status",
@@ -229,7 +250,7 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
         }
         Some(other) => {
             return Err(anyhow!(daemon_response_refusal(
-                "daemon_unexpected_response",
+                daemon_unexpected_response_kind(),
                 format!("unexpected daemon response: {other:?}"),
                 format!(
                     "daemon returned a response variant that `stop` cannot interpret: {other:?}"
@@ -242,10 +263,10 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
                 write_json_stdout(&DaemonStopOutput {
                     output_kind: "daemon_stop",
                     action: "daemon stop",
-                    status: "not_running",
+                    status: daemon_stop_status_token(false),
                 })?;
             } else {
-                println!("daemon: not running");
+                println!("{}", daemon_stop_not_running_line());
             }
             return Ok(());
         }
@@ -284,10 +305,10 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
         write_json_stdout(&DaemonStopOutput {
             output_kind: "daemon_stop",
             action: "daemon stop",
-            status: "stopped",
+            status: daemon_stop_status_token(true),
         })?;
     } else {
-        println!("daemon: stopped");
+        println!("{}", daemon_stop_stopped_line());
     }
     Ok(())
 }

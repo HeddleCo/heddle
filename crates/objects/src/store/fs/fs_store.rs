@@ -194,9 +194,11 @@ where
             // A key appears at most once in `order`; if it was already
             // removed by a concurrent logical path we just skip.
             if let Some(evicted) = self.entries.remove(&oldest) {
-                self.cached_bytes = self
-                    .cached_bytes
-                    .saturating_sub(self.byte_budget.map(|_| (self.sizer)(&evicted)).unwrap_or(0));
+                self.cached_bytes = self.cached_bytes.saturating_sub(
+                    self.byte_budget
+                        .map(|_| (self.sizer)(&evicted))
+                        .unwrap_or(0),
+                );
             }
         }
     }
@@ -327,11 +329,13 @@ impl FsStore {
 
     /// Initialize the directory structure.
     pub fn init(&self) -> Result<()> {
-        std::fs::create_dir_all(blobs_dir(&self.root))?;
-        std::fs::create_dir_all(trees_dir(&self.root))?;
-        std::fs::create_dir_all(states_dir(&self.root))?;
-        std::fs::create_dir_all(actions_dir(&self.root))?;
-        std::fs::create_dir_all(packs_dir(&self.root))?;
+        // Durable create so the object-store layout dirs survive crash
+        // between mkdir and first object write (L6 residual migration).
+        crate::fs_atomic::create_dir_all_durable(&blobs_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&trees_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&states_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&actions_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&packs_dir(&self.root))?;
         Ok(())
     }
 
@@ -386,7 +390,18 @@ impl FsStore {
     }
 
     /// Reload pack files from disk.
+    ///
+    /// Runs L8 install-intent recovery first so crash windows between pack
+    /// and index publish are finished or aborted before packs are loaded.
+    /// Uses the default intent TTL so abandoned staging is swept.
     pub fn reload_packs(&self) -> Result<()> {
+        let packs = packs_dir(&self.root);
+        let _ = super::pack_install_journal::recover_pack_install_intents_with_ttl(
+            &packs,
+            Some(super::pack_install_journal::DEFAULT_PACK_INSTALL_INTENT_TTL_SECS),
+        )?;
+        // Option D backstop: remove any legacy unpaired packs without intent.
+        let _ = super::fs_pack::prune_unpaired_pack_files(&packs)?;
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
@@ -486,6 +501,10 @@ impl FsStore {
         write_atomic(path, data, mode, Some(&self.pending_directory_syncs))
     }
 
+    /// Durable atomic write for pack/index bytes when not going through the
+    /// L8 journal (tests / rare call sites). Prefer
+    /// [`super::pack_install_journal::install_pack_bytes_journaled`].
+    #[allow(dead_code)]
     pub(super) fn write_pack_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
         write_atomic(path, data, AtomicWriteMode::Durable, None)
     }

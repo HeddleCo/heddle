@@ -37,6 +37,10 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use heddle_core::try_plan::{
+    TrySuccessMessageFacts, display_cmd, format_try_thread_name, plan_try_drop_outcome,
+    try_exit_label, try_failed_message, try_success_message, try_thread_name_collision_kind,
+};
 use repo::{Repository, ThreadManager, shell_quote};
 use serde::Serialize;
 
@@ -256,11 +260,6 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         // than hiding behind the cmd's exit code.
         verify_parent_unchanged(&repo, parent_head_before.as_deref())?;
 
-        let drop_msg = if thread_dropped {
-            format!("thread '{thread_name}' dropped")
-        } else {
-            format!("thread '{thread_name}' NOT dropped (cleanup failed)")
-        };
         let recovery_commands = if thread_dropped {
             Vec::new()
         } else {
@@ -269,13 +268,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         let output = TryOutput {
             status: "failed",
             action: "try",
-            message: format!(
-                "`{}` failed (exit {}); {}",
-                display_cmd(&args.command),
-                exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".into()),
-                drop_msg
+            message: try_failed_message(
+                &display_cmd(&args.command),
+                &try_exit_label(exit_code),
+                &thread_name,
+                thread_dropped,
             ),
             thread: thread_name.clone(),
             thread_dropped,
@@ -397,40 +394,14 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     };
     let recovery_action_templates = action_templates(&recovery_commands);
 
-    let message = if args.auto_merge {
-        match (&captured_state, &merge_state) {
-            (Some(state), Some(merge)) => format!(
-                "`{}` succeeded; captured {}, merged into parent as {}",
-                display_cmd(&args.command),
-                state,
-                merge
-            ),
-            (Some(state), None) => format!(
-                "`{}` succeeded; captured {}, merge into parent skipped",
-                display_cmd(&args.command),
-                state
-            ),
-            _ => format!(
-                "`{}` succeeded; nothing to capture",
-                display_cmd(&args.command)
-            ),
-        }
-    } else {
-        match &captured_state {
-            Some(state) => format!(
-                "`{}` succeeded; thread '{}' ready (state {}). Check readiness with `heddle ready --thread {}` before landing.",
-                display_cmd(&args.command),
-                thread_name,
-                state,
-                thread_name
-            ),
-            None => format!(
-                "`{}` succeeded; thread '{}' ready (no capture).",
-                display_cmd(&args.command),
-                thread_name
-            ),
-        }
-    };
+    let cmd_display = display_cmd(&args.command);
+    let message = try_success_message(TrySuccessMessageFacts {
+        cmd_display: &cmd_display,
+        thread_name: &thread_name,
+        auto_merge: args.auto_merge,
+        captured_state: captured_state.as_deref(),
+        merge_state: merge_state.as_deref(),
+    });
 
     let output = TryOutput {
         status: "completed",
@@ -498,16 +469,9 @@ fn verify_parent_unchanged(repo: &Repository, before: Option<&str>) -> Result<()
     Ok(())
 }
 
-/// Render `<cmd>` for human messages. `display_cmd(["cargo", "test"])`
-/// returns `"cargo test"`. Quoting is intentionally simple — the user
-/// can run with `--output json` for a structured shape.
-fn display_cmd(cmd: &[String]) -> String {
-    cmd.join(" ")
-}
-
 fn try_thread_name_collision_advice(thread_name: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "try_thread_name_collision",
+        try_thread_name_collision_kind(),
         format!("thread '{thread_name}' already exists"),
         "Pick a different `--name`, or omit it so Heddle can generate a collision-resistant name.",
         format!("`heddle try --name {thread_name}` would target an existing thread"),
@@ -524,7 +488,8 @@ fn try_thread_name_collision_advice(thread_name: &str) -> RecoveryAdvice {
 /// Build the default thread name from the cmd. `try-<8-hex>` of a
 /// hash over the cmd vector + a high-resolution timestamp. The
 /// timestamp ensures back-to-back `heddle try -- true` invocations
-/// don't collide.
+/// don't collide. Hashing/time stay CLI-owned; pure format lives in
+/// `heddle_core::try_plan`.
 fn default_try_name(command: &[String]) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -540,7 +505,7 @@ fn default_try_name(command: &[String]) -> String {
         .unwrap_or(0)
         .hash(&mut hasher);
     let digest = hasher.finish();
-    format!("try-{:08x}", digest as u32)
+    format_try_thread_name(digest as u32)
 }
 
 fn emit(cli: &Cli, repo: &Repository, output: &TryOutput) -> Result<()> {
@@ -567,21 +532,22 @@ fn emit(cli: &Cli, repo: &Repository, output: &TryOutput) -> Result<()> {
 /// `(thread_dropped, cleanup_error)` so the caller can plug them into
 /// `TryOutput` directly. On error we also emit a stderr warning so
 /// interactive users see what happened — automation reads
-/// `cleanup_error` from the JSON shape.
+/// `cleanup_error` from the JSON shape. Pure mapping is
+/// [`heddle_core::try_plan::plan_try_drop_outcome`]; CLI owns warn I/O.
 fn interpret_drop_result(
     thread_name: &str,
     result: Result<DropOutcome>,
     context: &str,
 ) -> (bool, Option<String>) {
     match result {
-        Ok(_) => (true, None),
+        Ok(_) => plan_try_drop_outcome(true, None),
         Err(err) => {
             let msg = err.to_string();
             tracing::warn!(thread = %thread_name, error = %err, context, "drop failed");
             eprintln!(
                 "warning: failed to drop ephemeral thread '{thread_name}' during {context}: {msg}"
             );
-            (false, Some(msg))
+            plan_try_drop_outcome(false, Some(msg))
         }
     }
 }

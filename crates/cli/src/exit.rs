@@ -10,7 +10,7 @@
 //! `0` is success; `2` is reserved for `set -e` / panic / unhandled error and
 //! is never emitted intentionally — we let it surface naturally.
 
-use std::io::ErrorKind as IoErrorKind;
+use std::{error::Error, fmt, io::ErrorKind as IoErrorKind};
 
 use clap::error::ErrorKind as ClapErrorKind;
 
@@ -40,6 +40,44 @@ pub enum HeddleExitCode {
     /// upstream, no remote, conflicting user identity).
     Config = 78,
 }
+
+/// Command already rendered its user-visible outcome (operator envelope,
+/// eligibility report, etc.) and only needs a non-zero process exit.
+///
+/// `main` maps this through [`HeddleExitCode::from_error`] and **does not**
+/// print a second error envelope — the command body owns the render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeExit {
+    code: HeddleExitCode,
+}
+
+impl OutcomeExit {
+    pub const fn new(code: HeddleExitCode) -> Self {
+        Self { code }
+    }
+
+    pub const fn code(self) -> HeddleExitCode {
+        self.code
+    }
+
+    /// Semantic rejection after a successful render (blocked operator,
+    /// unmet merge eligibility, …).
+    pub const fn data_err() -> Self {
+        Self::new(HeddleExitCode::DataErr)
+    }
+}
+
+impl fmt::Display for OutcomeExit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "command completed with non-zero status {}",
+            self.code.as_u8()
+        )
+    }
+}
+
+impl Error for OutcomeExit {}
 
 impl HeddleExitCode {
     /// Map a clap parse error to an exit code. Help/version are not failures
@@ -81,9 +119,24 @@ impl HeddleExitCode {
             | "no_merge_in_progress"
             | "operation_not_in_progress"
             | "json_unsupported"
-            | "json_compact_unsupported" => Some(Self::DataErr),
+            | "json_compact_unsupported"
+            // Operator/land/ready/continue finished rendering a blocked or
+            // failed envelope — semantic rejection of well-formed input.
+            | "operator_blocked"
+            // Hosted merge eligibility gate refused the pair.
+            | "merge_eligibility_blocked" => Some(Self::DataErr),
+            // Capture aborted on ENOSPC; working tree is intact. Classifies
+            // as IO rather than a distinct raw-28 OS code so agents stay on
+            // the documented sysexits taxonomy.
+            "capture_out_of_space" => Some(Self::IoErr),
             _ => None,
         }
+    }
+
+    /// True when the error is a post-render outcome that must not print a
+    /// second stderr envelope (the command body already wrote the report).
+    pub fn is_quiet_outcome(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| cause.is::<OutcomeExit>())
     }
 
     /// Map an anyhow error chain to an exit code. Walks the chain and uses
@@ -91,6 +144,11 @@ impl HeddleExitCode {
     /// get a code more informative than the bare `1` shell convention.
     pub fn from_error(err: &anyhow::Error) -> Self {
         for cause in err.chain() {
+            // Already-rendered command outcomes carry an explicit code and
+            // must not fall through to the IoErr catch-all.
+            if let Some(outcome) = cause.downcast_ref::<OutcomeExit>() {
+                return outcome.code();
+            }
             // Typed refusals carry a stable `kind` discriminator — route the
             // ones whose documented code differs from the `IoErr` catch-all.
             // Keyed on `kind` (not the user-visible message) so rewording the
@@ -381,6 +439,9 @@ mod tests {
             ("conflict_not_found", HeddleExitCode::DataErr),
             ("json_unsupported", HeddleExitCode::DataErr),
             ("json_compact_unsupported", HeddleExitCode::DataErr),
+            ("operator_blocked", HeddleExitCode::DataErr),
+            ("merge_eligibility_blocked", HeddleExitCode::DataErr),
+            ("capture_out_of_space", HeddleExitCode::IoErr),
         ] {
             assert_eq!(
                 HeddleExitCode::from_error(&advice_with_kind(kind)),
@@ -451,6 +512,33 @@ mod tests {
         assert_eq!(
             HeddleExitCode::from_error(&advice_with_kind("hook_veto")),
             HeddleExitCode::IoErr
+        );
+    }
+
+    #[test]
+    fn outcome_exit_maps_to_its_code() {
+        let err = anyhow::anyhow!(OutcomeExit::data_err());
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+        assert!(HeddleExitCode::is_quiet_outcome(&err));
+    }
+
+    #[test]
+    fn capture_out_of_space_advice_is_io_err() {
+        assert_eq!(
+            HeddleExitCode::from_error(&advice_with_kind("capture_out_of_space")),
+            HeddleExitCode::IoErr
+        );
+    }
+
+    #[test]
+    fn operator_blocked_advice_is_data_err() {
+        assert_eq!(
+            HeddleExitCode::from_error(&advice_with_kind("operator_blocked")),
+            HeddleExitCode::DataErr
+        );
+        assert_eq!(
+            HeddleExitCode::from_error(&advice_with_kind("merge_eligibility_blocked")),
+            HeddleExitCode::DataErr
         );
     }
 

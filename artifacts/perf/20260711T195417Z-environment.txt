@@ -1,0 +1,19 @@
+timestamp_utc=20260711T195417Z
+commit=c422950fb780cc53700a1c4749c15e63d76587cd
+branch=codex/correctness-architecture-performance-program
+heddle_bin=/tmp/heddle-fan-perf-target/release/heddle
+heddle_version=heddle 0.10.0
+uname=Darwin MacBookPro 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:56 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6000 arm64
+ProductName:		macOS
+ProductVersion:		26.5.1
+BuildVersion:		25F80
+cpu=Apple M1 Pro
+mem_bytes=34359738368
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo=cargo 1.97.0 (c980f4866 2026-06-30)
+python3=Python 3.14.6
+trials=5
+warmup=1
+file_count=300
+thread_count=24
+absolute_json=artifacts/perf/20260711T195417Z-core-loop-absolute.json

@@ -15,6 +15,13 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow};
+use heddle_core::approval_plan::{
+    EligibilitySummary, approval_recorded_message, approval_revoked_message,
+    approvals_empty_message, approvals_header, change_id_bytes_to_string,
+    eligibility_allowed_message, eligibility_approvals_counted_message,
+    eligibility_blocked_message, format_unix_secs_display, format_unix_secs_label,
+    plan_eligibility_summary, short_change_id, timestamp_secs_u64, unmet_requirement_line,
+};
 use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
@@ -47,16 +54,7 @@ struct ApprovalOutput {
 }
 
 fn ts_secs(ts: &Option<prost_types::Timestamp>) -> u64 {
-    ts.as_ref().map(|t| t.seconds.max(0) as u64).unwrap_or(0)
-}
-
-fn bytes_to_change_id_string(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    objects::object::ChangeId::try_from_slice(bytes)
-        .map(|id| id.to_string_full())
-        .unwrap_or_default()
+    timestamp_secs_u64(ts.as_ref().map(|t| t.seconds))
 }
 
 #[derive(Serialize)]
@@ -154,7 +152,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             repo_path: approval.repo_path,
             source_thread: approval.source_thread,
             target_thread: approval.target_thread,
-            source_state: bytes_to_change_id_string(&approval.source_state),
+            source_state: change_id_bytes_to_string(&approval.source_state),
             approver_user_id: approval.approver_user_id,
             note: approval.note,
             approved_at: ts_secs(&approval.approved_at),
@@ -163,17 +161,13 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
         println!("{}", serde_json::to_string(&out)?);
     } else {
         println!(
-            "Approved {source} -> {target} at {state}",
-            source = args.source,
-            target = args.target,
-            state = &source_state[..source_state.len().min(12)],
+            "{}",
+            approval_recorded_message(&args.source, &args.target, &source_state)
         );
         println!("  approval id: {}", approval.id);
         let exp_secs = ts_secs(&approval.expires_at);
-        if exp_secs > 0
-            && let Some(d) = chrono::DateTime::from_timestamp(exp_secs as i64, 0)
-        {
-            println!("  expires at:  {}", d.to_rfc3339());
+        if exp_secs > 0 {
+            println!("  expires at:  {}", format_unix_secs_label(exp_secs));
         }
         if !approval.note.is_empty() {
             println!("  note:        {}", approval.note);
@@ -197,7 +191,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
                 repo_path: a.repo_path,
                 source_thread: a.source_thread,
                 target_thread: a.target_thread,
-                source_state: bytes_to_change_id_string(&a.source_state),
+                source_state: change_id_bytes_to_string(&a.source_state),
                 approver_user_id: a.approver_user_id,
                 note: a.note,
                 approved_at: ts_secs(&a.approved_at),
@@ -206,35 +200,25 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
             .collect();
         println!("{}", serde_json::to_string(&out)?);
     } else if approvals.is_empty() {
-        println!(
-            "No approvals recorded for {} -> {}.",
-            args.source, args.target
-        );
+        println!("{}", approvals_empty_message(&args.source, &args.target));
     } else {
         println!(
-            "{} approval(s) for {} -> {}:",
-            approvals.len(),
-            args.source,
-            args.target
+            "{}",
+            approvals_header(approvals.len(), &args.source, &args.target)
         );
         for a in approvals {
             let approved_secs = ts_secs(&a.approved_at);
-            let when = chrono::DateTime::from_timestamp(approved_secs as i64, 0)
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| approved_secs.to_string());
-            let state_str = bytes_to_change_id_string(&a.source_state);
+            let when = format_unix_secs_display(approved_secs);
+            let state_str = change_id_bytes_to_string(&a.source_state);
             print!(
                 "  {id}  approver={user}  state={state}  approved_at={when}",
                 id = a.id,
                 user = a.approver_user_id,
-                state = &state_str[..state_str.len().min(12)],
+                state = short_change_id(&state_str),
             );
             let exp_secs = ts_secs(&a.expires_at);
             if exp_secs > 0 {
-                let exp = chrono::DateTime::from_timestamp(exp_secs as i64, 0)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_else(|| exp_secs.to_string());
-                print!("  expires_at={exp}");
+                print!("  expires_at={}", format_unix_secs_display(exp_secs));
             }
             if !a.note.is_empty() {
                 print!("  note=\"{}\"", a.note);
@@ -257,7 +241,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("Revoked approval {}.", args.id);
+        println!("{}", approval_revoked_message(&args.id));
     }
     Ok(())
 }
@@ -298,7 +282,7 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             repo_path: a.repo_path,
             source_thread: a.source_thread,
             target_thread: a.target_thread,
-            source_state: bytes_to_change_id_string(&a.source_state),
+            source_state: change_id_bytes_to_string(&a.source_state),
             approver_user_id: a.approver_user_id,
             note: a.note,
             approved_at: ts_secs(&a.approved_at),
@@ -306,36 +290,44 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
         })
         .collect();
 
+    let allowed = resp.allowed;
     if should_output_json(cli, Some(repo.config())) {
         let out = EligibilityOutput {
-            allowed: resp.allowed,
+            allowed,
             unmet,
             valid_approvals,
         };
         println!("{}", serde_json::to_string(&out)?);
-    } else if resp.allowed {
-        println!("{} -> {} can merge.", args.source, args.target);
-        if !valid_approvals.is_empty() {
-            println!("  ({} approval(s) counted)", valid_approvals.len());
-        }
     } else {
-        println!(
-            "{} -> {} BLOCKED by {} unmet requirement(s):",
-            args.source,
-            args.target,
-            unmet.len()
-        );
-        for u in unmet {
-            println!(
-                "  [{kind}] {reason} (have {have}/{needed})",
-                kind = u.kind,
-                reason = u.reason,
-                have = u.have,
-                needed = u.needed,
-            );
+        match plan_eligibility_summary(allowed, valid_approvals.len(), unmet.len()) {
+            EligibilitySummary::Allowed { approval_count } => {
+                println!(
+                    "{}",
+                    eligibility_allowed_message(&args.source, &args.target)
+                );
+                if approval_count > 0 {
+                    println!("{}", eligibility_approvals_counted_message(approval_count));
+                }
+            }
+            EligibilitySummary::Blocked { unmet_count } => {
+                println!(
+                    "{}",
+                    eligibility_blocked_message(&args.source, &args.target, unmet_count)
+                );
+                for u in &unmet {
+                    println!(
+                        "{}",
+                        unmet_requirement_line(&u.kind, &u.reason, u.have, u.needed)
+                    );
+                }
+            }
         }
-        // Non-zero exit code so scripts can branch on it.
-        std::process::exit(2);
+    }
+    // Non-zero exit so scripts can branch. Use DataErr (65) — exit 2 is
+    // reserved for panic / set -e fallout and must not be intentional.
+    // Report already rendered; main maps OutcomeExit without a second envelope.
+    if !allowed {
+        return Err(anyhow!(crate::exit::OutcomeExit::data_err()));
     }
     Ok(())
 }

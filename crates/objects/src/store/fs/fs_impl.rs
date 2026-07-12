@@ -1067,7 +1067,7 @@ impl ObjectStore for FsStore {
     fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
         let dir = redactions_dir(&self.root);
         if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+            crate::fs_atomic::create_dir_all_durable(&dir)?;
         }
         let path = redaction_path(&self.root, blob);
         crate::fs_atomic::write_file_atomic(&path, bytes)?;
@@ -1112,7 +1112,7 @@ impl ObjectStore for FsStore {
     fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
         let dir = state_visibility_dir(&self.root);
         if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+            crate::fs_atomic::create_dir_all_durable(&dir)?;
         }
         let path = state_visibility_path(&self.root, state);
         crate::fs_atomic::write_file_atomic(&path, bytes)?;

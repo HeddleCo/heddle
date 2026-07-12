@@ -5,7 +5,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split, thread_move,
+    CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split,
+    is_manual_review_blocker, thread_move,
 };
 use objects::object::ThreadName;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
@@ -175,7 +176,10 @@ pub fn cmd_thread_absorb(
     let _ = ensure_current_state(
         &parent_repo,
         &user_config,
-        Some(format!("Bootstrap git-overlay before absorbing {}", child.thread)),
+        Some(format!(
+            "Bootstrap git-overlay before absorbing {}",
+            child.thread
+        )),
     )?;
     let output = merge_thread_into_current(
         &parent_repo,
@@ -343,7 +347,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         let _ = ensure_current_state(
             &repo,
             &UserConfig::load_default().unwrap_or_default(),
-            Some(format!("Bootstrap git-overlay before resolving {}", thread.id)),
+            Some(format!(
+                "Bootstrap git-overlay before resolving {}",
+                thread.id
+            )),
         )?;
         let preview =
             merge_thread_into_current(&repo, &thread.id, None, false, true, false, false, false)?;
@@ -420,10 +427,6 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             thread: summary.name.clone(),
         },
     )
-}
-
-fn is_manual_review_blocker(blocker: &str) -> bool {
-    blocker.starts_with("Heavy-impact change:")
 }
 
 fn thread_resolve_next_action(

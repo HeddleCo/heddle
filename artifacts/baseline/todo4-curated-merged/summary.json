@@ -1,0 +1,195 @@
+{
+  "jobs": 19,
+  "counts": {
+    "pass": 19,
+    "fail": 0
+  },
+  "results": [
+    {
+      "id": "facade-render-free",
+      "status": "pass",
+      "duration_ms": 139,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "fmt-check",
+      "status": "pass",
+      "duration_ms": 12500,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "git-process-lint",
+      "status": "pass",
+      "duration_ms": 193470,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "roundtrip-fidelity",
+      "status": "pass",
+      "duration_ms": 8554,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "commit-conformance",
+      "status": "pass",
+      "duration_ms": 5435,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "git-projection-engine",
+      "status": "pass",
+      "duration_ms": 251513,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-objects",
+      "status": "pass",
+      "duration_ms": 33976,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-refs",
+      "status": "pass",
+      "duration_ms": 33759,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-oplog",
+      "status": "pass",
+      "duration_ms": 10277,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-merge",
+      "status": "pass",
+      "duration_ms": 16789,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-format",
+      "status": "pass",
+      "duration_ms": 1519,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-crypto",
+      "status": "pass",
+      "duration_ms": 12967,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-core",
+      "status": "pass",
+      "duration_ms": 52392,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-repo",
+      "status": "pass",
+      "duration_ms": 108919,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-ingest",
+      "status": "pass",
+      "duration_ms": 55233,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "lib-git-projection",
+      "status": "pass",
+      "duration_ms": 7056,
+      "oracle": true,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-core-functionality",
+      "status": "pass",
+      "duration_ms": 51676,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "cli-state-management",
+      "status": "pass",
+      "duration_ms": 52791,
+      "oracle": false,
+      "exit_code": 0
+    },
+    {
+      "id": "formal-specs",
+      "status": "pass",
+      "duration_ms": 5158,
+      "oracle": true,
+      "exit_code": 0
+    }
+  ],
+  "gates": {
+    "clippy_d_warnings": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked -- -D warnings",
+      "status": "pass",
+      "exit_code": 0,
+      "note": "clean on tip a5b1dc68 (prior assign_op_pattern blocker no longer present)",
+      "log": "logs/clippy-d-warnings.log"
+    },
+    "clippy_soft": {
+      "command": "cargo clippy -p heddle-core -p heddle-cli --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "warnings": 0,
+      "note": "no clippy warnings",
+      "log": "logs/clippy-soft.log"
+    },
+    "cargo_doc": {
+      "command": "cargo doc -p heddle-core --no-deps --locked",
+      "status": "pass",
+      "exit_code": 0,
+      "log": "logs/cargo-doc.log"
+    }
+  },
+  "certification": {
+    "label": "todo4-full-curated-recert",
+    "wave": 8,
+    "commit": "a5b1dc689c755228be15cefeaffd91dbb9dd18f3",
+    "branch": "codex/correctness-architecture-performance-program",
+    "isolation": "git worktree (detached HEAD) at /tmp/heddle-todo4-worktree; artifacts written to main workspace",
+    "worktree_path": "/Users/lukethorne/dev/HeddleCo/workspace/session-2026-07-10",
+    "cert_checkout_path": "/tmp/heddle-todo4-worktree",
+    "cargo_target_dir": "/tmp/heddle-todo4-target",
+    "timestamp_utc": "20260711T153430Z",
+    "note": "Full curated 19-job suite via single run-baseline.sh --suite curated on clean tip a5b1dc68 (detached worktree dirty=0). Concurrent dirty WIP in main workspace excluded. Clippy -D warnings + soft + cargo doc all green. Prior n=5 perf stamp retained (not re-run).",
+    "method": "git worktree add --detach /tmp/heddle-todo4-worktree HEAD; BASELINE_OUT_DIR=.../todo4-curated; full --suite curated",
+    "oracle_jobs_pass": [
+      "git-process-lint",
+      "roundtrip-fidelity",
+      "commit-conformance",
+      "git-projection-engine",
+      "lib-git-projection",
+      "formal-specs"
+    ],
+    "release_gate_checklist": {
+      "curated_19": "pass",
+      "oracles": "pass",
+      "fmt_check": "pass",
+      "clippy_d_warnings": "pass",
+      "cargo_doc": "pass",
+      "perf_n5": "prior_recorded_not_rerun"
+    },
+    "blockers": []
+  }
+}

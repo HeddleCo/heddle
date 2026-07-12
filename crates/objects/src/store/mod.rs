@@ -25,12 +25,17 @@ pub use agent_task::{
     AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
     generate_agent_task_id, validate_task_id,
 };
-pub use fs::FsStore;
+pub use fs::{
+    DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsStore, PackInstallIntent, PackInstallMetricsSnapshot,
+    PackInstallPhase, PackInstallRecoverReport, install_pack_bytes_journaled,
+    pack_install_metrics_reset, pack_install_metrics_snapshot, recover_pack_install_intents,
+    recover_pack_install_intents_with_ttl,
+};
 pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use liveness::{Liveness, current_boot_id, is_owner_alive, process_alive};
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;
-pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats};
+pub use pack::{PackBuilder, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 pub use shallow::ShallowInfo;
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;

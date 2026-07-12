@@ -4,6 +4,11 @@
 use std::fs;
 
 use anyhow::{Result, anyhow};
+use heddle_core::{
+    RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
+    default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
+    plan_revert, revert_inspect_command, revert_success_message,
+};
 use objects::object::{Attribution, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
 use serde::Serialize;
@@ -33,6 +38,7 @@ pub fn cmd_revert(
     let repo = cli.open_repo()?;
 
     let target_id = resolve_state_id(&repo, &state_spec)?;
+    let target_short = target_id.short();
 
     let target_state = require_resolved_state(&repo, &target_id)?;
 
@@ -58,8 +64,8 @@ pub fn cmd_revert(
 
     let changes = repo.diff_trees(&parent_hash, &target_state.tree)?;
 
-    if changes.is_empty() {
-        return Err(anyhow!(no_changes_to_revert_advice(&target_id.short())));
+    if matches!(plan_revert(changes.len()), RevertPlan::NoChanges) {
+        return Err(anyhow!(no_changes_to_revert_advice(&target_short)));
     }
 
     ensure_worktree_clean(&repo, "revert")?;
@@ -74,20 +80,35 @@ pub fn cmd_revert(
         &mut files_affected,
     )?;
 
+    let json = should_output_json(cli, Some(repo.config()));
+
     if no_commit {
-        if should_output_json(cli, Some(repo.config())) {
+        let facts = RevertSuccessFacts {
+            outcome: RevertOutcome::AppliedNotCommitted,
+            state_short: &target_short,
+            new_change_id_short: None,
+        };
+        let success_message = revert_success_message(
+            &facts,
+            if json {
+                RevertMessageMode::Json
+            } else {
+                RevertMessageMode::Text
+            },
+        );
+        if json {
             println!(
                 "{}",
                 serde_json::to_string(&RevertOutput {
                     output_kind: "revert",
                     change_id: None,
-                    reverted_state: target_id.short(),
+                    reverted_state: target_short,
                     files_affected,
-                    message: "Changes applied to worktree (not committed)".to_string(),
+                    message: success_message,
                 })?
             );
         } else {
-            println!("Reverted {} (not committed)", target_id.short());
+            println!("{success_message}");
             for file in &files_affected {
                 println!("  {}", file);
             }
@@ -95,28 +116,38 @@ pub fn cmd_revert(
         return Ok(());
     }
 
-    let revert_message = message.unwrap_or_else(|| format!("Revert {}", target_id.short()));
+    let revert_message = message.unwrap_or_else(|| default_revert_commit_message(&target_short));
 
     let attribution = Attribution::human(repo.get_principal()?);
     let new_state = repo.snapshot_with_attribution(Some(revert_message), None, attribution)?;
+    let new_short = new_state.change_id.short();
+    let facts = RevertSuccessFacts {
+        outcome: RevertOutcome::Committed,
+        state_short: &target_short,
+        new_change_id_short: Some(&new_short),
+    };
+    let success_message = revert_success_message(
+        &facts,
+        if json {
+            RevertMessageMode::Json
+        } else {
+            RevertMessageMode::Text
+        },
+    );
 
-    if should_output_json(cli, Some(repo.config())) {
+    if json {
         println!(
             "{}",
             serde_json::to_string(&RevertOutput {
                 output_kind: "revert",
-                change_id: Some(new_state.change_id.short()),
-                reverted_state: target_id.short(),
+                change_id: Some(new_short),
+                reverted_state: target_short,
                 files_affected,
-                message: format!("Created revert state {}", new_state.change_id.short()),
+                message: success_message,
             })?
         );
     } else {
-        println!(
-            "Reverted {} as {}",
-            target_id.short(),
-            new_state.change_id.short()
-        );
+        println!("{success_message}");
         for file in &files_affected {
             println!("  {}", file);
         }
@@ -126,10 +157,10 @@ pub fn cmd_revert(
 }
 
 fn no_changes_to_revert_advice(state: &str) -> RecoveryAdvice {
-    let inspect_command = format!("heddle show {state}");
+    let inspect_command = revert_inspect_command(state);
     RecoveryAdvice::safety_refusal(
-        "no_changes_to_revert",
-        format!("No changes to revert in state {state}"),
+        no_changes_to_revert_kind(),
+        no_changes_to_revert_summary(state),
         format!(
             "Inspect the state with `{inspect_command}` and choose a state with a non-empty diff."
         ),

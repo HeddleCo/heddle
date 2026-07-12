@@ -30,7 +30,7 @@ use std::{
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::write_file_atomic,
+    fs_atomic::{create_dir_all_durable, write_file_atomic},
     object::{ChangeId, OperationId},
 };
 use serde::{Deserialize, Serialize};
@@ -288,7 +288,7 @@ impl OperationLogIndex {
 
     fn save_bucket(&self, bucket: &DayBucket) -> Result<()> {
         if !self.root.exists() {
-            fs::create_dir_all(&self.root).map_err(HeddleError::from)?;
+            create_dir_all_durable(&self.root).map_err(HeddleError::from)?;
         }
         let date = NaiveDate::parse_from_str(&bucket.date, "%Y-%m-%d").map_err(|err| {
             HeddleError::InvalidObject(format!("invalid bucket date '{}': {err}", bucket.date))

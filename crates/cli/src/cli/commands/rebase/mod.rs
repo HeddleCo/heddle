@@ -122,7 +122,10 @@ pub(crate) fn cmd_rebase_silent(
 
 pub(crate) fn continue_rebase_for_operator(repo: &Repository) -> Result<OperatorContinueStatus> {
     let rebase_state_path = repo.heddle_dir().join(REBASE_STATE_FILE);
-    if !rebase_state_path.exists() {
+    if matches!(
+        heddle_core::plan_rebase_continue(rebase_state_path.exists()),
+        heddle_core::RebaseContinuePlan::NoRebaseInProgress
+    ) {
         return Err(anyhow!(no_rebase_in_progress_advice("continue rebase")));
     }
 
@@ -189,7 +192,31 @@ fn run_rebase(
         return handle_continue(repo, &rebase_state_path, cli);
     }
 
-    let target_thread = thread.ok_or_else(rebase_target_required_advice)?;
+    let target_thread_owned = thread.map(str::to_string);
+    let target_exists = target_thread_owned
+        .as_deref()
+        .map(|t| {
+            repo.refs()
+                .get_thread(&ThreadName::new(t))
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .unwrap_or(false);
+    let start_plan = heddle_core::plan_rebase_start(&heddle_core::RebaseStartFacts {
+        target_thread: target_thread_owned.clone(),
+        target_exists,
+    });
+    let target_thread = match start_plan {
+        heddle_core::RebaseStartPlan::Proceed { target_thread } => target_thread,
+        heddle_core::RebaseStartPlan::TargetRequired => {
+            return Err(anyhow!(rebase_target_required_advice()));
+        }
+        heddle_core::RebaseStartPlan::TargetNotFound { target_thread } => {
+            return Err(anyhow!(rebase_target_not_found_advice(&target_thread)));
+        }
+    };
+    let target_thread = target_thread.as_str();
 
     let current_change = ensure_current_state(
         repo,
@@ -394,7 +421,10 @@ fn handle_abort(
     rebase_state_path: &std::path::Path,
     cli: Option<&Cli>,
 ) -> Result<()> {
-    if !rebase_state_path.exists() {
+    if matches!(
+        heddle_core::plan_rebase_abort(rebase_state_path.exists()),
+        heddle_core::RebaseContinuePlan::NoRebaseInProgress
+    ) {
         return Err(anyhow!(no_rebase_in_progress_advice("abort rebase")));
     }
 
@@ -425,7 +455,10 @@ fn handle_continue(
     rebase_state_path: &std::path::Path,
     cli: Option<&Cli>,
 ) -> Result<()> {
-    if !rebase_state_path.exists() {
+    if matches!(
+        heddle_core::plan_rebase_continue(rebase_state_path.exists()),
+        heddle_core::RebaseContinuePlan::NoRebaseInProgress
+    ) {
         return Err(anyhow!(no_rebase_in_progress_advice("continue rebase")));
     }
 
