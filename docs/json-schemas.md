@@ -3493,7 +3493,7 @@ report redacted blobs the collector refused to touch; `consolidated_mirror_loose
 counts loose legacy Bridge Mirror objects packed into the mirror's own pack):
 
 ```json
-{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
+{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "unpaired_packs_pruned": 0, "pack_install_intents_completed": 0, "pack_install_intents_aborted": 0, "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0}, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
 ```
 
 `heddle redact purge apply|list --output json` emit (each carries `output_kind`
