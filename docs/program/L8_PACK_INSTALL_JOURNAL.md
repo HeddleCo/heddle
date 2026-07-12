@@ -1,161 +1,87 @@
-# L8 — Pack install two-phase journal (A+)
+# L8 — Pack install journal (A+, hardened)
 
-**Status:** **Shipped on program tip (A+ journal + Option D backstop + in-memory journal + TTL)**  
-**Module:** `crates/objects/src/store/fs/pack_install_journal.rs`  
-**Call sites:**
-- `FsStore::install_pack_files_streaming` → `install_pack_files_journaled`
-- `FsStore::install_pack_files` → `install_pack_bytes_journaled`  
-**Recovery:** `FsStore::reload_packs` runs `recover_pack_install_intents_with_ttl`
-(default 24h) then `prune_unpaired_pack_files`.
+**Status:** **Shipped on program tip** (identifiers-only intent, path containment,
+pair identity check, quarantine, flock, TTL).
 
-Cross-check: `GAP_MAP.md` L7/L8, `fs_pack.rs`, `publish_file_durable`.
+**Module:** `crates/objects/src/store/fs/pack_install_journal.rs`
 
 ---
 
-## On-disk layout (under `.heddle/packs/`)
-
-```text
-packs/
-  <blake3-hex>.pack          # final content-addressed pack
-  <blake3-hex>.idx           # final index
-  .staging/<install_id>/
-    pack                     # staged pack bytes
-    idx                      # staged index bytes
-  .install-intent/
-    <install_id>.json        # durable intent (atomic write)
-```
-
-`install_id` = `{unix_secs:016x}-{rand_u64:016x}` (unique under concurrency).
-
----
-
-## Intent schema (v1)
+## Intent schema (v2)
 
 ```json
 {
-  "version": 1,
-  "install_id": "…",
-  "pack_name": "<blake3 hex>",
-  "staging_pack": "/abs/…/packs/.staging/<id>/pack",
-  "staging_idx": "/abs/…/packs/.staging/<id>/idx",
-  "dst_pack": "/abs/…/packs/<name>.pack",
-  "dst_idx": "/abs/…/packs/<name>.idx",
-  "phase": "prepared | pack_published | completed",
+  "version": 2,
+  "install_id": "hex-time-rand",
+  "pack_name": "blake3-hex",
+  "phase": "prepared | pack_published",
   "created_unix": 0
 }
 ```
 
-Phases: `PackInstallPhase::{Prepared, PackPublished, Completed}`.
+**No paths in JSON.** Recovery rebuilds:
+
+| Path | Construction |
+|------|----------------|
+| staging pack | `{packs}/.staging/{install_id}/pack` |
+| staging idx | `{packs}/.staging/{install_id}/idx` |
+| final pack | `{packs}/{pack_name}.pack` |
+| final idx | `{packs}/{pack_name}.idx` |
+
+`install_id` and `pack_name` are validated (no `..`, no separators; pack_name hex).
+
+Malformed / unknown-version intents are moved to
+`{packs}/.install-intent/quarantine/` (never deleted in place).
 
 ---
 
-## Install protocol (happy path)
+## Protocol
 
-1. Stream-hash source pack → `pack_name`.
-2. If final pack+idx both exist → drop sources, return (idempotent).
-3. If orphan final pack without idx → delete orphan.
-4. `create_dir_all_durable(.staging/<id>)`.
-5. `publish_file_durable(src_pack → staging/pack)`.
-6. `publish_file_durable(src_idx → staging/idx)`.
-7. Write intent `phase=prepared` (`write_file_atomic`).
-8. `publish_file_durable(staging/pack → final.pack)`.
-9. Intent `phase=pack_published`.
-10. `publish_file_durable(staging/idx → final.idx)`.
-11. Intent `phase=completed`.
-12. Remove staging dir + intent file.
-13. Caller clears caches + `reload_packs` (which also recovers peers).
+1. Stage pack+idx under `.staging/<id>/` (**outside** exclusive lock when possible).
+2. Take `packs/.pack-install.lock`.
+3. Write durable **prepared** intent.
+4. Publish pack → rewrite intent **pack_published**.
+5. Publish index → **delete** intent (no Completed rewrite) + fsync intent dir.
+6. Best-effort remove staging.
 
-Every publish uses existing L6/L7 durability (`publish_file_durable`).
+Idempotency: existing final pair is accepted only if pack file **hashes to
+`pack_name`** and idx is non-empty.
 
 ---
 
 ## Concurrency
 
-Install and recover take an exclusive flock on `packs/.pack-install.lock`
-(`RepoLock`, reentrant for install → `reload_packs` → recover).
+- Global reentrant flock on install + recover (simple correctness).
+- Non-expired incomplete intents are **skipped** (live install).
+- Expired incomplete intents are **aborted**.
+- Staging outside lock + lock around publish reduces hold time vs staging under lock.
 
-| Case | Behavior |
-|------|----------|
-| Live install mid-`Prepared` + concurrent recover | **Skip** intent (do not abort); count `skipped_in_progress` |
-| Expired `Prepared` / stuck install | **Abort** after TTL |
-| Completable crash residue | **Complete** regardless of TTL |
-
-Without the skip policy, recover could delete another thread's staging between
-intent write and pack publish (Fable review, worth-fixing).
+---
 
 ## Recovery table
 
-| Intent phase | Disk | TTL | Action |
-|--------------|------|-----|--------|
-| `prepared`, no finals | staging only | fresh | **Skip in progress** (live install) |
-| `prepared`, no finals | staging only | expired | **Abort** — drop staging + intent |
-| `prepared`, pack final + staged idx | crash after pack publish before phase flip | any | **Complete** index publish |
-| `prepared`, both finals | rare | any | **Cleanup** staging + intent |
-| `pack_published`, staged idx present | pack final | any | **Complete** index publish |
-| `pack_published`, staged idx missing | pack final only | fresh | **Skip in progress** |
-| `pack_published`, staged idx missing | pack final only | expired | **Abort** — delete unpaired pack + intent |
-| `completed` leftover | both finals | any | **Cleanup** staging + intent |
-| corrupt / unknown version | — | — | drop intent file; count error |
-| no intent, unpaired `.pack` | legacy L8 | — | **Option D** `prune_unpaired_pack_files` on reload |
+| State | Action |
+|-------|--------|
+| Can complete (pack final + staged idx) | Complete regardless of TTL |
+| Expired incomplete | Abort (reconstructed paths only) |
+| Fresh incomplete | Skip in progress |
+| Malformed / unknown version | Quarantine |
+| Unpaired pack without intent | Option D prune on reload |
 
 ---
 
-## Public API
+## Tests (unit)
 
-| Item | Role |
-|------|------|
-| `install_pack_files_journaled(packs_dir, src_pack, src_idx, pack_name)` | Journaled install from on-disk sources |
-| `install_pack_bytes_journaled(packs_dir, pack_data, index_data) -> pack_name` | Journaled install from in-memory bytes |
-| `recover_pack_install_intents(packs_dir) -> PackInstallRecoverReport` | Crash recovery (default 24h TTL) |
-| `recover_pack_install_intents_with_ttl(packs_dir, ttl_secs)` | Crash recovery with explicit TTL |
-| `DEFAULT_PACK_INSTALL_INTENT_TTL_SECS` | 86_400 (24h) |
-| `PackInstallIntent` / `PackInstallPhase` / `PackInstallRecoverReport` | Types |
-| `FsStore::prune_unpaired_packs` | Option D GC |
-| `FsStore::reload_packs` | recover + prune + load |
-
-### TTL recovery policy
-
-- If install can complete (final pack + staged idx, or both finals) → **complete/cleanup** regardless of TTL.
-- Else if `created_unix + ttl < now` → **abort** (drop partial + staging + intent).
-- Else → **skip in progress** (do not abort a concurrent live install).
-- Install + recover hold `packs/.pack-install.lock` so expire-abort cannot run against a live holder.
-- Orphan `.staging/*` dirs with no matching intent and mtime older than TTL are swept (best-effort).
+Path containment, quarantine, pair hash match, relocate packs tree, concurrent
+same-pack installs, flock load-bearing expire-vs-live, TTL abort/complete, etc.
+(`cargo test -p heddle-objects --lib pack_install_journal`)
 
 ---
 
-## Test matrix (unit)
+## Residual
 
-| Test | Covers |
-|------|--------|
-| `journaled_install_produces_pair_and_cleans_intent` | Happy path + cleanup |
-| `recover_pack_published_completes_from_staging` | Complete after pack publish |
-| `recover_prepared_aborts_without_finals_when_expired` | Expired Prepared → abort |
-| `recover_prepared_fresh_skips_in_progress` | Non-expired Prepared → skip (policy only) |
-| `flock_serializes_recover_against_expired_live_install` | **Flock load-bearing:** expired Prepared + concurrent recover while install lock held; recover blocks, `aborted==0`, staging survives |
-| `recover_pack_published_without_staging_idx_aborts_orphan_pack` | Expired stuck pack_published → abort |
-| `recover_prepared_with_pack_and_staging_idx_completes` | Phase-flip crash window |
-| `journaled_install_idempotent_when_pair_exists` | CAS idempotency |
-| `install_pack_bytes_journaled_happy_path` | In-memory journaled install |
-| `ttl_aborts_old_prepared_intent` | TTL abort of stale prepared |
-| `complete_preferred_over_ttl_when_staging_idx_present` | Complete wins over TTL |
-| unpaired pack list/prune tests | Option D backstop |
-
----
-
-## Remaining / follow-ups
-
-- [x] Wire prune/recover summary lines into `heddle maintenance` / `gc` human+JSON output
-- [x] Journal the in-memory `install_pack_files` dual-write path (`install_pack_bytes_journaled`)
-- [ ] Hosted metrics counters for recover completed/aborted (when observability product lands)
-- [x] Intent TTL sweeper (24h default) + orphan staging sweep
-
----
-
-## Decision log
-
-| Date | Decision |
-|------|----------|
-| 2026-07-11 | A+ chosen for long-term multi-user scale |
-| 2026-07-11 | **Implemented** journaled streaming install + recover on reload + Option D prune |
-| 2026-07-11 | Prepared-phase recovery completes when final pack + staged idx present |
-| 2026-07-11 | **Implemented** in-memory `install_pack_bytes_journaled` + default 24h intent/staging TTL |
+- Full fault-injection matrix at every FS op (property/fault harness).
+- Per-pack locks / hosted multi-tenant throughput measurement.
+- Hosted metrics product pipeline.
+- Wall-clock TTL skew (clock rollback) hardening.
+- Selective rollback of pure presentation `*_plan` string modules (architecture debt).

@@ -1148,13 +1148,9 @@ mod tests {
         fs::write(
             intent_dir.join(format!("{install_id}.json")),
             serde_json::to_vec_pretty(&json!({
-                "version": 1,
+                "version": 2,
                 "install_id": install_id,
-                "pack_name": "pending-name",
-                "staging_pack": staging_dir.join("pack").display().to_string(),
-                "staging_idx": staging_dir.join("idx").display().to_string(),
-                "dst_pack": packs.join("pending-name.pack").display().to_string(),
-                "dst_idx": packs.join("pending-name.idx").display().to_string(),
+                "pack_name": "aa",
                 "phase": "prepared",
                 "created_unix": 1,
             }))

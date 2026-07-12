@@ -12,8 +12,11 @@ Usage:
 Writes JSON stats to artifacts/perf/<stamp>-<name>.json by default.
 
 Rules enforced by this tool's design:
-  - Alternating A/B order (A B A B ...) so thermal/cache bias is shared.
+  - Counterbalanced pair order: even trials A then B, odd trials B then A
+    (AB, BA, AB, BA, ...) so first-in-pair bias is shared.
   - Reports mean, median, p95, p99, min, max, stdev, and per-trial raw times.
+    Note: with small n (default 3), p95/p99 are near the max — use n>=30 for
+    meaningful tail estimates; this is calibration, not production SLOs.
   - Requires successful exit codes by default (--no-require-success to disable).
   - Does NOT claim wins; only prints ratios. Caller must ensure equal work
     and equivalent correctness outside this runner.
@@ -177,7 +180,12 @@ def main() -> int:
     times_b: list[float] = []
     trials = []
     for i in range(args.trials):
-        for label, cmd, bucket in (("A", args.a, times_a), ("B", args.b, times_b)):
+        # Counterbalance: even trials A→B, odd trials B→A (not fixed A,B,A,B).
+        if i % 2 == 0:
+            order = (("A", args.a, times_a), ("B", args.b, times_b))
+        else:
+            order = (("B", args.b, times_b), ("A", args.a, times_a))
+        for label, cmd, bucket in order:
             elapsed, rc, err = run_cmd(cmd)
             if args.require_success and rc != 0:
                 print(
@@ -190,6 +198,7 @@ def main() -> int:
                 {
                     "trial": i,
                     "label": label,
+                    "order_index": len(trials) % 2,
                     "seconds": elapsed,
                     "ms": ms(elapsed),
                     "exit_code": rc,
@@ -229,9 +238,11 @@ def main() -> int:
         "b": with_ms(summary_b),
         "ratio_b_over_a_median": ratio_median,
         "raw_trials": trials,
+        "pair_order": "counterbalanced_ab_ba",
         "notes": (
-            "Paired alternating A/B. Does not assert correctness or equal work; "
-            "only times successful (or all) process wall times. "
+            "Counterbalanced pairs (AB, BA, AB, BA, ...). Does not assert "
+            "correctness or equal work; only times process wall times. "
+            "p95/p99 with small n are not meaningful tail estimates. "
             "Not a Git win claim; measurement calibration only."
         ),
     }

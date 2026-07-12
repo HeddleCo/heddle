@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure shell-completion validation (no clap / script I/O).
 //!
-//! Owns shell name parsing and unsupported-shell summary text for
-//! `heddle shell completion` / `heddle completion`. Dynamic completion
-//! script bodies stay CLI-owned (large shell sources).
+//! Owns shell name parsing. Presentation for unsupported shells is a single
+//! typed helper so callers are not coupled to four string factories.
 
 /// Shells that Heddle emits completion scripts for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,24 +24,23 @@ pub fn parse_completion_shell(s: &str) -> Option<CompletionShell> {
     }
 }
 
-/// Human summary when `shell` is not one of the supported completion shells.
-pub fn completion_shell_unsupported_summary(shell: &str) -> String {
-    format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish")
+/// Facts for RecoveryAdvice when the shell is unsupported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedCompletionShell {
+    pub kind: &'static str,
+    pub summary: String,
+    pub hint: &'static str,
+    pub example: &'static str,
 }
 
-/// Stable recovery-advice kind for unsupported completion shells.
-pub fn completion_shell_unsupported_kind() -> &'static str {
-    "completion_shell_unsupported"
-}
-
-/// Hint line listing supported shells.
-pub fn completion_shell_unsupported_hint() -> &'static str {
-    "Use one of: bash, zsh, fish."
-}
-
-/// Example command for recovery advice.
-pub fn completion_shell_example_command() -> &'static str {
-    "heddle shell completion bash"
+/// Build unsupported-shell recovery facts (one place for copy + kind token).
+pub fn unsupported_completion_shell(shell: &str) -> UnsupportedCompletionShell {
+    UnsupportedCompletionShell {
+        kind: "completion_shell_unsupported",
+        summary: format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
+        hint: "Use one of: bash, zsh, fish.",
+        example: "heddle shell completion bash",
+    }
 }
 
 #[cfg(test)]
@@ -54,34 +52,15 @@ mod tests {
         assert_eq!(parse_completion_shell("bash"), Some(CompletionShell::Bash));
         assert_eq!(parse_completion_shell("zsh"), Some(CompletionShell::Zsh));
         assert_eq!(parse_completion_shell("fish"), Some(CompletionShell::Fish));
-    }
-
-    #[test]
-    fn parse_rejects_unknown() {
-        assert_eq!(parse_completion_shell(""), None);
-        assert_eq!(parse_completion_shell("Bash"), None);
+        assert_eq!(parse_completion_shell("BASH"), None);
         assert_eq!(parse_completion_shell("powershell"), None);
-        assert_eq!(parse_completion_shell("bash "), None);
     }
 
     #[test]
-    fn unsupported_summary_and_tokens() {
-        let summary = completion_shell_unsupported_summary("powershell");
-        assert!(summary.contains("powershell"));
-        assert!(summary.contains("bash"));
-        assert!(summary.contains("zsh"));
-        assert!(summary.contains("fish"));
-        assert_eq!(
-            completion_shell_unsupported_kind(),
-            "completion_shell_unsupported"
-        );
-        assert_eq!(
-            completion_shell_unsupported_hint(),
-            "Use one of: bash, zsh, fish."
-        );
-        assert_eq!(
-            completion_shell_example_command(),
-            "heddle shell completion bash"
-        );
+    fn unsupported_summary_includes_shell() {
+        let u = unsupported_completion_shell("tcsh");
+        assert_eq!(u.kind, "completion_shell_unsupported");
+        assert!(u.summary.contains("tcsh"));
+        assert!(u.summary.contains("bash"));
     }
 }

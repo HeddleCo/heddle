@@ -5,9 +5,7 @@ use anyhow::{Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 use heddle_core::completion_plan::{
-    CompletionShell, completion_shell_example_command, completion_shell_unsupported_hint,
-    completion_shell_unsupported_kind, completion_shell_unsupported_summary,
-    parse_completion_shell,
+    CompletionShell, parse_completion_shell, unsupported_completion_shell,
 };
 
 use super::advice::RecoveryAdvice;
@@ -30,11 +28,12 @@ pub fn cmd_completion(shell: String) -> Result<()> {
             print!("{FISH_DYNAMIC_COMPLETION}");
         }
         None => {
+            let bad = unsupported_completion_shell(&shell);
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                completion_shell_unsupported_kind(),
-                completion_shell_unsupported_summary(&shell),
-                completion_shell_unsupported_hint(),
-                completion_shell_example_command(),
+                bad.kind,
+                bad.summary,
+                bad.hint,
+                bad.example,
             )));
         }
     }
