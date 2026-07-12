@@ -112,18 +112,24 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
         builder = builder.op_id(op_id.to_string());
     }
 
-    // Open once here when a Heddle repo is present so core reuses the handle
-    // and JSON mode can read config without a second `Repository::open`.
-    // Failure is non-fatal: plain-Git observe (or core's own open error) still
-    // runs when no handle is injected.
+    // Open once when a Heddle sidecar is already present so core reuses the
+    // handle and JSON mode can read config without a second open.
+    //
+    // Do NOT call `Repository::open` on plain Git: open auto-bootstraps a
+    // sidecar for mutators, which would make verify mutate and skip the
+    // plain-Git observe probe (observe-only contract).
     let open_start = Instant::now();
-    let (builder, repo_config, repo_open_ms) = match Repository::open(start) {
-        Ok(repo) => {
-            let repo_open_ms = open_start.elapsed().as_millis();
-            let repo_config = repo.config().clone();
-            (builder.repo(repo), Some(repo_config), repo_open_ms)
+    let (builder, repo_config, repo_open_ms) = if heddle_sidecar_present(start) {
+        match Repository::open(start) {
+            Ok(repo) => {
+                let repo_open_ms = open_start.elapsed().as_millis();
+                let repo_config = repo.config().clone();
+                (builder.repo(repo), Some(repo_config), repo_open_ms)
+            }
+            Err(_) => (builder, None, 0),
         }
-        Err(_) => (builder, None, 0),
+    } else {
+        (builder, None, 0)
     };
 
     Ok(VerifyExecutionPrep {
@@ -131,6 +137,22 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
         repo_config,
         repo_open_ms,
     })
+}
+
+/// True when `start` or an ancestor already has a Heddle sidecar (main repo or
+/// worktree pointer). Used to avoid auto-bootstrap on observe-only verify.
+fn heddle_sidecar_present(start: &Path) -> bool {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        let heddle = dir.join(".heddle");
+        if heddle.is_dir()
+            && (heddle.join("objects").is_dir() || heddle.join("objectstore").is_file())
+        {
+            return true;
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {

@@ -808,13 +808,16 @@ impl Repository {
             current = dir.parent();
         }
 
-        // Plain Git without a `.heddle` sidecar must NOT be auto-bootstrapped
-        // here. Observe-only commands (`status`/`verify`/`doctor`/…) rely on
-        // open failing so they take the plain-Git probe path and leave the
-        // worktree untouched. Explicit `heddle init` / `bootstrap_git_overlay`
-        // creates the sidecar. Nested-git-under-parent-heddle bootstrap above
-        // remains intentional for managed checkouts.
-        let _ = discovered_git_root;
+        // Mutating commands historically rely on open() bootstrapping a plain
+        // Git tree into a Git-overlay sidecar (import/thread/start/marker…).
+        // Observe-only commands (status/verify/doctor) must NOT call open on
+        // plain Git — they take the plain-Git probe path so they never create
+        // `.heddle`. See `verify_execution_context_from_cli`.
+        if let Some(git_root) = discovered_git_root {
+            ensure_git_overlay_exclude(&git_root)?;
+            Self::bootstrap_git_overlay(&git_root)?;
+            return Self::open(git_root);
+        }
 
         Err(HeddleError::RepositoryNotFound(path.as_ref().to_path_buf()))
     }

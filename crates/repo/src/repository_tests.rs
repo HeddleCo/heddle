@@ -214,27 +214,25 @@ fn open_accepts_supported_repository_format() {
     Repository::open(temp_dir.path()).expect("supported repo format should open");
 }
 
-/// Observe-only commands rely on open failing for plain Git so they take the
-/// plain-Git probe path. Auto-bootstrap would create `.heddle` on `verify`/`status`.
+/// Mutating commands historically bootstrap plain Git via `Repository::open`.
+/// Observe-only CLI paths (status/verify/doctor) must not call open until a
+/// `.heddle` sidecar already exists — see `verify_execution_context_from_cli`.
 #[test]
-fn open_does_not_bootstrap_plain_git_without_heddle_sidecar() {
+fn open_bootstraps_plain_git_sidecar_for_mutators() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path();
-    // Minimal git metadata dir — enough for has_git_metadata without needing `git`.
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
 
-    let err = match Repository::open(root) {
-        Ok(_) => panic!("plain Git without .heddle must not open via auto-bootstrap"),
-        Err(err) => err,
-    };
+    let repo = Repository::open(root).expect("open should bootstrap plain Git for mutators");
     assert!(
-        matches!(err, HeddleError::RepositoryNotFound(_)),
-        "expected RepositoryNotFound, got {err:?}"
+        root.join(".heddle").is_dir(),
+        "open should create the Heddle sidecar for mutators"
     );
-    assert!(
-        !root.join(".heddle").exists(),
-        "open must leave plain Git observe-only (no .heddle sidecar)"
+    assert_eq!(
+        repo.capability(),
+        crate::RepositoryCapability::GitOverlay,
+        "bootstrapped plain Git should be git-overlay"
     );
 }
 

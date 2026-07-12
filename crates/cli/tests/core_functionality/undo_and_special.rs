@@ -10,6 +10,24 @@ fn head_short(root: &std::path::Path) -> String {
     repo.head().unwrap().expect("repo has HEAD").short()
 }
 
+/// Drop pack store contents so a removed loose state cannot be resolved via pack.
+/// Handles L8 journal subdirs (`.staging`, `.install-intent`, `.pack-locks`) that
+/// plain `remove_file` cannot delete (PermissionDenied / EISDIR on directories).
+fn wipe_pack_store(repo_root: &std::path::Path) {
+    let packs_dir = repo_root.join(".heddle/packs");
+    if !packs_dir.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(&packs_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
 #[test]
 fn test_undo_at_beginning() {
     let temp = TempDir::new().unwrap();
@@ -853,12 +871,7 @@ fn test_undo_ff_merge_refuses_when_pre_target_state_missing() {
     let state_path = locate_state_loose_file(temp.path(), &main_tip_before)
         .expect("pre-FF state's loose file is present after merge");
     std::fs::remove_file(&state_path).unwrap();
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
+    wipe_pack_store(temp.path());
 
     let err = heddle(&["undo"], Some(temp.path()))
         .expect_err("undo must refuse when the pre-FF state is missing");
@@ -1080,12 +1093,7 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     let state_path = locate_state_loose_file(temp.path(), &feature_tip_at_ff)
         .expect("FF target state's loose file is present after undo");
     std::fs::remove_file(&state_path).unwrap();
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
+    wipe_pack_store(temp.path());
     // Also drop the source thread ref so a live-resolve path can't smuggle
     // the SHA back in by reading `feature → tip`. (Belt-and-braces: the new
     // redo arm doesn't read the source thread at all, but locking this down
@@ -1231,12 +1239,7 @@ fn test_undo_refuses_when_prior_state_missing() {
     // Drop every pack in the repo too; heddle writes packs eagerly and a
     // surviving pack would still resolve the state, masking the test's
     // destructive-boundary intent.
-    let packs_dir = temp.path().join(".heddle/packs");
-    if packs_dir.exists() {
-        for entry in std::fs::read_dir(&packs_dir).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
+    wipe_pack_store(temp.path());
 
     let err = heddle(&["undo"], Some(temp.path()))
         .expect_err("undo must refuse when the prior state is missing");
