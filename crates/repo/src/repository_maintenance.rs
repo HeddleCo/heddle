@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use objects::{
     fs_atomic::write_file_atomic,
     object::ChangeId,
-    store::{ObjectStore, recover_pack_install_intents},
+    store::{ObjectStore, pack_install_metrics_snapshot, recover_pack_install_intents},
 };
 use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,12 @@ pub struct RepositoryMaintenanceRunReport {
     pub pack_install_intents_recovered_completed: u64,
     /// Pack install intents aborted by L8 recovery.
     pub pack_install_intents_aborted: u64,
+    /// Non-expired / lock-held intents left alone during recovery.
+    pub pack_install_intents_skipped_in_progress: u64,
+    /// Malformed intents moved to quarantine.
+    pub pack_install_intents_quarantined: u64,
+    /// Process-local pack-install counters (scrape hook for hosted/ops).
+    pub pack_install_metrics: objects::store::PackInstallMetricsSnapshot,
     /// Unpaired `.pack` files removed (Option D backstop).
     pub unpaired_packs_pruned: u64,
     /// Bytes freed by unpaired pack prune.
@@ -236,6 +242,9 @@ impl Repository {
             pruned_pull_planner_entries: pull_planner_maintenance.pruned_entries,
             pack_install_intents_recovered_completed: pack_install_recover.completed,
             pack_install_intents_aborted: pack_install_recover.aborted,
+            pack_install_intents_skipped_in_progress: pack_install_recover.skipped_in_progress,
+            pack_install_intents_quarantined: pack_install_recover.quarantined,
+            pack_install_metrics: pack_install_metrics_snapshot(),
             unpaired_packs_pruned,
             unpaired_pack_bytes_freed,
             report,

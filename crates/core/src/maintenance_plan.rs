@@ -170,6 +170,22 @@ pub fn run_pack_install_recover_line(completed: u64, aborted: u64) -> String {
     format!("Pack install intents recovered: {completed} completed, {aborted} aborted")
 }
 
+/// Extended recover line including skip/quarantine counters when non-zero.
+pub fn run_pack_install_recover_detail_line(
+    completed: u64,
+    aborted: u64,
+    skipped: u64,
+    quarantined: u64,
+) -> String {
+    let mut line = run_pack_install_recover_line(completed, aborted);
+    if skipped > 0 || quarantined > 0 {
+        line.push_str(&format!(
+            " (skipped in-progress: {skipped}, quarantined: {quarantined})"
+        ));
+    }
+    line
+}
+
 /// L8 Option D unpaired-pack prune summary.
 ///
 /// `Pruned N unpaired packs (freed B bytes)` / zero-friendly form.
@@ -266,6 +282,14 @@ mod tests {
         assert_eq!(
             run_pack_install_recover_line(2, 1),
             "Pack install intents recovered: 2 completed, 1 aborted"
+        );
+        assert_eq!(
+            run_pack_install_recover_detail_line(2, 1, 0, 0),
+            "Pack install intents recovered: 2 completed, 1 aborted"
+        );
+        assert!(
+            run_pack_install_recover_detail_line(0, 1, 3, 2)
+                .contains("skipped in-progress: 3")
         );
         assert_eq!(
             run_unpaired_packs_pruned_line(0, 0),

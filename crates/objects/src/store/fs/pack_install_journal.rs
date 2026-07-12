@@ -18,25 +18,29 @@
 //! from JSON (Codex review: path containment).
 //!
 //! # Protocol
-//! 1. Stage pack+idx under `.staging/<id>/` (may be outside the exclusive lock).
-//! 2. Take install lock; write one durable **prepared** intent.
+//! 1. Stage pack+idx under `.staging/<id>/` (outside the per-pack lock).
+//! 2. Take per-`pack_name` exclusive lock; write one durable **prepared** intent.
 //! 3. Publish pack → update intent to **pack_published**.
 //! 4. Publish index → **remove** intent (no Completed rewrite).
 //! 5. Best-effort remove staging; fsync intent dir after intent unlink.
 //!
-//! Recovery reconstructs paths, validates IDs, completes or aborts, quarantines
-//! garbage intents. See `docs/program/L8_PACK_INSTALL_JOURNAL.md`.
+//! Recovery lists intents under a short global listing lock, then recovers each
+//! pack under `try_lock` on that pack (skip if a live install holds it).
+//! Paths are reconstructed, IDs validated; garbage intents are quarantined.
+//! See `docs/program/L8_PACK_INSTALL_JOURNAL.md`.
 
 use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    fault_inject,
     fs_atomic::{create_dir_all_durable, publish_file_durable, sync_directory, write_file_atomic},
     lock::RepoLock,
 };
@@ -47,12 +51,69 @@ pub const PACK_INSTALL_INTENT_VERSION: u32 = 2;
 /// Default TTL for abandoned install intents / orphan staging (24 hours).
 pub const DEFAULT_PACK_INSTALL_INTENT_TTL_SECS: i64 = 86_400;
 
+/// Tolerate clocks slightly ahead of wall time when computing TTL expiry.
+/// Far-future `created_unix` is clamped to `now` so intents cannot dodge expiry forever.
+pub const INTENT_CLOCK_SKEW_TOLERANCE_SECS: i64 = 300;
+
 const STAGING_DIR_NAME: &str = ".staging";
 const INTENT_DIR_NAME: &str = ".install-intent";
 const QUARANTINE_DIR_NAME: &str = "quarantine";
 const STAGED_PACK_NAME: &str = "pack";
 const STAGED_IDX_NAME: &str = "idx";
+const PACK_LOCKS_DIR_NAME: &str = ".pack-locks";
+/// Legacy global lock name (kept for recover directory scan serialization).
 const PACK_INSTALL_LOCK_NAME: &str = ".pack-install.lock";
+
+// ---------------------------------------------------------------------------
+// Process-local metrics (hosted/adapters can scrape; not a full product pipeline)
+// ---------------------------------------------------------------------------
+
+static METRIC_INSTALLS_OK: AtomicU64 = AtomicU64::new(0);
+static METRIC_INSTALLS_ERR: AtomicU64 = AtomicU64::new(0);
+static METRIC_RECOVER_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static METRIC_RECOVER_ABORTED: AtomicU64 = AtomicU64::new(0);
+static METRIC_RECOVER_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static METRIC_RECOVER_QUARANTINED: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of process-local pack-install counters (resettable in tests).
+///
+/// Hosted / maintenance adapters scrape this; it is not a full product metrics
+/// pipeline, but it is the stable hook surface for recover/install observability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackInstallMetricsSnapshot {
+    pub installs_ok: u64,
+    pub installs_err: u64,
+    pub recover_completed: u64,
+    pub recover_aborted: u64,
+    pub recover_skipped_in_progress: u64,
+    pub recover_quarantined: u64,
+}
+
+/// Read process-local pack-install metrics.
+pub fn pack_install_metrics_snapshot() -> PackInstallMetricsSnapshot {
+    PackInstallMetricsSnapshot {
+        installs_ok: METRIC_INSTALLS_OK.load(Ordering::Relaxed),
+        installs_err: METRIC_INSTALLS_ERR.load(Ordering::Relaxed),
+        recover_completed: METRIC_RECOVER_COMPLETED.load(Ordering::Relaxed),
+        recover_aborted: METRIC_RECOVER_ABORTED.load(Ordering::Relaxed),
+        recover_skipped_in_progress: METRIC_RECOVER_SKIPPED.load(Ordering::Relaxed),
+        recover_quarantined: METRIC_RECOVER_QUARANTINED.load(Ordering::Relaxed),
+    }
+}
+
+/// Reset process-local metrics (tests / process start hooks).
+pub fn pack_install_metrics_reset() {
+    METRIC_INSTALLS_OK.store(0, Ordering::Relaxed);
+    METRIC_INSTALLS_ERR.store(0, Ordering::Relaxed);
+    METRIC_RECOVER_COMPLETED.store(0, Ordering::Relaxed);
+    METRIC_RECOVER_ABORTED.store(0, Ordering::Relaxed);
+    METRIC_RECOVER_SKIPPED.store(0, Ordering::Relaxed);
+    METRIC_RECOVER_QUARANTINED.store(0, Ordering::Relaxed);
+}
+
+fn metric_inc(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Install lifecycle phase recorded in the durable intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +153,33 @@ pub struct PackInstallRecoverReport {
     pub errors: u64,
 }
 
-/// Exclusive install/recover lock for `packs_dir` (cross-thread + cross-process).
+/// Per-`pack_name` exclusive lock (cross-thread + cross-process).
+pub(crate) fn acquire_pack_name_lock(
+    packs_dir: &Path,
+    pack_name: &str,
+) -> io::Result<crate::lock::WriteLockGuard> {
+    validate_pack_name(pack_name)?;
+    create_dir_all_durable(packs_dir)?;
+    let locks = packs_dir.join(PACK_LOCKS_DIR_NAME);
+    create_dir_all_durable(&locks)?;
+    let lock = RepoLock::at(locks.join(format!("{pack_name}.lock")));
+    lock.write().map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Non-blocking per-pack lock. `None` = another install holds this pack.
+pub(crate) fn try_acquire_pack_name_lock(
+    packs_dir: &Path,
+    pack_name: &str,
+) -> io::Result<Option<crate::lock::WriteLockGuard>> {
+    validate_pack_name(pack_name)?;
+    create_dir_all_durable(packs_dir)?;
+    let locks = packs_dir.join(PACK_LOCKS_DIR_NAME);
+    create_dir_all_durable(&locks)?;
+    let lock = RepoLock::at(locks.join(format!("{pack_name}.lock")));
+    lock.try_write().map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Short global listing lock (intent dir scan only).
 pub(crate) fn acquire_pack_install_lock(
     packs_dir: &Path,
 ) -> io::Result<crate::lock::WriteLockGuard> {
@@ -397,9 +484,28 @@ fn can_complete_quickly(packs_dir: &Path, intent: &PackInstallIntent) -> bool {
     dst_pack.exists() && !dst_idx.exists() && staging_idx.exists()
 }
 
+/// Effective creation time for TTL when `created_unix` is only slightly ahead
+/// of wall time (within [`INTENT_CLOCK_SKEW_TOLERANCE_SECS`]).
+fn effective_created_unix(created_unix: i64, now: i64) -> i64 {
+    if created_unix > now {
+        now
+    } else {
+        created_unix
+    }
+}
+
 fn intent_expired(intent: &PackInstallIntent, ttl_secs: Option<i64>, now: i64) -> bool {
     match ttl_secs {
-        Some(ttl) if ttl >= 0 => intent.created_unix.saturating_add(ttl) < now,
+        Some(ttl) if ttl >= 0 => {
+            // Far-future / large clock rollback: expire immediately so a forged
+            // `created_unix = i64::MAX` (or a multi-minute clock jump) cannot
+            // keep an intent alive forever. Mild skew is clamped to `now`.
+            if intent.created_unix > now.saturating_add(INTENT_CLOCK_SKEW_TOLERANCE_SECS) {
+                return true;
+            }
+            let created = effective_created_unix(intent.created_unix, now);
+            created.saturating_add(ttl) < now
+        }
         _ => false,
     }
 }
@@ -452,75 +558,84 @@ pub fn recover_pack_install_intents_with_ttl(
     packs_dir: &Path,
     ttl_secs: Option<i64>,
 ) -> io::Result<PackInstallRecoverReport> {
-    let _guard = acquire_pack_install_lock(packs_dir)?;
-    recover_pack_install_intents_with_ttl_locked(packs_dir, ttl_secs)
-}
+    // Snapshot intent paths under a short global listing lock, then recover
+    // each pack under its per-pack lock (try_lock → skip if install holds it).
+    let intent_paths: Vec<PathBuf> = {
+        let _list_guard = acquire_pack_install_lock(packs_dir)?;
+        let intent_dir = intent_root(packs_dir);
+        if !intent_dir.exists() {
+            let mut report = PackInstallRecoverReport::default();
+            let now = unix_now();
+            sweep_orphan_staging(packs_dir, ttl_secs, now, &mut report);
+            return Ok(report);
+        }
+        fs::read_dir(&intent_dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| !p.is_dir() && p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect()
+    };
 
-fn recover_pack_install_intents_with_ttl_locked(
-    packs_dir: &Path,
-    ttl_secs: Option<i64>,
-) -> io::Result<PackInstallRecoverReport> {
     let mut report = PackInstallRecoverReport::default();
     let now = unix_now();
-    let intent_dir = intent_root(packs_dir);
 
-    if intent_dir.exists() {
-        let entries = match fs::read_dir(&intent_dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                sweep_orphan_staging(packs_dir, ttl_secs, now, &mut report);
-                return Ok(report);
+    for path in intent_paths {
+        report.intents_seen += 1;
+
+        let intent = match load_intent(&path) {
+            Ok(i)
+                if i.version == PACK_INSTALL_INTENT_VERSION
+                    || i.version == 1 /* v1 ids still usable; paths ignored */ =>
+            {
+                match validate_intent_ids(&i) {
+                    Ok(()) => i,
+                    Err(_) => {
+                        let _ = quarantine_intent_file(packs_dir, &path);
+                        report.quarantined += 1;
+                        metric_inc(&METRIC_RECOVER_QUARANTINED);
+                        continue;
+                    }
+                }
             }
-            Err(e) => return Err(e),
+            Ok(_) | Err(_) => {
+                match quarantine_intent_file(packs_dir, &path) {
+                    Ok(()) => {
+                        report.quarantined += 1;
+                        metric_inc(&METRIC_RECOVER_QUARANTINED);
+                    }
+                    Err(_) => report.errors += 1,
+                }
+                continue;
+            }
         };
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => {
-                    report.errors += 1;
-                    continue;
-                }
-            };
-            let path = entry.path();
-            // Skip quarantine subdirectory and non-json.
-            if path.is_dir() {
+        // Per-pack try-lock: if a live install holds it, skip (in progress).
+        let pack_guard = match try_acquire_pack_name_lock(packs_dir, &intent.pack_name)? {
+            Some(g) => g,
+            None => {
+                report.skipped_in_progress += 1;
+                metric_inc(&METRIC_RECOVER_SKIPPED);
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            report.intents_seen += 1;
+        };
 
-            let intent = match load_intent(&path) {
-                Ok(i)
-                    if i.version == PACK_INSTALL_INTENT_VERSION
-                        || i.version == 1 /* v1 ids still usable; paths ignored */ =>
-                {
-                    match validate_intent_ids(&i) {
-                        Ok(()) => i,
-                        Err(_) => {
-                            let _ = quarantine_intent_file(packs_dir, &path);
-                            report.quarantined += 1;
-                            continue;
-                        }
-                    }
-                }
-                Ok(_) | Err(_) => {
-                    // Unknown version or malformed: quarantine, never delete.
-                    match quarantine_intent_file(packs_dir, &path) {
-                        Ok(()) => report.quarantined += 1,
-                        Err(_) => report.errors += 1,
-                    }
-                    continue;
-                }
-            };
-
-            let expired = intent_expired(&intent, ttl_secs, now);
-            if let Err(_) = recover_one_intent(packs_dir, &intent, expired, &mut report) {
-                report.errors += 1;
-            }
+        let expired = intent_expired(&intent, ttl_secs, now);
+        let before_aborted = report.aborted;
+        let before_completed = report.completed;
+        let before_skipped = report.skipped_in_progress;
+        if recover_one_intent(packs_dir, &intent, expired, &mut report).is_err() {
+            report.errors += 1;
         }
+        if report.completed > before_completed {
+            metric_inc(&METRIC_RECOVER_COMPLETED);
+        }
+        if report.aborted > before_aborted {
+            metric_inc(&METRIC_RECOVER_ABORTED);
+        }
+        if report.skipped_in_progress > before_skipped {
+            metric_inc(&METRIC_RECOVER_SKIPPED);
+        }
+        drop(pack_guard);
     }
 
     sweep_orphan_staging(packs_dir, ttl_secs, now, &mut report);
@@ -543,6 +658,7 @@ fn recover_pack_install_intents_with_ttl_locked(
             orphan_staging_swept = report.orphan_staging_swept,
             quarantined = report.quarantined,
             errors = report.errors,
+            metrics = ?pack_install_metrics_snapshot(),
             "pack install journal recovery"
         );
     } else {
@@ -681,6 +797,23 @@ pub fn install_pack_bytes_journaled(
     pack_data: &[u8],
     index_data: &[u8],
 ) -> io::Result<String> {
+    match install_pack_bytes_journaled_inner(packs_dir, pack_data, index_data) {
+        Ok(name) => {
+            metric_inc(&METRIC_INSTALLS_OK);
+            Ok(name)
+        }
+        Err(e) => {
+            metric_inc(&METRIC_INSTALLS_ERR);
+            Err(e)
+        }
+    }
+}
+
+fn install_pack_bytes_journaled_inner(
+    packs_dir: &Path,
+    pack_data: &[u8],
+    index_data: &[u8],
+) -> io::Result<String> {
     create_dir_all_durable(packs_dir)?;
     let pack_name = format!("{}", blake3::hash(pack_data).to_hex());
 
@@ -688,7 +821,7 @@ pub fn install_pack_bytes_journaled(
         return Ok(pack_name);
     }
 
-    // Stage outside lock (unique install_id); lock only for intent + publish.
+    // Stage outside per-pack lock (unique install_id).
     let install_id = new_install_id();
     validate_install_id(&install_id)?;
     let stage = staging_dir(packs_dir, &install_id);
@@ -696,22 +829,24 @@ pub fn install_pack_bytes_journaled(
     let staging_pack = staging_pack_path(packs_dir, &install_id);
     let staging_idx = staging_idx_path(packs_dir, &install_id);
     write_file_atomic(&staging_pack, pack_data)?;
+    fault_inject::maybe_fail_at("pack_install_after_stage_pack")?;
     write_file_atomic(&staging_idx, index_data)?;
+    fault_inject::maybe_fail_at("pack_install_after_stage_idx")?;
 
-    let _guard = acquire_pack_install_lock(packs_dir)?;
-    // Re-check under lock.
+    // Per-pack lock for intent + publish (other pack names stay parallel).
+    let _guard = acquire_pack_name_lock(packs_dir, &pack_name)?;
+    fault_inject::maybe_fail_at("pack_install_after_pack_lock")?;
+
     if existing_pair_matches_pack_name(packs_dir, &pack_name)? {
         remove_staging(packs_dir, &install_id);
         return Ok(pack_name);
     }
-    // Drop corrupt/orphan final pack without idx.
     let dst_pack = dst_pack_path(packs_dir, &pack_name);
     let dst_idx = dst_idx_path(packs_dir, &pack_name);
     if dst_pack.exists() && !dst_idx.exists() {
         let _ = fs::remove_file(&dst_pack);
     }
     if dst_pack.exists() && dst_idx.exists() {
-        // Exists but hash mismatch — remove both and reinstall.
         if !existing_pair_matches_pack_name(packs_dir, &pack_name)? {
             let _ = fs::remove_file(&dst_pack);
             let _ = fs::remove_file(&dst_idx);
@@ -723,20 +858,43 @@ pub fn install_pack_bytes_journaled(
 
     let mut intent = PackInstallIntent::new(install_id.clone(), pack_name.clone());
     write_intent(packs_dir, &intent)?;
+    fault_inject::maybe_fail_at("pack_install_after_intent_prepared")?;
 
     publish_file_durable(&staging_pack, &dst_pack)?;
+    fault_inject::maybe_fail_at("pack_install_after_publish_pack")?;
     intent.phase = PackInstallPhase::PackPublished;
     write_intent(packs_dir, &intent)?;
+    fault_inject::maybe_fail_at("pack_install_after_intent_pack_published")?;
 
     publish_file_durable(&staging_idx, &dst_idx)?;
-    // No Completed rewrite — delete intent after both finals durable.
+    fault_inject::maybe_fail_at("pack_install_after_publish_idx")?;
     remove_staging(packs_dir, &install_id);
     remove_intent(packs_dir, &install_id)?;
+    fault_inject::maybe_fail_at("pack_install_after_intent_removed")?;
     Ok(pack_name)
 }
 
 /// Journaled streaming install (consumes source pack/index paths).
 pub fn install_pack_files_journaled(
+    packs_dir: &Path,
+    src_pack_path: &Path,
+    src_index_path: &Path,
+    pack_name: &str,
+) -> io::Result<()> {
+    match install_pack_files_journaled_inner(packs_dir, src_pack_path, src_index_path, pack_name)
+    {
+        Ok(()) => {
+            metric_inc(&METRIC_INSTALLS_OK);
+            Ok(())
+        }
+        Err(e) => {
+            metric_inc(&METRIC_INSTALLS_ERR);
+            Err(e)
+        }
+    }
+}
+
+fn install_pack_files_journaled_inner(
     packs_dir: &Path,
     src_pack_path: &Path,
     src_index_path: &Path,
@@ -757,11 +915,12 @@ pub fn install_pack_files_journaled(
     create_dir_all_durable(&stage)?;
     let staging_pack = staging_pack_path(packs_dir, &install_id);
     let staging_idx = staging_idx_path(packs_dir, &install_id);
-    // Stage outside lock.
     publish_file_durable(src_pack_path, &staging_pack)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_stage_pack")?;
     publish_file_durable(src_index_path, &staging_idx)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_stage_idx")?;
 
-    let _guard = acquire_pack_install_lock(packs_dir)?;
+    let _guard = acquire_pack_name_lock(packs_dir, pack_name)?;
     if existing_pair_matches_pack_name(packs_dir, pack_name)? {
         remove_staging(packs_dir, &install_id);
         return Ok(());
@@ -782,12 +941,16 @@ pub fn install_pack_files_journaled(
 
     let mut intent = PackInstallIntent::new(install_id.clone(), pack_name.to_string());
     write_intent(packs_dir, &intent)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_intent_prepared")?;
 
     publish_file_durable(&staging_pack, &dst_pack)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_publish_pack")?;
     intent.phase = PackInstallPhase::PackPublished;
     write_intent(packs_dir, &intent)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_intent_pack_published")?;
 
     publish_file_durable(&staging_idx, &dst_idx)?;
+    fault_inject::maybe_fail_at("pack_install_stream_after_publish_idx")?;
     remove_staging(packs_dir, &install_id);
     remove_intent(packs_dir, &install_id)?;
     Ok(())
@@ -1069,13 +1232,15 @@ mod tests {
     }
 
     #[test]
-    fn flock_serializes_recover_against_expired_live_install() {
+    fn pack_lock_prevents_recover_aborting_live_expired_looking_install() {
         use std::{
             sync::{Arc, Barrier},
             thread,
-            time::{Duration, Instant},
+            time::Duration,
         };
 
+        // Per-pack try_lock: recover must skip (not abort) while install holds
+        // the pack lock — even if created_unix looks TTL-expired.
         let root = tempfile::tempdir().unwrap();
         let packs = Arc::new(root.path().join("packs"));
         create_dir_all_durable(&packs).unwrap();
@@ -1089,7 +1254,7 @@ mod tests {
 
         let installer = thread::spawn(move || {
             let packs = packs_a.as_path();
-            let guard = acquire_pack_install_lock(packs).expect("install lock");
+            let guard = acquire_pack_name_lock(packs, "dd").expect("pack lock");
 
             let install_id = "flock-live";
             let stage = staging_dir(packs, install_id);
@@ -1102,11 +1267,11 @@ mod tests {
             let dst_idx = dst_idx_path(packs, "dd");
 
             let mut intent = PackInstallIntent::new(install_id.into(), "dd".into());
-            intent.created_unix = 1;
+            intent.created_unix = 1; // looks expired under any short TTL
             write_intent(packs, &intent).unwrap();
 
             planted_a.wait();
-            thread::sleep(Duration::from_millis(80));
+            thread::sleep(Duration::from_millis(60));
 
             assert!(staging_pack.exists() && staging_idx.exists());
             assert!(intent_path(packs, install_id).exists());
@@ -1130,18 +1295,19 @@ mod tests {
         let recoverer = thread::spawn(move || {
             let packs = packs_b.as_path();
             planted_b.wait();
-            let t0 = Instant::now();
-            let report =
-                recover_pack_install_intents_with_ttl(packs, Some(1)).expect("recover under flock");
-            let waited = t0.elapsed();
+            // While pack lock is held, recover try_locks and skips — must not abort.
+            let mid =
+                recover_pack_install_intents_with_ttl(packs, Some(1)).expect("recover under pack lock");
+            assert_eq!(mid.aborted, 0, "must not abort live install: {mid:?}");
             assert!(
-                waited >= Duration::from_millis(50),
-                "recover must block on install flock (elapsed {waited:?})"
+                mid.skipped_in_progress >= 1 || dst_pack_path(packs, "dd").exists(),
+                "either skip in-progress or install already finished: {mid:?}"
             );
-            assert_eq!(report.aborted, 0, "report={report:?}");
+            done_b.wait();
+            // After installer finishes, finals exist and no intent remains.
             assert!(dst_pack_path(packs, "dd").exists());
             assert!(dst_idx_path(packs, "dd").exists());
-            done_b.wait();
+            assert!(!intent_path(packs, "flock-live").exists());
         });
 
         installer.join().expect("installer");
@@ -1320,5 +1486,190 @@ mod tests {
         assert_eq!(n1, expected);
         assert_eq!(n2, expected);
         assert!(existing_pair_matches_pack_name(&packs, &expected).unwrap());
+    }
+
+    #[test]
+    fn concurrent_many_distinct_pack_installs() {
+        use std::thread;
+
+        // Distinct pack_names take distinct locks — installs progress in parallel.
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..8u8 {
+            let packs = packs.clone();
+            handles.push(thread::spawn(move || {
+                let pack_bytes = format!("many-pack-body-{i}").into_bytes();
+                let idx_bytes = format!("many-idx-{i}").into_bytes();
+                install_pack_bytes_journaled(&packs, &pack_bytes, &idx_bytes).unwrap()
+            }));
+        }
+        let mut names = Vec::new();
+        for h in handles {
+            names.push(h.join().unwrap());
+        }
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 8, "expected 8 distinct pack names");
+        for name in &names {
+            assert!(existing_pair_matches_pack_name(&packs, name).unwrap());
+        }
+    }
+
+    #[test]
+    fn far_future_created_unix_expires_immediately_under_ttl() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let install_id = "far-future";
+        create_dir_all_durable(&staging_dir(&packs, install_id)).unwrap();
+        write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
+        write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
+
+        let mut intent = PackInstallIntent::new(install_id.into(), "aa".into());
+        // Beyond skew tolerance — must not dodge expiry.
+        intent.created_unix = unix_now().saturating_add(INTENT_CLOCK_SKEW_TOLERANCE_SECS + 10_000);
+        write_intent(&packs, &intent).unwrap();
+
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(86_400)).unwrap();
+        assert_eq!(report.aborted, 1, "far-future must expire: {report:?}");
+        assert!(!intent_path(&packs, install_id).exists());
+    }
+
+    #[test]
+    fn mild_clock_skew_does_not_expire_fresh_intent() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let install_id = "mild-skew";
+        create_dir_all_durable(&staging_dir(&packs, install_id)).unwrap();
+        write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
+        write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
+
+        let mut intent = PackInstallIntent::new(install_id.into(), "bb".into());
+        // Slightly ahead of wall clock (within tolerance) — still "in progress".
+        intent.created_unix = unix_now().saturating_add(INTENT_CLOCK_SKEW_TOLERANCE_SECS / 2);
+        write_intent(&packs, &intent).unwrap();
+
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(86_400)).unwrap();
+        assert_eq!(report.skipped_in_progress, 1, "mild skew: {report:?}");
+        assert_eq!(report.aborted, 0);
+        assert!(intent_path(&packs, install_id).exists());
+    }
+
+    #[test]
+    fn fault_after_intent_prepared_is_recoverable() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+
+        let pack_bytes = b"fault-inject-pack-body";
+        let idx_bytes = b"fault-inject-idx-body";
+        let expected = format!("{}", blake3::hash(pack_bytes).to_hex());
+
+        let before_err = pack_install_metrics_snapshot().installs_err;
+        let err = fault_inject::with_fault_points(&["pack_install_after_intent_prepared"], || {
+            install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes)
+        })
+        .expect_err("fault should fire");
+        assert!(
+            err.to_string().contains("pack_install_after_intent_prepared"),
+            "err={err}"
+        );
+        // Process-global counters can race under parallel tests; assert non-decreasing delta.
+        assert!(pack_install_metrics_snapshot().installs_err >= before_err);
+
+        // Staging + prepared intent should remain for recovery.
+        assert_eq!(intent_count_json(&packs), 1);
+        assert!(!dst_pack_path(&packs, &expected).exists());
+
+        // Force-expire prepared intent, abort, then reinstall succeeds.
+        for entry in fs::read_dir(intent_root(&packs)).unwrap().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let mut intent: PackInstallIntent =
+                serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+            intent.created_unix = 1;
+            write_intent(&packs, &intent).unwrap();
+        }
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
+        assert_eq!(report.aborted, 1, "report={report:?}");
+        assert_eq!(intent_count_json(&packs), 0);
+
+        let name = install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes).unwrap();
+        assert_eq!(name, expected);
+        assert!(existing_pair_matches_pack_name(&packs, &expected).unwrap());
+    }
+
+    #[test]
+    fn fault_after_publish_pack_recovers_to_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+
+        let pack_bytes = b"fault-after-pack-publish-body";
+        let idx_bytes = b"fault-after-pack-publish-idx";
+        let expected = format!("{}", blake3::hash(pack_bytes).to_hex());
+
+        let err = fault_inject::with_fault_points(&["pack_install_after_publish_pack"], || {
+            install_pack_bytes_journaled(&packs, pack_bytes, idx_bytes)
+        })
+        .expect_err("fault should fire after pack publish");
+        assert!(err.to_string().contains("pack_install_after_publish_pack"));
+
+        // Pack published, intent may still be prepared (fault is after publish, before
+        // phase rewrite) or pack_published depending on checkpoint placement.
+        assert!(dst_pack_path(&packs, &expected).exists());
+        assert!(!dst_idx_path(&packs, &expected).exists());
+
+        let report = recover_pack_install_intents(&packs).unwrap();
+        assert_eq!(report.completed, 1, "report={report:?}");
+        assert!(dst_idx_path(&packs, &expected).exists());
+        assert!(existing_pair_matches_pack_name(&packs, &expected).unwrap());
+    }
+
+    fn intent_count_json(packs: &Path) -> usize {
+        let dir = intent_root(packs);
+        if !dir.exists() {
+            return 0;
+        }
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    #[test]
+    fn metrics_snapshot_tracks_install_and_recover() {
+        // Process-global atomics: measure deltas so parallel tests don't flake.
+        let before = pack_install_metrics_snapshot();
+        let root = tempfile::tempdir().unwrap();
+        let packs = root.path().join("packs");
+        create_dir_all_durable(&packs).unwrap();
+        let _ = install_pack_bytes_journaled(&packs, b"metrics-pack", b"metrics-idx").unwrap();
+        let after_install = pack_install_metrics_snapshot();
+        assert!(after_install.installs_ok >= before.installs_ok + 1);
+
+        // Plant expired prepared → recover aborts.
+        let install_id = "metrics-abort";
+        create_dir_all_durable(&staging_dir(&packs, install_id)).unwrap();
+        write_file_atomic(&staging_pack_path(&packs, install_id), b"p").unwrap();
+        write_file_atomic(&staging_idx_path(&packs, install_id), b"i").unwrap();
+        let mut intent = PackInstallIntent::new(install_id.into(), "cc".into());
+        intent.created_unix = 1;
+        write_intent(&packs, &intent).unwrap();
+        let before_abort = pack_install_metrics_snapshot();
+        let report = recover_pack_install_intents_with_ttl(&packs, Some(1)).unwrap();
+        assert_eq!(report.aborted, 1);
+        let after_abort = pack_install_metrics_snapshot();
+        assert!(after_abort.recover_aborted >= before_abort.recover_aborted + 1);
     }
 }

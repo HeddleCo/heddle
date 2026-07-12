@@ -20,7 +20,10 @@ use heddle_core::{
     },
     maintenance_plan::{run_pack_install_recover_line, run_unpaired_packs_pruned_line},
 };
-use objects::store::{AnyStore, ObjectStore, recover_pack_install_intents};
+use objects::store::{
+    AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
+    recover_pack_install_intents,
+};
 use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
@@ -44,6 +47,8 @@ struct GcOutput {
     pack_install_intents_completed: u64,
     /// L8 install-intent recover: intents aborted during this GC.
     pack_install_intents_aborted: u64,
+    /// Process-local pack-install scrape counters after recover.
+    pack_install_metrics: PackInstallMetricsSnapshot,
     pinned_redactions: usize,
     preserved_redactions: usize,
     #[cfg(feature = "git-overlay")]
@@ -157,6 +162,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         let recover = recover_pack_install_intents(&packs)?;
         summary.pack_install_intents_completed = recover.completed;
         summary.pack_install_intents_aborted = recover.aborted;
+        summary.pack_install_metrics = pack_install_metrics_snapshot();
         if !json {
             println!(
                 "{}",

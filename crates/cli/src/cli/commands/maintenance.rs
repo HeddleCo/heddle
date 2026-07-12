@@ -4,7 +4,8 @@ use heddle_core::maintenance_plan::{
     inspect_change_monitor_line, inspect_commit_graph_line, inspect_pack_install_line,
     inspect_packs_line, inspect_partial_fetch_line, inspect_pull_planner_cache_line,
     inspect_ref_summary_index_line, inspect_refs_line, inspect_worktree_index_line,
-    run_commit_graph_now_line, run_pack_install_recover_line, run_pruned_pull_planner_entries_line,
+    run_commit_graph_now_line, run_pack_install_recover_detail_line,
+    run_pruned_pull_planner_entries_line,
     run_pull_planner_cache_now_line, run_rebuilt_commit_graph_line,
     run_rebuilt_pull_planner_cache_line, run_rebuilt_ref_summary_index_line,
     run_rebuilt_worktree_index_line, run_ref_summary_now_line, run_refreshed_change_monitor_line,
@@ -127,9 +128,11 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 );
                 println!(
                     "{}",
-                    run_pack_install_recover_line(
+                    run_pack_install_recover_detail_line(
                         run.pack_install_intents_recovered_completed,
-                        run.pack_install_intents_aborted
+                        run.pack_install_intents_aborted,
+                        run.pack_install_intents_skipped_in_progress,
+                        run.pack_install_intents_quarantined,
                     )
                 );
                 println!(

@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Pure git-overlay OSS guide content (no styling / stdout I/O).
+//! Git-overlay guide content (machine path).
 //!
-//! Owns the machine-facing summary, step list, and JSON payload for
-//! `heddle oss` / git-overlay guide. Human formatting with ANSI styles
-//! stays CLI-owned.
+//! Single typed value — not four micro-functions. Human ANSI formatting stays CLI.
 
-/// One-line machine summary for the git-overlay daily loop.
-pub fn git_overlay_guide_summary() -> &'static str {
-    "Use Heddle as the daily loop with explicit Git projection compatibility: status, diff, commit, start --path, ready, land, push, undo, verify."
+/// Machine-facing git-overlay guide (JSON / structured output).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOverlayGuide {
+    pub topic: &'static str,
+    pub summary: &'static str,
+    pub steps: &'static [&'static str],
 }
 
-/// Ordered command steps for the git-overlay guide (JSON / machine path).
-pub fn git_overlay_guide_steps() -> &'static [&'static str] {
-    &[
+/// Canonical git-overlay guide payload.
+pub const GIT_OVERLAY_GUIDE: GitOverlayGuide = GitOverlayGuide {
+    topic: "git-overlay",
+    summary: "Use Heddle as the daily loop with explicit Git projection compatibility: status, diff, commit, start --path, ready, land, push, undo, verify.",
+    steps: &[
         "heddle status",
         "heddle init",
         "heddle diff",
@@ -23,21 +26,23 @@ pub fn git_overlay_guide_steps() -> &'static [&'static str] {
         "heddle push",
         "heddle undo",
         "heddle verify",
-    ]
+    ],
+};
+
+impl GitOverlayGuide {
+    /// Machine JSON object for the guide.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "topic": self.topic,
+            "summary": self.summary,
+            "steps": self.steps,
+        })
+    }
 }
 
-/// Topic key used in machine JSON.
-pub fn git_overlay_guide_topic() -> &'static str {
-    "git-overlay"
-}
-
-/// Machine JSON object for the git-overlay guide.
+/// Backward-compatible alias for callers that want a function form.
 pub fn git_overlay_guide_json() -> serde_json::Value {
-    serde_json::json!({
-        "topic": git_overlay_guide_topic(),
-        "summary": git_overlay_guide_summary(),
-        "steps": git_overlay_guide_steps(),
-    })
+    GIT_OVERLAY_GUIDE.to_json()
 }
 
 #[cfg(test)]
@@ -45,21 +50,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summary_and_steps_nonempty() {
-        assert!(git_overlay_guide_summary().contains("Heddle"));
-        let steps = git_overlay_guide_steps();
-        assert_eq!(steps.len(), 10);
-        assert_eq!(steps[0], "heddle status");
-        assert_eq!(steps[steps.len() - 1], "heddle verify");
-        assert_eq!(git_overlay_guide_topic(), "git-overlay");
-    }
-
-    #[test]
-    fn json_payload_shape() {
-        let v = git_overlay_guide_json();
-        assert_eq!(v["topic"], "git-overlay");
-        assert_eq!(v["summary"], git_overlay_guide_summary());
-        assert!(v["steps"].is_array());
+    fn guide_shape() {
+        assert_eq!(GIT_OVERLAY_GUIDE.topic, "git-overlay");
+        assert_eq!(GIT_OVERLAY_GUIDE.steps.len(), 10);
+        let v = GIT_OVERLAY_GUIDE.to_json();
         assert_eq!(v["steps"].as_array().unwrap().len(), 10);
     }
 }

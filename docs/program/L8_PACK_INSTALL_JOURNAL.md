@@ -1,7 +1,8 @@
 # L8 — Pack install journal (A+, hardened)
 
 **Status:** **Shipped on program tip** (identifiers-only intent, path containment,
-pair identity check, quarantine, flock, TTL).
+pair identity check, quarantine, per-pack locks, TTL clock-skew clamp, process
+metrics hooks, fault-inject checkpoints).
 
 **Module:** `crates/objects/src/store/fs/pack_install_journal.rs`
 
@@ -37,8 +38,8 @@ Malformed / unknown-version intents are moved to
 
 ## Protocol
 
-1. Stage pack+idx under `.staging/<id>/` (**outside** exclusive lock when possible).
-2. Take `packs/.pack-install.lock`.
+1. Stage pack+idx under `.staging/<id>/` (**outside** the per-pack lock).
+2. Take per-`pack_name` exclusive lock (`.pack-locks/<pack_name>.lock`).
 3. Write durable **prepared** intent.
 4. Publish pack → rewrite intent **pack_published**.
 5. Publish index → **delete** intent (no Completed rewrite) + fsync intent dir.
@@ -47,14 +48,49 @@ Malformed / unknown-version intents are moved to
 Idempotency: existing final pair is accepted only if pack file **hashes to
 `pack_name`** and idx is non-empty.
 
+Fault-inject checkpoints (env `HEDDLE_FAULT_INJECT` or test
+`with_fault_points`): `pack_install_after_stage_*`, `pack_install_after_pack_lock`,
+`pack_install_after_intent_prepared`, `pack_install_after_publish_pack`,
+`pack_install_after_intent_pack_published`, `pack_install_after_publish_idx`,
+`pack_install_after_intent_removed` (+ stream variants).
+
 ---
 
 ## Concurrency
 
-- Global reentrant flock on install + recover (simple correctness).
+- **Per-pack** exclusive flock for install publish + recover mutate.
+- Short **global** listing lock only while scanning intent filenames.
+- Recover uses **try_lock** per pack: if install holds it → `skipped_in_progress`.
 - Non-expired incomplete intents are **skipped** (live install).
-- Expired incomplete intents are **aborted**.
-- Staging outside lock + lock around publish reduces hold time vs staging under lock.
+- Expired incomplete intents are **aborted** (when lock acquired).
+- Distinct pack names install in parallel; same pack name serializes.
+
+---
+
+## TTL / clock skew
+
+- Default TTL: 24h (`DEFAULT_PACK_INSTALL_INTENT_TTL_SECS`).
+- Mild future `created_unix` (≤ `INTENT_CLOCK_SKEW_TOLERANCE_SECS`, 300s) is
+  clamped to `now` so small clock skew does not look like forgery.
+- Far-future `created_unix` (beyond tolerance) **expires immediately** so a
+  forged timestamp cannot dodge expiry forever.
+
+---
+
+## Metrics hooks
+
+Process-local atomics via `pack_install_metrics_snapshot()` /
+`pack_install_metrics_reset()`:
+
+| Counter | Meaning |
+|---------|---------|
+| `installs_ok` / `installs_err` | journaled install outcomes |
+| `recover_completed` / `recover_aborted` | recover mutations |
+| `recover_skipped_in_progress` | live install / fresh intent |
+| `recover_quarantined` | bad intent files |
+
+Surfaced on `RepositoryMaintenanceRunReport.pack_install_metrics` and tracing
+on recover. Not a full hosted product pipeline — stable scrape hooks only.
 
 ---
 
@@ -65,6 +101,7 @@ Idempotency: existing final pair is accepted only if pack file **hashes to
 | Can complete (pack final + staged idx) | Complete regardless of TTL |
 | Expired incomplete | Abort (reconstructed paths only) |
 | Fresh incomplete | Skip in progress |
+| Pack lock held | Skip in progress |
 | Malformed / unknown version | Quarantine |
 | Unpaired pack without intent | Option D prune on reload |
 
@@ -73,15 +110,17 @@ Idempotency: existing final pair is accepted only if pack file **hashes to
 ## Tests (unit)
 
 Path containment, quarantine, pair hash match, relocate packs tree, concurrent
-same-pack installs, flock load-bearing expire-vs-live, TTL abort/complete, etc.
+same-pack + many-distinct-pack installs, pack-lock load-bearing expire-vs-live,
+TTL abort/complete, clock skew, fault-inject recover, metrics counters.
 (`cargo test -p heddle-objects --lib pack_install_journal`)
 
 ---
 
 ## Residual
 
-- Full fault-injection matrix at every FS op (property/fault harness).
-- Per-pack locks / hosted multi-tenant throughput measurement.
-- Hosted metrics product pipeline.
-- Wall-clock TTL skew (clock rollback) hardening.
-- Selective rollback of pure presentation `*_plan` string modules (architecture debt).
+- Full hosted product metrics pipeline (dashboards / multi-tenant SLOs).
+- Property/fuzz harness over the full fault matrix under process kill (not just
+  in-process `maybe_fail_at`).
+- Further selective collapse of pure presentation `*_plan` string modules
+  (partial: `oss_plan`, `index_plan`, `switch_plan`, `collapse_plan`,
+  `completion_plan`).
