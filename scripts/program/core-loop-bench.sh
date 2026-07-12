@@ -170,174 +170,22 @@ OPS_JSON='[
   {"id": "thread_list_json", "args": ["--output", "json", "thread", "list"]}
 ]'
 
-# Absolute multi-command timings via Python for truthful stats (median/mean/p95/p99/stdev).
+# Absolute multi-command timings (implementation lives in core_loop_absolute.py
+# so smoke tests exercise the real summarizer/printer, not a duplicate).
 ABS_OUT="$OUT_DIR/${STAMP}-core-loop-absolute.json"
-python3 - "$HEDDLE_BIN" "$FIXTURE" "$HEDDLE_CONFIG" "$TRIALS" "$WARMUP" "$ABS_OUT" \
-  "$COMMIT" "$BRANCH" "$STAMP" "$FILE_COUNT" "$THREAD_COUNT" "$OPS_JSON" <<'PY'
-from __future__ import annotations
-
-import json
-import math
-import os
-import statistics
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-heddle = sys.argv[1]
-fixture = Path(sys.argv[2])
-config = sys.argv[3]
-trials = int(sys.argv[4])
-warmup = int(sys.argv[5])
-out_path = Path(sys.argv[6])
-commit = sys.argv[7]
-branch = sys.argv[8]
-stamp = sys.argv[9]
-file_count = int(sys.argv[10])
-thread_count = int(sys.argv[11])
-ops = json.loads(sys.argv[12])
-
-
-def percentile(sorted_vals: list[float], p: float) -> float:
-    if not sorted_vals:
-        return float("nan")
-    if len(sorted_vals) == 1:
-        return sorted_vals[0]
-    k = (len(sorted_vals) - 1) * (p / 100.0)
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return sorted_vals[int(k)]
-    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
-
-
-MIN_TAIL_N = 30
-
-
-def summarize(times: list[float]) -> dict:
-    s = sorted(times)
-    n = len(times)
-    mean = statistics.fmean(times)
-    med = statistics.median(times)
-    stdev = statistics.stdev(times) if n > 1 else 0.0
-    tail_ok = n >= MIN_TAIL_N
-    p95 = percentile(s, 95) if tail_ok else None
-    p99 = percentile(s, 99) if tail_ok else None
-    return {
-        "n": n,
-        "mean_s": mean,
-        "median_s": med,
-        "stdev_s": stdev,
-        "min_s": s[0],
-        "max_s": s[-1],
-        "p95_s": p95,
-        "p99_s": p99,
-        "sample_quality": "tail_ok" if tail_ok else "insufficient_for_tail",
-        "mean_ms": mean * 1000.0,
-        "median_ms": med * 1000.0,
-        "stdev_ms": stdev * 1000.0,
-        "p95_ms": None if p95 is None else p95 * 1000.0,
-        "p99_ms": None if p99 is None else p99 * 1000.0,
-        "min_ms": s[0] * 1000.0,
-        "max_ms": s[-1] * 1000.0,
-        "raw_s": times,
-        "raw_ms": [t * 1000.0 for t in times],
-    }
-
-
-env = os.environ.copy()
-env["HEDDLE_CONFIG"] = config
-env.pop("HEDDLE_PROFILE", None)
-
-results = []
-for op in ops:
-    args = list(op["args"])
-    cmd = [heddle, *args]
-    # Warmup (required success)
-    for _ in range(warmup):
-        proc = subprocess.run(
-            cmd,
-            cwd=str(fixture),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise SystemExit(
-                f"warmup failed for {op['id']}: rc={proc.returncode}\n{proc.stderr}"
-            )
-    times: list[float] = []
-    raw_trials = []
-    for i in range(trials):
-        start = time.perf_counter()
-        proc = subprocess.run(
-            cmd,
-            cwd=str(fixture),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        elapsed = time.perf_counter() - start
-        if proc.returncode != 0:
-            raise SystemExit(
-                f"trial {i} failed for {op['id']}: rc={proc.returncode}\n{proc.stderr}"
-            )
-        times.append(elapsed)
-        raw_trials.append({"trial": i, "seconds": elapsed, "ms": elapsed * 1000.0, "exit_code": 0})
-    stats = summarize(times)
-    results.append(
-        {
-            "id": op["id"],
-            "argv": cmd,
-            "stats": stats,
-            "raw_trials": raw_trials,
-        }
-    )
-    p95 = (
-        f"{stats['p95_ms']:.1f} ms"
-        if stats["p95_ms"] is not None
-        else "n/a (n<30)"
-    )
-    print(
-        f"  {op['id']:<20} median={stats['median_ms']:.1f} ms  "
-        f"p95={p95}  mean={stats['mean_ms']:.1f} ms  "
-        f"n={stats['n']}  quality={stats.get('sample_quality', '?')}",
-        file=sys.stderr,
-    )
-
-payload = {
-    "schema_version": 1,
-    "kind": "core_loop_absolute",
-    "timestamp_utc": stamp,
-    "commit": commit,
-    "branch": branch,
-    "heddle_bin": heddle,
-    "fixture": str(fixture),
-    "fixture_recipe": {
-        "files": file_count,
-        "dir_modulus": 20,
-        "threads": thread_count,
-        "dirty_file": "tracked-00/file-000.txt",
-        "seed_message": "seed",
-        "matches": "crates/cli/tests/cli_integration/perf_core_loop.rs::setup_core_loop_fixture",
-    },
-    "trials": trials,
-    "warmup": warmup,
-    "require_success": True,
-    "operations": results,
-    "disclaimer": (
-        "Measurement calibration on a fixed equal-work fixture. "
-        "Not a Git win claim. Absolute wall-clock process times only; "
-        "no behavior skipped, no early-exit gaming."
-    ),
-}
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(payload, indent=2) + "\n")
-print(f"wrote {out_path}", file=sys.stderr)
-PY
+python3 "$ROOT/scripts/program/core_loop_absolute.py" \
+  --heddle "$HEDDLE_BIN" \
+  --fixture "$FIXTURE" \
+  --config "$HEDDLE_CONFIG" \
+  --trials "$TRIALS" \
+  --warmup "$WARMUP" \
+  --out "$ABS_OUT" \
+  --commit "$COMMIT" \
+  --branch "$BRANCH" \
+  --stamp "$STAMP" \
+  --file-count "$FILE_COUNT" \
+  --thread-count "$THREAD_COUNT" \
+  --ops-json "$OPS_JSON"
 
 if [[ "$RUN_PAIRED" -eq 1 ]]; then
   echo "==> paired-bench A==B absolute self-pairs (alternating thermal control)" >&2

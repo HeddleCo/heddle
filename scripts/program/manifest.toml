@@ -255,8 +255,7 @@ perf_eligible = false
 platforms = ["any"]
 required = true
 suite = "perf"
-notes = "Compile/run smoke for paired-bench.py + core-loop printer path (n=3, p95 null). No heddle binary required. Catches future-import and None-format regressions."
-
+notes = "Compile/run smoke for paired-bench.py + core_loop_absolute.py --self-test (real summarizer/printer). No heddle binary required. Catches future-import and None-format regressions without duplicating logic."
 [[jobs]]
 id = "core-loop-absolute-bench"
 kind = "script"
