@@ -1105,6 +1105,7 @@ fn command_contract_metadata_is_internally_consistent() {
                     && !contract.writes_heddle_refs
                     && !contract.writes_git_refs
                     && !contract.writes_worktree
+                    && !contract.writes_metadata
                     && !contract.writes_config
                     && !contract.writes_hooks
                     && !contract.network_io
@@ -1128,37 +1129,47 @@ fn command_contract_metadata_is_internally_consistent() {
         if contract.observe_only {
             assert_eq!(
                 effects,
-                vec!["observe_only"],
+                vec![CommandSideEffect::ObserveOnly],
                 "`{display}` observe-only side_effects must stay exact"
             );
         } else {
             for (flag, effect) in [
-                (contract.may_initialize, "initialize"),
-                (contract.may_import_git, "import_git"),
-                (contract.writes_heddle_refs, "writes_heddle_refs"),
-                (contract.writes_git_refs, "writes_git_refs"),
-                (contract.writes_worktree, "writes_worktree"),
-                (contract.writes_config, "writes_config"),
-                (contract.writes_hooks, "writes_hooks"),
-                (contract.network_io, "network_io"),
-                (contract.daemon_process, "daemon_process"),
-                (contract.object_gc, "object_gc"),
-                (contract.external_command, "external_command"),
+                (contract.may_initialize, CommandSideEffect::Initialize),
+                (contract.may_import_git, CommandSideEffect::ImportGit),
+                (
+                    contract.writes_heddle_refs,
+                    CommandSideEffect::WritesHeddleRefs,
+                ),
+                (contract.writes_git_refs, CommandSideEffect::WritesGitRefs),
+                (contract.writes_worktree, CommandSideEffect::WritesWorktree),
+                (contract.writes_metadata, CommandSideEffect::WritesMetadata),
+                (contract.writes_config, CommandSideEffect::WritesConfig),
+                (contract.writes_hooks, CommandSideEffect::WritesHooks),
+                (contract.network_io, CommandSideEffect::NetworkIo),
+                (contract.daemon_process, CommandSideEffect::DaemonProcess),
+                (contract.object_gc, CommandSideEffect::ObjectGc),
+                (
+                    contract.external_command,
+                    CommandSideEffect::ExternalCommand,
+                ),
                 (
                     contract.destructive_requires_force,
-                    "destructive_requires_force",
+                    CommandSideEffect::DestructiveRequiresForce,
                 ),
-                (contract.destructive_data, "destructive_data"),
+                (
+                    contract.destructive_data,
+                    CommandSideEffect::DestructiveData,
+                ),
             ] {
                 assert_eq!(
                     effects.contains(&effect),
                     flag,
-                    "`{display}` side_effects must mirror `{effect}`"
+                    "`{display}` side_effects must mirror `{effect:?}`"
                 );
             }
             if contract.may_write_worktree && !contract.writes_worktree {
                 assert!(
-                    effects.contains(&"may_write_worktree"),
+                    effects.contains(&CommandSideEffect::MayWriteWorktree),
                     "`{display}` side_effects must preserve flag-sensitive worktree writes"
                 );
             }
@@ -1200,6 +1211,190 @@ fn command_contract_metadata_is_internally_consistent() {
             );
         }
     }
+}
+
+#[test]
+fn every_mutating_leaf_declares_a_concrete_side_effect() {
+    let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
+
+    for entry in CONTRACTS {
+        if paths_with_children.contains(&entry.path.to_vec()) || !entry.contract.mutates {
+            continue;
+        }
+        let declares_concrete_effect = entry.contract.writes_heddle_refs
+            || entry.contract.writes_git_refs
+            || entry.contract.writes_worktree
+            || entry.contract.writes_metadata
+            || entry.contract.writes_config
+            || entry.contract.writes_hooks
+            || entry.contract.network_io
+            || entry.contract.daemon_process
+            || entry.contract.object_gc
+            || entry.contract.external_command;
+        assert!(
+            declares_concrete_effect,
+            "mutating leaf `{}` must declare a concrete write, process, or network effect",
+            entry.path.join(" ")
+        );
+        let effects = side_effects(entry.contract);
+        assert!(
+            !effects.is_empty(),
+            "mutating leaf `{}` must declare a concrete side effect",
+            entry.path.join(" ")
+        );
+        assert_ne!(
+            side_effect_class(entry.contract),
+            "none",
+            "mutating leaf `{}` must have a concrete side-effect class",
+            entry.path.join(" ")
+        );
+    }
+}
+
+#[test]
+fn observe_only_leaves_declare_no_mutation_effects() {
+    let paths_with_children = contract_paths_with_children(&CONTRACTS.iter().collect::<Vec<_>>());
+
+    for entry in CONTRACTS {
+        if paths_with_children.contains(&entry.path.to_vec()) || !entry.contract.observe_only {
+            continue;
+        }
+        assert_eq!(
+            side_effects(entry.contract),
+            vec![CommandSideEffect::ObserveOnly],
+            "observe-only leaf `{}` must declare no mutation effects",
+            entry.path.join(" ")
+        );
+    }
+}
+
+fn assert_command_effects(path: &[&str], expected: &[CommandSideEffect]) {
+    let contract = raw_command_contract_for_path(path.iter().copied())
+        .unwrap_or_else(|| panic!("missing contract for `{}`", path.join(" ")));
+    assert_eq!(side_effects(contract), expected, "`{}`", path.join(" "));
+}
+
+#[test]
+fn sidecar_only_effect_sets_exclude_refs() {
+    for path in [
+        &["actor", "done"][..],
+        &["agent", "heartbeat"],
+        &["agent", "release"],
+        &["agent", "task", "create"],
+        &["agent", "task", "update"],
+        &["context", "reason", "git"],
+        &["review", "sign"],
+        &["session", "start"],
+        &["session", "segment"],
+        &["session", "end"],
+        &["timeline", "record-start"],
+        &["timeline", "record-finish"],
+        &["timeline", "fork"],
+        &["timeline", "recover"],
+        &["transaction", "begin"],
+        &["transaction", "commit"],
+        &["transaction", "abort"],
+        &["visibility", "set"],
+        &["visibility", "promote"],
+    ] {
+        assert_command_effects(path, &[CommandSideEffect::WritesMetadata]);
+    }
+}
+
+#[test]
+fn state_attached_effect_sets_include_refs() {
+    for path in [
+        &["context", "set"][..],
+        &["context", "edit"],
+        &["context", "supersede"],
+        &["context", "rm"],
+        &["discuss", "open"],
+        &["discuss", "append"],
+        &["discuss", "resolve"],
+    ] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesHeddleRefs,
+                CommandSideEffect::WritesMetadata,
+            ],
+        );
+    }
+}
+
+#[test]
+fn materializer_effect_sets_include_refs_metadata_and_worktree() {
+    for path in [&["timeline", "reset"][..], &["integration", "relay"]] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesHeddleRefs,
+                CommandSideEffect::WritesWorktree,
+                CommandSideEffect::WritesMetadata,
+            ],
+        );
+    }
+}
+
+#[test]
+fn integration_installer_effect_sets_include_config_and_hooks() {
+    for path in [
+        &["integration", "install"][..],
+        &["integration", "uninstall"],
+        &["integration", "upgrade"],
+    ] {
+        assert_command_effects(
+            path,
+            &[
+                CommandSideEffect::WritesMetadata,
+                CommandSideEffect::WritesConfig,
+                CommandSideEffect::WritesHooks,
+            ],
+        );
+    }
+}
+
+#[test]
+fn credential_and_trust_effect_sets_are_config_scoped() {
+    for path in [
+        &["auth", "logout"][..],
+        &["redact", "trust", "add"],
+        &["redact", "trust", "remove"],
+    ] {
+        assert_command_effects(path, &[CommandSideEffect::WritesConfig]);
+    }
+    assert_command_effects(
+        &["auth", "login"],
+        &[
+            CommandSideEffect::WritesConfig,
+            CommandSideEffect::NetworkIo,
+        ],
+    );
+}
+
+#[test]
+fn fsck_repair_effect_set_covers_all_targets() {
+    assert_command_effects(
+        &["fsck"],
+        &[
+            CommandSideEffect::ImportGit,
+            CommandSideEffect::WritesHeddleRefs,
+            CommandSideEffect::WritesGitRefs,
+            CommandSideEffect::WritesWorktree,
+            CommandSideEffect::WritesMetadata,
+        ],
+    );
+}
+
+#[test]
+fn sync_git_adopt_note_is_authority_neutral() {
+    let contract = raw_command_contract_for_path(["sync", "git"]).expect("sync git contract");
+    assert_eq!(
+        contract.canonical_note,
+        Some(
+            "Use adopt to initialize Heddle from an existing Git repository and import its history."
+        )
+    );
 }
 
 #[cfg(not(feature = "git-overlay"))]

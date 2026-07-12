@@ -80,7 +80,7 @@ pub struct CommandCatalogEntry {
     pub external_command: bool,
     pub requires_git_executable: bool,
     pub destructive_data: bool,
-    pub side_effects: Vec<String>,
+    pub side_effects: Vec<CommandSideEffect>,
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
@@ -93,6 +93,27 @@ pub struct CommandCatalogEntry {
     /// one-line agent-facing reason. Empty for commands not yet swept. See
     /// `docs/exit-codes.md` for the full taxonomy.
     pub exit_codes: Vec<CommandCatalogExitCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSideEffect {
+    ObserveOnly,
+    Initialize,
+    ImportGit,
+    WritesHeddleRefs,
+    WritesGitRefs,
+    WritesWorktree,
+    MayWriteWorktree,
+    WritesMetadata,
+    WritesConfig,
+    WritesHooks,
+    NetworkIo,
+    DaemonProcess,
+    ObjectGc,
+    ExternalCommand,
+    DestructiveRequiresForce,
+    DestructiveData,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -274,6 +295,7 @@ struct CommandContract {
     writes_heddle_refs: bool,
     writes_git_refs: bool,
     writes_worktree: bool,
+    writes_metadata: bool,
     writes_config: bool,
     writes_hooks: bool,
     network_io: bool,
@@ -674,6 +696,7 @@ const READ_JSON: CommandContract = CommandContract {
     writes_heddle_refs: false,
     writes_git_refs: false,
     writes_worktree: false,
+    writes_metadata: false,
     writes_config: false,
     writes_hooks: false,
     network_io: false,
@@ -723,25 +746,63 @@ const READ_JSON_OR_JSONL: CommandContract = CommandContract {
     ..READ_JSON
 };
 
-const MUTATING: CommandContract = CommandContract {
+const MUTATION_BASE: CommandContract = CommandContract {
     mutates: true,
     supports_op_id: true,
     observe_only: false,
-    may_move_ref: true,
-    writes_heddle_refs: true,
     ..READ_JSON
 };
 
-const MUTATING_NO_OP_ID: CommandContract = CommandContract {
-    supports_op_id: false,
-    ..MUTATING
+const REF_MUTATION: CommandContract = CommandContract {
+    may_move_ref: true,
+    writes_heddle_refs: true,
+    ..MUTATION_BASE
 };
 
-const MUTATING_TEXT: CommandContract = CommandContract {
+const METADATA_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..MUTATION_BASE
+};
+
+const REF_AND_METADATA_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..REF_MUTATION
+};
+
+const NETWORK_METADATA_MUTATION: CommandContract = CommandContract {
+    network_io: true,
+    ..METADATA_MUTATION
+};
+
+const METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    supports_op_id: false,
+    ..METADATA_MUTATION
+};
+
+const NETWORK_METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    network_io: true,
+    ..METADATA_MUTATION_NO_OP_ID
+};
+
+const NETWORK_METADATA_MUTATION_TEXT: CommandContract = CommandContract {
     supports_json: false,
     supports_op_id: false,
+    network_io: true,
     json_kind: "none",
-    ..MUTATING
+    ..METADATA_MUTATION
+};
+
+const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    supports_op_id: false,
+    ..CONFIG_MUTATION
+};
+
+const NETWORK_CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
+    supports_json: false,
+    supports_op_id: false,
+    network_io: true,
+    json_kind: "none",
+    ..CONFIG_MUTATION
 };
 
 const INIT: CommandContract = CommandContract {
@@ -749,10 +810,10 @@ const INIT: CommandContract = CommandContract {
     may_move_ref: false,
     writes_heddle_refs: false,
     writes_config: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
-const CAPTURE: CommandContract = CommandContract { ..MUTATING };
+const CAPTURE: CommandContract = CommandContract { ..REF_MUTATION };
 
 const fn compact_json(contract: CommandContract) -> CommandContract {
     CommandContract {
@@ -771,7 +832,7 @@ const fn operator_envelope(contract: CommandContract) -> CommandContract {
 const WORKTREE_MUTATION: CommandContract = CommandContract {
     may_write_worktree: true,
     writes_worktree: true,
-    ..MUTATING
+    ..REF_MUTATION
 };
 
 const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
@@ -782,6 +843,11 @@ const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
 const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
     may_move_ref: false,
     writes_heddle_refs: false,
+    ..WORKTREE_MUTATION
+};
+
+const REF_METADATA_WORKTREE_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
     ..WORKTREE_MUTATION
 };
 
@@ -797,34 +863,31 @@ const DESTRUCTIVE_WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
     ..WORKTREE_ONLY_MUTATION
 };
 
-const DATA_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
-    ..MUTATING
-};
-
 const DESTRUCTIVE_DATA_MUTATION: CommandContract = CommandContract {
     destructive_data: true,
-    ..DATA_MUTATION
+    ..METADATA_MUTATION
+};
+
+const DESTRUCTIVE_REF_MUTATION: CommandContract = CommandContract {
+    destructive_data: true,
+    ..REF_MUTATION
 };
 
 const IMPORTING_MUTATION: CommandContract = CommandContract {
     may_import_git: true,
-    ..MUTATING
+    ..REF_MUTATION
 };
 
 const ADOPT: CommandContract = CommandContract {
     may_initialize: true,
     may_import_git: true,
     writes_config: true,
-    ..MUTATING
+    ..REF_MUTATION
 };
 
 const CONFIG_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     writes_config: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
 const HOOK_MUTATION: CommandContract = CommandContract {
@@ -832,25 +895,27 @@ const HOOK_MUTATION: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
+const INTEGRATION_INSTALL_MUTATION: CommandContract = CommandContract {
+    writes_metadata: true,
+    ..HOOK_MUTATION
+};
+
 const DAEMON_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     daemon_process: true,
-    ..MUTATING_NO_OP_ID
+    ..METADATA_MUTATION_NO_OP_ID
 };
 
 const GC_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     object_gc: true,
-    ..MUTATING
+    ..MUTATION_BASE
 };
 
 const EXTERNAL_COMMAND_MUTATION: CommandContract = CommandContract {
-    may_move_ref: false,
-    writes_heddle_refs: false,
     external_command: true,
-    ..MUTATING_TEXT
+    supports_json: false,
+    supports_op_id: false,
+    json_kind: "none",
+    ..MUTATION_BASE
 };
 
 const EXTERNAL_WORKTREE_COMMAND: CommandContract = CommandContract {
@@ -1100,7 +1165,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["abort"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["abort"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["abort"]),
                 &[json_discriminator(Some("abort"), "output_kind", "abort")],
             ),
             "recovery",
@@ -1128,7 +1193,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["actor", "spawn"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["actor spawn"]),
+                documented_schemas(REF_AND_METADATA_MUTATION, &["actor spawn"]),
                 &[json_discriminator(
                     Some("actor spawn"),
                     "output_kind",
@@ -1184,7 +1249,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["actor", "done"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["actor done"]),
+                documented_schemas(METADATA_MUTATION, &["actor done"]),
                 &[json_discriminator(
                     Some("actor done"),
                     "output_kind",
@@ -1240,14 +1305,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "reserve"],
         surface(
-            documented_schemas(MUTATING, &["agent reserve"]),
+            documented_schemas(REF_AND_METADATA_MUTATION, &["agent reserve"]),
             "automation",
         ),
     ),
     entry(
         &["agent", "heartbeat"],
         surface(
-            documented_schemas(MUTATING, &["agent heartbeat"]),
+            documented_schemas(METADATA_MUTATION, &["agent heartbeat"]),
             "automation",
         ),
     ),
@@ -1282,7 +1347,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "release"],
         surface(
-            documented_schemas(MUTATING, &["agent release"]),
+            documented_schemas(METADATA_MUTATION, &["agent release"]),
             "automation",
         ),
     ),
@@ -1295,7 +1360,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "task", "create"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["agent task create"]),
+                documented_schemas(METADATA_MUTATION, &["agent task create"]),
                 &[json_discriminator(
                     Some("agent task create"),
                     "output_kind",
@@ -1337,7 +1402,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "task", "update"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["agent task update"]),
+                documented_schemas(METADATA_MUTATION, &["agent task update"]),
                 &[json_discriminator(
                     Some("agent task update"),
                     "output_kind",
@@ -1377,12 +1442,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(&["auth"], category(feature_gated(GROUP, "client"), "repo")),
-    entry(&["auth", "login"], feature_gated(MUTATING_TEXT, "client")),
+    entry(
+        &["auth", "login"],
+        feature_gated(NETWORK_CONFIG_MUTATION_TEXT, "client"),
+    ),
     entry(
         &["auth", "logout"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["auth logout"]),
+                documented_schemas(CONFIG_MUTATION_NO_OP_ID, &["auth logout"]),
                 &[json_discriminator(
                     Some("auth logout"),
                     "output_kind",
@@ -1410,7 +1478,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["auth", "create-service-token"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["auth create-service-token"]),
+                documented_schemas(
+                    NETWORK_METADATA_MUTATION_NO_OP_ID,
+                    &["auth create-service-token"],
+                ),
                 &[json_discriminator(
                     Some("auth create-service-token"),
                     "output_kind",
@@ -1446,7 +1517,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             documented_schemas(
                 CommandContract {
                     writes_git_refs: true,
-                    ..MUTATING
+                    ..REF_MUTATION
                 },
                 &["export git"],
             ),
@@ -1471,7 +1542,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 ),
                 "adopt",
                 "workflow",
-                "Use adopt for the guided Git-to-Heddle conversion workflow.",
+                "Use adopt to initialize Heddle from an existing Git repository and import its history.",
             ),
             &[
                 (0, "ok"),
@@ -1549,7 +1620,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         may_move_ref: true,
                         writes_worktree: true,
                         network_io: true,
-                        ..MUTATING
+                        ..REF_MUTATION
                     },
                     &["clone"],
                 ),
@@ -1589,7 +1660,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["collapse"],
-        category(opaque_schemas(MUTATING, &["collapse"]), "states"),
+        category(opaque_schemas(REF_MUTATION, &["collapse"]), "states"),
     ),
     entry(
         &["expand"],
@@ -1635,7 +1706,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["continue"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["continue"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["continue"]),
                 &[json_discriminator(
                     Some("continue"),
                     "output_kind",
@@ -1649,7 +1720,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "set"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context set"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context set"]),
             &[json_discriminator(
                 Some("context set"),
                 "output_kind",
@@ -1693,7 +1764,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "edit"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context edit"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context edit"]),
             &[json_discriminator(
                 Some("context edit"),
                 "output_kind",
@@ -1704,7 +1775,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "supersede"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context supersede"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context supersede"]),
             &[json_discriminator(
                 Some("context supersede"),
                 "output_kind",
@@ -1715,7 +1786,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "rm"],
         json_discriminators(
-            opaque_schemas(MUTATING, &["context rm"]),
+            opaque_schemas(REF_AND_METADATA_MUTATION, &["context rm"]),
             &[json_discriminator(
                 Some("context rm"),
                 "output_kind",
@@ -1762,7 +1833,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "reason", "git"],
         surface(
-            opaque_schemas(DATA_MUTATION, &["context reason git"]),
+            opaque_schemas(METADATA_MUTATION, &["context reason git"]),
             "git_projection",
         ),
     ),
@@ -1800,7 +1871,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "open"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss open"]),
+            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss open"]),
             &[json_discriminator(
                 Some("discuss open"),
                 "output_kind",
@@ -1811,7 +1882,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "append"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss append"]),
+            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss append"]),
             &[json_discriminator(
                 Some("discuss append"),
                 "output_kind",
@@ -1822,7 +1893,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "resolve"],
         json_discriminators(
-            documented_schemas(MUTATING, &["discuss resolve"]),
+            documented_schemas(REF_AND_METADATA_MUTATION, &["discuss resolve"]),
             &[json_discriminator(
                 Some("discuss resolve"),
                 "output_kind",
@@ -1896,7 +1967,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     CommandContract {
                         writes_git_refs: true,
                         network_io: true,
-                        ..MUTATING
+                        ..REF_MUTATION
                     },
                     &["fetch"],
                 ),
@@ -1913,12 +1984,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
             documented_schemas(
                 documented_core_report_schema(
                     CommandContract {
-                        mutates: true,
-                        observe_only: false,
                         supports_op_id: false,
-                        may_move_ref: false,
-                        writes_heddle_refs: false,
-                        ..READ_JSON
+                        writes_git_refs: true,
+                        writes_metadata: true,
+                        may_write_worktree: true,
+                        writes_worktree: true,
+                        ..IMPORTING_MUTATION
                     },
                     FsckReport::CONTRACT,
                 ),
@@ -1932,7 +2003,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["oplog", "recover"],
         category(
             json_discriminators(
-                opaque_schemas(MUTATING_NO_OP_ID, &["oplog recover"]),
+                opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["oplog recover"]),
                 &[json_discriminator(
                     Some("oplog recover"),
                     "output_kind",
@@ -2006,7 +2077,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["integration", "install"],
-        surface(opaque_schemas(MUTATING, &["integration install"]), "admin"),
+        surface(
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration install"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "doctor"],
@@ -2018,18 +2092,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["integration", "uninstall"],
         surface(
-            opaque_schemas(MUTATING, &["integration uninstall"]),
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration uninstall"]),
             "admin",
         ),
     ),
     entry(
         &["integration", "upgrade"],
-        surface(opaque_schemas(MUTATING, &["integration upgrade"]), "admin"),
+        surface(
+            opaque_schemas(INTEGRATION_INSTALL_MUTATION, &["integration upgrade"]),
+            "admin",
+        ),
     ),
     entry(
         &["integration", "relay"],
         hidden(surface(
-            opaque_schemas(MUTATING, &["integration relay"]),
+            opaque_schemas(REF_METADATA_WORKTREE_MUTATION, &["integration relay"]),
             "admin",
         )),
     ),
@@ -2054,7 +2131,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["maintenance", "run"],
-        surface(opaque_schemas(MUTATING, &["maintenance run"]), "admin"),
+        surface(
+            opaque_schemas(
+                CommandContract {
+                    object_gc: true,
+                    ..METADATA_MUTATION
+                },
+                &["maintenance run"],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["maintenance", "gc"],
@@ -2128,7 +2214,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["presence", "publish"],
-        feature_gated(MUTATING_TEXT, "client"),
+        feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
     ),
     entry(
         &["pull"],
@@ -2165,7 +2251,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                             CommandContract {
                                 writes_git_refs: true,
                                 network_io: true,
-                                ..MUTATING
+                                ..REF_MUTATION
                             },
                             &["push"],
                         ),
@@ -2231,7 +2317,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["redact", "apply"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact apply"]),
+            opaque_schemas(METADATA_MUTATION, &["redact apply"]),
             &[json_discriminator(
                 Some("redact apply"),
                 "output_kind",
@@ -2294,7 +2380,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["redact", "trust", "add"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact trust add"]),
+            opaque_schemas(CONFIG_MUTATION, &["redact trust add"]),
             &[json_discriminator(
                 Some("redact trust add"),
                 "output_kind",
@@ -2316,7 +2402,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["redact", "trust", "remove"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
+            opaque_schemas(CONFIG_MUTATION, &["redact trust remove"]),
             &[json_discriminator(
                 Some("redact trust remove"),
                 "output_kind",
@@ -2384,7 +2470,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["resolve"],
         front_door(
             json_discriminators(
-                documented_schemas(MUTATING, &["resolve"]),
+                documented_schemas(REF_MUTATION, &["resolve"]),
                 &[json_discriminator(
                     Some("resolve"),
                     "output_kind",
@@ -2423,7 +2509,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["review", "sign"],
         json_discriminators(
-            documented_schemas(MUTATING, &["review sign"]),
+            documented_schemas(METADATA_MUTATION, &["review sign"]),
             &[json_discriminator(
                 Some("review sign"),
                 "output_kind",
@@ -2477,20 +2563,23 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["session", "start"],
         surface(
-            documented_schemas(MUTATING, &["session start"]),
+            documented_schemas(METADATA_MUTATION, &["session start"]),
             "automation",
         ),
     ),
     entry(
         &["session", "segment"],
         surface(
-            documented_schemas(MUTATING, &["session segment"]),
+            documented_schemas(METADATA_MUTATION, &["session segment"]),
             "automation",
         ),
     ),
     entry(
         &["session", "end"],
-        surface(documented_schemas(MUTATING, &["session end"]), "automation"),
+        surface(
+            documented_schemas(METADATA_MUTATION, &["session end"]),
+            "automation",
+        ),
     ),
     entry(
         &["session", "show"],
@@ -2519,7 +2608,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     CommandContract {
                         writes_git_refs: true,
                         network_io: true,
-                        ..compact_json(MUTATING)
+                        ..compact_json(REF_MUTATION)
                     },
                     &["land"],
                 ),
@@ -2658,11 +2747,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["spool"], category(feature_gated(GROUP, "client"), "repo")),
     entry(
         &["spool", "attach"],
-        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+        category(
+            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
+            "repo",
+        ),
     ),
     entry(
         &["spool", "detach"],
-        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+        category(
+            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
+            "repo",
+        ),
     ),
     entry(
         &["spool", "children"],
@@ -2679,7 +2774,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["prove"], category(feature_gated(GROUP, "client"), "repo")),
     entry(
         &["prove", "submit"],
-        category(feature_gated(MUTATING_TEXT, "client"), "repo"),
+        category(
+            feature_gated(NETWORK_METADATA_MUTATION_TEXT, "client"),
+            "repo",
+        ),
     ),
     entry(
         &["prove", "list"],
@@ -2693,7 +2791,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["support", "grant"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["support grant"]),
+                documented_schemas(NETWORK_METADATA_MUTATION_NO_OP_ID, &["support grant"]),
                 &[json_discriminator(
                     Some("support grant"),
                     "output_kind",
@@ -2721,7 +2819,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["support", "revoke"],
         feature_gated(
             json_discriminators(
-                documented_schemas(MUTATING_NO_OP_ID, &["support revoke"]),
+                documented_schemas(NETWORK_METADATA_MUTATION_NO_OP_ID, &["support revoke"]),
                 &[json_discriminator(
                     Some("support revoke"),
                     "output_kind",
@@ -2749,7 +2847,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["sync"],
         category(
             json_discriminators(
-                documented_schemas(operator_envelope(compact_json(MUTATING)), &["sync"]),
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["sync"]),
                 &[json_discriminator(Some("sync"), "output_kind", "sync")],
             ),
             "threads",
@@ -2759,7 +2857,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "create"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread create"]),
+            documented_schemas(REF_MUTATION, &["thread create"]),
             &[json_discriminator(
                 Some("thread create"),
                 "output_kind",
@@ -2812,7 +2910,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "rename"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread rename"]),
+            documented_schemas(REF_MUTATION, &["thread rename"]),
             &[json_discriminator(
                 Some("thread rename"),
                 "output_kind",
@@ -2833,16 +2931,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "move"],
-        documented_schemas(MUTATING, &["thread move"]),
+        documented_schemas(REF_MUTATION, &["thread move"]),
     ),
     entry(
         &["thread", "absorb"],
-        documented_schemas(MUTATING, &["thread absorb"]),
+        documented_schemas(REF_MUTATION, &["thread absorb"]),
     ),
     entry(
         &["thread", "resolve"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread resolve"]),
+            documented_schemas(REF_MUTATION, &["thread resolve"]),
             &[json_discriminator(
                 Some("thread resolve"),
                 "output_kind",
@@ -2874,7 +2972,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "approve"],
-        documented_schemas(MUTATING, &["thread approve"]),
+        documented_schemas(NETWORK_METADATA_MUTATION, &["thread approve"]),
     ),
     entry(
         &["thread", "approvals"],
@@ -2883,7 +2981,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "revoke-approval"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread revoke-approval"]),
+            documented_schemas(NETWORK_METADATA_MUTATION, &["thread revoke-approval"]),
             &[json_discriminator(
                 Some("thread revoke-approval"),
                 "output_kind",
@@ -2921,7 +3019,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "marker", "create"],
         json_discriminators(
-            documented_schemas(MUTATING, &["thread marker create"]),
+            documented_schemas(REF_MUTATION, &["thread marker create"]),
             &[json_discriminator(
                 Some("thread marker create"),
                 "output_kind",
@@ -2932,7 +3030,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["thread", "marker", "delete"],
         json_discriminators(
-            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["thread marker delete"]),
+            documented_schemas(DESTRUCTIVE_REF_MUTATION, &["thread marker delete"]),
             &[json_discriminator(
                 Some("thread marker delete"),
                 "output_kind",
@@ -2970,7 +3068,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "record-start"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline record-start"]),
+                documented_schemas(METADATA_MUTATION, &["timeline record-start"]),
                 &[json_discriminator(
                     Some("timeline record-start"),
                     "output_kind",
@@ -2984,7 +3082,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "record-finish"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline record-finish"]),
+                documented_schemas(METADATA_MUTATION, &["timeline record-finish"]),
                 &[json_discriminator(
                     Some("timeline record-finish"),
                     "output_kind",
@@ -2998,7 +3096,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "fork"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline fork"]),
+                documented_schemas(METADATA_MUTATION, &["timeline fork"]),
                 &[json_discriminator(
                     Some("timeline fork"),
                     "output_kind",
@@ -3012,7 +3110,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "reset"],
         surface(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["timeline reset"]),
+                documented_schemas(REF_METADATA_WORKTREE_MUTATION, &["timeline reset"]),
                 &[json_discriminator(
                     Some("timeline reset"),
                     "output_kind",
@@ -3026,7 +3124,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["timeline", "recover"],
         surface(
             json_discriminators(
-                documented_schemas(MUTATING, &["timeline recover"]),
+                documented_schemas(METADATA_MUTATION, &["timeline recover"]),
                 &[json_discriminator(
                     Some("timeline recover"),
                     "output_kind",
@@ -3039,15 +3137,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["transaction"], hidden(GROUP)),
     entry(
         &["transaction", "begin"],
-        hidden(opaque_schemas(MUTATING, &["transaction begin"])),
+        hidden(opaque_schemas(METADATA_MUTATION, &["transaction begin"])),
     ),
     entry(
         &["transaction", "commit"],
-        documented_schemas(MUTATING, &["transaction commit"]),
+        documented_schemas(METADATA_MUTATION, &["transaction commit"]),
     ),
     entry(
         &["transaction", "abort"],
-        hidden(opaque_schemas(MUTATING, &["transaction abort"])),
+        hidden(opaque_schemas(METADATA_MUTATION, &["transaction abort"])),
     ),
     entry(
         &["transaction", "status"],
@@ -3071,7 +3169,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["visibility", "set"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["visibility set"]),
+            opaque_schemas(METADATA_MUTATION, &["visibility set"]),
             &[json_discriminator(
                 Some("visibility set"),
                 "output_kind",
@@ -3082,7 +3180,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["visibility", "promote"],
         json_discriminators(
-            opaque_schemas(DATA_MUTATION, &["visibility promote"]),
+            opaque_schemas(METADATA_MUTATION, &["visibility promote"]),
             &[json_discriminator(
                 Some("visibility promote"),
                 "output_kind",
@@ -3325,10 +3423,7 @@ fn feature_gated_catalog_entry(
         external_command: contract.external_command,
         requires_git_executable: contract.requires_git_executable,
         destructive_data: contract.destructive_data,
-        side_effects: side_effects(contract)
-            .iter()
-            .map(|effect| (*effect).to_string())
-            .collect(),
+        side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
@@ -3420,10 +3515,7 @@ fn catalog_entry(
         external_command: contract.external_command,
         requires_git_executable: contract.requires_git_executable,
         destructive_data: contract.destructive_data,
-        side_effects: side_effects(contract)
-            .iter()
-            .map(|effect| (*effect).to_string())
-            .collect(),
+        side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
@@ -3666,62 +3758,62 @@ fn side_effect_class(contract: CommandContract) -> &'static str {
         "external_command"
     } else if contract.writes_heddle_refs || contract.writes_git_refs || contract.may_move_ref {
         "ref_mutation"
-    } else if contract.mutates {
-        "mutation"
+    } else if contract.writes_metadata {
+        "metadata_mutation"
     } else {
         "none"
     }
 }
 
-fn side_effects(contract: CommandContract) -> Vec<&'static str> {
+fn side_effects(contract: CommandContract) -> Vec<CommandSideEffect> {
     if contract.observe_only {
-        return vec!["observe_only"];
+        return vec![CommandSideEffect::ObserveOnly];
     }
 
     let mut effects = Vec::new();
     if contract.may_initialize {
-        effects.push("initialize");
+        effects.push(CommandSideEffect::Initialize);
     }
     if contract.may_import_git {
-        effects.push("import_git");
+        effects.push(CommandSideEffect::ImportGit);
     }
     if contract.writes_heddle_refs {
-        effects.push("writes_heddle_refs");
+        effects.push(CommandSideEffect::WritesHeddleRefs);
     }
     if contract.writes_git_refs {
-        effects.push("writes_git_refs");
+        effects.push(CommandSideEffect::WritesGitRefs);
     }
     if contract.writes_worktree {
-        effects.push("writes_worktree");
+        effects.push(CommandSideEffect::WritesWorktree);
     } else if contract.may_write_worktree {
-        effects.push("may_write_worktree");
+        effects.push(CommandSideEffect::MayWriteWorktree);
+    }
+    if contract.writes_metadata {
+        effects.push(CommandSideEffect::WritesMetadata);
     }
     if contract.writes_config {
-        effects.push("writes_config");
+        effects.push(CommandSideEffect::WritesConfig);
     }
     if contract.writes_hooks {
-        effects.push("writes_hooks");
+        effects.push(CommandSideEffect::WritesHooks);
     }
     if contract.network_io {
-        effects.push("network_io");
+        effects.push(CommandSideEffect::NetworkIo);
     }
     if contract.daemon_process {
-        effects.push("daemon_process");
+        effects.push(CommandSideEffect::DaemonProcess);
     }
     if contract.object_gc {
-        effects.push("object_gc");
+        effects.push(CommandSideEffect::ObjectGc);
     }
     if contract.external_command {
-        effects.push("external_command");
+        effects.push(CommandSideEffect::ExternalCommand);
     }
     if contract.destructive_requires_force {
-        effects.push("destructive_requires_force");
+        effects.push(CommandSideEffect::DestructiveRequiresForce);
     }
     if contract.destructive_data {
-        effects.push("destructive_data");
-    }
-    if effects.is_empty() && contract.mutates {
-        effects.push("mutation");
+        effects.push(CommandSideEffect::DestructiveData);
     }
     effects
 }
