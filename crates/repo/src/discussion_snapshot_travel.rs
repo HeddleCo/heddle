@@ -7,8 +7,8 @@ use std::{collections::HashMap, path::PathBuf};
 
 use objects::{
     object::{
-        Blob, ChangeId, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType,
-        State, Tree,
+        Blob, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType, State,
+        StateId, Tree,
     },
     store::ObjectStore,
 };
@@ -91,7 +91,7 @@ where
     fn collect_discussion_baseline_file_bytes(
         &self,
         discussions: &[Discussion],
-    ) -> Result<HashMap<ChangeId, HashMap<String, Vec<u8>>>> {
+    ) -> Result<HashMap<StateId, HashMap<String, Vec<u8>>>> {
         let mut baselines = HashMap::new();
         for discussion in discussions {
             if baselines.contains_key(&discussion.opened_against_state) {
@@ -161,16 +161,16 @@ fn missing_object(object_type: &str, hash: ContentHash) -> HeddleError {
     }
 }
 
-fn missing_state(change_id: ChangeId) -> HeddleError {
+fn missing_state(state_id: StateId) -> HeddleError {
     HeddleError::MissingObject {
         object_type: "state".to_string(),
-        id: change_id.to_string_full(),
+        id: state_id.to_string_full(),
     }
 }
 
 fn group_discussions_by_opened_state(
     discussions: Vec<Discussion>,
-) -> HashMap<ChangeId, Vec<Discussion>> {
+) -> HashMap<StateId, Vec<Discussion>> {
     let mut grouped = HashMap::new();
     for discussion in discussions {
         grouped
@@ -186,7 +186,7 @@ mod tests {
     use std::fs;
 
     use objects::object::{
-        Attribution, ChangeId, Discussion, DiscussionTurn, Principal, SymbolAnchor, ThreadName,
+        Attribution, Discussion, DiscussionTurn, Principal, StateId, SymbolAnchor, ThreadName,
         VisibilityTier,
     };
     use refs::Head;
@@ -200,7 +200,7 @@ mod tests {
         (temp_dir, repo)
     }
 
-    fn discussion(id: &str, state: ChangeId, file: &str, symbol: &str) -> Discussion {
+    fn discussion(id: &str, state: StateId, file: &str, symbol: &str) -> Discussion {
         Discussion {
             id: id.to_string(),
             anchor: SymbolAnchor::new(file, symbol),
@@ -230,7 +230,7 @@ mod tests {
         let mut decorated = state.clone().with_discussions(hash);
         repo.put_authored_state(&mut decorated).unwrap();
         repo.refs()
-            .set_thread(&ThreadName::new("main"), &decorated.change_id)
+            .set_thread(&ThreadName::new("main"), &decorated.id())
             .unwrap();
         repo.refs()
             .write_head(&Head::Attached {
@@ -266,7 +266,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(
@@ -305,7 +305,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(
@@ -361,7 +361,7 @@ mod tests {
         attach_discussions_to_main_head(
             &repo,
             &first,
-            vec![discussion("d1", first.change_id, "src.rs", "foo")],
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
         fs::write(

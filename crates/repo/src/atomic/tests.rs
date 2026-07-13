@@ -10,7 +10,7 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
+    object::{ContentHash, MarkerName, StateId, ThreadName, VisibilityTier},
 };
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpLogRecorder,
@@ -56,7 +56,7 @@ fn thread_precondition(since_head_id: u64, thread: &str) -> IsolationPreconditio
 }
 
 fn snapshot_on(thread: &str) -> OpRecord {
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     OpRecord::Snapshot {
         new_state: state,
         prev_head: None,
@@ -72,7 +72,7 @@ fn commit_marker(transaction_id: &str, op_count: u32) -> OpRecord {
     }
 }
 
-fn visibility_set_on(state: ChangeId) -> OpRecord {
+fn visibility_set_on(state: StateId) -> OpRecord {
     OpRecord::StateVisibilitySet {
         state,
         record_id: ContentHash::from_bytes([7u8; 32]),
@@ -82,7 +82,7 @@ fn visibility_set_on(state: ChangeId) -> OpRecord {
     }
 }
 
-fn visibility_precondition(since_head_id: u64, state: ChangeId) -> IsolationPrecondition {
+fn visibility_precondition(since_head_id: u64, state: StateId) -> IsolationPrecondition {
     let mut keys = BTreeSet::new();
     keys.insert(IsolationKey::StateVisibility(state));
     IsolationPrecondition {
@@ -383,7 +383,7 @@ impl AtomicMutation for CommitFailsRewindFails {
             std::fs::remove_file(&oplog_path)?;
         }
         std::fs::create_dir(&oplog_path)?;
-        let state = ChangeId::generate();
+        let state = crate::test_state_id();
         Ok(StagedCommit::new(
             (),
             vec![OpRecord::Snapshot {
@@ -419,7 +419,7 @@ fn commit_failure_surfaces_rewind_failure_too() {
 
 /// A leaf mutation that stages one oplog record and surfaces a value.
 struct Recorder {
-    state: ChangeId,
+    state: StateId,
 }
 
 impl AtomicMutation for Recorder {
@@ -449,7 +449,7 @@ impl AtomicMutation for Recorder {
 #[test]
 fn execute_commits_at_the_oplog() {
     let (_t, repo) = test_repo();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
 
     let out = execute(&repo, Recorder { state }).unwrap();
     assert_eq!(out, 42);
@@ -572,14 +572,14 @@ fn eager_compensator_runs_on_outer_rollback() {
 #[test]
 fn crash_replay_reconciles_on_long_held_handle() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
 
     // Phase 4 only: append the Fork record naming the published thread, with no
     // phase-5 canonical publish of "explore".
-    let forked = ChangeId::generate();
+    let forked = crate::test_state_id();
     repo.oplog()
         .record_fork(&base, &forked, Some("explore"), None, None)
         .unwrap();
@@ -603,7 +603,7 @@ fn crash_replay_reconciles_on_long_held_handle() {
 fn crash_replay_reconciles_a_concurrent_commit() {
     let temp = TempDir::new().unwrap();
     let reader = Repository::init_default(temp.path()).unwrap();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     reader
         .refs()
         .set_thread(&ThreadName::new("main"), &base)
@@ -612,7 +612,7 @@ fn crash_replay_reconciles_a_concurrent_commit() {
     // A second handle stands in for a concurrent process committing a fork's
     // phase-4 record without publishing the ref.
     let committer = Repository::open(temp.path()).unwrap();
-    let forked = ChangeId::generate();
+    let forked = crate::test_state_id();
     committer
         .oplog()
         .record_fork(&base, &forked, Some("explore"), None, None)
@@ -640,21 +640,27 @@ fn all_ten_readers_reconcile() {
     let scope = repo.op_scope();
 
     // Shared classes — committed records, canonical refs unpublished.
-    let thread_state = ChangeId::generate();
+    let thread_state = crate::test_state_id();
     repo.oplog()
-        .record_fork(&ChangeId::generate(), &thread_state, Some("ft"), None, None)
+        .record_fork(
+            &crate::test_state_id(),
+            &thread_state,
+            Some("ft"),
+            None,
+            None,
+        )
         .unwrap();
-    let marker_state = ChangeId::generate();
+    let marker_state = crate::test_state_id();
     repo.oplog()
         .record_marker_create(&MarkerName::new("mk"), &marker_state)
         .unwrap();
-    let remote_state = ChangeId::generate();
+    let remote_state = crate::test_state_id();
     repo.oplog()
         .record_remote_thread_update("origin", "rt", &remote_state, None)
         .unwrap();
 
     // Local class — undo-recovery reconciles within this checkout's lane.
-    let undo_state = ChangeId::generate();
+    let undo_state = crate::test_state_id();
     repo.oplog()
         .record_undo_recovery_update(&undo_state, Some(&scope))
         .unwrap();
@@ -713,7 +719,7 @@ fn all_ten_readers_reconcile() {
 #[test]
 fn write_chokepoint_records_before_publishing() {
     let temp = TempDir::new().unwrap();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     {
         let repo = Repository::init_default(temp.path()).unwrap();
         let record = OpRecord::ThreadCreate {
@@ -780,7 +786,7 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // A second commit after a successful one is a no-op (committed guard).
     let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string(), test_precondition());
-    let first_state = ChangeId::generate();
+    let first_state = crate::test_state_id();
     tx2.commit(vec![OpRecord::Snapshot {
         new_state: first_state,
         prev_head: None,
@@ -788,7 +794,7 @@ fn tx_accessors_and_rewind_error_paths() {
         thread: None,
     }])
     .unwrap();
-    let second_state = ChangeId::generate();
+    let second_state = crate::test_state_id();
     tx2.commit(vec![OpRecord::Snapshot {
         new_state: second_state,
         prev_head: None,
@@ -929,8 +935,8 @@ fn visibility_records_contribute_per_state_isolation_key() {
     // Invariant 3 foundation: a StateVisibilitySet/Promote on state S touches
     // the per-state key StateVisibility(S) — and only that state's key, so
     // mutations on distinct states never spuriously conflict.
-    let s = ChangeId::generate();
-    let other = ChangeId::generate();
+    let s = crate::test_state_id();
+    let other = crate::test_state_id();
 
     let set_keys = isolation_keys_for_record(&visibility_set_on(s), Some("scope"));
     assert!(set_keys.contains(&IsolationKey::StateVisibility(s)));
@@ -957,7 +963,7 @@ fn undo_cannot_discard_concurrent_visibility_change() {
     // over the newer record. Modeled at the conditional-commit layer the undo
     // executor commits through.
     let (_t, repo) = test_repo();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
 
     // A visibility batch B1 on S commits (the batch the undo targets).
     repo.oplog()
@@ -999,7 +1005,7 @@ fn undo_cannot_discard_concurrent_visibility_change() {
     // block the undo — visibility mutations on distinct states are independent.
     let since_ctrl = repo.oplog().head_id().unwrap();
     let precondition_ctrl = visibility_precondition(since_ctrl, state);
-    let other = ChangeId::generate();
+    let other = crate::test_state_id();
     repo.oplog()
         .record_batch(vec![visibility_set_on(other)])
         .unwrap();
@@ -1189,32 +1195,32 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
     };
     let main = IsolationKey::Thread("main".to_string());
     let feature = IsolationKey::Thread("feature".to_string());
-    let visibility_state = ChangeId::generate();
-    let promoted_state = ChangeId::generate();
+    let visibility_state = crate::test_state_id();
+    let promoted_state = crate::test_state_id();
 
     vec![
         (snapshot_on("main"), keys([main.clone()])),
         (
             OpRecord::Snapshot {
-                new_state: ChangeId::generate(),
+                new_state: crate::test_state_id(),
                 prev_head: None,
-                head: Some(ChangeId::generate()),
+                head: Some(crate::test_state_id()),
                 thread: None,
             },
             keys([local_head.clone()]),
         ),
         (
             OpRecord::Goto {
-                target: ChangeId::generate(),
+                target: crate::test_state_id(),
                 prev_head: None,
-                head: ChangeId::generate(),
+                head: crate::test_state_id(),
             },
             keys([local_head.clone()]),
         ),
         (
             OpRecord::ThreadCreate {
                 name: "main".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
                 manager_snapshot: Some(vec![1]),
             },
             keys([main.clone()]),
@@ -1222,23 +1228,23 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         (
             OpRecord::ThreadDelete {
                 name: "feature".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             keys([feature.clone()]),
         ),
         (
             OpRecord::ThreadUpdate {
                 name: "main".to_string(),
-                old_state: ChangeId::generate(),
-                new_state: ChangeId::generate(),
+                old_state: crate::test_state_id(),
+                new_state: crate::test_state_id(),
                 manager_snapshots: ThreadUpdateSnapshots::from_parts(Some(vec![1]), Some(vec![2])),
             },
             keys([main.clone()]),
         ),
         (
             OpRecord::Fork {
-                from: ChangeId::generate(),
-                new_state: ChangeId::generate(),
+                from: crate::test_state_id(),
+                new_state: crate::test_state_id(),
                 thread: Some("main".to_string()),
                 head: None,
             },
@@ -1246,17 +1252,17 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         ),
         (
             OpRecord::Fork {
-                from: ChangeId::generate(),
-                new_state: ChangeId::generate(),
+                from: crate::test_state_id(),
+                new_state: crate::test_state_id(),
                 thread: None,
-                head: Some(ChangeId::generate()),
+                head: Some(crate::test_state_id()),
             },
             keys([local_head.clone()]),
         ),
         (
             OpRecord::Fork {
-                from: ChangeId::generate(),
-                new_state: ChangeId::generate(),
+                from: crate::test_state_id(),
+                new_state: crate::test_state_id(),
                 thread: None,
                 head: None,
             },
@@ -1264,17 +1270,17 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         ),
         (
             OpRecord::Collapse {
-                sources: vec![ChangeId::generate(), ChangeId::generate()],
-                result: ChangeId::generate(),
+                sources: vec![crate::test_state_id(), crate::test_state_id()],
+                result: crate::test_state_id(),
                 thread: Some("feature".to_string()),
-                pre_thread_state: Some(ChangeId::generate()),
+                pre_thread_state: Some(crate::test_state_id()),
             },
             keys([feature.clone()]),
         ),
         (
             OpRecord::Collapse {
-                sources: vec![ChangeId::generate()],
-                result: ChangeId::generate(),
+                sources: vec![crate::test_state_id()],
+                result: crate::test_state_id(),
                 thread: None,
                 pre_thread_state: None,
             },
@@ -1283,21 +1289,21 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         (
             OpRecord::MarkerCreate {
                 name: "release".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             BTreeSet::new(),
         ),
         (
             OpRecord::MarkerDelete {
                 name: "release".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             BTreeSet::new(),
         ),
         (
             OpRecord::Checkpoint {
                 parent: None,
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
                 thread: Some("main".to_string()),
             },
             keys([main.clone()]),
@@ -1305,7 +1311,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         (
             OpRecord::Checkpoint {
                 parent: None,
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
                 thread: None,
             },
             keys([local_head.clone()]),
@@ -1320,7 +1326,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
         (
             OpRecord::EphemeralThreadCollapse {
                 thread: "main".to_string(),
-                final_state: ChangeId::generate(),
+                final_state: crate::test_state_id(),
             },
             keys([main.clone()]),
         ),
@@ -1336,7 +1342,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
             OpRecord::Redact {
                 redaction_id: ContentHash::from_bytes([1u8; 32]),
                 blob: ContentHash::from_bytes([2u8; 32]),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
                 path: "secret.txt".to_string(),
             },
             BTreeSet::new(),
@@ -1352,15 +1358,15 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
             OpRecord::FastForward {
                 source_thread: "feature".to_string(),
                 target_thread: "main".to_string(),
-                pre_target_id: ChangeId::generate(),
-                post_target_id: ChangeId::generate(),
+                pre_target_id: crate::test_state_id(),
+                post_target_id: crate::test_state_id(),
             },
             keys([feature.clone(), main.clone()]),
         ),
         (
             OpRecord::GitCheckpoint {
                 branch: "main".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
                 previous_git_oid: None,
                 new_git_oid: "abc123".to_string(),
             },
@@ -1370,7 +1376,7 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
             OpRecord::RemoteThreadUpdate {
                 remote: "origin".to_string(),
                 thread: "main".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             keys([main.clone()]),
         ),
@@ -1378,13 +1384,13 @@ fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<Isolatio
             OpRecord::RemoteThreadDelete {
                 remote: "origin".to_string(),
                 thread: "main".to_string(),
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             keys([main.clone()]),
         ),
         (
             OpRecord::UndoRecoveryUpdate {
-                state: ChangeId::generate(),
+                state: crate::test_state_id(),
             },
             keys([local_head.clone()]),
         ),
@@ -1448,15 +1454,15 @@ fn reconcile_folds_every_record_shape() {
     let scope = repo.op_scope();
     let op = repo.oplog();
 
-    let v1 = ChangeId::generate();
-    let v1b = ChangeId::generate();
-    let v2 = ChangeId::generate();
-    let coll = ChangeId::generate();
-    let ckpt = ChangeId::generate();
-    let ff = ChangeId::generate();
-    let mk = ChangeId::generate();
-    let remote = ChangeId::generate();
-    let undo = ChangeId::generate();
+    let v1 = crate::test_state_id();
+    let v1b = crate::test_state_id();
+    let v2 = crate::test_state_id();
+    let coll = crate::test_state_id();
+    let ckpt = crate::test_state_id();
+    let ff = crate::test_state_id();
+    let mk = crate::test_state_id();
+    let remote = crate::test_state_id();
+    let undo = crate::test_state_id();
 
     // Thread create + update records.
     op.record_batch(vec![OpRecord::ThreadCreate {
@@ -1705,7 +1711,7 @@ fn savepoint_whole_op_rewind_runs_on_apply_err() {
 /// being re-run after a crash.
 struct StableKeyed {
     key: String,
-    state: ChangeId,
+    state: StateId,
     applied: Rc<RefCell<u32>>,
 }
 
@@ -1740,7 +1746,7 @@ impl AtomicMutation for StableKeyed {
 fn stable_transaction_id_dedupes_crash_retry() {
     let (_t, repo) = test_repo();
     let applied = Rc::new(RefCell::new(0u32));
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     let key = "logical-op-42".to_string();
 
     // First run commits.
@@ -1806,7 +1812,7 @@ impl AtomicMutation for ReplayStages {
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
         *self.staged_count.borrow_mut() += 1;
-        let state = ChangeId::generate();
+        let state = crate::test_state_id();
         Ok(StagedCommit::new(
             7,
             vec![OpRecord::Snapshot {
@@ -1863,7 +1869,7 @@ fn exact_once_replay_compensates_this_runs_staging() {
 #[test]
 fn validation_failure_appends_no_record() {
     let (_t, repo) = test_repo();
-    let existing = ChangeId::generate();
+    let existing = crate::test_state_id();
 
     // Publish "dup" with a backing record through the chokepoint.
     repo.commit_and_publish(
@@ -1881,7 +1887,7 @@ fn validation_failure_appends_no_record() {
     .unwrap();
 
     // A second publish whose ref expectation FAILS: `Missing`, but "dup" exists.
-    let leaked = ChangeId::generate();
+    let leaked = crate::test_state_id();
     let result = repo.commit_and_publish(
         vec![OpRecord::Fork {
             from: existing,
@@ -1924,13 +1930,13 @@ fn concurrent_commit_and_publish_serializes_record_and_publish() {
         let temp = TempDir::new().unwrap();
         {
             let repo = Repository::init_default(temp.path()).unwrap();
-            let base = ChangeId::generate();
+            let base = crate::test_state_id();
             repo.refs()
                 .set_thread(&ThreadName::new("main"), &base)
                 .unwrap();
         }
-        let va = ChangeId::generate();
-        let vb = ChangeId::generate();
+        let va = crate::test_state_id();
+        let vb = crate::test_state_id();
         let path = temp.path().to_path_buf();
 
         std::thread::scope(|s| {
@@ -1989,13 +1995,13 @@ fn concurrent_commit_and_publish_serializes_record_and_publish() {
 #[test]
 fn crash_replay_reconciles_update_to_existing_ref() {
     let (temp, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
 
     // Phase 4 only: record a Collapse updating "main", with no phase-5 publish.
-    let result = ChangeId::generate();
+    let result = crate::test_state_id();
     repo.oplog()
         .record_collapse(&[base], &result, Some("main"), None)
         .unwrap();
@@ -2018,7 +2024,7 @@ fn crash_replay_reconciles_update_to_existing_ref() {
 #[test]
 fn crash_replay_reconciles_delete_in_point_and_list_reads() {
     let (_t, repo) = test_repo();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     let deleted = ThreadName::new("deleted");
     repo.refs().set_thread(&deleted, &state).unwrap();
 
@@ -2043,7 +2049,7 @@ fn crash_replay_reconciles_delete_in_point_and_list_reads() {
 #[test]
 fn crash_replay_reconciles_marker_delete_in_list_reads() {
     let (_t, repo) = test_repo();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     let deleted = MarkerName::new("deleted-marker");
     repo.refs().create_marker(&deleted, &state).unwrap();
 
@@ -2068,8 +2074,8 @@ fn crash_replay_reconciles_marker_delete_in_list_reads() {
 #[test]
 fn crash_replay_reconciles_remote_thread_create_and_delete_in_lists() {
     let (_t, repo) = test_repo();
-    let original = ChangeId::generate();
-    let replacement = ChangeId::generate();
+    let original = crate::test_state_id();
+    let replacement = crate::test_state_id();
     let deleted = ThreadName::new("deleted-remote");
     let created = ThreadName::new("created-remote");
     repo.refs()
@@ -2119,7 +2125,7 @@ fn crash_replay_reconciles_remote_thread_create_and_delete_in_lists() {
 #[test]
 fn crash_replay_reconstructs_committed_head_update() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2129,7 +2135,7 @@ fn crash_replay_reconstructs_committed_head_update() {
         })
         .unwrap();
 
-    let detached = ChangeId::generate();
+    let detached = crate::test_state_id();
     repo.oplog()
         .record_batch_scoped(
             vec![OpRecord::Fork {
@@ -2166,7 +2172,7 @@ fn crash_replay_reconstructs_committed_head_update() {
 fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2177,7 +2183,7 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
         .unwrap();
 
     // An atomic Fork committed (phase 4) a published HEAD = Detached{fork_a}.
-    let fork_a = ChangeId::generate();
+    let fork_a = crate::test_state_id();
     repo.oplog()
         .record_batch_scoped(
             vec![OpRecord::Fork {
@@ -2193,7 +2199,7 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
     // `goto goto_b` then writes canonical HEAD = Detached{goto_b} DIRECTLY
     // (publish-first) and records a `Goto`. The direct write is the canonical
     // the reconciler reads; the record masks the older Fork.
-    let goto_b = ChangeId::generate();
+    let goto_b = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: goto_b })
         .unwrap();
@@ -2224,7 +2230,7 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
 fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2234,7 +2240,7 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
         })
         .unwrap();
 
-    let fork_a = ChangeId::generate();
+    let fork_a = crate::test_state_id();
     repo.oplog()
         .record_batch_scoped(
             vec![OpRecord::Fork {
@@ -2250,7 +2256,7 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
     // A fast-forward advances "main" to ff_target and re-attaches HEAD
     // (`fast_forward_attached`): canonical HEAD = Attached{main}, written
     // directly before the FastForward record.
-    let ff_target = ChangeId::generate();
+    let ff_target = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &ff_target)
         .unwrap();
@@ -2285,7 +2291,7 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
 fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2295,7 +2301,7 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
         })
         .unwrap();
 
-    let fork_a = ChangeId::generate();
+    let fork_a = crate::test_state_id();
     repo.oplog()
         .record_batch_scoped(
             vec![OpRecord::Fork {
@@ -2309,7 +2315,7 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
         .unwrap();
 
     // A detached snapshot writes HEAD = Detached{snap_b} directly, then records.
-    let snap_b = ChangeId::generate();
+    let snap_b = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: snap_b })
         .unwrap();
@@ -2355,7 +2361,7 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
 fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2367,7 +2373,7 @@ fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
 
     // Phase 4 only: a detached snapshot committed its record, the phase-5 HEAD
     // publish never ran (canonical HEAD is still `Attached{main}`).
-    let snap = ChangeId::generate();
+    let snap = crate::test_state_id();
     repo.oplog()
         .record_snapshot(&snap, Some(&base), None, Some(&scope))
         .unwrap();
@@ -2383,7 +2389,7 @@ fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
 fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     let main = ThreadName::new("main");
     repo.refs().set_thread(&main, &base).unwrap();
     repo.refs()
@@ -2392,7 +2398,7 @@ fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
         })
         .unwrap();
 
-    let snap = ChangeId::generate();
+    let snap = crate::test_state_id();
     repo.oplog()
         .record_snapshot(&snap, Some(&base), Some(main.as_str()), Some(&scope))
         .unwrap();
@@ -2421,12 +2427,12 @@ fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
 fn goto_record_first_crash_recovery_reconstructs_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: base })
         .unwrap();
 
-    let target = ChangeId::generate();
+    let target = crate::test_state_id();
     repo.oplog()
         .record_goto(&target, Some(&base), Some(&scope))
         .unwrap();
@@ -2461,7 +2467,7 @@ fn goto_record_first_crash_recovery_reconstructs_head() {
 fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
     let (temp, repo) = test_repo();
     let scope = repo.op_scope();
-    let s0 = ChangeId::generate();
+    let s0 = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("feature"), &s0)
         .unwrap();
@@ -2472,12 +2478,12 @@ fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
         .unwrap();
 
     // A's snapshot (record-first) advances `feature` = sA at the lower id.
-    let sa = ChangeId::generate();
+    let sa = crate::test_state_id();
     repo.oplog()
         .record_snapshot(&sa, Some(&s0), Some("feature"), Some(&scope))
         .unwrap();
     // B advances `feature` = sB and records (record-first) at the higher id.
-    let sb = ChangeId::generate();
+    let sb = crate::test_state_id();
     repo.oplog()
         .record_thread_create(&ThreadName::new("feature"), &sb, None, Some(&scope))
         .unwrap();
@@ -2506,16 +2512,16 @@ fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
 fn snapshot_does_not_clobber_newer_committed_write_detached() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: base })
         .unwrap();
 
-    let sa = ChangeId::generate();
+    let sa = crate::test_state_id();
     repo.oplog()
         .record_snapshot(&sa, Some(&base), None, Some(&scope))
         .unwrap();
-    let sb = ChangeId::generate();
+    let sb = crate::test_state_id();
     repo.oplog()
         .record_snapshot(&sb, Some(&sa), None, Some(&scope))
         .unwrap();
@@ -2532,7 +2538,7 @@ fn snapshot_does_not_clobber_newer_committed_write_detached() {
 #[test]
 fn commit_snapshot_atomic_attached_records_and_publishes() {
     let (_t, repo) = test_repo();
-    let s0 = ChangeId::generate();
+    let s0 = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("feature"), &s0)
         .unwrap();
@@ -2542,7 +2548,7 @@ fn commit_snapshot_atomic_attached_records_and_publishes() {
         })
         .unwrap();
 
-    let sa = ChangeId::generate();
+    let sa = crate::test_state_id();
     repo.commit_snapshot_atomic(&sa, Some(s0), Some(&ThreadName::new("feature")))
         .unwrap();
 
@@ -2568,12 +2574,12 @@ fn commit_snapshot_atomic_attached_records_and_publishes() {
 #[test]
 fn commit_snapshot_atomic_detached_records_and_publishes() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: base })
         .unwrap();
 
-    let sb = ChangeId::generate();
+    let sb = crate::test_state_id();
     repo.commit_snapshot_atomic(&sb, Some(base), None).unwrap();
 
     assert_eq!(
@@ -2605,7 +2611,7 @@ fn commit_snapshot_atomic_detached_records_and_publishes() {
 fn named_fork_recovery_materializes_head_and_paired_thread() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2617,7 +2623,7 @@ fn named_fork_recovery_materializes_head_and_paired_thread() {
 
     // Phase 4 only: the fork's record is committed (thread `topic` + HEAD =
     // Attached(topic)); no phase-5 publish ran.
-    let forked = ChangeId::generate();
+    let forked = crate::test_state_id();
     repo.oplog()
         .record_fork(&base, &forked, Some("topic"), None, Some(&scope))
         .unwrap();
@@ -2653,7 +2659,7 @@ fn named_fork_recovery_materializes_head_and_paired_thread() {
 fn attached_collapse_advances_thread_without_moving_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -2664,7 +2670,7 @@ fn attached_collapse_advances_thread_without_moving_head() {
         .unwrap();
 
     // Phase 4 only: an attached collapse naming thread `topic`.
-    let result = ChangeId::generate();
+    let result = crate::test_state_id();
     repo.oplog()
         .record_collapse(&[base], &result, Some("topic"), Some(&scope))
         .unwrap();
@@ -2694,13 +2700,13 @@ fn attached_collapse_advances_thread_without_moving_head() {
 fn detached_collapse_republishes_detached_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .write_head(&Head::Detached { state: base })
         .unwrap();
 
     // Phase 4 only: a detached collapse (thread = None).
-    let result = ChangeId::generate();
+    let result = crate::test_state_id();
     repo.oplog()
         .record_collapse(&[base], &result, None, Some(&scope))
         .unwrap();
@@ -2824,8 +2830,8 @@ fn eager_override_rewind_does_not_double_undo() {
 #[test]
 fn persisted_watermark_recovers_cross_process_crash_tail() {
     let temp = TempDir::new().unwrap();
-    let base = ChangeId::generate();
-    let forked = ChangeId::generate();
+    let base = crate::test_state_id();
+    let forked = crate::test_state_id();
     {
         let repo = Repository::init_default(temp.path()).unwrap();
         repo.refs()
@@ -2873,7 +2879,7 @@ fn persisted_watermark_recovers_cross_process_crash_tail() {
 #[test]
 fn persisted_watermark_does_not_resurrect_unrecorded_delete() {
     let temp = TempDir::new().unwrap();
-    let state = ChangeId::generate();
+    let state = crate::test_state_id();
     {
         let repo = Repository::init_default(temp.path()).unwrap();
         // Create through the chokepoint (records + publishes).
@@ -2943,7 +2949,7 @@ fn shared_watermark_is_cross_worktree_no_resurrect() {
 
     // A records + publishes a shared-ref create, then a read advances + persists
     // the SHARED watermark past it.
-    let created = ChangeId::generate();
+    let created = crate::test_state_id();
     {
         let repo_a = Repository::open(&wt_a).unwrap();
         repo_a
@@ -3003,7 +3009,7 @@ fn shared_watermark_is_cross_worktree_no_resurrect() {
 #[test]
 fn non_atomic_write_materializes_committed_tail() {
     let (_t, repo) = test_repo();
-    let v_new = ChangeId::generate();
+    let v_new = crate::test_state_id();
     // Phase-4 only: a committed-but-unpublished thread "x" (canonical absent,
     // watermark behind).
     repo.oplog()
@@ -3025,7 +3031,7 @@ fn non_atomic_write_materializes_committed_tail() {
 
     // A NON-ATOMIC write to a DIFFERENT ref runs the write chokepoint, which
     // materializes the committed tail before publishing.
-    let y = ChangeId::generate();
+    let y = crate::test_state_id();
     repo.refs().set_thread(&ThreadName::new("y"), &y).unwrap();
 
     // The committed "x" is now in canonical — observable WITHOUT reconciliation.
@@ -3049,8 +3055,8 @@ fn non_atomic_write_materializes_committed_tail() {
 #[test]
 fn non_atomic_delete_is_not_clobbered_by_a_committed_record() {
     let (_t, repo) = test_repo();
-    let v_old = ChangeId::generate();
-    let v_new = ChangeId::generate();
+    let v_old = crate::test_state_id();
+    let v_new = crate::test_state_id();
     // Publish "x"=v_old (no record), then commit (don't publish) "x"=v_new.
     repo.refs()
         .set_thread(&ThreadName::new("x"), &v_old)
@@ -3092,8 +3098,8 @@ fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
     // Detached fork, scoped → HEAD reconciles.
     let (_t1, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
-    let forked = ChangeId::generate();
+    let base = crate::test_state_id();
+    let forked = crate::test_state_id();
     repo.oplog()
         .record_fork(&base, &forked, None, Some(&forked), Some(&scope))
         .unwrap();
@@ -3107,8 +3113,8 @@ fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
     // ref reconciles.
     let (_t2, repo) = test_repo();
     let scope = repo.op_scope();
-    let base = ChangeId::generate();
-    let forked = ChangeId::generate();
+    let base = crate::test_state_id();
+    let forked = crate::test_state_id();
     repo.oplog()
         .record_fork(&base, &forked, Some("topic"), None, Some(&scope))
         .unwrap();
@@ -3128,14 +3134,14 @@ fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
     // Contrast: an UNSCOPED detached fork is invisible to the scoped Local fold,
     // so HEAD is NOT reconstructed (the pre-r7 bug — scope is load-bearing).
     let (_t3, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     let head_before = repo.refs().read_head().unwrap();
     repo.oplog()
         .record_fork(
             &base,
-            &ChangeId::generate(),
+            &crate::test_state_id(),
             None,
-            Some(&ChangeId::generate()),
+            Some(&crate::test_state_id()),
             None,
         )
         .unwrap();
@@ -3154,8 +3160,8 @@ fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
 #[test]
 fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
-    let committed = ChangeId::generate();
+    let base = crate::test_state_id();
+    let committed = crate::test_state_id();
 
     // Phase-4 only: "explore" is committed-but-unpublished (canonical absent).
     repo.oplog()
@@ -3167,14 +3173,14 @@ fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
     let result = repo.commit_and_publish(
         vec![OpRecord::Fork {
             from: base,
-            new_state: ChangeId::generate(),
+            new_state: crate::test_state_id(),
             thread: Some("explore".to_string()),
             head: None,
         }],
         &[RefUpdate::Thread {
             name: ThreadName::new("explore"),
             expected: RefExpectation::Missing,
-            new: Some(ChangeId::generate()),
+            new: Some(crate::test_state_id()),
         }],
     );
     assert!(
@@ -3183,7 +3189,7 @@ fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
     );
 
     // A CAS to the COMMITTED value (not the absent on-disk value) must succeed.
-    let next = ChangeId::generate();
+    let next = crate::test_state_id();
     repo.commit_and_publish(
         vec![OpRecord::Fork {
             from: committed,
@@ -3215,7 +3221,7 @@ fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
 fn lagging_reader_never_clobbers_concurrent_publish() {
     for _ in 0..25 {
         let temp = TempDir::new().unwrap();
-        let base = ChangeId::generate();
+        let base = crate::test_state_id();
         {
             let repo = Repository::init_default(temp.path()).unwrap();
             repo.refs()
@@ -3223,11 +3229,11 @@ fn lagging_reader_never_clobbers_concurrent_publish() {
                 .unwrap();
             // A committed-but-unpublished OLD value a lagging reader would fold.
             repo.oplog()
-                .record_fork(&base, &ChangeId::generate(), Some("main"), None, None)
+                .record_fork(&base, &crate::test_state_id(), Some("main"), None, None)
                 .unwrap();
         }
         let path = temp.path().to_path_buf();
-        let v_new = ChangeId::generate();
+        let v_new = crate::test_state_id();
 
         std::thread::scope(|s| {
             let p_r = path.clone();
@@ -3280,15 +3286,15 @@ fn lagging_reader_never_clobbers_concurrent_publish() {
     }
 }
 
-/// A mutation that REGENERATES its `ChangeId` output on every `apply` run, and
+/// A mutation that REGENERATES its `StateId` output on every `apply` run, and
 /// reconstructs the committed identity from the deduped record on a dedup hit.
-struct RegeneratesChangeId {
+struct RegeneratesStateId {
     key: String,
-    fresh_ids: Rc<RefCell<Vec<ChangeId>>>,
+    fresh_ids: Rc<RefCell<Vec<StateId>>>,
 }
 
-impl AtomicMutation for RegeneratesChangeId {
-    type Output = ChangeId;
+impl AtomicMutation for RegeneratesStateId {
+    type Output = StateId;
 
     fn transaction_id(&self) -> String {
         self.key.clone()
@@ -3296,10 +3302,10 @@ impl AtomicMutation for RegeneratesChangeId {
 
     empty_isolation_keys!();
 
-    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<ChangeId>> {
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<StateId>> {
         // A fresh, NON-deterministic output each run — a crash-retry's value
         // would diverge from the originally-committed one.
-        let fresh = ChangeId::generate();
+        let fresh = crate::test_state_id();
         self.fresh_ids.borrow_mut().push(fresh);
         Ok(StagedCommit::new(
             fresh,
@@ -3315,8 +3321,8 @@ impl AtomicMutation for RegeneratesChangeId {
     fn reconstruct_committed_output(
         &self,
         committed_records: &[OpRecord],
-        _this_run: ChangeId,
-    ) -> Result<ChangeId> {
+        _this_run: StateId,
+    ) -> Result<StateId> {
         for op in committed_records {
             if let OpRecord::Snapshot { new_state, .. } = op {
                 return Ok(*new_state);
@@ -3330,7 +3336,7 @@ impl AtomicMutation for RegeneratesChangeId {
 
 /// Finding C (cid 3329631075) — a dedup-hit replay returns the ORIGINALLY
 /// committed output, not this run's freshly regenerated value. The replay's
-/// `apply` mints a *different* ChangeId; `execute` must reconstruct the
+/// `apply` mints a *different* StateId; `execute` must reconstruct the
 /// committed identity from the deduped record and return that.
 #[test]
 fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
@@ -3340,7 +3346,7 @@ fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
 
     let first = execute(
         &repo,
-        RegeneratesChangeId {
+        RegeneratesStateId {
             key: key.clone(),
             fresh_ids: Rc::clone(&fresh_ids),
         },
@@ -3349,7 +3355,7 @@ fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
 
     let second = execute(
         &repo,
-        RegeneratesChangeId {
+        RegeneratesStateId {
             key,
             fresh_ids: Rc::clone(&fresh_ids),
         },
@@ -3380,7 +3386,7 @@ fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
 #[test]
 fn corrupt_oplog_header_fails_reconciled_read_loudly() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();
@@ -3409,7 +3415,7 @@ fn corrupt_oplog_header_fails_reconciled_read_loudly() {
 #[test]
 fn unsupported_oplog_version_fails_reconciled_read_loudly() {
     let (_t, repo) = test_repo();
-    let base = ChangeId::generate();
+    let base = crate::test_state_id();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &base)
         .unwrap();

@@ -226,19 +226,17 @@ mod tests {
         root: &Path,
         path: &str,
         content: &str,
-    ) -> objects::object::ChangeId {
+    ) -> objects::object::StateId {
         fs::write(root.join(path), content).unwrap();
-        repo.snapshot(Some(path.to_string()), None)
-            .unwrap()
-            .change_id
+        repo.snapshot(Some(path.to_string()), None).unwrap().id()
     }
 
     fn write_step(
         store: &TimelineStore,
         step_id: &str,
         call_id: &str,
-        before: objects::object::ChangeId,
-        after: objects::object::ChangeId,
+        before: objects::object::StateId,
+        after: objects::object::StateId,
     ) {
         store
             .write_operation(&TimelineOperationEnvelope::new(

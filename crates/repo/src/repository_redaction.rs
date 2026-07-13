@@ -29,7 +29,7 @@ use chrono::Utc;
 use crypto::verify_payload_signature;
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, ContentHash, Principal, Redaction, RedactionsBlob, Tree},
+    object::{ContentHash, Principal, Redaction, RedactionsBlob, StateId, Tree},
     store::ObjectStore,
 };
 
@@ -245,7 +245,7 @@ impl Repository {
     pub fn remove_redaction(
         &self,
         blob: &ContentHash,
-        state: &ChangeId,
+        state: &StateId,
         path: &str,
         redaction_id: &ContentHash,
     ) -> Result<RemoveRedactionOutcome> {
@@ -372,7 +372,7 @@ impl Repository {
     pub fn redaction_is_purged(
         &self,
         blob: &ContentHash,
-        state: &ChangeId,
+        state: &StateId,
         path: &str,
     ) -> Result<bool> {
         let redactions_blob = self.get_redactions_for_blob(blob)?;
@@ -572,14 +572,14 @@ impl Repository {
     /// redaction propagation so a leaked secret can be scrubbed from
     /// every state in which its blob hash appears.
     ///
-    /// The walk is breadth-first and dedups by `ChangeId`, so a state
+    /// The walk is breadth-first and dedups by `StateId`, so a state
     /// reached from multiple tips appears once. Missing states (broken
     /// parent links) are skipped silently — redaction propagation is
     /// best-effort across the reachable graph, not a graph-integrity
     /// check.
-    pub fn reachable_states(&self) -> Result<Vec<ChangeId>> {
+    pub fn reachable_states(&self) -> Result<Vec<StateId>> {
         let refs = self.refs();
-        let mut roots: Vec<ChangeId> = Vec::new();
+        let mut roots: Vec<StateId> = Vec::new();
         for name in refs
             .list_threads()
             .with_context(|| "list threads for reachable_states")?
@@ -603,14 +603,14 @@ impl Repository {
             }
         }
 
-        let mut visited: HashSet<ChangeId> = HashSet::new();
-        let mut queue: Vec<ChangeId> = Vec::new();
+        let mut visited: HashSet<StateId> = HashSet::new();
+        let mut queue: Vec<StateId> = Vec::new();
         for root in roots {
             if visited.insert(root) {
                 queue.push(root);
             }
         }
-        let mut out: Vec<ChangeId> = Vec::new();
+        let mut out: Vec<StateId> = Vec::new();
         while let Some(id) = queue.pop() {
             // Load the state; if missing (broken parent ref or shallow
             // clone), skip — propagation tolerates gaps.
@@ -640,7 +640,7 @@ impl Repository {
     /// stable thanks to `Tree` entry ordering.
     pub fn paths_to_blob_in_state(
         &self,
-        state: &ChangeId,
+        state: &StateId,
         target: &ContentHash,
     ) -> Result<Vec<String>> {
         let Some(tree) = self
@@ -848,7 +848,7 @@ fn remove_loose_blob_bytes(repo: &Repository, hash: &ContentHash) -> Result<(boo
 mod tests {
     use chrono::TimeZone;
     use crypto::Signer;
-    use objects::object::{ChangeId, Principal};
+    use objects::object::{Principal, StateId};
     use tempfile::TempDir;
 
     use super::*;
@@ -873,7 +873,7 @@ mod tests {
     fn sample_redaction() -> Redaction {
         Redaction {
             redacted_blob: sample_blob(),
-            state: ChangeId::from_bytes([1u8; 16]),
+            state: StateId::from_bytes([1u8; 32]),
             path: "config/secrets.toml".into(),
             reason: "leaked credential".into(),
             redactor: sample_principal(),
@@ -981,7 +981,7 @@ mod tests {
         let blob = first.redacted_blob;
         let first_id = repo.put_redaction(first).unwrap();
         let second = Redaction {
-            state: ChangeId::from_bytes([2u8; 16]),
+            state: StateId::from_bytes([2u8; 32]),
             path: "config/other.toml".into(),
             reason: "follow-up reason".into(),
             ..sample_redaction()
@@ -1044,7 +1044,7 @@ mod tests {
         // existed" safety net.
         let (_dir, repo) = fresh_repo();
         let unknown_blob = ContentHash::from_bytes([0u8; 32]);
-        let unknown_state = ChangeId::from_bytes([0u8; 16]);
+        let unknown_state = StateId::from_bytes([0u8; 32]);
         let unknown_id = ContentHash::from_bytes([0u8; 32]);
         let err = repo
             .remove_redaction(
@@ -1126,7 +1126,7 @@ mod tests {
         // Unknown (blob, state, path) → false. Lets the caller's own
         // missing-record path surface the cause.
         let unknown_blob = ContentHash::from_bytes([0u8; 32]);
-        let unknown_state = ChangeId::from_bytes([0u8; 16]);
+        let unknown_state = StateId::from_bytes([0u8; 32]);
         assert!(
             !repo
                 .redaction_is_purged(&unknown_blob, &unknown_state, "missing")

@@ -24,7 +24,7 @@ use std::{
 
 use objects::{
     fs_atomic::{enrich_fs_error, enrich_rename_error},
-    object::{ChangeId, ContentHash},
+    object::{ContentHash, StateId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +54,7 @@ pub struct ThreadManifest {
     /// Manifest format version. See [`SCHEMA_VERSION`].
     pub schema_version: u32,
     /// The state this manifest is a materialization of.
-    pub state_id: ChangeId,
+    pub state_id: StateId,
     /// Tree hash captured at materialize time. Future-proofing for a
     /// `refresh` operation that wants to know which tree the on-disk
     /// state corresponds to without resolving the thread head again.
@@ -103,7 +103,7 @@ impl ThreadManifest {
     /// will describe. Production callers canonicalize the path
     /// (`std::fs::canonicalize`) so a later `snapshot` from inside
     /// the worktree matches regardless of symlink / `./` indirection.
-    pub fn new(state_id: ChangeId, tree_hash: ContentHash, worktree_path: PathBuf) -> Self {
+    pub fn new(state_id: StateId, tree_hash: ContentHash, worktree_path: PathBuf) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             state_id,
@@ -285,7 +285,7 @@ pub struct MaterializedThreadSummary {
     /// Thread name (the directory under `threads/`).
     pub thread: String,
     /// Recorded state at materialize time.
-    pub state_id: ChangeId,
+    pub state_id: StateId,
     /// Recorded uncompressed tree hash at materialize time.
     pub tree_hash: ContentHash,
     /// UNIX-epoch seconds at materialize time.
@@ -691,8 +691,8 @@ mod tests {
         ContentHash::from_bytes([byte; 32])
     }
 
-    fn cid() -> ChangeId {
-        ChangeId::generate()
+    fn cid() -> StateId {
+        crate::test_state_id()
     }
 
     #[test]

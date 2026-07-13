@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use objects::object::{
-    ChangeId, ContentHash, NativeToolCallRefV1, TimelineBranchId, TimelineBranchReason,
+    ContentHash, NativeToolCallRefV1, StateId, TimelineBranchId, TimelineBranchReason,
     TimelineCursorMoveReason, TimelineLabel, TimelineOperationId, TimelineStepId,
     TimelineToolCallStatus,
 };
@@ -28,7 +28,7 @@ pub struct TimelineNavigationSnapshot {
 pub struct TimelineNavigationCursor {
     pub branch_id: Option<TimelineBranchId>,
     pub step_id: Option<TimelineStepId>,
-    pub state: Option<ChangeId>,
+    pub state: Option<StateId>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,7 +36,7 @@ pub struct TimelineNavigationBranch {
     pub branch_id: TimelineBranchId,
     pub parent_branch_id: Option<TimelineBranchId>,
     pub forked_from_step_id: Option<TimelineStepId>,
-    pub forked_from_state: Option<ChangeId>,
+    pub forked_from_state: Option<StateId>,
     pub reason: Option<TimelineBranchReason>,
     pub created_at_ms: Option<i64>,
     pub operation_ids: Vec<TimelineOperationId>,
@@ -56,9 +56,9 @@ pub struct TimelineNavigationStep {
     pub status: Option<TimelineToolCallStatus>,
     pub changed: Option<bool>,
     pub touched_paths: Vec<String>,
-    pub before_state: Option<ChangeId>,
-    pub after_state: Option<ChangeId>,
-    pub capture_state: Option<ChangeId>,
+    pub before_state: Option<StateId>,
+    pub after_state: Option<StateId>,
+    pub capture_state: Option<StateId>,
     pub capture_oplog_batch_id: Option<u64>,
     pub labels: Vec<TimelineLabel>,
     pub payload_summary: Option<String>,
@@ -66,7 +66,7 @@ pub struct TimelineNavigationStep {
     pub operation_ids: Vec<TimelineOperationId>,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
-    pub cursor_state: Option<ChangeId>,
+    pub cursor_state: Option<StateId>,
     pub is_current: bool,
     pub is_on_active_branch_path: bool,
     pub can_seek: bool,
@@ -89,11 +89,11 @@ pub struct TimelineNavigationRecovery {
     pub branch_id: TimelineBranchId,
     pub from_step_id: Option<TimelineStepId>,
     pub to_step_id: Option<TimelineStepId>,
-    pub from_state: ChangeId,
-    pub to_state: ChangeId,
+    pub from_state: StateId,
+    pub to_state: StateId,
     pub reason: TimelineCursorMoveReason,
     pub moved_at_ms: i64,
-    pub checkout_state: Option<ChangeId>,
+    pub checkout_state: Option<StateId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,11 +313,9 @@ mod tests {
         }
     }
 
-    fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> ChangeId {
+    fn write_state(repo: &Repository, root: &Path, path: &str, content: &str) -> StateId {
         fs::write(root.join(path), content).unwrap();
-        repo.snapshot(Some(path.to_string()), None)
-            .unwrap()
-            .change_id
+        repo.snapshot(Some(path.to_string()), None).unwrap().id()
     }
 
     fn write_finished_step(
@@ -325,8 +323,8 @@ mod tests {
         step_id: &str,
         branch_id: &str,
         native_id: &str,
-        before_state: ChangeId,
-        after_state: ChangeId,
+        before_state: StateId,
+        after_state: StateId,
         finished_at_ms: i64,
     ) {
         store

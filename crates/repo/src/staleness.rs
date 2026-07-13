@@ -90,10 +90,10 @@ pub fn check_context_staleness(
                 check_annotation_staleness(repo, annotation, &entry.target, current_state)?;
             let key = match &entry.target {
                 ContextTarget::File { path } => format!("{path}:{}", annotation.scope),
-                ContextTarget::State { change_id } => {
+                ContextTarget::State { state_id } => {
                     format!(
                         "state:{}:{}",
-                        change_id.to_string_full(),
+                        state_id.to_string_full(),
                         annotation.annotation_id
                     )
                 }
@@ -199,7 +199,7 @@ mod tests {
     #[cfg(feature = "async-source")]
     use objects::{
         object::{
-            Blob, ChangeId, DiffKind, EntryType, FileChange, TreeEntry, diff_trees_visit,
+            Blob, DiffKind, EntryType, FileChange, StateId, TreeEntry, diff_trees_visit,
             diff_trees_visit_async,
         },
         store::{AsyncObjectSource, InMemoryStore},
@@ -229,7 +229,7 @@ mod tests {
             ObjectStore::get_tree(self.0, hash)
         }
 
-        async fn get_state(&self, id: &ChangeId) -> objects::error::Result<Option<State>> {
+        async fn get_state(&self, id: &StateId) -> objects::error::Result<Option<State>> {
             ObjectStore::get_state(self.0, id)
         }
 

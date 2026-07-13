@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use objects::{
     lock::RepositoryLockExt,
-    object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
+    object::{Attribution, Blob, ChangeLineage, ContentHash, State, StateId, Tree, TreeEntry},
     store::ObjectStore,
 };
 use oplog::{IsolationKey, OpRecord};
@@ -49,7 +49,8 @@ struct SnapshotMutation<'a> {
     intent: Option<String>,
     confidence: Option<f32>,
     attribution: Attribution,
-    prev_head: Option<ChangeId>,
+    lineage: Vec<ChangeLineage>,
+    prev_head: Option<StateId>,
     head: Head,
     transaction_id: String,
     /// Set by `apply` when the automatic capture-time default-visibility binding
@@ -57,7 +58,7 @@ struct SnapshotMutation<'a> {
     /// #529 P1): `(state, sidecar-before-the-binding)`. `rewind` restores the
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
-    staged_visibility_rewind: Option<(ChangeId, Option<Vec<u8>>)>,
+    staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -67,7 +68,8 @@ impl<'a> SnapshotMutation<'a> {
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
-        prev_head: Option<ChangeId>,
+        lineage: Vec<ChangeLineage>,
+        prev_head: Option<StateId>,
         head: Head,
     ) -> Self {
         let transaction_id = snapshot_transaction_id(
@@ -76,6 +78,7 @@ impl<'a> SnapshotMutation<'a> {
             intent.as_deref(),
             confidence,
             &attribution,
+            &lineage,
             prev_head,
             &head,
         );
@@ -85,6 +88,7 @@ impl<'a> SnapshotMutation<'a> {
             intent,
             confidence,
             attribution,
+            lineage,
             prev_head,
             head,
             transaction_id,
@@ -131,9 +135,9 @@ impl AtomicMutation for SnapshotMutation<'_> {
         maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
 
         let mut records = vec![OpRecord::Snapshot {
-            new_state: execution.state.change_id,
+            new_state: execution.state.id(),
             prev_head: self.prev_head,
-            head: self.thread().is_none().then_some(execution.state.change_id),
+            head: self.thread().is_none().then_some(execution.state.id()),
             thread: self.thread(),
         }];
 
@@ -146,11 +150,10 @@ impl AtomicMutation for SnapshotMutation<'_> {
         // true`); `rewind` restores the sidecar if this batch fails to commit.
         if let Some(binding) = self
             .repo
-            .stage_default_visibility_binding(&execution.state.change_id, true)
+            .stage_default_visibility_binding(&execution.state.id(), true)
             .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
         {
-            self.staged_visibility_rewind =
-                Some((execution.state.change_id, binding.prior_sidecar));
+            self.staged_visibility_rewind = Some((execution.state.id(), binding.prior_sidecar));
             records.push(binding.record);
         }
 
@@ -244,6 +247,10 @@ impl SnapshotMutation<'_> {
 
         if let Some(confidence) = self.confidence {
             state = state.with_confidence(confidence);
+        }
+
+        if !self.lineage.is_empty() {
+            state = state.with_lineage(self.lineage.clone());
         }
 
         if let Some(parent_id) = self.prev_head
@@ -463,7 +470,8 @@ fn snapshot_transaction_id(
     intent: Option<&str>,
     confidence: Option<f32>,
     attribution: &Attribution,
-    _prev_head: Option<ChangeId>,
+    lineage: &[ChangeLineage],
+    _prev_head: Option<StateId>,
     head: &Head,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -506,6 +514,8 @@ fn snapshot_transaction_id(
         hasher.update(b"\0");
         hasher.update(agent.policy_id.as_deref().unwrap_or_default().as_bytes());
     }
+    hasher.update(b"\0lineage\0");
+    hasher.update(&rmp_serde::to_vec_named(lineage).expect("lineage encoding is infallible"));
     format!("snapshot-{}", hasher.finalize().to_hex())
 }
 
@@ -590,7 +600,18 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution)
+        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution, Vec::new())
+    }
+
+    pub fn snapshot_with_attribution_and_lineage(
+        &self,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        lineage: Vec<ChangeLineage>,
+    ) -> Result<State> {
+        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution, lineage)
+            .map(|execution| execution.state)
     }
 
     #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
@@ -599,6 +620,7 @@ impl Repository {
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
+        lineage: Vec<ChangeLineage>,
     ) -> Result<SnapshotExecution> {
         let _lock = self
             .locker()
@@ -624,7 +646,7 @@ impl Repository {
             let theirs = merge_state.theirs;
             let base = merge_state.base;
             let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
-            let state = self.snapshot_merge_with_attribution(
+            let state = self.snapshot_merge_with_attribution_and_lineage(
                 &theirs,
                 intent,
                 confidence,
@@ -633,6 +655,7 @@ impl Repository {
                 // We hold the snapshot write lock here; fold the default-
                 // visibility binding into the merge's batch (heddle#317).
                 true,
+                lineage,
             )?;
             self.merge_state_manager().finish()?;
             let tree = self
@@ -657,6 +680,7 @@ impl Repository {
                 intent,
                 confidence,
                 attribution,
+                lineage,
                 prev_head,
                 head.clone(),
             ),
@@ -735,6 +759,7 @@ impl Repository {
                 intent,
                 confidence,
                 attribution,
+                Vec::new(),
                 prev_head,
                 head,
             ),
@@ -762,12 +787,33 @@ impl Repository {
     /// no-auto-binding behavior.
     pub fn snapshot_merge_with_attribution(
         &self,
-        merge_parent: &ChangeId,
+        merge_parent: &StateId,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
-        merge_base: Option<ChangeId>,
+        merge_base: Option<StateId>,
         fold_default_visibility: bool,
+    ) -> Result<State> {
+        self.snapshot_merge_with_attribution_and_lineage(
+            merge_parent,
+            intent,
+            confidence,
+            attribution,
+            merge_base,
+            fold_default_visibility,
+            Vec::new(),
+        )
+    }
+
+    fn snapshot_merge_with_attribution_and_lineage(
+        &self,
+        merge_parent: &StateId,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        merge_base: Option<StateId>,
+        fold_default_visibility: bool,
+        lineage: Vec<ChangeLineage>,
     ) -> Result<State> {
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
@@ -785,6 +831,10 @@ impl Repository {
 
         if let Some(confidence) = confidence {
             state = state.with_confidence(confidence);
+        }
+
+        if !lineage.is_empty() {
+            state = state.with_lineage(lineage);
         }
 
         let ours_state = self
@@ -839,14 +889,14 @@ impl Repository {
         // behavior — a plain record-first commit (heddle#354 r8).
         if fold_default_visibility {
             self.commit_snapshot_atomic_with_capture_visibility(
-                &state.change_id,
+                &state.id(),
                 Some(first_parent),
                 thread.as_ref(),
                 true,
             )?;
         } else {
             self.commit_snapshot_atomic_with_records(
-                &state.change_id,
+                &state.id(),
                 Some(first_parent),
                 thread.as_ref(),
                 Vec::new(),
@@ -890,11 +940,8 @@ fn refresh_materialized_thread_manifest(
         return;
     }
 
-    let mut refreshed = crate::thread_manifest::ThreadManifest::new(
-        state.change_id,
-        state.tree,
-        original.worktree_path,
-    );
+    let mut refreshed =
+        crate::thread_manifest::ThreadManifest::new(state.id(), state.tree, original.worktree_path);
     if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
         repo,
         tree,

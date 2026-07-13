@@ -224,7 +224,7 @@ fn extract_body(source: &[u8], start_line: u32, end_line: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{ChangeId, DiscussionResolution, DiscussionTurn};
+    use objects::object::{DiscussionResolution, DiscussionTurn, StateId};
 
     use super::*;
 
@@ -232,7 +232,7 @@ mod tests {
         Discussion {
             id: id.to_string(),
             anchor: SymbolAnchor::new(file, symbol),
-            opened_against_state: ChangeId::from_bytes([1; 16]),
+            opened_against_state: StateId::from_bytes([1; 32]),
             opened_at: 1_700_000_000,
             thread_ref: None,
             turns: vec![DiscussionTurn {

@@ -7,16 +7,38 @@ use objects::{
     fs_atomic::{sync_directory, temp_path, write_file_atomic},
     fs_ops::remove_path_recursively,
     lock::RepoLock,
-    object::{ChangeId, ContentHash},
+    object::ContentHash,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{Repository, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StashId([u8; 16]);
+
+impl StashId {
+    fn generate() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(
+            &chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .to_le_bytes(),
+        );
+        hasher.update(&NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        Self(bytes)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StashEntry {
     pub index: usize,
-    pub change_id: ChangeId,
+    pub stash_id: StashId,
     pub tree_hash: String,
     pub parent_tree_hash: String,
     pub message: Option<String>,
@@ -52,11 +74,11 @@ impl StashManager {
         let _lock = self.write_lock()?;
         let stashes = self.list_unlocked()?;
 
-        let change_id = ChangeId::generate();
+        let stash_id = StashId::generate();
 
         let entry = StashEntry {
             index: stashes.len(),
-            change_id,
+            stash_id,
             tree_hash: tree_hash.to_string(),
             parent_tree_hash,
             message,
@@ -250,14 +272,14 @@ mod tests {
             .unwrap();
 
         let removed = manager.drop().unwrap().unwrap();
-        assert_eq!(removed.change_id, third.change_id);
+        assert_eq!(removed.stash_id, third.stash_id);
 
         let remaining = manager.list().unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].index, 0);
-        assert_eq!(remaining[0].change_id, first.change_id);
+        assert_eq!(remaining[0].stash_id, first.stash_id);
         assert_eq!(remaining[1].index, 1);
-        assert_eq!(remaining[1].change_id, second.change_id);
+        assert_eq!(remaining[1].stash_id, second.stash_id);
 
         let temp_entries = fs::read_dir(&manager.stash_dir)
             .unwrap()
@@ -286,17 +308,17 @@ mod tests {
 
         let applied = manager
             .pop_with(|stash| {
-                assert_eq!(stash.change_id, second.change_id);
+                assert_eq!(stash.stash_id, second.stash_id);
                 Ok(())
             })
             .unwrap()
             .unwrap();
-        assert_eq!(applied.change_id, second.change_id);
+        assert_eq!(applied.stash_id, second.stash_id);
 
         let remaining = manager.list().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].index, 0);
-        assert_eq!(remaining[0].change_id, first.change_id);
+        assert_eq!(remaining[0].stash_id, first.stash_id);
     }
 
     #[test]
@@ -335,7 +357,7 @@ mod tests {
         assert_eq!(indices, (0..8).collect::<Vec<_>>());
 
         let change_ids: std::collections::HashSet<_> =
-            stashes.iter().map(|entry| entry.change_id).collect();
+            stashes.iter().map(|entry| entry.stash_id).collect();
         assert_eq!(change_ids.len(), 8);
     }
 }
