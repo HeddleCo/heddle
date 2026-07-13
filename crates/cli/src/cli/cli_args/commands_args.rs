@@ -8,9 +8,9 @@ use super::commands_git_projection::SyncCommands;
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle init                                  # initialize the current directory
-  heddle init my-project                       # initialize a subdirectory
-  heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
+  heddle init                                                    # initialize here; existing Git becomes Git Overlay
+  heddle init my-project                                         # initialize a native Heddle subdirectory
+  heddle init --principal-name 'Ada Lovelace' --principal-email ada@example.com
 ")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
@@ -45,17 +45,17 @@ pub struct InitArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # convert all local Git refs into native Heddle storage
-  heddle adopt --ref main                     # convert one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # convert selected refs in another repo
+  heddle adopt                                # import all local Git refs into Heddle state history
+  heddle adopt --ref main                     # import one branch or tag
+  heddle adopt ../repo --ref main --ref v1.0  # import selected refs in another repo
 
-Adoption converts Git history metadata into Heddle-native storage without modifying existing Git worktree changes.
+Adoption imports Git refs into Heddle state history without modifying existing Git worktree changes or changing Git Overlay authority. Normal Git Overlay setup uses `heddle init` instead.
 ")]
 pub struct AdoptArgs {
-    /// Git repository to convert into Heddle-native storage (default: current directory).
+    /// Git repository to import into Heddle state history (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to convert. Repeat to convert selected refs; omit to convert all refs.
+    /// Git branch or tag to import. Repeat to import selected refs; omit to import all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }

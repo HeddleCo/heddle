@@ -1101,7 +1101,7 @@ impl Repository {
         // Git-overlay treats Git refs and commits as Git-owned storage that
         // Heddle reads directly. Missing Git->Heddle state mappings are not an
         // everyday "needs adopt" condition; `adopt` is reserved for explicit
-        // conversion into Heddle-native storage.
+        // import into Heddle state history.
         Ok(None)
     }
 

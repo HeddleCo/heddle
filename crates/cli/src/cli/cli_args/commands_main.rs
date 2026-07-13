@@ -32,14 +32,14 @@ pub enum FsckRepairTarget {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new Heddle repository.
+    /// Initialize Heddle in a directory or existing Git checkout.
     Init(InitArgs),
 
-    /// Convert Git history into Heddle-native storage.
+    /// Import Git refs into Heddle state history.
     ///
-    /// Git-overlay repos normally keep Git commits in `.git` and Heddle
-    /// metadata in `.heddle`. Use `adopt` only when you explicitly want a
-    /// Git-backed checkout converted into native Heddle storage.
+    /// Git Overlay is the normal existing-Git mode: Git keeps source objects,
+    /// refs, index, and worktree state while Heddle stores metadata in
+    /// `.heddle`. `adopt` adds Heddle state history without changing that authority.
     Adopt(AdoptArgs),
 
     /// Curated, progressive-disclosure help.

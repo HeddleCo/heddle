@@ -32,6 +32,7 @@ pub mod maintenance_plan;
 pub mod marker_plan;
 pub mod merge;
 pub mod monitor_plan;
+pub mod onboarding;
 pub mod oplog_plan;
 pub mod oss_plan;
 pub mod prove_plan;
@@ -199,6 +200,10 @@ pub use merge::{
 pub use objects::{
     CollectingWarnings, HeddleError, NoopProgress, NoopWarnings, ProgressEvent, ProgressSink,
     TaskId, Warning, WarningSink,
+};
+pub use onboarding::{
+    OnboardingAction, OnboardingFacts, OnboardingMode, OnboardingPlan, OnboardingRepositoryState,
+    plan_repository_onboarding,
 };
 pub use oplog_plan::{
     OPLOG_RECOVER_DEFAULT_STRATEGY, OplogRecoverFacts, OplogRecoverStatus,

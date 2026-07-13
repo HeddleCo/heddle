@@ -312,16 +312,19 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
 
     if output.initialized {
         println!(
-            "{} Heddle imported the requested Git history",
+            "{} imported the requested Git history into Heddle state history",
             style::ok_marker()
         );
     } else if output.already_in_sync {
         println!(
-            "{} Heddle already adopted this Git repo; history is in sync",
+            "{} Git history is already imported into Heddle state history",
             style::ok_marker()
         );
     } else {
-        println!("{} imported Git history into Heddle", style::ok_marker());
+        println!(
+            "{} imported Git history into Heddle state history",
+            style::ok_marker()
+        );
     }
     println!(
         "  {}",

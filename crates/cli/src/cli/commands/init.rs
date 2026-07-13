@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use heddle_core::{
-    InitPrincipalPlan, init_side_effects as core_init_side_effects, resolve_absolute_path,
+    InitPrincipalPlan, OnboardingFacts, OnboardingMode,
+    init_side_effects as core_init_side_effects, plan_repository_onboarding, resolve_absolute_path,
     select_init_principal,
 };
 use objects::object::Principal;
@@ -78,42 +79,50 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     info!(path = %path.display(), "Initializing repository");
 
-    // If the directory already has a `.git` (or is inside one), leave the
-    // `main` thread unseeded: the user almost certainly wants to import from
-    // Git next, and pre-seeding would make `main` point at a throwaway
-    // empty-tree snapshot. Otherwise, seed `main` so the repo is immediately
-    // usable for snapshot/history/etc.
-    let has_git = SleyRepository::discover(&path).is_ok();
-
-    let repo = if has_git {
-        Repository::bootstrap_git_overlay(&path)?
-    } else {
-        Repository::init_default(&path)?
-    };
-
-    debug!(heddle_dir = %repo.heddle_dir().display(), "Repository initialized");
-
-    let installed_heddleignore = false;
-
     let mut user_config = UserConfig::load_default()?;
-    let mut principal_configured = false;
-    if args.principal_name.is_some() || args.principal_email.is_some() {
-        let name = args.principal_name.clone().ok_or_else(|| {
-            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
-                "--principal-name"
-            ))
-        })?;
-        let email = args.principal_email.clone().ok_or_else(|| {
-            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
+    let principal = match (args.principal_name.clone(), args.principal_email.clone()) {
+        (Some(name), Some(email)) => Some((name, email)),
+        (Some(_), None) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
                 "--principal-email"
             ))
-        })?;
+        }
+        (None, Some(_)) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
+                "--principal-name"
+            ))
+        }
+        (None, None) => None,
+    };
+    let mut principal_configured = false;
+    if let Some((name, email)) = principal {
         user_config.set_principal(name.clone(), email.clone());
         let config_path = user_config.save_default()?;
         info!(principal_name = %name, principal_email = %email, "Principal configured");
         debug!(config_path = %config_path.display(), "User config updated");
         principal_configured = true;
     }
+
+    let git = SleyRepository::discover(&path).ok();
+    let onboarding = plan_repository_onboarding(OnboardingFacts {
+        git_worktree: git.is_some(),
+        git_has_commits: git
+            .as_ref()
+            .and_then(|repo| repo.head().ok())
+            .and_then(|head| head.oid)
+            .is_some(),
+        heddle_mode: None,
+    });
+    let has_git = onboarding.mode == OnboardingMode::GitOverlay;
+
+    let repo = match onboarding.mode {
+        OnboardingMode::GitOverlay => Repository::bootstrap_git_overlay(&path)?,
+        OnboardingMode::Native => Repository::init_default(&path)?,
+    };
+
+    debug!(heddle_dir = %repo.heddle_dir().display(), "Repository initialized");
+
+    let installed_heddleignore = false;
 
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 

@@ -14,8 +14,8 @@ use serde::{Serialize, Serializer};
 use sley::{Repository as SleyRepository, ShortStatusOptions, StatusUntrackedMode, StreamControl};
 
 use crate::{
-    ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract,
-    schema_for_report,
+    ExecutionContext, HeddleReport, MachineOutputKind, OnboardingFacts, OutputDiscriminator,
+    ReportContract, plan_repository_onboarding, schema_for_report,
     status::{
         RepositoryVerificationHealth, build_repository_verification_health_with_worktree_status,
         default_remote_name, git_default_remote_name_from_repo,
@@ -361,9 +361,17 @@ pub fn build_plain_git_verification_probe_with_machine_contract(
     let git_branches = plain_git_local_branches(&git_repo);
     let git_tags = plain_git_local_tags(&git_repo);
     let changes = plain_git_worktree_status(&git_repo)?;
+    let onboarding = plan_repository_onboarding(OnboardingFacts {
+        git_worktree: true,
+        git_has_commits: git_repo.head().ok().and_then(|head| head.oid).is_some(),
+        heddle_mode: None,
+    });
 
     let default_remote = git_default_remote_name_from_repo(&git_repo);
-    let setup_action = "heddle init".to_string();
+    let setup_action = onboarding
+        .recommended_command()
+        .expect("plain Git without Heddle metadata requires onboarding")
+        .to_string();
     let recovery_commands = vec![setup_action.clone()];
     let machine_contract_coverage = machine_contract_input.coverage.clone();
     let mut details = BTreeMap::new();
@@ -379,6 +387,10 @@ pub fn build_plain_git_verification_probe_with_machine_contract(
         git_branches.len().to_string(),
     );
     details.insert("git_tag_count".to_string(), git_tags.len().to_string());
+    details.insert(
+        "onboarding_state".to_string(),
+        onboarding.state.as_str().to_string(),
+    );
 
     let mut checks = vec![
         VerificationCheck {
@@ -407,7 +419,7 @@ pub fn build_plain_git_verification_probe_with_machine_contract(
             name: "Mapping".to_string(),
             status: "git_backed".to_string(),
             clean: true,
-            summary: "Git refs will stay in Git storage after Heddle initialization".to_string(),
+            summary: onboarding.storage_summary().to_string(),
             recommended_action: None,
             recommended_action_template: None,
             recovery_commands: Vec::new(),

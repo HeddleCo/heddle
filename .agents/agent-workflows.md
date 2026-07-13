@@ -4,7 +4,7 @@
 
 - Prefer `--output json` for automation.
 - Treat text output as human-facing and unstable.
-- `auto` switches to JSON when stdout is not a TTY.
+- Text is the default even when stdout is piped; pass `--output json` or `--output json-compact` explicitly.
 
 ## Attribution
 
