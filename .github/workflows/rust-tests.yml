@@ -57,7 +57,7 @@ jobs:
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   release_only — every changed path is release/publish workflow plumbing.
-  #   rust      — !docs_only && !release_only; gates check-and-test / postgres / CLI fault-injection.
+  #   rust      — !docs_only && !release_only; gates quality / compile contracts / postgres / CLI fault-injection.
   #   coverage  — weekly/manual instrumented coverage gate; skipped on PR/push.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   #   cargo_package_args — selected Cargo package arguments for the main Rust lane.
@@ -251,12 +251,12 @@ jobs:
           write_bool repo_fault repo_needed
           write_bool fault_tests fault_needed
 
-  # Single sequential job: build once, then clippy + test + feature-checks
-  # all reuse the same `target/` directory. Avoids the 4-jobs-each-doing-a-
-  # cold-build pattern; total compute time drops ~70% at the cost of less
-  # parallelism in wall-clock terms.
-  check-and-test:
-    name: Check & test
+  # Default-feature quality lane. Build, clippy, tests, and executable-backed
+  # CLI contracts share one `target/`; independent benchmark and alternate-
+  # feature compile contracts run in parallel below so they do not extend this
+  # job's critical path or invalidate its default-feature artifacts.
+  quality:
+    name: Quality
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
@@ -312,26 +312,66 @@ jobs:
 
       - name: No affected Rust packages
         if: needs.changes.outputs.skip_cargo == 'true'
-        run: echo "No affected Rust packages selected; running script and benchmark checks only."
+        run: echo "No affected Rust packages selected; running script-only checks."
 
-      # 3a. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
-      #     is only as honest as the compare script; these tests pin the
-      #     "missing or corrupt estimates fail closed" contract (Codex r1
-      #     P1 on heddle#89). Plain `unittest`, no third-party deps.
+      # Unit tests for `scripts/fuse-bench-compare.py`. The perf gate is only
+      # as honest as the compare script; these tests pin the "missing or
+      # corrupt estimates fail closed" contract (Codex r1 P1 on heddle#89).
+      # Plain `unittest`, no third-party deps.
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      # 3b. Compile every workspace benchmark target in the dev profile
-      #     without running the measurements. The weekly benchmark workflow
-      #     owns optimized performance trend tracking and shares the same
-      #     discovery helper. This cheap PR-safe guard catches rotten bench
-      #     code and Cargo.toml `[[bench]]` entries before they land,
-      #     including non-default required features.
-      #     Invariant: every target enumerated by `discover-benches.py` is
-      #     compile-checked by a PR-time gate. Non-FUSE benches are checked
-      #     here; FUSE benches are compile-checked by `fuse-smoke` when
-      #     mount-relevant paths change because that job already installs
-      #     libfuse.
+      # Verify the default install produces `heddle-fuse-worker` before any
+      # alternate-feature compilation can replace default artifacts in this
+      # job's target directory. The sibling lookup in
+      # `mount::worker::default_worker_binary` depends on both binaries being
+      # installed together; otherwise Linux mounts silently fall back to NFS.
+      - name: Default install ships mount worker
+        if: needs.changes.outputs.cli_checks == 'true'
+        run: bash scripts/check-default-install-ships-worker.sh
+
+      # Assert `heddle doctor schemas` reports no drift between the
+      # generated schema mirrors and the documented `--output json`
+      # samples in `docs/json-schemas.md`. IMPROVEMENT_PLAN §7's DoD
+      # requires this surface stay clean after any Principal/output-
+      # boundary change (heddle#593); the script builds `heddle` from
+      # this checkout, runs `doctor schemas`, and propagates its
+      # non-zero exit on drift (heddle#605).
+      - name: Doctor schemas drift gate
+        if: needs.changes.outputs.cli_checks == 'true'
+        run: bash scripts/check-doctor-schemas-clean.sh
+
+      - name: sccache stats
+        run: sccache --show-stats
+
+  # Independent compile-only contracts. These intentionally use a separate
+  # target directory/job from the default quality lane: alternate CLI feature
+  # checks otherwise force Cargo to rebuild the default binaries, and benchmark
+  # linking is independent of the test runtime. FUSE benchmarks remain owned
+  # by `fuse-smoke`, whose runner has the required system libraries.
+  compile-contracts:
+    name: Compile contracts
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compile-contracts-${{ runner.os }}
+          cache-on-failure: true
+
+      # Compile every selected non-FUSE benchmark target in the dev profile
+      # without running measurements. The scheduled benchmark workflow owns
+      # optimized performance trends; this PR-safe link guard catches rotten
+      # bench code, Cargo target declarations, and non-default feature sets.
       - name: Compile benchmark targets
         env:
           AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
@@ -369,71 +409,15 @@ jobs:
             echo "No non-FUSE benchmark targets selected."
           fi
 
-      # 3c. Compile gate for the `postgres` storage backends used by hosted /
-      #     weft code. This is the silent-rot guard: these backends are not
-      #     exercised by the default-feature build above, so a server-path
-      #     regression (e.g. a backend that wasn't updated after a newtype
-      #     migration) compiles fine on the OSS build and lands undetected.
-      #     heddle#259 hit exactly this — `PgRefBackend` rotted after the
-      #     `ThreadName`/`MarkerName` migration. Build + clippy need no DB;
-      #     the integration tests live in the separate `postgres-tests` job.
-      - name: Build and clippy postgres storage backends
-        if: needs.changes.outputs.postgres == 'true'
-        env:
-          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
-          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
-        run: |
-          set -euo pipefail
-          selected=",$AFFECTED_PACKAGES,"
-          packages=()
-          features=()
-
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
-            packages+=(-p heddle-refs)
-            features+=(heddle-refs/postgres)
-          fi
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
-            packages+=(-p heddle-oplog)
-            features+=(heddle-oplog/postgres)
-          fi
-
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "Skipping postgres backend compile checks; refs/oplog not affected."
-            exit 0
-          fi
-
-          feature_arg=$(IFS=,; echo "${features[*]}")
-          cargo build --locked "${packages[@]}" --tests --features "$feature_arg"
-          cargo clippy --locked "${packages[@]}" --all-targets --features "$feature_arg" -- -D warnings
-
-      # 4. Verify the OSS build flavors compile. `cargo check` is fast on
-      #    a warm cache; the feature-delta from defaults is small.
-      #    Keep these scoped to `heddle-cli`; other package changes are covered
-      #    by the selected build/clippy/test block above.
-      - name: CLI feature and install checks
+      # Verify the three supported OSS/hosted CLI feature shapes without
+      # invalidating the default-feature binaries used by the quality lane.
+      - name: CLI alternate-feature checks
         if: needs.changes.outputs.cli_checks == 'true'
         run: |
           set -euo pipefail
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
           cargo check --locked -p heddle-cli --features client
-          # Assert the default `cargo install -p heddle-cli` flow produces
-          # `heddle-fuse-worker` so the sibling-binary lookup in
-          # `mount::worker::default_worker_binary` resolves on a stock
-          # install; otherwise Linux mounts silently fall back to NFS
-          # (heddle#190 r5 / Codex PR #225 P2).
-          bash scripts/check-default-install-ships-worker.sh
-
-      # Assert `heddle doctor schemas` reports no drift between the
-      # generated schema mirrors and the documented `--output json`
-      # samples in `docs/json-schemas.md`. IMPROVEMENT_PLAN §7's DoD
-      # requires this surface stay clean after any Principal/output-
-      # boundary change (heddle#593); the script builds `heddle` from
-      # this checkout, runs `doctor schemas`, and propagates its
-      # non-zero exit on drift (heddle#605).
-      - name: Doctor schemas drift gate
-        if: needs.changes.outputs.cli_checks == 'true'
-        run: bash scripts/check-doctor-schemas-clean.sh
 
       - name: sccache stats
         run: sccache --show-stats
@@ -441,12 +425,12 @@ jobs:
   # Postgres integration tests. The `postgres` feature is the server /
   # weft code path (`PgRefBackend`, `PgOpLogBackend`); its `#[ignore]`-gated
   # tests (`crates/refs/.../pg_refs.rs`, `crates/oplog/.../pg_oplog.rs`) need
-  # a reachable database. A `postgres:16` service container provides one and
+  # a reachable database. A `postgres:18` service container provides one and
   # `DATABASE_URL` points the test setup at it — without that env var the
   # tests fall back to an unreachable placeholder (port 1), so a plain
-  # `cargo test` stays hermetic and DB-free. The compile-rot class is
-  # already caught by the build+clippy steps in `check-and-test`; this job
-  # additionally exercises the runtime bridge against a live server.
+  # `cargo test` stays hermetic and DB-free. This job owns both the live
+  # round-trip and the postgres-feature clippy gate so the backend is compiled
+  # once, outside the default quality lane.
   postgres-tests:
     name: Postgres integration tests
     needs: changes
@@ -471,6 +455,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -519,8 +505,77 @@ jobs:
           cargo test --locked "${packages[@]}" --features "$feature_arg" \
             -- --ignored --test-threads=1 --nocapture
 
+          echo "::group::cargo clippy postgres storage backends"
+          cargo clippy --locked "${packages[@]}" --all-targets \
+            --features "$feature_arg" -- -D warnings
+          echo "::endgroup::"
+
       - name: sccache stats
         run: sccache --show-stats
+
+  # Preserve the repository ruleset's required `Check & test` context while
+  # allowing its independent prerequisites to execute in parallel. A moved
+  # compile contract must remain blocking, not become an advisory side job.
+  check-and-test:
+    name: Check & test
+    needs:
+      - changes
+      - quality
+      - compile-contracts
+      - postgres-tests
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every extracted quality gate
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          COMPILE_CONTRACTS_RESULT: ${{ needs.compile-contracts.result }}
+          POSTGRES_REQUIRED: ${{ needs.changes.outputs.postgres }}
+          POSTGRES_RESULT: ${{ needs.postgres-tests.result }}
+        run: |
+          set -euo pipefail
+          require_success() {
+            local name=$1
+            local result=$2
+            if [ "$result" != "success" ]; then
+              echo "ERROR: $name finished with result '$result'" >&2
+              exit 1
+            fi
+          }
+
+          allow_success_or_skipped() {
+            local name=$1
+            local result=$2
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "ERROR: $name finished with result '$result'" >&2
+              exit 1
+            fi
+          }
+
+          require_success "Detect changed paths" "$CHANGES_RESULT"
+          case "$RUST_REQUIRED" in
+            true)
+              require_success "Quality" "$QUALITY_RESULT"
+              require_success "Compile contracts" "$COMPILE_CONTRACTS_RESULT"
+              if [ "$POSTGRES_REQUIRED" = "true" ]; then
+                require_success "Postgres integration tests" "$POSTGRES_RESULT"
+              else
+                allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT"
+              fi
+              ;;
+            false)
+              allow_success_or_skipped "Quality" "$QUALITY_RESULT"
+              allow_success_or_skipped "Compile contracts" "$COMPILE_CONTRACTS_RESULT"
+              allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT"
+              ;;
+            *)
+              echo "ERROR: Detect changed paths produced unknown rust selection '$RUST_REQUIRED'" >&2
+              exit 1
+              ;;
+          esac
 
   # CLI crash-recovery / atomicity tests. These are `#[ignore]` because they
   # spawn child `heddle` processes with `HEDDLE_FAULT_INJECT` armed, so the
