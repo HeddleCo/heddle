@@ -20,7 +20,7 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        Action, ActionId, Attribution, Blob, ChangeId, ContentHash, Principal, State, ThreadName,
+        Action, ActionId, Attribution, Blob, ContentHash, Principal, State, StateId, ThreadName,
         Tree, TreeEntry,
     },
     store::{ObjectStore, ShallowInfo},
@@ -239,7 +239,7 @@ fn mount_with_gitlink() -> (TempDir, ContentAddressedMount, GitObjectId) {
     );
     repo.store().put_state(&state).unwrap();
     repo.refs()
-        .set_thread(&ThreadName::new("main"), &state.change_id)
+        .set_thread(&ThreadName::new("main"), &state.state_id)
         .unwrap();
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
     (temp, mount, target)
@@ -411,10 +411,10 @@ fn mount_with_seed(path: &str, content: &[u8]) -> (TempDir, ContentAddressedMoun
     (temp, mount)
 }
 
-/// Read the blob bytes for `path` from the captured tree at `change_id`.
-fn read_captured_blob(mount: &ContentAddressedMount, change_id: &ChangeId, path: &str) -> Vec<u8> {
+/// Read the blob bytes for `path` from the captured tree at `state_id`.
+fn read_captured_blob(mount: &ContentAddressedMount, state_id: &StateId, path: &str) -> Vec<u8> {
     let store = mount.repo_handle().store();
-    let state = store.get_state(change_id).unwrap().unwrap();
+    let state = store.get_state(state_id).unwrap().unwrap();
     let mut tree = store.get_tree(&state.tree).unwrap().unwrap();
     let comps: Vec<&str> = std::path::Path::new(path)
         .components()
@@ -702,16 +702,16 @@ impl ObjectStore for CountingStore {
     fn has_tree(&self, hash: &ContentHash) -> objects::store::Result<bool> {
         self.inner.has_tree(hash)
     }
-    fn get_state(&self, id: &ChangeId) -> objects::store::Result<Option<State>> {
+    fn get_state(&self, id: &StateId) -> objects::store::Result<Option<State>> {
         self.inner.get_state(id)
     }
     fn put_state(&self, state: &State) -> objects::store::Result<()> {
         self.inner.put_state(state)
     }
-    fn has_state(&self, id: &ChangeId) -> objects::store::Result<bool> {
+    fn has_state(&self, id: &StateId) -> objects::store::Result<bool> {
         self.inner.has_state(id)
     }
-    fn list_states(&self) -> objects::store::Result<Vec<ChangeId>> {
+    fn list_states(&self) -> objects::store::Result<Vec<StateId>> {
         self.inner.list_states()
     }
     fn get_action(&self, id: &ActionId) -> objects::store::Result<Option<Action>> {
@@ -1079,7 +1079,7 @@ fn capture_builds_state_and_advances_thread() {
     let alpha_oid = mount.warm_blob("alpha.txt").unwrap();
     let beta_oid = mount.warm_blob("beta.txt").unwrap();
 
-    let prior_head = mount.current_change_id();
+    let prior_head = mount.current_state_id();
     let new_id = mount.capture(Some("two files".to_string())).unwrap();
     assert_ne!(new_id, prior_head, "capture should advance the thread");
 
@@ -1122,7 +1122,7 @@ fn capture_builds_state_and_advances_thread() {
     assert_eq!(head, new_id);
 }
 
-fn dig_state(mount: &ContentAddressedMount, id: &ChangeId) -> Option<State> {
+fn dig_state(mount: &ContentAddressedMount, id: &StateId) -> Option<State> {
     mount.repo_handle().store().get_state(id).ok().flatten()
 }
 
@@ -2949,9 +2949,9 @@ mod write_ops {
         // observable. A leak shows up as Executable at the new
         // path; the contract says Normal.
         mount.flush(fresh.node).expect("flush fresh");
-        let change_id = mount.capture(Some("orphan chmod".into())).unwrap();
+        let state_id = mount.capture(Some("orphan chmod".into())).unwrap();
         let store = mount.repo_handle().store();
-        let state = store.get_state(&change_id).unwrap().unwrap();
+        let state = store.get_state(&state_id).unwrap().unwrap();
         let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
         let entry = root_tree.get("hello.txt").expect("recreated file in tree");
         assert!(
@@ -3507,10 +3507,10 @@ mod write_ops {
             .invalidate(entry.node)
             .expect("invalidate (kernel forget)");
 
-        let change_id = mount
+        let state_id = mount
             .capture(Some("post-invalidate capture".into()))
             .expect("capture");
-        let bytes = read_captured_blob(&mount, &change_id, "durable");
+        let bytes = read_captured_blob(&mount, &state_id, "durable");
         assert_eq!(
             &bytes[..],
             b"DURABLE-WARM",
@@ -3702,10 +3702,10 @@ mod write_ops {
         // Capture must plant v2's bytes. Pre-fix the by_path binding is
         // wiped → apply_pending_to_tree's path check skips v2 → captured
         // tree is missing scratch.
-        let change_id = mount
+        let state_id = mount
             .capture(Some("post-forget capture".into()))
             .expect("capture");
-        let captured = read_captured_blob(&mount, &change_id, "scratch");
+        let captured = read_captured_blob(&mount, &state_id, "scratch");
         assert_eq!(
             &captured[..],
             b"v2-bytes",
