@@ -119,7 +119,12 @@ fn agent_capture_and_ready_require_authenticated_writer_authority() {
         ],
     )
     .unwrap();
-    assert!(capture_output.status.success());
+    assert!(
+        capture_output.status.success(),
+        "authenticated capture should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&capture_output.stdout),
+        String::from_utf8_lossy(&capture_output.stderr)
+    );
     let capture: Value = serde_json::from_slice(&capture_output.stdout).unwrap();
     assert_eq!(capture["intent"], "authenticated capture");
     assert!(capture["state_id"].as_str().unwrap().starts_with("hs-"));

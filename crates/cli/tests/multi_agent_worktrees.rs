@@ -88,6 +88,8 @@ fn heddle_output_with_env(
 ) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(args);
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
