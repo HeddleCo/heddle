@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
@@ -29,7 +30,6 @@ use sley::{
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
-use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference};
 
 pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     if !batches_have_git_checkpoint(batches) {
@@ -1185,9 +1185,8 @@ fn apply_git_checkpoint_undo(
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
             let previous = previous.to_string();
-            let new_git_oid = new_git_oid.to_string();
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                update_mirror_branch_ref(repo, branch, Some(&previous), Some(&new_git_oid))
+                reconcile_mirror_branch_ref(repo, branch, Some(&previous))
             })?;
         }
         None => {
@@ -1200,9 +1199,8 @@ fn apply_git_checkpoint_undo(
                     )
                 })?;
             }
-            let new_git_oid = new_git_oid.to_string();
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                update_mirror_branch_ref(repo, branch, None, Some(&new_git_oid))
+                reconcile_mirror_branch_ref(repo, branch, None)
             })?;
         }
     }
@@ -1258,24 +1256,17 @@ fn apply_git_checkpoint_redo(
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
-    let previous_git_oid = previous_git_oid.map(|previous| previous.to_string());
     let new_git_oid = new_git_oid.to_string();
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
-        update_mirror_branch_ref(
-            repo,
-            branch,
-            Some(&new_git_oid),
-            previous_git_oid.as_deref(),
-        )
+        reconcile_mirror_branch_ref(repo, branch, Some(&new_git_oid))
     })?;
     Ok(())
 }
 
-fn update_mirror_branch_ref(
+fn reconcile_mirror_branch_ref(
     repo: &Repository,
     branch: &str,
     target_oid: Option<&str>,
-    expected_old_oid: Option<&str>,
 ) -> Result<()> {
     if branch == "HEAD" {
         return Ok(());
@@ -1291,16 +1282,8 @@ fn update_mirror_branch_ref(
     {
         return Ok(());
     }
-    match (target_oid, expected_old_oid) {
-        (Some(target), Some(expected)) => set_reference(
-            &git,
-            &ref_name,
-            parse_git_oid(target)?,
-            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(parse_git_oid(expected)?)),
-            "heddle: update mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        (Some(target), None) => set_reference(
+    match target_oid {
+        Some(target) => set_reference(
             &git,
             &ref_name,
             parse_git_oid(target)?,
@@ -1308,10 +1291,7 @@ fn update_mirror_branch_ref(
             "heddle: update mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
-        (None, Some(expected)) => {
-            delete_reference_matching(&git, &ref_name, Some(parse_git_oid(expected)?))
-        }
-        (None, None) => delete_reference_matching(&git, &ref_name, None),
+        None => delete_reference_matching(&git, &ref_name, None),
     }
 }
 

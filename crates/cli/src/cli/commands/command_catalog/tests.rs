@@ -1689,6 +1689,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "undo",
             "undo",
             "undo",
+            "undo",
         ]
     );
 }

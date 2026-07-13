@@ -6,7 +6,7 @@ status: accepted
 
 Repository Source Authority determines which storage and transport adapter executes a source operation. The Heddle command surface stays consistent across authorities where the semantics are shared.
 
-In Git Overlay, the real `.git` is authoritative for commits, refs, packs, index, and worktree state. Sley executes `clone`, `commit`, `pull`, `push`, and `remote` directly against it. Heddle metadata remains in `.heddle`. Normal overlay operations neither create nor use `.heddle/git` and do not depend on the `git` executable. Legacy and explicit native Git Projection maintenance can still use the Bridge Mirror while ADR 0042's retirement work remains incomplete.
+In Git Overlay, the real `.git` is authoritative for commits, refs, packs, index, and worktree state. Sley executes `clone`, `commit`, `pull`, `push`, and `remote` directly against it. Heddle metadata remains in `.heddle`, and no operation depends on the `git` executable. The retained `.heddle/git` Bridge Mirror is an internal projection cache used by explicit projection and maintenance paths such as undo, gc, fsck, log, and reason; it is not authority and remains scheduled for retirement under ADR 0042.
 
 `capture` records the granular Heddle state, provenance, and coordination metadata. `commit` then records captured source history in `.git`. `land` projects a managed thread into the same authoritative Git store. Remote verbs use Sley configuration and streaming transport.
 

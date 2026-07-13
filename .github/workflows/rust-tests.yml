@@ -303,6 +303,13 @@ jobs:
           cargo test --locked "${package_args[@]}"
           echo "::endgroup::"
 
+      - name: Human and agent CLI cold flows
+        if: needs.changes.outputs.cli_checks == 'true'
+        run: |
+          set -euo pipefail
+          HEDDLE_BIN="$PWD/target/debug/heddle" bash scripts/verify-cold-flow-human.sh
+          HEDDLE_BIN="$PWD/target/debug/heddle" bash scripts/verify-cold-flow-agent.sh
+
       - name: No affected Rust packages
         if: needs.changes.outputs.skip_cargo == 'true'
         run: echo "No affected Rust packages selected; running script and benchmark checks only."

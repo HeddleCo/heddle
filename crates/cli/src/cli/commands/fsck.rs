@@ -160,11 +160,10 @@ fn repair_git_ref(
     prefer: &str,
     preview: bool,
 ) -> Result<Vec<FsckRepair>> {
+    use heddle_git_projection::git_ingest::import_git_history;
     use ingest::ImportOptions;
     use objects::object::ThreadName;
     use refs::Head;
-
-    use heddle_git_projection::git_ingest::import_git_history;
 
     if preview {
         return Ok(vec![FsckRepair {

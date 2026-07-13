@@ -1394,17 +1394,17 @@ pub fn merge_thread_into_current_with_machine_contract(
                         error = %err,
                         state = %new_state.state_id.short(),
                         git_commit = %info.sha,
-                        "git commit succeeded after heddle merge, but checkpoint metadata recording failed"
+                        "git commit succeeded after Heddle integration, but Git metadata recording failed"
                     );
                     post_snapshot_git_blockers.push(format!(
-                        "git commit {} was written for Heddle merge {}, but checkpoint metadata recording failed: {}",
+                        "git commit {} was written for integrated Heddle state {}, but Git metadata recording failed: {}",
                         info.sha,
                         new_state.state_id.short(),
                         err
                     ));
                     post_snapshot_git_blockers.push(format!(
-                        "recovery: Heddle merge state {} and Git commit {} are intact; run `heddle verify` \
-                         and use its primary recovery command before undoing this merge",
+                        "recovery: integrated Heddle state {} and Git commit {} are intact; run `heddle verify` \
+                         and use its primary recovery command before undoing this integration",
                         new_state.state_id.short(),
                         info.sha
                     ));
@@ -1414,15 +1414,15 @@ pub fn merge_thread_into_current_with_machine_contract(
                 tracing::warn!(
                     error = %err,
                     state = %new_state.state_id.short(),
-                    "git commit failed after heddle merge state was written"
+                    "git commit failed after the integrated Heddle state was written"
                 );
                 post_snapshot_git_blockers.push(format!(
-                    "git commit failed after heddle merge {} landed: {}",
+                    "git commit failed after Heddle integration state {} landed: {}",
                     new_state.state_id.short(),
                     err
                 ));
                 post_snapshot_git_blockers.push(format!(
-                    "recovery: heddle merge state {} is intact; resolve the Git checkout issue \
+                    "recovery: integrated Heddle state {} is intact; resolve the Git checkout issue \
                      (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run the integration",
                     new_state.state_id.short(),
                     merge_message
@@ -1760,9 +1760,8 @@ fn validate_git_commit_preconditions_extended(
     let mut blockers = Vec::new();
 
     if merge_paths.is_empty() {
-        blockers.push(
-            "integration produced no changed paths — no Git commit is needed".to_string(),
-        );
+        blockers
+            .push("integration produced no changed paths — no Git commit is needed".to_string());
     }
 
     if !repo_root.join(".git").exists() {

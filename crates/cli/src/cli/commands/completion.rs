@@ -88,7 +88,7 @@ __heddle_thread_value_position() {
             ;;
     esac
     case "${COMP_WORDS[1]}" in
-        start|switch|merge) [ "$COMP_CWORD" -eq 2 ] && return 0 ;;
+        start) [ "$COMP_CWORD" -eq 2 ] && return 0 ;;
     esac
     if [ "${COMP_WORDS[1]}" = "thread" ]; then
         case "${COMP_WORDS[2]}" in
@@ -148,7 +148,7 @@ __heddle_thread_value_position() {
             ;;
     esac
     case "${words[2]}" in
-        start|switch|merge) [[ "$CURRENT" -eq 3 ]] && return 0 ;;
+        start) [[ "$CURRENT" -eq 3 ]] && return 0 ;;
     esac
     if [[ "${words[2]}" == "thread" ]]; then
         case "${words[3]}" in
@@ -208,7 +208,7 @@ function __heddle_dynamic_subject
     end
     if test (count $words) -eq 2
         switch "$words[2]"
-            case start switch merge
+            case start
                 printf threads
                 return 0
         end

@@ -162,7 +162,7 @@ inverse. Filing them keeps 0.3 surgical.
   exists today (audit: `crates/daemon/src/` reads refs on every RPC). When
   one lands, undo must broadcast invalidation. Until then this is a
   documented assumption, not a TODO.
-- **Remote-affecting undo.** `heddle push`/`pull`/`fetch` cannot be rolled
+- **Remote-affecting undo.** `heddle push`/`pull` cannot be rolled
   back unilaterally. Documented in `docs/undo.md` already; no in-scope work.
 - **Worktree teardown command.** Today there's no `heddle thread drop
   --with-worktree` that atomically removes a thread and its materialized

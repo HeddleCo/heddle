@@ -6,7 +6,6 @@
 use std::{fs, process::Command, str};
 
 use ntest::timeout;
-use objects::store::ObjectStore;
 use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;
@@ -91,20 +90,6 @@ fn assert_file_not_exists(path: impl AsRef<std::path::Path>, msg: &str) {
     assert!(!path.exists(), "{}: {:?}", msg, path);
 }
 
-fn assert_stale_merge_refuses(path: &std::path::Path, thread: &str) {
-    let result = heddle(&["merge", thread], Some(path));
-    let err = result.expect_err("stale direct merge should refuse before mutation");
-    assert!(
-        err.contains(&format!("Thread '{thread}' is stale"))
-            && err.contains(&format!("heddle sync --thread {thread}")),
-        "stale merge should explain the refresh path: {err}"
-    );
-    assert!(
-        !path.join(".heddle/MERGE_STATE").exists(),
-        "stale merge refusal must not create MERGE_STATE"
-    );
-}
-
 fn refresh_thread_expect_conflict(path: &std::path::Path, thread: &str) -> String {
     heddle(&["thread", "switch", thread], Some(path)).unwrap();
     let refresh = heddle(
@@ -124,11 +109,14 @@ fn refresh_thread_expect_conflict(path: &std::path::Path, thread: &str) -> Strin
     refresh.unwrap_err()
 }
 
-fn refresh_then_merge_thread(path: &std::path::Path, thread: &str) -> String {
+fn land_thread(path: &std::path::Path, thread: &str) -> String {
+    heddle(&["land", "--thread", thread], Some(path)).unwrap()
+}
+
+fn refresh_thread_for_land(path: &std::path::Path, thread: &str) {
     heddle(&["thread", "switch", thread], Some(path)).unwrap();
     heddle(&["thread", "refresh", thread], Some(path)).unwrap();
     heddle(&["thread", "switch", "main"], Some(path)).unwrap();
-    heddle(&["merge", thread], Some(path)).unwrap()
 }
 
 mod resolve {
@@ -148,7 +136,6 @@ mod resolve {
         fs::write(temp.path().join("file.txt"), "main version").unwrap();
         heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
-        assert_stale_merge_refuses(temp.path(), "feature");
         refresh_thread_expect_conflict(temp.path(), "feature");
     }
 
@@ -184,7 +171,7 @@ mod resolve {
     #[test]
     #[timeout(15000)]
     #[serial]
-    fn test_thread_refresh_conflict_continue_then_merge_lands_resolved_thread() {
+    fn test_thread_refresh_conflict_continue_then_land_resolved_thread() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
 
@@ -197,12 +184,14 @@ mod resolve {
         assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
 
         heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
-        let merged = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()))
-            .expect("merge resolved thread");
-        let merged: Value = serde_json::from_str(&merged).expect("merge JSON");
-        assert_eq!(merged["status"], "completed", "{merged}");
-        assert_eq!(merged["applied"], true, "{merged}");
-        assert_eq!(merged["conflict_count"], 0, "{merged}");
+        let landed = heddle(
+            &["--output", "json", "land", "--thread", "feature"],
+            Some(temp.path()),
+        )
+        .expect("land resolved thread");
+        let landed: Value = serde_json::from_str(&landed).expect("land JSON");
+        assert_eq!(landed["status"], "landed", "{landed}");
+        assert_eq!(landed["integrated"], true, "{landed}");
         assert_eq!(
             fs::read_to_string(temp.path().join("file.txt")).unwrap(),
             "resolved content"
@@ -337,7 +326,6 @@ mod resolve {
         )
         .unwrap();
 
-        assert_stale_merge_refuses(temp.path(), "feature");
         refresh_thread_expect_conflict(temp.path(), "feature");
         heddle_with_env(
             &["resolve", "file.txt", "--ours"],
@@ -353,7 +341,7 @@ mod resolve {
         heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
 
         heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        land_thread(temp.path(), "feature");
 
         let blame = heddle(
             &["--output", "json", "query", "--attribution", "file.txt"],
@@ -387,7 +375,7 @@ mod resolve {
         heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
 
         heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        land_thread(temp.path(), "feature");
 
         let blame = heddle(
             &["--output", "json", "query", "--attribution", "file.txt"],
@@ -492,7 +480,7 @@ mod fsck {
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("subcommand") || err.contains("required"),
+            err.contains("Usage: heddle fsck repair") && err.contains("Commands:"),
             "bare repair command should fail at CLI parsing, got: {err}"
         );
     }
@@ -558,8 +546,8 @@ mod fsck {
         fs::write(temp.path().join("main.txt"), "main").unwrap();
         heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
-        assert_stale_merge_refuses(temp.path(), "feature");
-        refresh_then_merge_thread(temp.path(), "feature");
+        refresh_thread_for_land(temp.path(), "feature");
+        land_thread(temp.path(), "feature");
 
         let result = heddle(&["fsck", "--full", "--thorough"], Some(temp.path()));
         assert!(
@@ -784,8 +772,8 @@ mod blame {
         fs::write(temp.path().join("other.txt"), "main side\n").unwrap();
         snapshot_with_agent(&temp, "main", "anthropic", "claude-opus-main");
 
-        assert_stale_merge_refuses(temp.path(), "feature");
-        refresh_then_merge_thread(temp.path(), "feature");
+        refresh_thread_for_land(temp.path(), "feature");
+        land_thread(temp.path(), "feature");
 
         let output = heddle(
             &["--output", "json", "query", "--attribution", "file.txt"],
@@ -800,15 +788,6 @@ mod blame {
         assert_eq!(lines[1]["agent"]["model"], "gpt-4.1-feature");
     }
 }
-
-#[path = "production_features/merge_operations.rs"]
-mod merge_operations;
-
-#[path = "production_features/merge_rename_detection.rs"]
-mod merge_rename_detection;
-
-#[path = "production_features/merge_rename_output.rs"]
-mod merge_rename_output;
 
 mod gc {
     use super::*;
@@ -961,53 +940,6 @@ mod clone {
     }
 }
 
-mod fetch {
-    use super::*;
-
-    #[test]
-    #[ignore = "Requires file:// protocol support for local paths"]
-    fn test_fetch_downloads_objects() {
-        let remote = TempDir::new().unwrap();
-        let local = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(remote.path())).unwrap();
-        fs::write(remote.path().join("file.txt"), "content").unwrap();
-        heddle(&["capture", "-m", "Initial"], Some(remote.path())).unwrap();
-
-        heddle(&["init"], Some(local.path())).unwrap();
-        let remote_path = remote.path().to_string_lossy().to_string();
-        heddle(
-            &["remote", "add", "origin", &remote_path],
-            Some(local.path()),
-        )
-        .unwrap();
-
-        let result = heddle(&["fetch", "origin"], Some(local.path()));
-        assert!(result.is_ok(), "fetch failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_fetch_all() {
-        let remote = TempDir::new().unwrap();
-        let local = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(remote.path())).unwrap();
-        fs::write(remote.path().join("file.txt"), "content").unwrap();
-        heddle(&["capture", "-m", "Initial"], Some(remote.path())).unwrap();
-
-        heddle(&["init"], Some(local.path())).unwrap();
-        let remote_path = remote.path().to_string_lossy().to_string();
-        heddle(
-            &["remote", "add", "origin", &remote_path],
-            Some(local.path()),
-        )
-        .unwrap();
-
-        let result = heddle(&["fetch", "--all"], Some(local.path()));
-        assert!(result.is_ok(), "fetch --all failed: {:?}", result.err());
-    }
-}
-
 mod local_sync {
     use super::*;
 
@@ -1133,7 +1065,7 @@ mod local_sync {
     }
 
     #[test]
-    fn test_fetch_then_merge_remote_content() {
+    fn test_pull_then_land_integrates_remote_content() {
         let source = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
 
@@ -1161,7 +1093,6 @@ mod local_sync {
         heddle(&["thread", "switch", "main"], Some(source.path())).unwrap();
 
         // Source adds a new file on main
-        let source_path = source.path().to_string_lossy().to_string();
         fs::write(source.path().join("source.txt"), "from source").unwrap();
         heddle(&["capture", "-m", "Source addition"], Some(source.path())).unwrap();
 
@@ -1169,7 +1100,10 @@ mod local_sync {
         fs::write(dest.path().join("dest.txt"), "from dest").unwrap();
         heddle(&["capture", "-m", "Dest addition"], Some(dest.path())).unwrap();
 
-        // Pull source's main into dest as a separate thread
+        // Pre-create a managed destination thread, then pull the source tip
+        // into it so ready/land retain explicit integration authority.
+        heddle(&["thread", "create", "from-source"], Some(dest.path())).unwrap();
+        let source_path = source.path().to_string_lossy().to_string();
         heddle(
             &[
                 "pull",
@@ -1183,12 +1117,10 @@ mod local_sync {
         )
         .unwrap();
 
-        // Switch back to main (which has dest.txt), refresh the imported
-        // thread if needed, and merge.
-        heddle(&["thread", "switch", "main"], Some(dest.path())).unwrap();
-        heddle(&["merge", "from-source"], Some(dest.path())).unwrap();
+        refresh_thread_for_land(dest.path(), "from-source");
+        land_thread(dest.path(), "from-source");
 
-        // Both unique files should exist after merge
+        // Both unique files should exist after landing the managed thread.
         assert!(
             dest.path().join("dest.txt").exists(),
             "dest.txt should still exist after merge"
@@ -1320,356 +1252,6 @@ mod force_with_lease {
     }
 }
 
-mod rebase {
-    use super::*;
-
-    #[test]
-    fn test_rebase_onto() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("feature.txt"), "feature").unwrap();
-        heddle(&["capture", "-m", "Feature commit"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("main.txt"), "main").unwrap();
-        heddle(&["capture", "-m", "Main commit"], Some(temp.path())).unwrap();
-
-        let log_output =
-            heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
-        let _base_commit = log_output
-            .lines()
-            .nth(1)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap();
-
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-
-        let result = heddle(&["rebase", "main"], Some(temp.path()));
-        assert!(result.is_ok(), "rebase failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_rebase_abort() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "feature").unwrap();
-        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "main").unwrap();
-        heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        heddle(&["rebase", "main"], Some(temp.path())).ok();
-
-        let _result = heddle(&["rebase", "--abort"], Some(temp.path()));
-        // May succeed or fail depending on rebase state
-    }
-
-    #[test]
-    fn test_rebase_rewrites_parent_chain() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("base.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        // Create feature branch: base → A1 → A2
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("a1.txt"), "a1").unwrap();
-        heddle(&["capture", "-m", "A1"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("a2.txt"), "a2").unwrap();
-        heddle(&["capture", "-m", "A2"], Some(temp.path())).unwrap();
-
-        // Advance main: base → B1
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("b1.txt"), "b1").unwrap();
-        heddle(&["capture", "-m", "B1"], Some(temp.path())).unwrap();
-
-        // Rebase feature onto main
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        let result = heddle(&["rebase", "main"], Some(temp.path()));
-        assert!(result.is_ok(), "rebase should succeed: {:?}", result.err());
-
-        // After rebase, feature should have B1's content
-        assert!(
-            temp.path().join("b1.txt").exists(),
-            "b1.txt from main should exist after rebase"
-        );
-        assert!(
-            temp.path().join("a1.txt").exists(),
-            "a1.txt from feature should exist after rebase"
-        );
-        assert!(
-            temp.path().join("a2.txt").exists(),
-            "a2.txt from feature should exist after rebase"
-        );
-
-        // Log should show B1 in the ancestry
-        let log_output =
-            heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
-        assert!(
-            log_output.contains("B1") || log_output.contains("A2"),
-            "log should include rebased history: {}",
-            log_output
-        );
-    }
-
-    #[test]
-    fn test_rebase_preserves_logical_state_identity() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("base.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("feature.txt"), "feature").unwrap();
-        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
-
-        let repo = repo::Repository::open(temp.path()).unwrap();
-        let pre_rebase_head = repo.head().unwrap().unwrap();
-        let pre_rebase_state = repo.store().get_state(&pre_rebase_head).unwrap().unwrap();
-        let original_logical = pre_rebase_state.state_id;
-
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("main.txt"), "main").unwrap();
-        heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        heddle(&["rebase", "main"], Some(temp.path())).unwrap();
-
-        let repo = repo::Repository::open(temp.path()).unwrap();
-        let rebased_head = repo.head().unwrap().unwrap();
-        let rebased_state = repo.store().get_state(&rebased_head).unwrap().unwrap();
-
-        assert_ne!(rebased_head, pre_rebase_head);
-        assert_eq!(rebased_state.state_id, original_logical);
-    }
-
-    #[test]
-    fn test_rebase_with_conflicting_changes_completes() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "feature change").unwrap();
-        heddle(&["capture", "-m", "Feature change"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("file.txt"), "main change").unwrap();
-        heddle(&["capture", "-m", "Main change"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-
-        // Rebase auto-resolves conflicting changes. The CLI emits a
-        // line-separated JSON event stream (`started` → `applying` →
-        // …) rather than a single `completed` summary, so we treat
-        // exit success + the emitted progress events as the
-        // completion contract.
-        let result = heddle(&["--output", "json", "rebase", "main"], Some(temp.path()));
-        assert!(
-            result.is_ok(),
-            "rebase with conflicting file should complete: {:?}",
-            result.err()
-        );
-        let output = result.unwrap();
-        assert!(
-            output.contains("\"status\": \"started\"") || output.contains("\"status\":\"started\""),
-            "rebase should announce a started status: {}",
-            output
-        );
-        assert!(
-            output.contains("\"status\": \"applying\"")
-                || output.contains("\"status\":\"applying\""),
-            "rebase should report progress while applying: {}",
-            output
-        );
-
-        // Feature's version should be in the file after rebase
-        let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
-        assert_eq!(
-            content, "feature change",
-            "rebase should preserve feature's changes"
-        );
-    }
-
-    #[test]
-    fn test_rebase_noop_when_already_on_target() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("base.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        // Create feature from main tip — no divergence
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("feat.txt"), "feature").unwrap();
-        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
-
-        // Rebase onto main — feature is already based on main tip
-        let result = heddle(&["rebase", "main"], Some(temp.path()));
-        assert!(
-            result.is_ok(),
-            "rebase when already on target should succeed: {:?}",
-            result.err()
-        );
-        let output = result.unwrap();
-        assert!(
-            output.contains("completed"),
-            "rebase should report completion: {}",
-            output
-        );
-    }
-
-    /// Regression: a fast-forward `heddle rebase` from inside an attached
-    /// parent thread used to call `repo.goto()` (which writes
-    /// `Head::Detached`) without advancing the parent thread's ref. The
-    /// worktree advanced but `thread show <parent>` still reported the
-    /// original state_id and HEAD was silently detached. Mirrors the
-    /// merge fix in `crates/cli/src/cli/commands/merge/mod.rs`.
-    #[test]
-    fn test_rebase_fast_forward_advances_current_thread() {
-        let temp = TempDir::new().unwrap();
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("base.txt"), "base").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        // Build a child thread that's strictly ahead of the parent.
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("new.txt"), "feature work").unwrap();
-        heddle(&["capture", "-m", "Feature work"], Some(temp.path())).unwrap();
-
-        // Capture the state_id at the tip of `feature` — this is the
-        // fast-forward target for rebasing `main` onto `feature`.
-        let feature_show = heddle(
-            &["thread", "show", "feature", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap();
-        let feature: Value = serde_json::from_str(&feature_show).unwrap();
-        let target = feature["current_state"]
-            .as_str()
-            .expect("feature should have a current_state")
-            .to_string();
-
-        // Switch to parent and rebase onto child. Parent is an ancestor
-        // of child, so this hits the fast-forward path in run_rebase.
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap();
-        // Rebase emits either text ("Fast-forwarded to ...") or JSON
-        // ({"status": "fast_forwarded", ...}) depending on the resolved
-        // output mode. Either form indicates the fast-forward path ran.
-        assert!(
-            rebase_output.contains("Fast-forwarded")
-                || rebase_output.contains("\"fast_forwarded\""),
-            "expected fast-forward rebase, got: {rebase_output}"
-        );
-
-        // After fast-forward, `main` must point at the integrated state.
-        let main_show = heddle(
-            &["thread", "show", "main", "--output", "json"],
-            Some(temp.path()),
-        )
-        .unwrap();
-        let main: Value = serde_json::from_str(&main_show).unwrap();
-        assert_eq!(
-            main["current_state"].as_str().unwrap(),
-            target,
-            "main.current_state must advance to the rebase target after fast-forward"
-        );
-
-        // HEAD must remain attached to the parent thread.
-        let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
-        let status: Value = serde_json::from_str(&status_output).unwrap();
-        assert_eq!(
-            status["thread"].as_str().unwrap(),
-            "main",
-            "HEAD must remain attached to the parent thread after fast-forward rebase"
-        );
-    }
-
-    #[test]
-    fn test_rebase_refuses_dirty_worktree_unless_force_discards_it() {
-        let temp = TempDir::new().unwrap();
-        heddle(&["init"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("base.txt"), "base\n").unwrap();
-        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
-        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("main.txt"), "main\n").unwrap();
-        heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
-
-        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-        fs::write(temp.path().join("feature.txt"), "unsnapped feature edit\n").unwrap();
-        fs::write(temp.path().join("scratch.txt"), "local only\n").unwrap();
-
-        let err = heddle(&["rebase", "main"], Some(temp.path()))
-            .expect_err("dirty rebase should refuse without --force");
-        assert!(
-            err.contains("rebase") && err.contains("unsaved") || err.contains("dirty"),
-            "dirty rebase refusal should explain the safety gate: {err}"
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
-            "unsnapped feature edit\n"
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("scratch.txt")).unwrap(),
-            "local only\n"
-        );
-
-        let output = heddle(&["rebase", "main", "--force"], Some(temp.path()))
-            .expect("forced rebase should discard local edits and proceed");
-        assert!(
-            output.contains("Rebasing")
-                || output.contains("Rebase completed")
-                || output.contains("\"status\": \"started\"")
-                || output.contains("\"status\":\"started\""),
-            "forced rebase should run the replay path: {output}"
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
-            "feature\n"
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("main.txt")).unwrap(),
-            "main\n"
-        );
-        assert!(
-            !temp.path().join("scratch.txt").exists(),
-            "--force must discard untracked local work during rebase materialization"
-        );
-    }
-}
-
 mod hooks {
     use super::*;
 
@@ -1735,6 +1317,10 @@ mod completion {
             output.contains("thread|capture"),
             "bash --into thread completion must be gated to existing-thread subcommands"
         );
+        assert!(
+            !output.contains("start|switch|merge"),
+            "bash completion must not route removed top-level switch/merge commands"
+        );
     }
 
     #[test]
@@ -1756,6 +1342,10 @@ mod completion {
             output.contains("thread|capture"),
             "zsh --into thread completion must be gated to existing-thread subcommands"
         );
+        assert!(
+            !output.contains("start|switch|merge"),
+            "zsh completion must not route removed top-level switch/merge commands"
+        );
     }
 
     #[test]
@@ -1776,6 +1366,10 @@ mod completion {
         assert!(
             output.contains("__fish_seen_subcommand_from thread capture"),
             "fish --into thread completion must be gated to existing-thread subcommands"
+        );
+        assert!(
+            !output.contains("case start switch merge"),
+            "fish completion must not route removed top-level switch/merge commands"
         );
     }
 

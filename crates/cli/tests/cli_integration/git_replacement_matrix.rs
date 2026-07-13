@@ -594,6 +594,62 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
 }
 
 #[test]
+fn git_overlay_undo_recover_stays_coherent_without_git_on_path() {
+    let temp = TempDir::new().unwrap();
+    SleyRepository::init(temp.path()).expect("init git worktree");
+    configure_repo_local_git_identity(temp.path());
+    assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    assert_clean_json_without_git(&["--output", "json", "capture", "-m", "base"], temp.path());
+    assert_clean_json_without_git(&["--output", "json", "commit", "-m", "base"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "recover this\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "recoverable"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "recoverable"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(&["--output", "json", "undo"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "different direction\n").unwrap();
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "diverge"],
+        temp.path(),
+    );
+    assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "diverge"],
+        temp.path(),
+    );
+    let git_head_before_recovery = git_head_oid(temp.path());
+
+    let recovered =
+        assert_clean_json_without_git(&["--output", "json", "undo", "--recover"], temp.path());
+    assert_eq!(recovered["output_kind"], "undo_recover");
+    assert_eq!(git_head_oid(temp.path()), git_head_before_recovery);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "recover this\n"
+    );
+    assert_eq!(recovered["verification"]["worktree_state"], "dirty");
+
+    assert_clean_json_without_git(
+        &["--output", "json", "capture", "-m", "recovered work"],
+        temp.path(),
+    );
+    let committed = assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "recovered work"],
+        temp.path(),
+    );
+    assert_eq!(committed["output_kind"], "commit");
+    assert_ne!(git_head_oid(temp.path()), git_head_before_recovery);
+    assert_eq!(committed["verification"]["worktree_state"], "clean");
+}
+
+#[test]
 fn git_replacement_matrix_clone_status_capture_push_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");

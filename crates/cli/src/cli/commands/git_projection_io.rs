@@ -10,6 +10,10 @@ use anyhow::{Result, anyhow};
 use heddle_core::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
 };
+use heddle_git_projection::{
+    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
+    git_ingest::import_git_history, git_util::ExportedRef,
+};
 use ingest::{ImportOptions, LossyImportEntry};
 use objects::object::{StateId, ThreadName};
 use refs::Head;
@@ -28,10 +32,6 @@ use super::{
     },
 };
 use crate::cli::{Cli, cli_args::GitSource, should_output_json, style};
-use heddle_git_projection::{
-    GitProjection, git_core::clone_url_to_bare, git_export::export_all,
-    git_ingest::import_git_history, git_util::ExportedRef,
-};
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
 /// scratch directory whose `Drop` cleans up the cloned bare repo after

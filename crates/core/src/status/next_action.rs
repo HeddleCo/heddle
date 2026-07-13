@@ -407,7 +407,7 @@ mod tests {
             Some("heddle push")
         );
         assert_eq!(
-            remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
+            remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle pull"))
                 .as_deref(),
             Some("heddle import git --ref origin/main")
         );

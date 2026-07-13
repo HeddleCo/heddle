@@ -166,7 +166,7 @@ pub use thread_shaping::{
 };
 pub use timeline_cmd::cmd_timeline;
 pub use try_cmd::cmd_try;
-pub use undo::{cmd_redo, cmd_undo};
+pub use undo::{cmd_redo, cmd_undo, cmd_undo_recover};
 pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;

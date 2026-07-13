@@ -38,7 +38,7 @@ fn test_log_json_output() {
 fn test_invalid_command_arguments() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    let result = heddle(&["switch", "invalid-state-id"], Some(temp.path()));
+    let result = heddle(&["show", "invalid-state-id"], Some(temp.path()));
     assert!(result.is_err());
 }
 

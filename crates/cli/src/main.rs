@@ -33,7 +33,7 @@ use cli::{
             cmd_maintenance, cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
             cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
             cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
-            cmd_timeline, cmd_try, cmd_undo, cmd_verify, cmd_watch,
+            cmd_timeline, cmd_try, cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
             command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
@@ -499,9 +499,12 @@ async fn async_main() -> Result<()> {
             depth,
             preview,
             redo,
+            recover,
             allow_redact_undo,
         }) => {
-            if *redo {
+            if *recover {
+                cmd_undo_recover(&cli)
+            } else if *redo {
                 cmd_redo(&cli, *steps, *preview)
             } else {
                 cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)

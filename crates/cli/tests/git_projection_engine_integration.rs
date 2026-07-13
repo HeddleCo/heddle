@@ -2338,7 +2338,9 @@ fn fetch_rejects_reserved_git_remote_name_at_boundary() {
         .expect_err("fetch of reserved remote name must be rejected");
     let message = err.to_string();
     assert!(
-        message.contains("reserved namespace") && message.contains("rename"),
+        message.contains("reserved namespace")
+            && message.contains("heddle remote add")
+            && message.contains("heddle remote remove git"),
         "fetch error must explain the reserved-namespace collision and how to fix it, got: {message}"
     );
 }
@@ -2354,7 +2356,9 @@ fn pull_rejects_reserved_git_remote_name_at_boundary() {
         .expect_err("pull of reserved remote name must be rejected");
     let message = err.to_string();
     assert!(
-        message.contains("reserved namespace") && message.contains("rename"),
+        message.contains("reserved namespace")
+            && message.contains("heddle remote add")
+            && message.contains("heddle remote remove git"),
         "pull error must explain the reserved-namespace collision and how to fix it, got: {message}"
     );
 }

@@ -8,6 +8,7 @@ use heddle_core::{
     GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
     principal_lacks_accountable_identity,
 };
+use heddle_git_projection::GitProjection;
 use objects::{
     object::{Agent, Attribution, Principal, StateId, Tree},
     worktree::WorktreeStatus,
@@ -43,7 +44,6 @@ use crate::{
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
-use heddle_git_projection::GitProjection;
 
 #[derive(Serialize)]
 pub(crate) struct SnapshotOutput {

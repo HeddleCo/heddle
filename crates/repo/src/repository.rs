@@ -27,6 +27,8 @@ mod repository_materialization;
 mod repository_partial_fetch;
 #[path = "repository_provenance/mod.rs"]
 mod repository_provenance;
+#[path = "repository_recovery.rs"]
+mod repository_recovery;
 #[path = "repository_resolve.rs"]
 mod repository_resolve;
 #[path = "repository_signing.rs"]

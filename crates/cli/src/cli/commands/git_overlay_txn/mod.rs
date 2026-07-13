@@ -7,6 +7,9 @@
 //! checkpoint, repo::atomic, and refs::commit_and_publish paths.
 
 use anyhow::{Result, anyhow};
+use heddle_git_projection::git_core::{
+    git_config_identity_with_global_fallback, principal_is_default_unknown,
+};
 use objects::{
     object::{Principal, ThreadName},
     worktree::WorktreeStatus,
@@ -24,9 +27,6 @@ use super::{
         plain_git_mutation_preflight_advice, raw_git_operation_mutation_advice,
         repository_verification_blocked_advice,
     },
-};
-use heddle_git_projection::git_core::{
-    git_config_identity_with_global_fallback, principal_is_default_unknown,
 };
 
 pub(crate) type GitOverlayWorktreeStatus = repo::Result<Option<WorktreeStatus>>;

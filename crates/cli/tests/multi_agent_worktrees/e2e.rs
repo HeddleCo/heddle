@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::store::{ActorPresenceStore, WriterLeaseStore};
+
+use super::*;
 
 #[test]
 fn thread_start_creates_presence_without_writer_authority() {
@@ -98,25 +99,28 @@ fn agent_capture_and_ready_require_authenticated_writer_authority() {
     let token = reserved["token"].as_str().unwrap();
 
     fs::write(main.path().join("first.txt"), "first").unwrap();
-    let capture: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "--output",
-                "json",
-                "agent",
-                "capture",
-                "--lease",
-                lease_id,
-                "--token",
-                token,
-                "-m",
-                "authenticated capture",
-            ],
-            Some(main.path()),
-        )
-        .unwrap(),
+    let capture_output = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "capture",
+            "--lease",
+            lease_id,
+            "--token",
+            token,
+            "-m",
+            "authenticated capture",
+        ],
+        Some(main.path()),
+        &[
+            ("HEDDLE_AGENT_PROVIDER", "openai"),
+            ("HEDDLE_AGENT_MODEL", "gpt-5.3-codex"),
+        ],
     )
     .unwrap();
+    assert!(capture_output.status.success());
+    let capture: Value = serde_json::from_slice(&capture_output.stdout).unwrap();
     assert_eq!(capture["intent"], "authenticated capture");
     assert!(capture["state_id"].as_str().unwrap().starts_with("hs-"));
     let log: Value = serde_json::from_str(
@@ -125,7 +129,7 @@ fn agent_capture_and_ready_require_authenticated_writer_authority() {
     .unwrap();
     assert_eq!(
         log["states"][0]["agent"], "openai/gpt-5.3-codex",
-        "agent capture should preserve the reservation's ambient harness model even when the capture process has no model env: {log}"
+        "agent capture should preserve its explicit harness model: {log}"
     );
 
     heddle(
@@ -371,7 +375,7 @@ fn parallel_agents_visible_from_main_repo() {
 }
 
 #[test]
-fn merge_agent_track_into_main() {
+fn land_agent_thread_into_main() {
     let main = setup_repo("base.txt", "base");
     let agent_tmp = TempDir::new().unwrap();
 
@@ -391,16 +395,16 @@ fn merge_agent_track_into_main() {
     fs::write(agent_tmp.path().join("added.txt"), "new feature").unwrap();
     heddle(&["capture", "-m", "add feature"], Some(agent_tmp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature/to-merge"], Some(main.path()));
+    let result = heddle(&["land", "--thread", "feature/to-merge"], Some(main.path()));
     assert!(
         result.is_ok(),
-        "merging agent thread into main should succeed: {:?}",
+        "landing agent thread into main should succeed: {:?}",
         result.err()
     );
 
     assert!(
         main.path().join("added.txt").exists(),
-        "merged file should appear in main repo"
+        "landed file should appear in main repo"
     );
 }
 
@@ -525,7 +529,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(ready["report"]["merge_relation"], "fast_forward");
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle land --thread feature/native-cli --no-push"
+        "heddle land --thread feature/native-cli"
     );
 
     let thread_show_json = heddle(
@@ -537,7 +541,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(thread_show["thread_state"], "ready");
     assert_eq!(
         thread_show["recommended_action"].as_str(),
-        Some("heddle land --thread feature/native-cli --no-push")
+        Some("heddle land --thread feature/native-cli")
     );
 
     let actor_list_json = heddle(
@@ -569,12 +573,12 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     let actor_done: Value = serde_json::from_str(&actor_done_json).unwrap();
     assert_eq!(actor_done["coordination_status"], "merge-ready");
     assert_eq!(
-        actor_done["recommended_action"], "heddle land --thread feature/native-cli --no-push",
+        actor_done["recommended_action"], "heddle land --thread feature/native-cli",
         "actor completion should keep agents on the canonical land path: {actor_done}"
     );
     assert_eq!(
         actor_done["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["land", "--thread", "feature/native-cli", "--no-push"]),
+        heddle_argv_json(["land", "--thread", "feature/native-cli"]),
         "{actor_done}"
     );
 }
@@ -1196,7 +1200,7 @@ fn thread_and_workspace_json_match_dirty_current_checkout() {
 }
 
 #[test]
-fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() {
+fn lightweight_thread_capture_marks_heavy_impact_and_ready_blocks_it() {
     let main = setup_repo("base.txt", "base");
 
     let start_json = heddle(
@@ -1236,29 +1240,32 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
             .any(|value| value.as_str() == Some("Cargo.toml"))
     );
 
-    let preview_json = heddle(
-        &["--output", "json", "merge", "feature/deps", "--preview"],
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "--thread", "feature/deps"],
         Some(main.path()),
     )
     .unwrap();
-    let preview: Value = serde_json::from_str(&preview_json).unwrap();
-    assert_eq!(preview["preview_only"], true);
-    assert_eq!(preview["promotion_suggested"], true);
-    assert_eq!(preview["heavy_impact_paths"][0], "Cargo.toml");
+    assert!(
+        !ready_output.status.success(),
+        "heavy-impact readiness must block"
+    );
+    let ready: Value = serde_json::from_slice(&ready_output.stdout).unwrap();
+    assert_eq!(ready["status"], "blocked");
+    assert_eq!(ready["report"]["heavy_impact_paths"][0], "Cargo.toml");
     assert_eq!(
-        preview["recommended_action"].as_str(),
-        Some("heddle land --thread feature/deps --no-push"),
-        "merge preview should suggest landing while surfacing heavy-impact review as advisory: {preview}"
+        ready["recommended_action"],
+        Value::Null,
+        "blocked readiness must not recommend landing: {ready}"
     );
     assert!(
-        preview["warnings"]
+        ready["blockers"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value
                 .as_str()
                 .is_some_and(|warning| warning.contains("Heavy-impact change: Cargo.toml"))),
-        "merge preview should keep the heavy-impact review warning: {preview}"
+        "ready should explain the heavy-impact blocker: {ready}"
     );
 }
 
@@ -1765,7 +1772,7 @@ fn log_never_surfaces_unknown_principal_after_init() {
 // can never succeed (the thread still holds an active reservation, so `start`
 // returns `active_thread_reservation`), and the JSON `recovery_commands` list
 // was only the same `land` that just failed — a dead loop. The fix points the
-// recovery at `heddle switch <thread>`, which rebuilds the dedicated worktree at
+// recovery at `heddle thread switch <thread>`, which rebuilds the dedicated worktree at
 // the recorded path so the follow-up `land` succeeds.
 #[test]
 fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
@@ -1796,14 +1803,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     fs::remove_dir_all(thread_path).expect("remove thread worktree dir");
 
     let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "land",
-            "--thread",
-            "feature/gone",
-            "--no-push",
-        ],
+        &["--output", "json", "land", "--thread", "feature/gone"],
         Some(main.path()),
     )
     .expect("land invocation runs");
@@ -1819,7 +1819,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     assert_eq!(envelope["kind"], "thread_worktree_missing");
     let primary = envelope["primary_command"].as_str().unwrap_or_default();
     assert_eq!(
-        primary, "heddle switch feature/gone",
+        primary, "heddle thread switch feature/gone",
         "primary recovery must rematerialize the existing thread via switch"
     );
 
@@ -1830,10 +1830,10 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
         .map(|v| v.as_str().unwrap_or_default().to_string())
         .collect();
     assert!(
-        recovery.contains(&"heddle switch feature/gone".to_string()),
+        recovery.contains(&"heddle thread switch feature/gone".to_string()),
         "recovery_commands must include the rematerialize command: {recovery:?}"
     );
-    let land_command = "heddle land --thread feature/gone --no-push".to_string();
+    let land_command = "heddle land --thread feature/gone".to_string();
     assert!(
         recovery != vec![land_command.clone()],
         "recovery_commands must not be just the failing land command (the old dead loop): {recovery:?}"
@@ -1842,7 +1842,7 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     // checkout first.
     let switch_idx = recovery
         .iter()
-        .position(|c| c == "heddle switch feature/gone");
+        .position(|c| c == "heddle thread switch feature/gone");
     let land_idx = recovery.iter().position(|c| c == &land_command);
     if let (Some(s), Some(l)) = (switch_idx, land_idx) {
         assert!(s < l, "switch must precede the land retry: {recovery:?}");

@@ -4,17 +4,20 @@ use objects::store::ObjectStore;
 use super::*;
 
 #[test]
-fn test_long_history_traversal() {
+fn test_named_threads_restore_states_across_long_history() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     for i in 1..=10 {
         std::fs::write(temp.path().join("version.txt"), format!("v{}", i)).unwrap();
         heddle_must_succeed(&["capture", "-m", &format!("Version {}", i)], temp.path());
+        if i == 1 || i == 5 {
+            heddle_must_succeed(&["thread", "create", &format!("version-{i}")], temp.path());
+        }
     }
-    heddle_must_succeed(&["switch", "HEAD~5"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "version-5"], temp.path());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v5");
-    heddle_must_succeed(&["switch", "HEAD~4"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "version-1"], temp.path());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v1");
 }

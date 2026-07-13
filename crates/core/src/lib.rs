@@ -5,7 +5,6 @@ pub mod actor;
 pub mod agent_fanout;
 pub mod agent_ops;
 pub mod approval_plan;
-pub mod clean_plan;
 pub mod clone_plan;
 pub mod collapse_plan;
 pub mod completion_plan;
@@ -48,9 +47,7 @@ pub mod semantic_plan;
 pub mod shell_plan;
 pub mod source_authority;
 pub mod spool_plan;
-pub mod stash_plan;
 pub mod status;
-pub mod switch_plan;
 pub mod thread;
 pub mod thread_lifecycle;
 pub mod thread_materialize;
@@ -93,9 +90,6 @@ pub use approval_plan::{
     eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
-};
-pub use clean_plan::{
-    clean_empty_message, clean_path_line, clean_paths_header, clean_result_lines, clean_result_text,
 };
 pub use clone_plan::{
     AdoptPlan, AdoptPlanError, AdoptPlanOptions, CloneMode, ClonePlan, ClonePlanError,
@@ -270,14 +264,6 @@ pub use semantic_plan::{
 };
 #[cfg(feature = "semantic")]
 pub use semantic_plan::{hot_event_kind_token, human_hot_event_kind, map_hot_event_kind};
-pub use stash_plan::{
-    STASH_DEFAULT_LIST_MESSAGE, StashEntryOpPlan, StashMessageMode, StashMutationReport,
-    StashOutcomeStatus, StashPushPlan, StashShowBuckets, StashShowChangeKind,
-    bucket_stash_show_changes, format_stash_list_line, plan_stash_entry_op, plan_stash_push,
-    stash_entry_op_should_refuse, stash_list_entry_message, stash_list_is_empty,
-    stash_mutation_message, stash_push_should_refuse, stash_show_change_prefix,
-    stash_show_is_empty, stash_stack_is_empty,
-};
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,

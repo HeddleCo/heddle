@@ -287,6 +287,58 @@ fn assert_verify_check_rows(parsed: &Value) {
 }
 
 #[test]
+fn git_overlay_matrix_undo_reconciles_stale_mirror_after_push_pull() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    let origin = temp.path().join("origin.git");
+    std::fs::create_dir(&work).unwrap();
+    init_git_repo_with_branch(&work, "main");
+    std::fs::write(work.join("base.txt"), "base\n").unwrap();
+    git_commit_all(&work, "base");
+    git(
+        &[
+            "clone",
+            "--bare",
+            work.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+        temp.path(),
+    );
+
+    initialize_git_overlay(&work);
+    json(&work, &["import", "git", "--ref", "main"]);
+    std::fs::write(work.join("first.txt"), "first\n").unwrap();
+    json(&work, &["capture", "-m", "first"]);
+    json(&work, &["commit", "-m", "first"]);
+    json(&work, &["push", origin.to_str().unwrap()]);
+    json(&work, &["pull", "origin"]);
+
+    let previous = git_stdout(&work, &["rev-parse", "HEAD"]);
+    std::fs::write(work.join("second.txt"), "second\n").unwrap();
+    json(&work, &["capture", "-m", "second"]);
+    json(&work, &["commit", "-m", "second"]);
+    let committed = git_stdout(&work, &["rev-parse", "HEAD"]);
+    assert_ne!(committed, previous);
+
+    let undo = json(&work, &["undo"]);
+    assert_eq!(undo["status"], "completed", "{undo}");
+    assert_eq!(git_stdout(&work, &["rev-parse", "HEAD"]), previous);
+    let mirror = work.join(".heddle/git");
+    assert_eq!(
+        git_stdout(
+            &work,
+            &[
+                "--git-dir",
+                mirror.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/main",
+            ],
+        ),
+        previous
+    );
+}
+
+#[test]
 fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");

@@ -579,6 +579,7 @@ pub struct RevertArgs {
 Examples:
   heddle undo                # roll back the most recent operation
   heddle undo -n 3           # roll back the last three operations
+  heddle undo --recover      # restore the state preserved by the last undo
   heddle undo --list         # preview undoable operations on this thread
   heddle undo --dry-run      # show what would change without applying
 
@@ -607,7 +608,6 @@ Not undoable (file a follow-up if you need one):
   - cross-worktree shared-backend undo (no worktree registry yet; single-
                                         worktree usage is the supported
                                         configuration for 0.3)
-  - redo across CLI invocations       (use `heddle undo --redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
@@ -630,6 +630,14 @@ pub struct UndoArgs {
     /// Re-apply operations that a prior `undo` rewound.
     #[arg(long, conflicts_with = "list")]
     pub redo: bool,
+
+    /// Restore the checkout-local state preserved by the most recent undo as
+    /// worktree changes. HEAD and the current thread remain unchanged.
+    #[arg(
+        long,
+        conflicts_with_all = ["steps", "list", "preview", "redo", "allow_redact_undo"]
+    )]
+    pub recover: bool,
 
     /// Explicit opt-in for undoing a `heddle redact apply`. The inverse
     /// removes the redaction record so subsequent materializes restore

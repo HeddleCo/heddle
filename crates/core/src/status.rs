@@ -11,7 +11,6 @@ use std::{
     time::Instant,
 };
 
-use crate::source_authority::{SourceAction, SourceAuthorityActions};
 use chrono::Utc;
 use objects::{
     HeddleError,
@@ -50,6 +49,7 @@ use crate::{
     ActionTemplate, ExecutionContext, HeddleReport, MachineOutputKind, OutputDiscriminator,
     ReportContract, RepositoryContextInfo, RepositoryVerificationState, VerificationCheck,
     schema_for_report,
+    source_authority::{SourceAction, SourceAuthorityActions},
     verify::{
         MachineContractInput, action_template, action_templates,
         build_plain_git_verification_probe_with_machine_contract,

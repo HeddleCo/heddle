@@ -99,30 +99,28 @@ cargo run -- integration relay claude-code SessionStart
 ## History Operations
 
 ```bash
-# Rebase current thread onto another (replays commits as new states)
-cargo run -- rebase <thread>
-cargo run -- rebase --continue     # After resolving conflicts
-cargo run -- rebase --abort        # Cancel in-progress rebase
+# Refresh a thread onto its target, then verify and integrate it
+cargo run -- thread refresh <thread>
+cargo run -- ready --thread <thread>
+cargo run -- land --thread <thread>
+
+# Resolve or cancel an in-progress integration
+cargo run -- resolve <path>
+cargo run -- continue
+cargo run -- abort
 
 # Collapse (squash) multiple states into one
 cargo run -- collapse <from>..<to>
-
-# Cherry-pick a specific state onto HEAD
-cargo run -- cherry-pick <state-id>
-
-# Fork current state (same tree, new change_id)
-cargo run -- fork
 
 # Revert a state (creates inverse change)
 cargo run -- revert <state-id>
 
 # Undo/redo last operation(s)
 cargo run -- undo
-cargo run -- redo
+cargo run -- undo --redo
 ```
 
-Note: rebase and collapse create **new** state objects — originals remain in the store.
-Force push (`heddle push --force`) is required after rebase since the thread is non-fast-forward.
+Note: refresh and collapse create **new** state objects — originals remain in the store.
 
 ## Debug Build
 

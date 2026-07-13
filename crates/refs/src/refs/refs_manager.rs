@@ -44,8 +44,8 @@ const RECONCILE_WATERMARK_LOCAL: &str = "RECONCILE_WATERMARK_LOCAL";
 const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
 
 /// Well-known refspec that resolves the heddle-internal pre-undo recovery
-/// pointer (so `heddle goto .undo-recovery` works). It is UNSHADOWABLE by any
-/// user marker or thread, in BOTH directions (heddle#305 r3):
+/// pointer used by `heddle undo --recover`. It is UNSHADOWABLE by any user
+/// marker or thread, in BOTH directions (heddle#305 r3):
 ///
 /// - **Write side:** the leading `.` is rejected by [`validate_ref_name`], so a
 ///   user can never `marker create` / `thread` a ref with this name. The

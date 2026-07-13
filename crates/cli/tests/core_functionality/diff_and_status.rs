@@ -340,12 +340,7 @@ fn test_native_status_warms_helper_for_second_run() {
 
     let mut helper_ready = false;
     let mut last_monitor = Value::Null;
-    // The native fsmonitor helper spawns asynchronously; under CI load the
-    // original 500ms window (10 x 50ms) was too tight and flaked. Instrumented
-    // coverage runs can also deny loopback helper binds locally; in that case
-    // the warmed in-process native backend is still the correct fallback.
-    let attempts = if coverage_instrumented() { 300 } else { 60 };
-    for _ in 0..attempts {
+    for _ in 0..60 {
         let output = heddle_with_env(
             &["maintenance", "inspect", "--output", "json"],
             Some(temp.path()),
@@ -354,12 +349,8 @@ fn test_native_status_warms_helper_for_second_run() {
         .unwrap();
         let report: Value = serde_json::from_str(&output).unwrap();
         let monitor = report["change_monitor"].clone();
-        let helper_usable = monitor["backend"] == "native-helper" && monitor["status"] == "usable";
-        let instrumented_fallback_usable = coverage_instrumented()
-            && monitor["backend"] == "native"
-            && monitor["status"] == "usable";
-        last_monitor = monitor;
-        if helper_usable || instrumented_fallback_usable {
+        last_monitor = monitor.clone();
+        if monitor["backend"] == "native-helper" && monitor["status"] == "usable" {
             helper_ready = true;
             break;
         }
@@ -370,8 +361,11 @@ fn test_native_status_warms_helper_for_second_run() {
         helper_ready,
         "native helper did not come up after repeated status runs; last monitor: {last_monitor}"
     );
-}
 
-fn coverage_instrumented() -> bool {
-    std::env::var_os("LLVM_PROFILE_FILE").is_some() || std::env::var_os("CARGO_LLVM_COV").is_some()
+    std::fs::write(temp.path().join("file.txt"), "changed after helper startup").unwrap();
+    let changed = heddle_with_env(&["status", "--short"], Some(temp.path()), &envs).unwrap();
+    assert!(
+        changed.contains("file.txt"),
+        "native helper must report a file changed after it becomes ready: {changed}"
+    );
 }

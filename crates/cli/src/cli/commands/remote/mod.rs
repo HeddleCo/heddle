@@ -255,7 +255,7 @@ pub async fn cmd_push(
     let push_uses_hosted_network = push_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
-    let remote_transport = classify_remote_spec(&repo, remote.as_deref());
+    let remote_transport = classify_push_remote_spec(&repo, remote.as_deref());
     let remote_is_git_local_or_url = matches!(
         remote_transport,
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl)
@@ -265,7 +265,6 @@ pub async fn cmd_push(
     let head = repo.head_ref()?;
     let plan = plan_push(&PushPlanRequest {
         capability: repo.capability(),
-        hosted_enabled: push_uses_hosted_network || repo.hosted_enabled(),
         uses_hosted_network: push_uses_hosted_network,
         remote: remote.clone(),
         has_default_remote,
@@ -772,7 +771,14 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
 
 pub(super) fn push_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
     matches!(
-        classify_remote_spec(repo, remote_arg),
+        classify_push_remote_spec(repo, remote_arg),
+        Some(RemoteTransportKind::NetworkHeddle)
+    )
+}
+
+pub(super) fn pull_target_is_hosted_network(repo: &Repository, remote_arg: Option<&str>) -> bool {
+    matches!(
+        classify_pull_remote_spec(repo, remote_arg),
         Some(RemoteTransportKind::NetworkHeddle)
     )
 }
@@ -811,7 +817,7 @@ pub(super) fn preflight_native_remote_transport(
     remote_arg: Option<&str>,
     action: &str,
 ) -> Result<()> {
-    match classify_remote_spec(repo, remote_arg) {
+    match classify_push_remote_spec(repo, remote_arg) {
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl) => Err(anyhow!(
             RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
         )),
@@ -819,11 +825,32 @@ pub(super) fn preflight_native_remote_transport(
     }
 }
 
-pub(super) fn classify_remote_spec(
+fn classify_push_remote_spec(
     repo: &Repository,
     remote_arg: Option<&str>,
 ) -> Option<RemoteTransportKind> {
-    let spec = remote_spec_for_preflight(repo, remote_arg)?;
+    classify_remote_spec(repo, remote_arg, RemoteAccess::Push)
+}
+
+pub(super) fn classify_pull_remote_spec(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+) -> Option<RemoteTransportKind> {
+    classify_remote_spec(repo, remote_arg, RemoteAccess::Fetch)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RemoteAccess {
+    Fetch,
+    Push,
+}
+
+fn classify_remote_spec(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+    access: RemoteAccess,
+) -> Option<RemoteTransportKind> {
+    let spec = remote_spec_for_transport(repo, remote_arg, access)?;
     if let Ok(target) = RemoteTarget::parse(&spec) {
         return Some(match target {
             RemoteTarget::Local(path) => {
@@ -848,7 +875,11 @@ pub(super) fn classify_remote_spec(
     Some(RemoteTransportKind::Unknown)
 }
 
-fn remote_spec_for_preflight(repo: &Repository, remote_arg: Option<&str>) -> Option<String> {
+fn remote_spec_for_transport(
+    repo: &Repository,
+    remote_arg: Option<&str>,
+    access: RemoteAccess,
+) -> Option<String> {
     if repo.capability() == RepositoryCapability::GitOverlay {
         let git = SleyRepository::discover(repo.root()).ok()?;
         let config = git.config_snapshot().ok()?;
@@ -857,13 +888,18 @@ fn remote_spec_for_preflight(repo: &Repository, remote_arg: Option<&str>) -> Opt
                 return Some(arg.to_string());
             }
             Some(arg) => arg.to_string(),
-            None => resolve_default_push_remote_name(repo, None).ok()?,
+            None => match access {
+                RemoteAccess::Fetch => resolve_default_remote_name(repo, None).ok()?,
+                RemoteAccess::Push => resolve_default_push_remote_name(repo, None).ok()?,
+            },
         };
-        return config
-            .get("remote", Some(&name), "pushurl")
-            .or_else(|| config.get("remote", Some(&name), "url"))
-            .map(str::to_string)
-            .or(Some(name));
+        let configured = match access {
+            RemoteAccess::Fetch => config.get("remote", Some(&name), "url"),
+            RemoteAccess::Push => config
+                .get("remote", Some(&name), "pushurl")
+                .or_else(|| config.get("remote", Some(&name), "url")),
+        };
+        return configured.map(str::to_string).or(Some(name));
     }
     let cfg = RemoteConfig::open(repo).ok();
     match remote_arg {

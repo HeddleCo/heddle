@@ -186,7 +186,7 @@ fn status_does_not_advertise_ready_thread_for_another_target() {
             .unwrap();
 
     assert_ne!(
-        status["recommended_action"], "heddle land --thread feature/ready-main --no-push",
+        status["recommended_action"], "heddle land --thread feature/ready-main",
         "status on a non-target thread must not suggest merging target-main work into the active thread: {status}"
     );
     assert_eq!(

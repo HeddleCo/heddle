@@ -760,7 +760,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
 ///   8. Conflict markers name the lanes (CURRENT (...) / INCOMING (...))
 ///   9. Stale thread with non-overlapping edits rebases automatically
 ///  10. Raw Git branch is discovered as a tip-only mirror with import hint
-///  11. `heddle checkpoint` produces a Git-facing commit
+///  11. `heddle commit` projects captured work into Git history
 ///  12. Raw-Git sequencer conflicts get a no-git preservation handoff
 ///  13. Heddle-native recovery names unresolved files
 ///
@@ -936,7 +936,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M3/M5) all three agent threads should report `ahead` after capture: {post_capture_threads}"
     );
 
-    // ── (6, 7, 8) Merge first thread; remaining stay stale + conflict-aware ──
+    // ── (6, 7, 8) Land first thread; remaining stay stale + conflict-aware ──
     // The marketing claim is that we get clean lane-named markers and
     // `heddle continue` as the single recovery verb. We validate the
     // verb exists and accepts a no-op invocation when no operation is
@@ -944,21 +944,27 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     // git_overlay_matrix tests using synthetic conflicts.
     let _ = heddle_with_host_git(&["ready", "--thread", "agent/risk-copy"], &work)
         .unwrap_or_else(|err| panic!("(M6) ready failed for risk-copy: {err}"));
-    let merge_first = heddle_with_host_git(
-        &["merge", "agent/risk-copy", "-m", "Merge risk copy thread"],
+    let land_first = heddle_with_host_git(
+        &[
+            "land",
+            "--thread",
+            "agent/risk-copy",
+            "-m",
+            "Land risk copy thread",
+        ],
         &work,
     );
     assert!(
-        merge_first.is_ok(),
-        "(M6) first thread merge should succeed: {merge_first:?}"
+        land_first.is_ok(),
+        "(M6) first thread land should succeed: {land_first:?}"
     );
-    // After the first merge, the other agent threads are stale and
+    // After the first land, the other agent threads are stale and
     // should be reported with a non-`merged` coordination status.
-    let post_merge: Value = serde_json::from_str(
+    let post_land: Value = serde_json::from_str(
         &heddle_with_host_git(&["--output", "json", "thread", "list"], &work).unwrap(),
     )
     .unwrap();
-    let stale_remaining: Vec<&str> = post_merge["threads"]
+    let stale_remaining: Vec<&str> = post_land["threads"]
         .as_array()
         .unwrap()
         .iter()
@@ -974,28 +980,21 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     assert_eq!(
         stale_remaining.len(),
         2,
-        "(M6) the two un-merged agent threads should still be visible after merging risk-copy: {post_merge}"
+        "(M6) the two unlanded agent threads should still be visible after landing risk-copy: {post_land}"
     );
 
-    // ── (11) `heddle checkpoint` bundles captures into a Git commit ──
-    let checkpoint_out = heddle_with_host_git(
-        &[
-            "--output",
-            "json",
-            "checkpoint",
-            "-m",
-            "Checkpoint integrated work",
-        ],
+    // ── (11) `heddle commit` projects captured work into a Git commit ──
+    let commit_out = heddle_with_host_git(
+        &["--output", "json", "commit", "-m", "Commit integrated work"],
         &work,
     )
-    .unwrap_or_else(|err| panic!("(M11) checkpoint failed: {err}"));
-    let checkpoint: Value =
-        serde_json::from_str(&checkpoint_out).expect("(M11) checkpoint output should parse");
+    .unwrap_or_else(|err| panic!("(M11) commit failed: {err}"));
+    let commit: Value =
+        serde_json::from_str(&commit_out).expect("(M11) commit output should parse");
+    assert_eq!(commit["output_kind"], "commit", "{commit_out}");
     assert!(
-        checkpoint["state"].as_str().is_some()
-            || checkpoint["state_id"].as_str().is_some()
-            || checkpoint["recorded"].as_bool().unwrap_or(false),
-        "(M11) checkpoint should report the new state/state_id: {checkpoint_out}"
+        commit["git_commit"].as_str().is_some(),
+        "(M11) commit should report the projected Git commit: {commit_out}"
     );
 
     // ── (7) Heddle-native recovery verbs are wired ──

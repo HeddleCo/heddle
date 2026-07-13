@@ -1272,13 +1272,12 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
         for proof in [
             "commit",
             "undo",
-            "fetch",
             "pull",
             "push",
             "clone",
             "start",
             "ready",
-            "--preview",
+            "land",
             "query --attribution",
             "assert_final_verify",
             "assert_transcript_claims",
@@ -1290,6 +1289,50 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 source.contains(proof),
                 "{} should assert/run proof step `{proof}`",
                 script.display()
+            );
+        }
+        let retired = [
+            "checkpoint",
+            "fetch",
+            "merge",
+            "rebase",
+            "stash",
+            "clean",
+            "switch",
+        ];
+        for (line_number, line) in source.lines().enumerate() {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let command = if matches!(
+                tokens.first(),
+                Some(&"run_text") | Some(&"run_text_expect_failure")
+            ) {
+                tokens.get(3)
+            } else if matches!(
+                tokens.first(),
+                Some(&"run_json") | Some(&"run_json_expect_failure")
+            ) {
+                tokens.get(4)
+            } else if let Some(index) = tokens.iter().position(|token| *token == "heddle_runtime") {
+                tokens.get(index + 1)
+            } else {
+                None
+            };
+            if let Some(command) = command {
+                let command = command.trim_matches(|character: char| {
+                    character == '\'' || character == '"' || character == '(' || character == ')'
+                });
+                assert!(
+                    !retired.contains(&command),
+                    "{}:{} invokes retired Heddle command `{command}`: `{line}`",
+                    script.display(),
+                    line_number + 1,
+                );
+            }
+            assert!(
+                !line.contains("--no-push"),
+                "{}:{} uses removed `land --no-push`: `{line}`",
+                script.display(),
+                line_number + 1,
             );
         }
         for (line_number, line) in source.lines().enumerate() {
@@ -1323,8 +1366,10 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
         );
         if script.file_name().and_then(|name| name.to_str()) == Some("verify-cold-flow-agent.sh") {
             assert!(
-                source.contains("reconcile"),
-                "{} should prove bridge reconcile in the machine-oriented flow",
+                source.contains("assert_source_authority")
+                    && source.contains("assert_git_commit_mapped")
+                    && source.contains("assert_git_ancestor"),
+                "{} should prove authority, imported mapping, and Git ancestry in the machine-oriented flow",
                 script.display()
             );
             assert!(
@@ -1369,7 +1414,8 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             assert!(
                 source.contains("Heddle runtime proof:")
                     && source.contains("PATH=%s")
-                    && source.contains("Git was used only to build fixture repositories"),
+                    && source.contains("used embedded Sley, not a Git executable")
+                    && source.contains("fixture setup and external assertions"),
                 "{} should record the no-Git Heddle runtime proof in human transcripts",
                 script.display()
             );

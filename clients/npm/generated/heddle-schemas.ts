@@ -3004,6 +3004,25 @@ export interface UndoListSchema {
   replayed?: boolean | null;
 }
 
+export interface UndoRecoverSchema {
+  action: string;
+  batches: unknown[];
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "undo_recover";
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  recovery_marker?: string | null;
+  /** The checkout-local state preserved for recovery, and its internal handle. Present on completed undo and recovery operations. */
+  recovery_state?: string | null;
+  replayed?: boolean | null;
+  status?: string | null;
+}
+
 export interface UndoRedoSchema {
   action: string;
   batches: unknown[];
@@ -3017,7 +3036,7 @@ export interface UndoRedoSchema {
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_marker?: string | null;
-  /** heddle#305: the pre-undo state preserved for recovery, and the marker pointing at it. Present only on a completed `undo`. */
+  /** The checkout-local state preserved for recovery, and its internal handle. Present on completed undo and recovery operations. */
   recovery_state?: string | null;
   replayed?: boolean | null;
   status?: string | null;
@@ -3036,7 +3055,7 @@ export interface UndoSchema {
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_marker?: string | null;
-  /** heddle#305: the pre-undo state preserved for recovery, and the marker pointing at it. Present only on a completed `undo`. */
+  /** The checkout-local state preserved for recovery, and its internal handle. Present on completed undo and recovery operations. */
   recovery_state?: string | null;
   replayed?: boolean | null;
   status?: string | null;
@@ -3274,6 +3293,7 @@ export interface HeddleVerbOutputs {
   try: TrySchema;
   undo: UndoSchema;
   "undo --list": UndoListSchema;
+  "undo --recover": UndoRecoverSchema;
   "undo --redo": UndoRedoSchema;
   verify: VerifyReport;
   "visibility list": VisibilityListSchema;
@@ -3434,6 +3454,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "try",
   "undo",
   "undo --list",
+  "undo --recover",
   "undo --redo",
   "verify",
   "visibility list",

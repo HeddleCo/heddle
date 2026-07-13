@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn ready_suppresses_action_without_target() {
         assert_eq!(
-            ready_report_recommended_action("no_target", "heddle merge main --preview"),
+            ready_report_recommended_action("no_target", "heddle land --thread main"),
             None
         );
         assert_eq!(

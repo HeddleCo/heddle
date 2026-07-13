@@ -84,23 +84,15 @@ pub(crate) fn dirty_worktree(
     HeddleError::recovery(
         RecoveryDetails::safety_refusal(
             "dirty_worktree",
-            // Established wording (`main`): the blocker leads with the fix
-            // ("Save or stash …"), not a bare refusal. The reparent rewrote
-            // this to "Refusing to … with a dirty worktree", dropping the
-            // recovery-first phrasing the typed advice contract asserts.
-            format!("Save or stash worktree changes before {action}"),
-            "Save Heddle provenance with `heddle capture -m \"...\"`, then commit Git-owned source history with `heddle commit -m \"...\"` before retrying.",
+            format!("Save worktree changes before {action}"),
+            "Save the work with `heddle capture -m \"...\"`, then retry the integration.",
             unsafe_condition,
             format!(
                 "{action} would write another tree into the worktree; saving first prevents those path changes from being overwritten"
             ),
             already_preserved,
         )
-        .with_recovery_commands(vec![
-            "heddle capture -m \"...\"".to_string(),
-            "heddle capture -m \"...\"".to_string(),
-            "heddle stash push -m \"...\"".to_string(),
-        ]),
+        .with_recovery_commands(vec!["heddle capture -m \"...\"".to_string()]),
     )
 }
 
@@ -122,7 +114,6 @@ pub(crate) fn source_thread_uncaptured_work(
     let repo_arg = recommended_action_quote(checkout_path);
     let ready = format!("heddle --repo {repo_arg} ready -m \"Save source work\"");
     let capture = format!("heddle --repo {repo_arg} capture -m \"Save source work\"");
-    let stash = format!("heddle --repo {repo_arg} stash push -m \"Save source work\"");
     // Error copy mirrors `main`: signal the preview/merge did not run so callers
     // don't mistake the refusal for an up-to-date result.
     let did_not_run = if preview {
@@ -137,12 +128,12 @@ pub(crate) fn source_thread_uncaptured_work(
         RecoveryDetails::safety_refusal(
             "source_thread_uncaptured_work",
             error,
-            format!("Run `{ready}` in the source checkout, then retry the merge."),
+            format!("Run `{ready}` in the source checkout, then retry the integration."),
             unsafe_condition,
             format!("{verb} would integrate a source tip that does not include uncaptured worktree changes"),
             "repository state, refs, metadata, and worktree files were left unchanged",
         )
-        .with_recovery_commands(vec![ready, capture, stash]),
+        .with_recovery_commands(vec![ready, capture]),
     )
 }
 

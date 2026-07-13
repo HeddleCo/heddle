@@ -20,6 +20,8 @@ use heddle_core::{
     },
     maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };
+#[cfg(feature = "git-overlay")]
+use heddle_git_projection::GitProjection;
 use objects::store::{
     AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
     recover_pack_install_intents,
@@ -27,8 +29,6 @@ use objects::store::{
 use serde::Serialize;
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
-#[cfg(feature = "git-overlay")]
-use heddle_git_projection::GitProjection;
 
 #[derive(Serialize, Default)]
 struct GcOutput {

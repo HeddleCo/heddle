@@ -36686,7 +36686,7 @@
           ]
         },
         "recovery_state": {
-          "description": "heddle#305: the pre-undo state preserved for recovery, and the marker\npointing at it. Present only on a completed `undo`.",
+          "description": "The checkout-local state preserved for recovery, and its internal\nhandle. Present on completed undo and recovery operations.",
           "type": [
             "string",
             "null"
@@ -36782,6 +36782,166 @@
         "output_kind"
       ],
       "title": "UndoListSchema",
+      "type": "object"
+    },
+    "undo --recover": {
+      "$defs": {
+        "ActionTemplateSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
+              "type": "boolean"
+            },
+            "argv_template": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "required_inputs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "action",
+            "argv_template",
+            "required_inputs",
+            "agent_may_fill"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "batches": {
+          "items": true,
+          "type": "array"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_action_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "undo_recover"
+          ],
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommended_action_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery_marker": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_state": {
+          "description": "The checkout-local state preserved for recovery, and its internal\nhandle. Present on completed undo and recovery operations.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "message",
+        "batches",
+        "output_kind"
+      ],
+      "title": "UndoSchema",
       "type": "object"
     },
     "undo --redo": {
@@ -36916,7 +37076,7 @@
           ]
         },
         "recovery_state": {
-          "description": "heddle#305: the pre-undo state preserved for recovery, and the marker\npointing at it. Present only on a completed `undo`.",
+          "description": "The checkout-local state preserved for recovery, and its internal\nhandle. Present on completed undo and recovery operations.",
           "type": [
             "string",
             "null"

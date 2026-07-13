@@ -200,8 +200,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
         Some("heddle push")
     );
     assert_eq!(
-        remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
-            .as_deref(),
+        remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle pull")).as_deref(),
         Some("heddle import git --ref origin/main")
     );
     assert_eq!(
@@ -213,7 +212,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
 #[test]
 fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() {
     let (_temp, repo) = test_repo();
-    let diverged = remote("main", "origin/main", 1, 1, "heddle fetch");
+    let diverged = remote("main", "origin/main", 1, 1, "heddle pull");
 
     let unimported = remote_drift_decision(&repo, &diverged);
     assert_eq!(unimported.status, "remote_diverged");

@@ -58,6 +58,7 @@ verify_app_signature() {
   codesign --verify --strict --verbose=4 "$app/Contents/MacOS/$app_exe" || return $?
 
   codesign --verify --strict --verbose=4 "$app/Contents/Resources/bin/heddle" || return $?
+  codesign --verify --strict --verbose=4 "$app/Contents/Resources/bin/heddle-fsmonitor-worker" || return $?
 
   extension="$app/Contents/Extensions/HeddleFSModule.appex"
   codesign --verify --deep --strict --verbose=4 "$extension" || return $?
@@ -123,6 +124,7 @@ ARCHIVE_PATH="$HOST_DIR/build/HeddleHost.xcarchive"
 STAGED_APP="$HOST_DIR/build/Heddle.app"
 EXTENSION="$STAGED_APP/Contents/Extensions/HeddleFSModule.appex"
 CLI_PATH="$REPO_ROOT/target/release/heddle"
+FSMONITOR_WORKER_PATH="$REPO_ROOT/target/release/heddle-fsmonitor-worker"
 LIBMOUNT_PATH="$REPO_ROOT/target/release/libmount.a"
 DMG_PATH="$OUTPUT_DIR/Heddle-${TAG}-macos-universal.dmg"
 NOTARY_ZIP="$HOST_DIR/build/Heddle-${TAG}-notary.zip"
@@ -135,8 +137,42 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
   MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
     cargo build --release --locked -p heddle-mount --features fskit --target "$target"
   MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
-    cargo build --release --locked -p heddle-cli --bin heddle --features mount,client --target "$target"
+    cargo build --release --locked -p heddle-cli \
+      --bin heddle \
+      --bin heddle-fsmonitor-worker \
+      --features mount,client \
+      --target "$target"
 done
+
+STANDALONE_NOTARY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/heddle-standalone-notary.XXXXXX")"
+STANDALONE_NOTARY_ZIP="$STANDALONE_NOTARY_DIR/heddle-macos-cli.zip"
+STANDALONE_NOTARY_PAYLOAD="$STANDALONE_NOTARY_DIR/payload"
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  target_cli="$REPO_ROOT/target/$target/release/heddle"
+  target_worker="$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker"
+  codesign --force --timestamp --options runtime --sign "$DEVELOPER_ID" "$target_cli"
+  codesign --force --timestamp --options runtime --sign "$DEVELOPER_ID" "$target_worker"
+  codesign --verify --strict --verbose=4 "$target_cli"
+  codesign --verify --strict --verbose=4 "$target_worker"
+  mkdir -p "$STANDALONE_NOTARY_PAYLOAD/$target"
+  ditto --norsrc --noextattr --noqtn --noacl \
+    "$target_cli" "$STANDALONE_NOTARY_PAYLOAD/$target/heddle"
+  ditto --norsrc --noextattr --noqtn --noacl \
+    "$target_worker" "$STANDALONE_NOTARY_PAYLOAD/$target/heddle-fsmonitor-worker"
+done
+ditto -c -k --keepParent \
+  "$STANDALONE_NOTARY_PAYLOAD" \
+  "$STANDALONE_NOTARY_ZIP"
+xcrun notarytool submit "$STANDALONE_NOTARY_ZIP" \
+  --key "$NOTARY_KEY" \
+  --key-id "$NOTARY_KEY_ID" \
+  --issuer "$NOTARY_ISSUER_ID" \
+  --wait
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle"
+  spctl -a -vvv -t execute "$REPO_ROOT/target/$target/release/heddle-fsmonitor-worker"
+done
+rm -rf "$STANDALONE_NOTARY_DIR"
 
 mkdir -p "$(dirname "$CLI_PATH")"
 lipo -create \
@@ -147,9 +183,15 @@ lipo -create \
   "$REPO_ROOT/target/aarch64-apple-darwin/release/heddle" \
   "$REPO_ROOT/target/x86_64-apple-darwin/release/heddle" \
   -output "$CLI_PATH"
+lipo -create \
+  "$REPO_ROOT/target/aarch64-apple-darwin/release/heddle-fsmonitor-worker" \
+  "$REPO_ROOT/target/x86_64-apple-darwin/release/heddle-fsmonitor-worker" \
+  -output "$FSMONITOR_WORKER_PATH"
 chmod 0755 "$CLI_PATH"
+chmod 0755 "$FSMONITOR_WORKER_PATH"
 lipo -info "$LIBMOUNT_PATH"
 lipo -info "$CLI_PATH"
+lipo -info "$FSMONITOR_WORKER_PATH"
 
 rm -rf "$HOST_DIR/build"
 mkdir -p "$HOST_DIR/build" "$OUTPUT_DIR"
@@ -174,7 +216,11 @@ mkdir -p "$STAGED_APP/Contents/Resources/bin"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$CLI_PATH" \
   "$STAGED_APP/Contents/Resources/bin/heddle"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$FSMONITOR_WORKER_PATH" \
+  "$STAGED_APP/Contents/Resources/bin/heddle-fsmonitor-worker"
 chmod 0755 "$STAGED_APP/Contents/Resources/bin/heddle"
+chmod 0755 "$STAGED_APP/Contents/Resources/bin/heddle-fsmonitor-worker"
 
 cp "$HOST_PROFILE" "$STAGED_APP/Contents/embedded.provisionprofile"
 cp "$FSMODULE_PROFILE" "$EXTENSION/Contents/embedded.provisionprofile"
@@ -182,6 +228,9 @@ cp "$FSMODULE_PROFILE" "$EXTENSION/Contents/embedded.provisionprofile"
 codesign --force --timestamp --options runtime \
   --sign "$DEVELOPER_ID" \
   "$STAGED_APP/Contents/Resources/bin/heddle"
+codesign --force --timestamp --options runtime \
+  --sign "$DEVELOPER_ID" \
+  "$STAGED_APP/Contents/Resources/bin/heddle-fsmonitor-worker"
 codesign --force --timestamp --options runtime \
   --entitlements "$HOST_DIR/HeddleFSModule/HeddleFSModule.entitlements" \
   --sign "$DEVELOPER_ID" \

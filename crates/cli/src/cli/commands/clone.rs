@@ -31,6 +31,9 @@ use heddle_core::{
     monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
     plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
 };
+use heddle_git_projection::git_core::{
+    clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
+};
 use ingest::ImportOptions;
 use objects::{
     Progress,
@@ -42,12 +45,12 @@ use objects::{
 use refs::Head;
 use repo::{BlobHydrator, Repository};
 use serde::Serialize;
-use sley::plumbing::sley_core::redact_url_for_display;
 #[cfg(feature = "client")]
 use sley::plumbing::sley_worktree;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
+    plumbing::sley_core::redact_url_for_display,
     remote::{ProgressSink as SleyProgressSink, TransferProgress},
 };
 
@@ -66,9 +69,6 @@ use crate::{
     },
     client::LocalSync,
     remote::{Remote, RemoteConfig, RemoteTarget},
-};
-use heddle_git_projection::git_core::{
-    clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
 
 /// `output_kind` value carried by the final `heddle clone --output json`

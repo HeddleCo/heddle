@@ -240,14 +240,14 @@ pub fn uses_git_overlay_mirror_rpc(capability: RepositoryCapability) -> bool {
 /// Whether push/pull should take the local git-overlay path (git refs /
 /// git projection) rather than native heddle remote transport.
 ///
-/// Eligible when the repo is git-overlay, hosted mode is off, and the
-/// resolved target is not a hosted heddle network endpoint.
+/// Eligible when the repo is git-overlay and the resolved target is not a
+/// hosted Heddle network endpoint. Repository-wide hosted linkage does not
+/// override the transport selected by an explicit ordinary Git remote.
 pub fn uses_local_git_overlay_transport(
     capability: RepositoryCapability,
-    hosted_enabled: bool,
     uses_hosted_network: bool,
 ) -> bool {
-    capability == RepositoryCapability::GitOverlay && !hosted_enabled && !uses_hosted_network
+    capability == RepositoryCapability::GitOverlay && !uses_hosted_network
 }
 
 /// Default thread name for a push when the user omitted it.
@@ -358,7 +358,6 @@ impl std::error::Error for RemotePreflightBlocker {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushPlanRequest {
     pub capability: RepositoryCapability,
-    pub hosted_enabled: bool,
     /// True when the resolved remote is a hosted heddle network endpoint.
     pub uses_hosted_network: bool,
     /// Explicit remote name/spec from the user; `None` means default.
@@ -421,7 +420,6 @@ pub struct PushPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullPlanRequest {
     pub capability: RepositoryCapability,
-    pub hosted_enabled: bool,
     pub uses_hosted_network: bool,
     pub remote: Option<String>,
     pub has_default_remote: bool,
@@ -519,11 +517,8 @@ pub fn plan_push(request: &PushPlanRequest) -> Result<PushPlan, RemotePreflightB
         return Err(blocker);
     }
 
-    let uses_local = uses_local_git_overlay_transport(
-        request.capability,
-        request.hosted_enabled,
-        request.uses_hosted_network,
-    );
+    let uses_local =
+        uses_local_git_overlay_transport(request.capability, request.uses_hosted_network);
     let track_name = default_push_thread_name(request.thread.as_deref(), &request.head);
     let hosted = plan_hosted_push(request.capability, request.all_threads);
     let uses_mirror = uses_git_overlay_mirror_rpc(request.capability);
@@ -602,11 +597,8 @@ pub fn plan_pull(request: &PullPlanRequest) -> Result<PullPlan, RemotePreflightB
         return Err(blocker);
     }
 
-    let uses_local = uses_local_git_overlay_transport(
-        request.capability,
-        request.hosted_enabled,
-        request.uses_hosted_network,
-    );
+    let uses_local =
+        uses_local_git_overlay_transport(request.capability, request.uses_hosted_network);
 
     if let Some(blocker) = transport_mismatch_blocker(uses_local, request.transport_mismatch) {
         return Err(blocker);
@@ -2734,25 +2726,17 @@ mod tests {
     }
 
     #[test]
-    fn uses_local_git_overlay_transport_requires_overlay_and_no_hosted() {
+    fn uses_local_git_overlay_transport_follows_resolved_remote() {
         assert!(uses_local_git_overlay_transport(
             RepositoryCapability::GitOverlay,
             false,
-            false,
         ));
         assert!(!uses_local_git_overlay_transport(
             RepositoryCapability::GitOverlay,
-            true,
-            false,
-        ));
-        assert!(!uses_local_git_overlay_transport(
-            RepositoryCapability::GitOverlay,
-            false,
             true,
         ));
         assert!(!uses_local_git_overlay_transport(
             RepositoryCapability::NativeHeddle,
-            false,
             false,
         ));
     }
@@ -2895,7 +2879,6 @@ mod tests {
     fn base_push_request() -> PushPlanRequest {
         PushPlanRequest {
             capability: RepositoryCapability::NativeHeddle,
-            hosted_enabled: false,
             uses_hosted_network: false,
             remote: Some("origin".to_string()),
             has_default_remote: true,
@@ -2911,7 +2894,6 @@ mod tests {
     fn base_pull_request() -> PullPlanRequest {
         PullPlanRequest {
             capability: RepositoryCapability::NativeHeddle,
-            hosted_enabled: false,
             uses_hosted_network: false,
             remote: Some("origin".to_string()),
             has_default_remote: true,
@@ -3073,7 +3055,6 @@ mod tests {
             req.all_threads = all_threads;
             // Force native remote path (hosted network disables local overlay).
             req.uses_hosted_network = capability == RepositoryCapability::GitOverlay;
-            req.hosted_enabled = capability == RepositoryCapability::GitOverlay;
             let plan = plan_push(&req).expect("plan");
             assert_eq!(plan.hosted, hosted, "capability={capability:?}");
             assert_eq!(plan.native_all_threads_fanout, fanout);

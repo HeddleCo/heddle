@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Integration tests for state-management commands: clean, revert, stash, merge.
+//! Integration tests for the retained state-management commands.
 
 use std::{
     fs,
@@ -10,18 +10,14 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[path = "state_management/clean.rs"]
-mod clean;
-#[path = "state_management/merge.rs"]
-mod merge;
 #[path = "state_management/merge_store_integrity.rs"]
 mod merge_store_integrity;
 #[path = "state_management/missing_tree_integrity.rs"]
 mod missing_tree_integrity;
 #[path = "state_management/revert.rs"]
 mod revert;
-#[path = "state_management/stash.rs"]
-mod stash;
+#[path = "state_management/thread_integration.rs"]
+mod thread_integration;
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
@@ -172,7 +168,7 @@ fn capture_without_message_json_refusal_is_structured_and_preserves_head() {
 }
 
 #[test]
-fn commit_without_message_refuses_and_preserves_head() {
+fn commit_in_native_repo_redirects_to_capture_and_preserves_head() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "initial");
     let before = current_head_json(temp.path());
@@ -180,11 +176,14 @@ fn commit_without_message_refuses_and_preserves_head() {
     fs::write(temp.path().join("file.txt"), "changed").unwrap();
     let output = heddle_output(&["--output", "text", "commit"], Some(temp.path())).unwrap();
 
-    assert!(!output.status.success(), "commit without -m must fail");
+    assert!(
+        !output.status.success(),
+        "commit in a native repo must refuse"
+    );
     assert!(
         str::from_utf8(&output.stderr)
             .unwrap_or("")
-            .contains("Next: heddle commit -m \"...\""),
+            .contains("Next: heddle capture -m \"...\""),
         "text refusal should include the direct next command: {}",
         str::from_utf8(&output.stderr).unwrap_or("")
     );

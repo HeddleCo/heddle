@@ -1494,7 +1494,8 @@ fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
 
 /// Close-the-class guard for the heddle#473 verb consolidation: a command can
 /// emit MORE than one `output_kind` from a single command path — `undo` emits
-/// `undo` (the rewind / `--preview`) and `undo_list` (`--list`). Every value a
+/// `undo` (the rewind / `--preview`), `undo_list` (`--list`), and
+/// `undo_recover` (`--recover`). Every value a
 /// handler can emit must be in that command's advertised catalog discriminator
 /// set, or an agent that validates responses against `heddle help --output
 /// json` rejects the off-contract record.
@@ -1516,6 +1517,7 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
             "undo".to_string(),
             "undo_list".to_string(),
             "redo".to_string(),
+            "undo_recover".to_string(),
         ])),
         "catalog must advertise all undo-mode output_kinds; advertised: {undo_advertised:?}"
     );
@@ -1530,12 +1532,19 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
 
     // Drive each JSON-emitting variant, in an order that keeps the repo
     // consistent: undo --list (read-only) → undo (rewinds, making a redo
-    // available) → undo --redo (re-applies). Each case names the command display whose
-    // advertised set must contain the emitted kind.
+    // available) → undo --redo (re-applies) → undo → undo --recover. The
+    // second undo recreates a clean recovery baseline before recovery restores
+    // it as worktree changes.
     let cases: &[(&[&str], &str, &str)] = &[
         (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
         (&["--output", "json", "undo"], "undo", "undo"),
         (&["--output", "json", "undo", "--redo"], "redo", "undo"),
+        (&["--output", "json", "undo"], "undo", "undo"),
+        (
+            &["--output", "json", "undo", "--recover"],
+            "undo_recover",
+            "undo",
+        ),
     ];
 
     let mut failures = Vec::new();

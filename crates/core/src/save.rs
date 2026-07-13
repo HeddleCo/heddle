@@ -442,10 +442,10 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
                 return Err(anyhow!(HeddleError::recovery(
                     RecoveryDetails::safety_refusal(
                         "dirty_worktree",
-                        "Save or stash worktree changes before checkpoint",
-                        "Save the work with `heddle capture -m \"...\"`, then retry the integration.",
+                        "Save worktree changes before committing",
+                        "Save the work with `heddle capture -m \"...\"`, then retry the commit.",
                         "the current Heddle state was left unchanged; these paths have not been captured",
-                        "checkpoint would write a Git commit that does not include dirty worktree paths",
+                        "commit would write Git history that does not include dirty worktree paths",
                         "the current Heddle state was left unchanged; these paths have not been captured",
                     ),
                 )));

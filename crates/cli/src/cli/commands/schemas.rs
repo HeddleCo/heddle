@@ -73,7 +73,7 @@ schema_registry! {
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
-    (&["undo", "undo --redo"], UndoSchema),
+    (&["undo", "undo --redo", "undo --recover"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
@@ -1179,8 +1179,8 @@ pub struct UndoSchema {
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    /// heddle#305: the pre-undo state preserved for recovery, and the marker
-    /// pointing at it. Present only on a completed `undo`.
+    /// The checkout-local state preserved for recovery, and its internal
+    /// handle. Present on completed undo and recovery operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

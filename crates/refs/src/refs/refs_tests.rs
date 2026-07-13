@@ -691,7 +691,7 @@ fn undo_recovery_ref_is_isolated_from_user_marker_namespace() {
 /// `RefManager::new(&shared_galeed_dir).with_local_head(<worktree>/.heddle/HEAD)` —
 /// the ref root is shared across sibling checkouts but `local_head` is unique.
 /// A `heddle undo` in checkout B must NOT overwrite checkout A's recovery
-/// pointer; otherwise `goto .undo-recovery` in A would restore B's pre-undo
+/// pointer; otherwise `undo --recover` in A would restore B's pre-undo
 /// state — cross-checkout data corruption.
 #[test]
 fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {

@@ -123,6 +123,14 @@ fn clone_source(temp: &TempDir, source: &Path, checkout: &Path) {
     );
 }
 
+fn link_overlay_to_hosted(checkout: &Path) {
+    let path = checkout.join(".heddle/config.toml");
+    let mut config = repo::RepoConfig::load(&path).expect("load repository config");
+    config.hosted.upstream_url = Some("https://hosted.example.test".to_string());
+    config.hosted.namespace = Some("acme/widget".to_string());
+    config.save(&path).expect("save hosted linkage");
+}
+
 #[test]
 fn embedded_credential_store_runs_without_git_on_path() {
     let temp = TempDir::new().expect("tempdir");
@@ -217,6 +225,140 @@ fn pull_streams_and_fast_forwards_with_empty_process_path() {
     let local = SleyRepository::discover(&checkout).expect("reopen checkout");
     assert_eq!(local.head().expect("read HEAD").oid, Some(second));
     assert!(!checkout.join(".heddle/git").exists());
+}
+
+#[test]
+fn hosted_linked_overlay_pushes_explicit_git_remote_through_sley() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+    link_overlay_to_hosted(&checkout);
+
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    let second = write_commit(&local, Some(first), b"two\n", b"two\n");
+    publish_branch(&local, "main", Some(first), second);
+    std::fs::write(checkout.join("tracked.txt"), b"two\n").expect("materialize local commit");
+
+    let pushed = run(&temp, &checkout, &["--output", "json", "push", "origin"]);
+    assert!(
+        pushed.status.success(),
+        "explicit Git push must ignore repository-wide hosted linkage\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pushed.stdout),
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let pushed: Value = serde_json::from_slice(&pushed.stdout).expect("push JSON");
+    assert_eq!(pushed["transport"], "git");
+    assert_eq!(
+        source
+            .find_reference("refs/heads/main")
+            .expect("read remote main")
+            .expect("remote main")
+            .direct_target()
+            .expect("direct remote main"),
+        second
+    );
+}
+
+#[test]
+fn hosted_linked_overlay_pulls_explicit_git_remote_through_sley() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+    link_overlay_to_hosted(&checkout);
+
+    let second = write_commit(&source, Some(first), b"two\n", b"two\n");
+    publish_branch(&source, "main", Some(first), second);
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+    assert!(
+        pulled.status.success(),
+        "explicit Git pull must ignore repository-wide hosted linkage\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pulled.stdout),
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    let pulled: Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    assert_eq!(pulled["transport"], "git");
+    assert_eq!(pulled["new_git_head"], second.to_string());
+    assert_eq!(
+        std::fs::read_to_string(checkout.join("tracked.txt")).expect("materialized file"),
+        "two\n"
+    );
+}
+
+#[test]
+fn overlay_pull_uses_url_even_when_pushurl_is_hosted() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    set_git_config(
+        &local,
+        "remote.origin.pushurl",
+        "heddle://127.0.0.1:1/acme/widget",
+    );
+    let second = write_commit(&source, Some(first), b"two\n", b"two\n");
+    publish_branch(&source, "main", Some(first), second);
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+    assert!(
+        pulled.status.success(),
+        "pull must use remote.origin.url, not its hosted pushurl\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pulled.stdout),
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    let pulled: Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    assert_eq!(pulled["transport"], "git");
+    assert_eq!(pulled["new_git_head"], second.to_string());
+}
+
+#[test]
+fn overlay_push_uses_pushurl_even_when_url_is_hosted() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    set_git_config(
+        &local,
+        "remote.origin.url",
+        "heddle://127.0.0.1:1/acme/widget",
+    );
+    set_git_config(
+        &local,
+        "remote.origin.pushurl",
+        source_path.to_str().expect("source path UTF-8"),
+    );
+    let second = write_commit(&local, Some(first), b"two\n", b"two\n");
+    publish_branch(&local, "main", Some(first), second);
+    std::fs::write(checkout.join("tracked.txt"), b"two\n").expect("materialize local commit");
+
+    let pushed = run(&temp, &checkout, &["--output", "json", "push", "origin"]);
+    assert!(
+        pushed.status.success(),
+        "push must use remote.origin.pushurl, not its hosted fetch URL\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pushed.stdout),
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let pushed: Value = serde_json::from_slice(&pushed.stdout).expect("push JSON");
+    assert_eq!(pushed["transport"], "git");
+    assert_eq!(
+        source
+            .find_reference("refs/heads/main")
+            .expect("read remote main")
+            .expect("remote main")
+            .direct_target()
+            .expect("direct remote main"),
+        second
+    );
 }
 
 #[test]

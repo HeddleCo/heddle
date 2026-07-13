@@ -4688,7 +4688,7 @@ pub fn push_authoritative_git_refs(
 
     let records = source
         .ls_remote(
-            remote,
+            &remote_url,
             LsRemoteFilter {
                 heads: false,
                 tags: false,

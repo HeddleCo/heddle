@@ -61,9 +61,9 @@ release-plz → push-to-main flow documented in
      GitHub-hosted runners
    - package each into a versioned archive (`.tar.gz` for unix,
      `.zip` for windows)
-   - build macOS once in `build-macos-cask`, then package both standalone
-     macOS CLI tarballs and the signed, notarized universal DMG containing
-     `Heddle.app`, with the CLI bundled at
+   - build macOS once in `build-macos-cask`, Developer ID sign and notarize
+     both standalone CLI/worker pairs, then package their tarballs and the
+     signed, notarized universal DMG containing `Heddle.app`, with the CLI bundled at
      `Heddle.app/Contents/Resources/bin/heddle`, from those same binaries
    - emit a `.sha256` next to each archive
    - sign each archive/DMG with `cosign` keyless (Sigstore public-good
@@ -144,7 +144,13 @@ Targets (`<target>`):
 Each archive contains:
 
 - `heddle` (or `heddle.exe` on Windows) — the CLI binary, release profile
+- `heddle-fsmonitor-worker` (or `.exe` on Windows) — the sibling process that keeps repeated status scans incremental
 - `README.md`, `LICENSE`, `NOTICE`
+
+The two macOS archives contain Developer ID signed binaries. Both target
+pairs are submitted to Apple's notary service before the tarballs are staged;
+the tarballs themselves also carry the same cosign release signature as every
+other archive.
 
 Downstream channels **must** consume:
 
@@ -387,7 +393,8 @@ cosign verify-blob \
 We build natively rather than cross-compiling from a single host, but
 macOS is intentionally consolidated into one job: `build-macos-cask`
 builds both Apple targets once, packages the standalone CLI tarballs, and
-then signs/notarizes the universal app DMG from the same build outputs.
+Developer ID signs and notarizes the binaries in those tarballs before
+signing/notarizing the universal app DMG from the same build outputs.
 Trade-off:
 
 - **Targeted native jobs (chosen)**: Linux/Windows use a small parallel
@@ -399,11 +406,10 @@ Trade-off:
 - **Cross-compilation**: one runner, more setup. Wins on cost only if
   we hit a parallelism cap, which we won't at our release cadence.
 
-Revisit if release frequency increases by an order of magnitude, if
-GitHub-hosted runner availability degrades, or when we add macOS
-notarization (cross-compiling macOS binaries from Linux makes the
-codesign + notarize step substantially harder and was a real cost in
-similar projects).
+Revisit if release frequency increases by an order of magnitude or if
+GitHub-hosted runner availability degrades. Cross-compiling macOS binaries
+from Linux would move Developer ID signing and notarization into a separate
+Apple-hosted stage, adding complexity without reducing the current Apple build.
 
 ## Pipeline-contract check
 

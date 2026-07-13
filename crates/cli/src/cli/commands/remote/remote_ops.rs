@@ -20,9 +20,9 @@ use heddle_core::{
     is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
-use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 // Re-export under the historical crate-local names for sibling modules.
 pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
+use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
     object::{StateId, ThreadName, Tree},
     store::ObjectStore,
@@ -238,11 +238,11 @@ pub async fn cmd_pull(
             .map(|_| name.to_string()),
         None => default_remote,
     };
-    let pull_uses_hosted_network = super::push_target_is_hosted_network(&repo, remote.as_deref());
+    let pull_uses_hosted_network = super::pull_target_is_hosted_network(&repo, remote.as_deref());
     // Match preflight_native_remote_transport: overlay capability never
     // treats a git URL as a native-transport mismatch.
     let remote_is_git_local_or_url = matches!(
-        super::classify_remote_spec(&repo, remote.as_deref()),
+        super::classify_pull_remote_spec(&repo, remote.as_deref()),
         Some(super::RemoteTransportKind::LocalGit | super::RemoteTransportKind::GitUrl)
     );
     let transport_mismatch =
@@ -250,7 +250,6 @@ pub async fn cmd_pull(
     let head = repo.head_ref()?;
     let plan = plan_pull(&PullPlanRequest {
         capability: repo.capability(),
-        hosted_enabled: repo.hosted_enabled(),
         uses_hosted_network: pull_uses_hosted_network,
         remote: remote.clone(),
         has_default_remote,

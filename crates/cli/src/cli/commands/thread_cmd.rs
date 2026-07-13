@@ -617,8 +617,8 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             // conflict on intermediate states even when the *final*
             // tree (target ⊔ thread) merges cleanly — the canonical
             // case is two sibling threads forked from the same base
-            // that touch disjoint files. `heddle merge` handles this
-            // via a 3-way tree merge; refresh used to fail with a
+            // that touch disjoint files. The shared 3-way tree merge
+            // engine handles this; refresh used to fail with a
             // misleading "rebase conflicts" error. Converge the two
             // paths: try the 3-way merge as a fallback. If it's clean
             // we apply it directly; if it actually conflicts we emit
@@ -1082,7 +1082,7 @@ fn preflight_three_way_refresh_conflict(
 
 /// Try to refresh a thread by performing a 3-way merge between the
 /// thread tip and the target tip (instead of replaying commits). This
-/// is the same algorithm `heddle merge` uses, so refresh and merge
+/// is the same algorithm the land path uses, so refresh and land
 /// agree on whether two thread tips can be combined cleanly.
 ///
 /// On success, the thread's worktree is updated with the merged tree

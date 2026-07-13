@@ -1185,8 +1185,9 @@ impl Error for RecoveryAdvice {}
 
 #[cfg(test)]
 mod tests {
-    use super::RecoveryAdvice;
     use heddle_git_projection::git_core::GitProjectionError;
+
+    use super::RecoveryAdvice;
 
     #[test]
     fn git_projection_mapping_conflict_returns_typed_advice() {

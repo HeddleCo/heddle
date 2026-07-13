@@ -17,6 +17,7 @@ use heddle_core::{
     recovery_scope_checkout as core_recovery_scope_checkout,
     should_squash_land as core_should_squash_land,
 };
+use heddle_git_projection::GitProjection;
 use objects::{
     object::{State, StateId, ThreadName},
     store::ObjectStore,
@@ -58,7 +59,6 @@ use crate::{
     },
     config::UserConfig,
 };
-use heddle_git_projection::GitProjection;
 
 #[derive(Serialize)]
 struct SyncOutput {

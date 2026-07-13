@@ -2,12 +2,18 @@
 
 A safety net for the operations a daily user is most likely to want to roll back.
 
+Every completed undo preserves its pre-undo state in a checkout-local internal
+ref. Run `heddle undo --recover` to materialize that state later, even after a
+divergent capture has made redo unavailable. Recovery preserves the current
+`HEAD` and attached thread, restores the saved tree as dirty worktree changes,
+and recommends `heddle capture`. It refuses without changing files when the
+recovery state is absent or the worktree is dirty.
+
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
 design + 0.3 scope cut for cross-thread cases lives in
 [docs/design/cross-thread-undo.md](design/cross-thread-undo.md). Remote-
-affecting undo and persistent cross-invocation redo are tracked as
-follow-ups.
+affecting undo and cross-worktree safety are tracked as follow-ups.
 
 ## Undoable operations
 
@@ -54,8 +60,6 @@ own, are destructive by design, or need a substrate change we haven't shipped:
   `.heddle/refstore` (the `heddle start --path` setup) can step on each
   other's threads. 0.3 supports single-worktree usage only; cross-
   worktree safety is filed as a follow-up. See the design doc.
-- **Redo across CLI invocations** — `heddle undo --redo` works within the same shell
-  session but is not yet persisted across processes.
 
 ## Safety contracts
 
@@ -75,7 +79,9 @@ contracts below are enforced by integration tests in
 - **Dirty worktree refusal.** If you have uncommitted changes (modified
   tracked files, untracked files), `heddle undo` refuses and surfaces the
   dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
-  them) and retry. The check is shared with `revert` and `sync`.
+  them) and retry. `heddle undo --recover` enforces the same refusal before
+  materializing the preserved state. The check is shared with `revert` and
+  `sync`.
 - **Destructive-boundary refusal.** If the state the inverse would restore
   has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
@@ -113,8 +119,10 @@ contracts below are enforced by integration tests in
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
 | `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--redo`                   | Re-apply operations that a prior `undo` rewound.            |
+| `--recover`                | Restore the last undo's saved state as worktree changes without moving HEAD. |
 | `--allow-redact-undo`      | Explicit opt-in to undo a `heddle redact apply` (see "Safety contracts"). |
-| `--output {auto,json,text}`| Force output format. JSON is the structured contract.        |
+| `--output {text,json,json-compact}` | Select human output or a structured machine contract. |
 
 Run `heddle undo --help` for the curated list with examples and the explicit
 "NOT undoable" reminder.

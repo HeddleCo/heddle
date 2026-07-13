@@ -2865,17 +2865,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                // `undo` keeps its own `--list` history view and owns
-                // redo-mode after the top-level `redo` deletion.
+                // `undo` keeps its own history, redo, and recovery modes.
                 // Every kind the handler can emit must be advertised or an agent
                 // validating responses via `heddle help --output json` rejects
                 // the off-contract record. `undo --list` has its own
                 // `UndoListSchema`.
-                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list", "undo --redo"]),
+                documented_schemas(
+                    WORKTREE_MUTATION,
+                    &["undo", "undo --list", "undo --redo", "undo --recover"],
+                ),
                 &[
                     json_discriminator(Some("undo"), "output_kind", "undo"),
                     json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
                     json_discriminator(Some("undo --redo"), "output_kind", "redo"),
+                    json_discriminator(Some("undo --recover"), "output_kind", "undo_recover"),
                 ],
             ),
             100,
@@ -4188,26 +4191,6 @@ fn dynamic_message_recommended_action_template(
                     confidence.clone(),
                 ],
                 vec!["message".to_string(), placeholder_input_name(confidence)],
-                true,
-            ))
-        }
-        [heddle, stash, push, message_flag, message]
-            if heddle == "heddle"
-                && stash == "stash"
-                && push == "push"
-                && is_message_flag(message_flag)
-                && is_message_placeholder_arg(message) =>
-        {
-            Some(action_template_from_owned(
-                action.to_string(),
-                vec![
-                    "heddle".to_string(),
-                    "stash".to_string(),
-                    "push".to_string(),
-                    "-m".to_string(),
-                    "<message>".to_string(),
-                ],
-                vec!["message".to_string()],
                 true,
             ))
         }

@@ -99,8 +99,8 @@ specifiers. Pass any of them — they all resolve to the same change ID:
   thread's tip.
 * **Thread name** — resolves to that thread's tip.
 
-Verbs covered: `show`, `diff`, `revert`,
-`switch`, `query --attribution --state`, `log --since`, `review show`,
+Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
+`log --since`, `review show`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
@@ -439,10 +439,33 @@ hooks.
   "action": "undo",
   "message": "restored previous logical operation",
   "batches": [],
-  "next_action": null,
-  "next_action_template": null,
+  "next_action": "heddle undo --recover",
+  "next_action_template": {"program": "heddle", "args": ["undo", "--recover"], "placeholders": []},
   "recommended_action": null,
-  "recommended_action_template": null
+  "recommended_action_template": null,
+  "recovery_state": "hd-before123",
+  "recovery_marker": ".undo-recovery"
+}
+```
+
+`heddle undo --recover` emits JSON when invoked with `--output json`. It
+materializes the checkout-local state preserved by the most recent undo as
+dirty worktree changes. `HEAD` and the attached thread remain unchanged, so
+the recovered work can be captured as new history:
+
+```json
+{
+  "output_kind": "undo_recover",
+  "status": "completed",
+  "action": "recover",
+  "message": "restored the state preserved by the most recent undo as worktree changes",
+  "batches": [],
+  "next_action": "heddle capture -m \"...\"",
+  "next_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
+  "recommended_action": "heddle capture -m \"...\"",
+  "recommended_action_template": {"program": "heddle", "args": ["capture", "-m", "<message>"], "placeholders": ["message"]},
+  "recovery_state": "hd-before123",
+  "recovery_marker": ".undo-recovery"
 }
 ```
 
@@ -547,13 +570,13 @@ saves a Heddle state without recommending a Git checkpoint.
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
 | `principal`, `agent` | object / object \| null | required for `capture` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
-| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo` and `undo --redo` report `completed` or `preview`. |
+| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`, `undo --redo`, and `undo --recover` report `completed`; undo/redo previews report `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
 | `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
 | `status` | string | required for `capture`/`ready`/`land` | Machine-stable success status for the operation. |
-| `action` | string | required for `capture`/`undo`/`undo --redo`/`land` | Logical operation name. |
-| `batches` | array<object> | required for `undo`/`undo --redo` | Oplog batches affected by the operation. Empty if none are reported. |
+| `action` | string | required for `capture`/`undo`/`undo --redo`/`undo --recover`/`land` | Logical operation name. Recovery reports `recover`. |
+| `batches` | array<object> | required for `undo`/`undo --redo`/`undo --recover` | Oplog batches affected by the operation. Recovery reports an empty array. |
 | `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
 | `thread`, `captured`, `checkpointed`, `synced`, `integrated` | string / bool | required for `land` | Thread landed and which local integration steps completed. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
@@ -587,7 +610,7 @@ add/modify/delete badges from `diff` alone:
 ```
 
 A state-to-state diff (`heddle diff <a> <b>`) instead emits `changes` as a
-flat `array<object>` (the shape `merge --with-diff` embeds):
+flat `array<object>`:
 
 ```json
 {
@@ -2470,8 +2493,8 @@ set should filter the returned `commands` array by `display`, `tier`,
 `command_action` is the per-command action contract. For example, `push`
 advertises executable argv `["/path/to/heddle", "push"]`, while `adopt`
 advertises the fillable template `["/path/to/heddle", "adopt", "--ref",
-"<branch>"]` and `merge` advertises `["/path/to/heddle", "merge",
-"<thread>", "--preview"]`.
+"<branch>"]` and `land` advertises `["/path/to/heddle", "land", "--thread",
+"<thread>"]`.
 Agents should execute `argv` directly and fill `template.argv_template`
 only when they can supply every `required_inputs` value and
 `agent_may_fill` is true.
