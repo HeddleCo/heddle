@@ -28,7 +28,7 @@ use merge::{
 };
 use objects::{
     object::{Attribution, ChangeId, ContentHash, ThreadName, Tree},
-    store::{AgentRegistry, AgentStatus, ObjectStore},
+    store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
 use refs::Head;
@@ -582,7 +582,7 @@ pub fn merge_thread_into_current_with_machine_contract(
     // the apply path, which is the documented Codex r13 divergence class.
     let attempt = MergeAttemptPlan::decide(no_semantic);
     let use_semantic = attempt.use_semantic();
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = thread_manager.find_by_thread(track_name)?;
     if let Some(ref mut thread) = thread {
@@ -886,7 +886,7 @@ pub fn merge_thread_into_current_with_machine_contract(
                 }
             }
             if let Some(entry) = &thread_entry {
-                registry.update_status(&entry.session_id, AgentStatus::Merged)?;
+                registry.update_status(&entry.session_id, ActorPresenceStatus::Merged)?;
             }
             if let Some(thread) = thread.as_mut() {
                 thread.state = ThreadState::Merged;
@@ -1345,7 +1345,7 @@ pub fn merge_thread_into_current_with_machine_contract(
     )?;
 
     if let Some(entry) = &thread_entry {
-        registry.update_status(&entry.session_id, AgentStatus::Merged)?;
+        registry.update_status(&entry.session_id, ActorPresenceStatus::Merged)?;
     }
     if let Some(thread) = thread.as_mut() {
         thread.state = ThreadState::Merged;

@@ -858,7 +858,7 @@ fn build_attribution_with_env(
     // Pull the thread's declared actor — set when the user ran
     // `heddle start --agent-provider X --agent-model Y` to dedicate this
     // thread to a specific agent. The `start` command writes an
-    // `AgentEntry` into the `AgentRegistry`; `heddle status` already
+    // `ActorPresence` into the `ActorPresenceStore`; `heddle status` already
     // surfaces it via `build_thread_view`. We look it up here so
     // `heddle capture` propagates it onto the resulting state's
     // `attribution.agent` — otherwise every captured state on an agent
@@ -875,7 +875,7 @@ fn build_attribution_with_env(
         .flatten()
         .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten());
     // Harness probing writes the literal "unknown" placeholder into
-    // `AgentEntry.model` and `SessionSegment.model` when it can't
+    // `ActorPresence.model` and `SessionSegment.model` when it can't
     // identify the model from argv/env (see `harness::open_session`
     // and `claude_hook::handle_user_prompt_segment_rotate`). If we
     // let that placeholder participate in the precedence chain, an
@@ -1156,13 +1156,13 @@ mod tests {
         repo: &Repository,
         provider: &str,
         model: &str,
-    ) -> objects::store::AgentEntry {
+    ) -> objects::store::ActorPresence {
         let thread = current_thread(repo)
             .unwrap()
             .expect("initialized repository has a current thread");
-        let registry = objects::store::AgentRegistry::new(repo.heddle_dir());
-        let entry = objects::store::AgentEntry {
-            session_id: objects::store::generate_agent_id(),
+        let registry = objects::store::ActorPresenceStore::new(repo.heddle_dir());
+        let entry = objects::store::ActorPresence {
+            session_id: objects::store::generate_actor_session_id(),
             client_instance_id: None,
             native_actor_key: Some("claude-code:session:session-457".to_string()),
             native_parent_actor_key: None,
@@ -1170,12 +1170,8 @@ mod tests {
             heddle_session_id: None,
             thread_id: Some(thread.id.clone()),
             thread: thread.id,
-            pid: None,
-            boot_id: None,
-            heartbeat_at: Some(chrono::Utc::now()),
             anchor_state: None,
             anchor_root: None,
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: Some(repo.root().to_path_buf()),
             base_state: String::new(),
             started_at: chrono::Utc::now(),
@@ -1192,7 +1188,7 @@ mod tests {
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),
             probe_confidence: Some(0.99),
-            status: objects::store::AgentStatus::Active,
+            status: objects::store::ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: Vec::new(),
         };

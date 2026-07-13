@@ -25,7 +25,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, Result, anyhow};
 use cli_shared::UserConfig;
 use futures::{SinkExt, StreamExt};
-use objects::store::{AgentEntry, AgentRegistry};
+use objects::store::{ActorPresence, ActorPresenceStore};
 use repo::{HostedConfig, Repository};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -167,8 +167,8 @@ pub async fn cmd_presence_publish(
     }
 }
 
-fn load_agent_entry(heddle_dir: &Path, session: &str) -> Result<AgentEntry> {
-    let registry = AgentRegistry::new(heddle_dir);
+fn load_agent_entry(heddle_dir: &Path, session: &str) -> Result<ActorPresence> {
+    let registry = ActorPresenceStore::new(heddle_dir);
     registry
         .load(session)
         .with_context(|| format!("failed to read agent registry for session '{session}'"))?
@@ -176,7 +176,7 @@ fn load_agent_entry(heddle_dir: &Path, session: &str) -> Result<AgentEntry> {
             anyhow!(
                 "no agent entry found for session '{session}' at {}",
                 heddle_dir
-                    .join("agents")
+                    .join("actor-presence")
                     .join(format!("{session}.toml"))
                     .display()
             )
@@ -190,7 +190,7 @@ fn load_agent_entry(heddle_dir: &Path, session: &str) -> Result<AgentEntry> {
 /// (missing token, malformed URL, etc).
 pub fn resolve_publisher_config(
     hosted: &HostedConfig,
-    agent: &AgentEntry,
+    agent: &ActorPresence,
     user_config: &UserConfig,
     interval: Duration,
 ) -> Result<Option<PublisherConfig>> {
@@ -584,12 +584,12 @@ impl BackoffPlan {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::store::AgentStatus;
+    use objects::store::ActorPresenceStatus;
 
     use super::*;
 
-    fn make_agent(session_id: &str) -> AgentEntry {
-        AgentEntry {
+    fn make_agent(session_id: &str) -> ActorPresence {
+        ActorPresence {
             session_id: session_id.into(),
             client_instance_id: None,
             native_actor_key: None,
@@ -598,12 +598,8 @@ mod tests {
             heddle_session_id: None,
             thread_id: None,
             thread: format!("agent/{session_id}"),
-            pid: None,
-            boot_id: None,
-            heartbeat_at: None,
             anchor_state: None,
             anchor_root: None,
-            reservation_token: None,
             path: None,
             base_state: "base".into(),
             started_at: Utc::now(),
@@ -620,7 +616,7 @@ mod tests {
             winning_attach_rule: None,
             probe_source: None,
             probe_confidence: None,
-            status: AgentStatus::Active,
+            status: ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: vec![],
         }

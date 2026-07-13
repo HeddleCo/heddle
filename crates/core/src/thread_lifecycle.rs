@@ -96,7 +96,7 @@ pub struct ThreadDropPlan {
     /// Mark the manager record [`ThreadState::Abandoned`].
     pub mark_abandoned: bool,
     /// Strip agent-registry entries matching thread name or id.
-    pub strip_agent_registry: bool,
+    pub strip_actor_presence: bool,
     /// Delete the live thread ref when present (ordinary drop only with
     /// `--delete-thread`; cleanup always requests this).
     pub delete_thread_ref: bool,
@@ -145,7 +145,7 @@ pub fn plan_thread_drop(options: &ThreadDropOptions) -> ThreadDropDisposition {
         remove_execution_path: options.execution_path_exists,
         remove_manifest: true,
         mark_abandoned: true,
-        strip_agent_registry: true,
+        strip_actor_presence: true,
         delete_thread_ref: options.delete_thread,
     })
 }
@@ -162,7 +162,7 @@ pub fn plan_cleanup_thread_drop(mode: &ThreadMode, execution_path_exists: bool) 
         remove_execution_path: execution_path_exists,
         remove_manifest: true,
         mark_abandoned: true,
-        strip_agent_registry: true,
+        strip_actor_presence: true,
         delete_thread_ref: true,
     }
 }
@@ -450,7 +450,7 @@ mod tests {
                 assert!(plan.remove_execution_path);
                 assert!(plan.remove_manifest);
                 assert!(plan.mark_abandoned);
-                assert!(plan.strip_agent_registry);
+                assert!(plan.strip_actor_presence);
                 assert!(plan.delete_thread_ref);
             }
             other => panic!("expected Drop, got {other:?}"),

@@ -10,7 +10,7 @@ use heddle_core::{
 };
 use objects::{
     object::{AnnotationStatus, ContextTarget},
-    store::{AgentRegistry, ContextQueryEntry},
+    store::{ActorPresenceStore, ContextQueryEntry},
 };
 use repo::{
     Repository, ThreadManager,
@@ -475,7 +475,7 @@ fn log_context_query_if_agent_session(
     path: &str,
     scope: Option<&str>,
 ) -> std::result::Result<(), ()> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let session = registry
         .find_active_by_path(repo.root())
         .map_err(|_| ())?
@@ -485,7 +485,7 @@ fn log_context_query_if_agent_session(
                 .ok()
                 .flatten()?;
             registry.list().ok()?.into_iter().find(|entry| {
-                entry.status == objects::store::AgentStatus::Active
+                entry.status == objects::store::ActorPresenceStatus::Active
                     && entry.thread_id.as_deref() == Some(thread.id.as_str())
             })
         });

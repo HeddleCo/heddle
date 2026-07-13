@@ -9993,7 +9993,7 @@ fn agent_stop_invalid_pidfile_uses_typed_advice_json() {
 }
 
 #[test]
-fn agent_heartbeat_missing_session_uses_typed_advice_json() {
+fn agent_heartbeat_missing_lease_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
     let output = heddle_output(
@@ -10002,8 +10002,10 @@ fn agent_heartbeat_missing_session_uses_typed_advice_json() {
             "json",
             "agent",
             "heartbeat",
-            "--session",
-            "missing-session",
+            "--lease",
+            "lease-missing",
+            "--token",
+            "missing-token",
         ],
         Some(temp.path()),
     )
@@ -10017,11 +10019,11 @@ fn agent_heartbeat_missing_session_uses_typed_advice_json() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let envelope: Value =
         serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "agent_session_not_found");
+    assert_eq!(envelope["kind"], "writer_lease_not_found");
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("Reserve the thread again")),
+            .is_some_and(|hint| hint.contains("Reserve again")),
         "typed advice should name reservation recovery: {stderr}"
     );
 }
@@ -10069,17 +10071,18 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     );
     assert_schema_declares_runtime_top_level(&["agent", "reserve"], &reserve);
     assert!(
-        reserve["reservation"]["session_id"].as_str().is_some(),
+        reserve["reservation"]["lease_id"].as_str().is_some(),
         "agent reserve should emit a reservation envelope: {reserve}"
     );
     assert!(
         reserve["verification"].is_object(),
         "agent reserve should prove post-mutation verify: {reserve}"
     );
-    let session = reserve["reservation"]["session_id"]
+    let lease = reserve["reservation"]["lease_id"]
         .as_str()
-        .expect("session id")
+        .expect("lease id")
         .to_string();
+    let token = reserve["token"].as_str().expect("lease token").to_string();
 
     std::fs::write(temp.path().join("agent.txt"), "agent work\n").expect("write work");
     let capture = json_value(
@@ -10087,8 +10090,10 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
         &[
             "agent",
             "capture",
-            "--session",
-            &session,
+            "--lease",
+            &lease,
+            "--token",
+            &token,
             "-m",
             "agent capture",
             "--confidence",
@@ -10106,7 +10111,9 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
 
     let ready = json_value(
         temp.path(),
-        &["agent", "ready", "--session", &session, "--output", "json"],
+        &[
+            "agent", "ready", "--lease", &lease, "--token", &token, "--output", "json",
+        ],
     );
     assert_schema_declares_runtime_top_level(&["agent", "ready"], &ready);
     assert!(
@@ -10119,8 +10126,10 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
         &[
             "agent",
             "heartbeat",
-            "--session",
-            &session,
+            "--lease",
+            &lease,
+            "--token",
+            &token,
             "--output",
             "json",
         ],
@@ -10148,14 +10157,8 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     let release = json_value(
         temp.path(),
         &[
-            "agent",
-            "release",
-            "--session",
-            &session,
-            "--status",
-            "complete",
-            "--output",
-            "json",
+            "agent", "release", "--lease", &lease, "--token", &token, "--status", "complete",
+            "--output", "json",
         ],
     );
     assert_schema_declares_runtime_top_level(&["agent", "release"], &release);

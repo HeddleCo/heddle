@@ -1475,17 +1475,25 @@ pub struct AgentReserveArgs {
 /// Arguments for `agent heartbeat`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentHeartbeatArgs {
-    /// Agent session id.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 }
 
 /// Arguments for `agent release`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentReleaseArgs {
-    /// Agent session id.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Terminal status to record.
     #[arg(long, default_value = "complete")]
@@ -1668,9 +1676,13 @@ pub struct AgentFanoutStartArgs {
 /// Arguments for `agent capture` under a current reservation lease.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentCaptureArgs {
-    /// Agent session id obtained from `agent reserve`.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Capture intent / commit message.
     #[arg(long, short = 'm', alias = "intent")]
@@ -1681,13 +1693,16 @@ pub struct AgentCaptureArgs {
     pub confidence: Option<f32>,
 }
 
-/// Arguments for `agent ready`. Mirrors `heddle ready` with the same
-/// `--session` guard.
+/// Arguments for `agent ready` under a writer lease.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentReadyArgs {
-    /// Agent session id obtained from `agent reserve`.
+    /// Writer lease id returned by `agent reserve`.
     #[arg(long)]
-    pub session: String,
+    pub lease: String,
+
+    /// Bearer token returned by `agent reserve`.
+    #[arg(long, env = "HEDDLE_RESERVATION_TOKEN", hide_env_values = true)]
+    pub token: String,
 
     /// Optional summary message.
     #[arg(long, short = 'm')]

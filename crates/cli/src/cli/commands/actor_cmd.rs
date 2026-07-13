@@ -3,7 +3,7 @@
 //!
 //! Actors are Heddle's native record of an active harness or agent identity
 //! working on a thread. They are user-facing handles over the lightweight
-//! registry stored in `.heddle/agents/`.
+//! presence stored in `.heddle/actor-presence/`.
 //!
 //! List/show/spawn/done domain assembly and pure planning live in
 //! `heddle_core::actor`. This module owns implicit session resolution,
@@ -17,7 +17,7 @@ use heddle_core::{
 };
 use objects::{
     object::ThreadName,
-    store::{AgentEntry, AgentRegistry},
+    store::{ActorPresence, ActorPresenceStore},
 };
 use repo::Repository;
 use serde::Serialize;
@@ -198,15 +198,9 @@ pub async fn cmd_actor_spawn(
     })
     .map_err(map_actor_spawn_error)?;
 
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let entry = build_spawn_entry(
-            &plan,
-            session_id,
-            None,
-            Some(objects::store::generate_agent_id()),
-            chrono::Utc::now(),
-        );
+        let entry = build_spawn_entry(&plan, session_id, chrono::Utc::now());
         let thread_name = ThreadName::new(entry.thread.clone());
 
         // In `--no-thread` mode we attach to the existing current thread
@@ -271,7 +265,7 @@ pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
 
 pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
@@ -297,8 +291,8 @@ fn render_actor_list(report: &ActorListReport) {
     println!("Actors:");
     for entry in &report.actors {
         println!(
-            "  {} [{}; {}] thread:{} base:{}",
-            entry.session_id, entry.status, entry.liveness, entry.thread, entry.base_state
+            "  {} [{}] thread:{} base:{}",
+            entry.session_id, entry.status, entry.thread, entry.base_state
         );
         if let Some(path) = &entry.path {
             println!("    path: {}", path);
@@ -328,7 +322,6 @@ fn render_actor_show(actor: &ActorEntryReport) {
     println!("Actor: {}", actor.session_id);
     println!("Thread: {}", actor.thread);
     println!("Status: {}", actor.status);
-    println!("Liveness: {}", actor.liveness);
     println!("Base state: {}", actor.base_state);
     if let Some(heddle_session_id) = &actor.heddle_session_id {
         println!("Heddle session: {}", heddle_session_id);
@@ -347,9 +340,6 @@ fn render_actor_show(actor: &ActorEntryReport) {
     }
     if let Some(path) = &actor.path {
         println!("Path: {}", path);
-    }
-    if let Some(lease_expires_at) = &actor.lease_expires_at {
-        println!("Lease expires: {}", lease_expires_at);
     }
     if let Some(last_progress_at) = &actor.last_progress_at {
         println!("Last progress: {}", last_progress_at);
@@ -377,7 +367,7 @@ fn render_actor_show(actor: &ActorEntryReport) {
 
 pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -424,7 +414,7 @@ fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Opt
 
 pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entry = match resolve_actor_entry(&repo, &registry, session_id.as_deref()) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -635,9 +625,9 @@ fn detected_actor_next_action(
 
 fn resolve_actor_entry(
     repo: &Repository,
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     session_id: Option<&str>,
-) -> Result<AgentEntry> {
+) -> Result<ActorPresence> {
     if let Some(session_id) = session_id {
         return registry
             .load(session_id)?

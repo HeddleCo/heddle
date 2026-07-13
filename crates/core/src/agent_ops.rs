@@ -4,43 +4,15 @@
 //! Owns:
 //! - `agent capture` option/plan validation and thread-ownership checks
 //! - `agent ready` plan assembly from a resolved active reservation
-//! - `agent list` filter + reservation report assembly from [`AgentEntry`]
+//! - `agent list` filter + writer lease report assembly
 //! - attach/explain field assembly from registry facts
 //! - pure heartbeat / release status transitions
 //!
 //! Registry I/O, recovery advice, harness probing, and human/JSON render stay
 //! CLI-owned.
 
-use chrono::{DateTime, Utc};
-use objects::store::{AgentEntry, AgentRegistry, AgentStatus};
+use objects::store::{ActorPresence, WriterLease, WriterLeaseStatus};
 use serde::Serialize;
-
-// ---------------------------------------------------------------------------
-// Session gate (shared by capture / ready)
-// ---------------------------------------------------------------------------
-
-/// Whether a loaded reservation may run a session-guarded mutation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentSessionUse {
-    /// Status is [`AgentStatus::Active`].
-    Active,
-    /// Terminal or otherwise non-active status.
-    Inactive,
-}
-
-/// Pure status gate used after the caller loads a reservation by session id.
-pub fn classify_agent_session_use(status: &AgentStatus) -> AgentSessionUse {
-    if *status == AgentStatus::Active {
-        AgentSessionUse::Active
-    } else {
-        AgentSessionUse::Inactive
-    }
-}
-
-/// True when [`classify_agent_session_use`] is [`AgentSessionUse::Active`].
-pub fn session_is_active(status: &AgentStatus) -> bool {
-    classify_agent_session_use(status) == AgentSessionUse::Active
-}
 
 // ---------------------------------------------------------------------------
 // Capture plan / thread check
@@ -49,7 +21,7 @@ pub fn session_is_active(status: &AgentStatus) -> bool {
 /// Caller-supplied `agent capture` options (CLI surface, no I/O).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentCaptureOptions {
-    pub session: String,
+    pub lease: String,
     pub message: Option<String>,
     pub confidence: Option<f32>,
 }
@@ -57,7 +29,7 @@ pub struct AgentCaptureOptions {
 /// Validated capture plan after pure option preflight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentCapturePlan {
-    pub session: String,
+    pub lease: String,
     pub message: Option<String>,
     pub confidence: Option<f32>,
 }
@@ -65,16 +37,17 @@ pub struct AgentCapturePlan {
 /// Failures from pure agent capture option validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCapturePlanError {
-    /// `--session` was empty/whitespace.
-    EmptySession,
+    EmptyLease,
     /// Confidence was not a finite value in `0.0..=1.0`.
-    InvalidConfidence { value: String },
+    InvalidConfidence {
+        value: String,
+    },
 }
 
 impl std::fmt::Display for AgentCapturePlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EmptySession => write!(f, "agent capture requires a non-empty --session"),
+            Self::EmptyLease => write!(f, "agent capture requires a non-empty --lease"),
             Self::InvalidConfidence { value } => write!(
                 f,
                 "confidence must be a finite number from 0.0 to 1.0, got `{value}`"
@@ -89,10 +62,10 @@ impl std::error::Error for AgentCapturePlanError {}
 pub fn plan_agent_capture(
     options: &AgentCaptureOptions,
 ) -> Result<AgentCapturePlan, AgentCapturePlanError> {
-    let session = require_nonempty_session(&options.session)?;
+    let lease = require_nonempty_lease(&options.lease)?;
     let confidence = normalize_confidence(options.confidence)?;
     Ok(AgentCapturePlan {
-        session,
+        lease,
         message: nonempty_optional_string(options.message.clone()),
         confidence,
     })
@@ -134,7 +107,7 @@ pub fn check_agent_capture_thread(
 /// Caller-supplied `agent ready` options (CLI surface, no I/O).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReadyOptions {
-    pub session: String,
+    pub lease: String,
     pub message: Option<String>,
     pub confidence: Option<f32>,
 }
@@ -145,7 +118,7 @@ pub struct AgentReadyOptions {
 /// session-scoped ready payload (thread comes from the reservation entry).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReadyPlan {
-    pub session: String,
+    pub lease: String,
     pub thread: String,
     pub message: Option<String>,
     pub confidence: Option<f32>,
@@ -154,14 +127,14 @@ pub struct AgentReadyPlan {
 /// Failures from pure agent ready option validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentReadyPlanError {
-    EmptySession,
+    EmptyLease,
     InvalidConfidence { value: String },
 }
 
 impl std::fmt::Display for AgentReadyPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EmptySession => write!(f, "agent ready requires a non-empty --session"),
+            Self::EmptyLease => write!(f, "agent ready requires a non-empty --lease"),
             Self::InvalidConfidence { value } => write!(
                 f,
                 "confidence must be a finite number from 0.0 to 1.0, got `{value}`"
@@ -174,26 +147,25 @@ impl std::error::Error for AgentReadyPlanError {}
 
 /// Pure preflight for `heddle agent ready` from options + resolved entry facts.
 ///
-/// Does not check [`AgentStatus`]; call [`session_is_active`] after load.
 pub fn plan_agent_ready(
-    entry: &AgentEntry,
+    lease: &WriterLease,
     options: &AgentReadyOptions,
 ) -> Result<AgentReadyPlan, AgentReadyPlanError> {
-    let session = require_nonempty_session(&options.session).map_err(|err| match err {
-        AgentCapturePlanError::EmptySession => AgentReadyPlanError::EmptySession,
+    let lease_id = require_nonempty_lease(&options.lease).map_err(|err| match err {
+        AgentCapturePlanError::EmptyLease => AgentReadyPlanError::EmptyLease,
         AgentCapturePlanError::InvalidConfidence { value } => {
             AgentReadyPlanError::InvalidConfidence { value }
         }
     })?;
     let confidence = normalize_confidence(options.confidence).map_err(|err| match err {
-        AgentCapturePlanError::EmptySession => AgentReadyPlanError::EmptySession,
+        AgentCapturePlanError::EmptyLease => AgentReadyPlanError::EmptyLease,
         AgentCapturePlanError::InvalidConfidence { value } => {
             AgentReadyPlanError::InvalidConfidence { value }
         }
     })?;
     Ok(AgentReadyPlan {
-        session,
-        thread: entry.thread.clone(),
+        lease: lease_id,
+        thread: lease.thread.clone(),
         message: nonempty_optional_string(options.message.clone()),
         confidence,
     })
@@ -209,57 +181,40 @@ pub fn plan_agent_ready(
 /// verification wrapper. `task` is the registry `attach_reason` (CLI contract).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentReservationReport {
-    pub session_id: String,
-    pub reservation_token: Option<String>,
+    pub lease_id: String,
+    pub actor_session_id: Option<String>,
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
     pub task_assignment_id: Option<String>,
-    /// Lifecycle status as a stable kebab-case string.
     pub status: String,
     pub path: Option<String>,
-    pub task: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    pub probe_source: Option<String>,
-    pub probe_confidence: Option<f32>,
-    pub heartbeat_at: Option<String>,
-    pub lease_expires_at: Option<String>,
-    pub last_progress_at: Option<String>,
+    pub heartbeat_at: String,
+    pub lease_expires_at: String,
     pub liveness: String,
 }
 
-impl From<&AgentEntry> for AgentReservationReport {
-    fn from(entry: &AgentEntry) -> Self {
+impl From<&WriterLease> for AgentReservationReport {
+    fn from(lease: &WriterLease) -> Self {
         Self {
-            session_id: entry.session_id.clone(),
-            reservation_token: entry.reservation_token.clone(),
-            thread: entry.thread.clone(),
-            anchor_state: entry.anchor_state.clone(),
-            anchor_root: entry.anchor_root.clone(),
-            task_assignment_id: entry.task_assignment_id.clone(),
-            status: entry.status.to_string(),
-            path: entry.path.as_ref().map(|path| path.display().to_string()),
-            task: entry.attach_reason.clone(),
-            provider: entry.provider.clone(),
-            model: entry.model.clone(),
-            harness: entry.harness.clone(),
-            thinking_level: entry.thinking_level.clone(),
-            probe_source: entry.probe_source.clone(),
-            probe_confidence: entry.probe_confidence,
-            heartbeat_at: entry.heartbeat_at.map(|value| value.to_rfc3339()),
-            lease_expires_at: entry.lease_expires_at().map(|value| value.to_rfc3339()),
-            last_progress_at: entry.last_progress_at.map(|value| value.to_rfc3339()),
-            liveness: AgentRegistry::liveness_for(entry).to_string(),
+            lease_id: lease.lease_id.clone(),
+            actor_session_id: lease.actor_session_id.clone(),
+            thread: lease.thread.clone(),
+            anchor_state: lease.anchor_state.clone(),
+            anchor_root: lease.anchor_root.clone(),
+            task_assignment_id: lease.task_assignment_id.clone(),
+            status: lease.status.to_string(),
+            path: lease.path.as_ref().map(|path| path.display().to_string()),
+            heartbeat_at: lease.heartbeat_at.to_rfc3339(),
+            lease_expires_at: lease.lease_expires_at().to_rfc3339(),
+            liveness: lease.liveness_at(chrono::Utc::now()).to_string(),
         }
     }
 }
 
 /// Assemble one reservation report from registry facts (pure).
-pub fn assemble_agent_reservation(entry: &AgentEntry) -> AgentReservationReport {
-    AgentReservationReport::from(entry)
+pub fn assemble_agent_reservation(lease: &WriterLease) -> AgentReservationReport {
+    AgentReservationReport::from(lease)
 }
 
 /// Domain list payload for `agent list` (no verification envelope).
@@ -272,33 +227,33 @@ pub struct AgentReservationListReport {
 
 /// Pure filter for `agent list`: optional thread name + alive-only (Active).
 pub fn filter_agent_reservations(
-    entries: impl IntoIterator<Item = AgentEntry>,
+    entries: impl IntoIterator<Item = WriterLease>,
     thread: Option<&str>,
     alive_only: bool,
-) -> Vec<AgentEntry> {
+) -> Vec<WriterLease> {
     entries
         .into_iter()
-        .filter(|entry| thread.is_none_or(|t| entry.thread == t))
-        .filter(|entry| !alive_only || entry.status == AgentStatus::Active)
+        .filter(|lease| thread.is_none_or(|thread| lease.thread == thread))
+        .filter(|lease| !alive_only || lease.status == WriterLeaseStatus::Active)
         .collect()
 }
 
 /// Pure filter over a borrowed slice.
 pub fn filter_agent_reservations_ref<'a>(
-    entries: impl IntoIterator<Item = &'a AgentEntry>,
+    entries: impl IntoIterator<Item = &'a WriterLease>,
     thread: Option<&str>,
     alive_only: bool,
-) -> Vec<&'a AgentEntry> {
+) -> Vec<&'a WriterLease> {
     entries
         .into_iter()
-        .filter(|entry| thread.is_none_or(|t| entry.thread == t))
-        .filter(|entry| !alive_only || entry.status == AgentStatus::Active)
+        .filter(|lease| thread.is_none_or(|thread| lease.thread == thread))
+        .filter(|lease| !alive_only || lease.status == WriterLeaseStatus::Active)
         .collect()
 }
 
 /// Filter entries and assemble the list report domain fields.
 pub fn assemble_agent_reservation_list(
-    entries: impl IntoIterator<Item = AgentEntry>,
+    entries: impl IntoIterator<Item = WriterLease>,
     thread: Option<String>,
     alive_only: bool,
 ) -> AgentReservationListReport {
@@ -311,7 +266,7 @@ pub fn assemble_agent_reservation_list(
 }
 
 // ---------------------------------------------------------------------------
-// Explain assembly from AgentEntry facts
+// Explain assembly from ActorPresence facts
 // ---------------------------------------------------------------------------
 
 /// Pure attach/explain report built from registry facts.
@@ -349,8 +304,8 @@ pub fn default_attach_reason_message() -> &'static str {
     "no persisted attach reason is available for this agent"
 }
 
-/// Assemble explain fields from an [`AgentEntry`] (pure, no I/O).
-pub fn assemble_agent_explain(entry: &AgentEntry) -> AgentExplainReport {
+/// Assemble explain fields from an [`ActorPresence`] (pure, no I/O).
+pub fn assemble_agent_explain(entry: &ActorPresence) -> AgentExplainReport {
     let attach_reason = entry
         .attach_reason
         .clone()
@@ -373,57 +328,14 @@ pub fn assemble_agent_explain(entry: &AgentEntry) -> AgentExplainReport {
     }
 }
 
-/// Terminal status requested by `agent release`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentReleaseKind {
-    Complete,
-    Abandoned,
-}
-
-impl AgentReleaseKind {
-    /// Map to the registry [`AgentStatus`] written on release.
-    pub fn to_status(self) -> AgentStatus {
-        match self {
-            Self::Complete => AgentStatus::Complete,
-            Self::Abandoned => AgentStatus::Abandoned,
-        }
-    }
-}
-
-/// Pure release transition: set status and terminal `completed_at` when needed.
-///
-/// Matches historical CLI: `Active` clears `completed_at`; terminal statuses
-/// (`Abandoned` / `Complete` / `Merged`) stamp `completed_at`.
-pub fn apply_agent_release(
-    mut entry: AgentEntry,
-    status: AgentStatus,
-    now: DateTime<Utc>,
-) -> AgentEntry {
-    entry.status = status;
-    entry.completed_at = match entry.status {
-        AgentStatus::Active => None,
-        AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => Some(now),
-    };
-    entry
-}
-
-/// Mutating form for use inside `registry.update_entry` closures.
-pub fn touch_agent_release(entry: &mut AgentEntry, status: AgentStatus, now: DateTime<Utc>) {
-    entry.status = status;
-    entry.completed_at = match entry.status {
-        AgentStatus::Active => None,
-        AgentStatus::Abandoned | AgentStatus::Complete | AgentStatus::Merged => Some(now),
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Shared option helpers
 // ---------------------------------------------------------------------------
 
-fn require_nonempty_session(session: &str) -> Result<String, AgentCapturePlanError> {
-    let trimmed = session.trim();
+fn require_nonempty_lease(lease: &str) -> Result<String, AgentCapturePlanError> {
+    let trimmed = lease.trim();
     if trimmed.is_empty() {
-        Err(AgentCapturePlanError::EmptySession)
+        Err(AgentCapturePlanError::EmptyLease)
     } else {
         Ok(trimmed.to_string())
     }
@@ -453,213 +365,61 @@ fn nonempty_optional_string(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::store::{AgentEntry, AgentStatus, AgentUsageSummary};
+    use objects::store::WriterLeaseStatus;
 
     use super::*;
 
-    fn sample_entry(session_id: &str, status: AgentStatus, thread: &str) -> AgentEntry {
-        AgentEntry {
-            session_id: session_id.to_string(),
-            client_instance_id: Some("client-1".to_string()),
-            native_actor_key: Some("native:1".to_string()),
-            native_parent_actor_key: None,
-            native_instance_key: Some("inst-1".to_string()),
-            heddle_session_id: Some("hs-1".to_string()),
-            thread_id: Some(thread.to_string()),
-            thread: thread.to_string(),
-            pid: Some(7),
+    fn lease() -> WriterLease {
+        let now = Utc::now();
+        WriterLease {
+            lease_id: "lease-one".to_string(),
+            thread: "feature/a".to_string(),
+            actor_session_id: Some("agent-one".to_string()),
+            task_assignment_id: None,
+            anchor_state: Some("hd-state".to_string()),
+            anchor_root: Some("root".to_string()),
+            path: None,
+            token_hash: "hash".to_string(),
+            pid: None,
             boot_id: None,
-            heartbeat_at: None,
-            anchor_state: Some("abcfull".to_string()),
-            anchor_root: Some("rootshort".to_string()),
-            reservation_token: Some("tok".to_string()),
-            path: Some(std::path::PathBuf::from("/tmp/work")),
-            base_state: "abc".to_string(),
-            started_at: Utc::now(),
-            provider: Some("anthropic".to_string()),
-            model: Some("claude".to_string()),
-            harness: Some("heddle-agent-api".to_string()),
-            thinking_level: Some("high".to_string()),
-            usage_summary: AgentUsageSummary::default(),
-            last_progress_at: None,
-            report_flush_state: None,
-            attach_reason: Some("implement feature".to_string()),
-            task_assignment_id: Some("task-1".to_string()),
-            attach_precedence: vec!["agent-reserve".to_string()],
-            winning_attach_rule: Some("agent-reserve".to_string()),
-            probe_source: Some("agent_api".to_string()),
-            probe_confidence: Some(1.0),
-            status,
+            heartbeat_at: now,
+            started_at: now,
+            status: WriterLeaseStatus::Active,
             completed_at: None,
-            context_queries: vec![],
         }
     }
 
     #[test]
-    fn session_gate_active_only() {
-        assert!(session_is_active(&AgentStatus::Active));
-        assert!(!session_is_active(&AgentStatus::Complete));
-        assert_eq!(
-            classify_agent_session_use(&AgentStatus::Abandoned),
-            AgentSessionUse::Inactive
-        );
-        assert_eq!(
-            classify_agent_session_use(&AgentStatus::Active),
-            AgentSessionUse::Active
-        );
-    }
-
-    #[test]
-    fn plan_capture_rejects_empty_session_and_bad_confidence() {
-        let err = plan_agent_capture(&AgentCaptureOptions {
-            session: "   ".to_string(),
+    fn capture_plan_requires_a_lease_id() {
+        let error = plan_agent_capture(&AgentCaptureOptions {
+            lease: " ".to_string(),
             message: None,
             confidence: None,
         })
         .unwrap_err();
-        assert_eq!(err, AgentCapturePlanError::EmptySession);
-
-        let err = plan_agent_capture(&AgentCaptureOptions {
-            session: "agent-1".to_string(),
-            message: Some("ok".to_string()),
-            confidence: Some(1.5),
-        })
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            AgentCapturePlanError::InvalidConfidence { .. }
-        ));
-
-        let plan = plan_agent_capture(&AgentCaptureOptions {
-            session: "  agent-1  ".to_string(),
-            message: Some("  ship it  ".to_string()),
-            confidence: Some(0.8),
-        })
-        .unwrap();
-        assert_eq!(plan.session, "agent-1");
-        assert_eq!(plan.message.as_deref(), Some("ship it"));
-        assert_eq!(plan.confidence, Some(0.8));
+        assert_eq!(error, AgentCapturePlanError::EmptyLease);
     }
 
     #[test]
-    fn capture_thread_check_only_mismatches_attached_lane() {
-        assert_eq!(
-            check_agent_capture_thread("feature/a", None),
-            AgentCaptureThreadCheck::Ok
-        );
-        assert_eq!(
-            check_agent_capture_thread("feature/a", Some("feature/a")),
-            AgentCaptureThreadCheck::Ok
-        );
-        assert_eq!(
-            check_agent_capture_thread("feature/a", Some("feature/b")),
-            AgentCaptureThreadCheck::Mismatch {
-                reserved_thread: "feature/a".to_string(),
-                current_thread: "feature/b".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn plan_ready_uses_entry_thread() {
-        let entry = sample_entry("agent-1", AgentStatus::Active, "feature/x");
+    fn ready_plan_uses_the_leased_thread() {
         let plan = plan_agent_ready(
-            &entry,
+            &lease(),
             &AgentReadyOptions {
-                session: "agent-1".to_string(),
+                lease: "lease-one".to_string(),
                 message: Some("ready".to_string()),
                 confidence: Some(0.9),
             },
         )
         .unwrap();
-        assert_eq!(plan.thread, "feature/x");
-        assert_eq!(plan.session, "agent-1");
-        assert_eq!(plan.message.as_deref(), Some("ready"));
-        assert_eq!(plan.confidence, Some(0.9));
+        assert_eq!(plan.thread, "feature/a");
+        assert_eq!(plan.lease, "lease-one");
     }
 
     #[test]
-    fn filter_reservations_by_thread_and_alive() {
-        let entries = vec![
-            sample_entry("a1", AgentStatus::Active, "t1"),
-            sample_entry("a2", AgentStatus::Complete, "t1"),
-            sample_entry("a3", AgentStatus::Active, "t2"),
-        ];
-        let alive_t1 = filter_agent_reservations(entries.clone(), Some("t1"), true);
-        assert_eq!(alive_t1.len(), 1);
-        assert_eq!(alive_t1[0].session_id, "a1");
-
-        let all_t1 = filter_agent_reservations(entries, Some("t1"), false);
-        assert_eq!(all_t1.len(), 2);
-    }
-
-    #[test]
-    fn reservation_report_stable_field_names() {
-        let entry = sample_entry("agent-test", AgentStatus::Active, "feature/x");
-        let report = assemble_agent_reservation(&entry);
-        let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["session_id"], "agent-test");
-        assert_eq!(value["thread"], "feature/x");
-        assert_eq!(value["status"], "active");
-        assert_eq!(value["task"], "implement feature");
-        assert_eq!(value["reservation_token"], "tok");
-        assert_eq!(value["task_assignment_id"], "task-1");
-        assert_eq!(value["path"], "/tmp/work");
-        assert_eq!(value["provider"], "anthropic");
-        assert_eq!(value["probe_confidence"], 1.0);
-    }
-
-    #[test]
-    fn list_report_filters_and_maps() {
-        let entries = vec![
-            sample_entry("a1", AgentStatus::Active, "t1"),
-            sample_entry("a2", AgentStatus::Complete, "t1"),
-        ];
-        let report = assemble_agent_reservation_list(entries, Some("t1".to_string()), true);
-        assert!(report.alive_only);
-        assert_eq!(report.thread.as_deref(), Some("t1"));
-        assert_eq!(report.reservations.len(), 1);
-        assert_eq!(report.reservations[0].session_id, "a1");
-    }
-
-    #[test]
-    fn explain_report_defaults_missing_attach_reason() {
-        let mut entry = sample_entry("agent-1", AgentStatus::Active, "t1");
-        entry.attach_reason = None;
-        let report = assemble_agent_explain(&entry);
-        assert_eq!(report.session_id, "agent-1");
-        assert_eq!(report.thread, "t1");
-        assert_eq!(report.attach_reason, default_attach_reason_message());
-        assert_eq!(report.winning_rule.as_deref(), Some("agent-reserve"));
-        assert_eq!(report.attach_precedence, vec!["agent-reserve".to_string()]);
-        assert_eq!(report.native_actor_key.as_deref(), Some("native:1"));
-
-        entry.attach_reason = Some("  do work  ".to_string());
-        let report = assemble_agent_explain(&entry);
-        // Non-empty reasons are kept as stored (CLI presents them verbatim).
-        assert_eq!(report.attach_reason, "  do work  ");
-    }
-
-    #[test]
-    fn release_transitions() {
-        let entry = sample_entry("agent-1", AgentStatus::Active, "t1");
-        let now = Utc::now();
-        let released =
-            apply_agent_release(entry.clone(), AgentReleaseKind::Complete.to_status(), now);
-        assert_eq!(released.status, AgentStatus::Complete);
-        assert_eq!(released.completed_at, Some(now));
-
-        let abandoned = apply_agent_release(entry, AgentReleaseKind::Abandoned.to_status(), now);
-        assert_eq!(abandoned.status, AgentStatus::Abandoned);
-        assert_eq!(abandoned.completed_at, Some(now));
-    }
-
-    #[test]
-    fn touch_release_mutates_in_place() {
-        let mut entry = sample_entry("agent-1", AgentStatus::Active, "t1");
-        let now = Utc::now();
-        touch_agent_release(&mut entry, AgentStatus::Complete, now);
-        assert_eq!(entry.status, AgentStatus::Complete);
-        assert_eq!(entry.completed_at, Some(now));
+    fn reservation_report_never_contains_token_material() {
+        let value = serde_json::to_value(assemble_agent_reservation(&lease())).unwrap();
+        assert!(value.get("token").is_none());
+        assert!(value.get("token_hash").is_none());
+        assert_eq!(value["lease_id"], "lease-one");
     }
 }

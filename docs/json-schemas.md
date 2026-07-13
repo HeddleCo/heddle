@@ -1326,30 +1326,24 @@ Background startup refusals use the shared error envelope.
 
 ## `heddle agent reserve --output json`
 
-`heddle agent reserve|heartbeat|release --output json` emit:
+`heddle agent reserve --output json` emits the bearer token once. Heartbeat
+and release emit the same reservation shape without `token`:
 
 ```json
 {
   "reservation": {
-    "session_id": "agent-kvd9yn2z5kk3ehm0x8be",
-    "reservation_token": "agent-k3f2w58q7f8rmm3qj0v8",
+    "lease_id": "lease-kvd9yn2z5kk3ehm0x8be",
+    "actor_session_id": "agent-k3f2w58q7f8rmm3qj0v8",
     "thread": "main",
     "anchor_state": "hd-sqr398dvx9ay",
     "anchor_root": "32fc0aff",
     "status": "active",
     "path": null,
-    "task": "implement parser",
-    "provider": "openai",
-    "model": "gpt-5",
-    "harness": "codex",
-    "thinking_level": "high",
-    "probe_source": "app_protocol",
-    "probe_confidence": 0.98,
     "heartbeat_at": "2026-07-12T23:15:00Z",
     "lease_expires_at": "2026-07-12T23:20:00Z",
-    "last_progress_at": "2026-07-12T23:14:42Z",
     "liveness": "alive"
-  }
+  },
+  "token": "hwl_secret-token-material"
 }
 ```
 
@@ -1357,7 +1351,7 @@ Background startup refusals use the shared error envelope.
 
 ## `heddle agent capture --output json`
 
-`agent capture` is the session-validated form of `capture`; the success
+`agent capture` is the token-authenticated writer-lease form of `capture`; the success
 shape is the same capture envelope.
 
 ```json
@@ -1379,7 +1373,7 @@ shape is the same capture envelope.
 
 ## `heddle agent ready --output json`
 
-`agent ready` is the session-validated form of `ready`; the success shape is
+`agent ready` is the token-authenticated writer-lease form of `ready`; the success shape is
 the same ready envelope.
 
 ```json

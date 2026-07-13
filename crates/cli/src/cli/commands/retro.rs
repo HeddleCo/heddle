@@ -30,7 +30,7 @@ use heddle_core::retro_plan::{
 };
 use objects::{
     object::{ChangeId, State},
-    store::{AgentRegistry, AgentStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
+    store::{ActorPresenceStore, ActorPresenceStatus, AgentTaskRecord, AgentTaskStore, ObjectStore},
 };
 use oplog::OpRecord;
 use repo::{Repository, TimelineStore, TimelineView};
@@ -60,7 +60,7 @@ struct RetroOutput {
     /// unresolvable (a brand-new repo before any captures).
     duration_secs: Option<i64>,
     states_captured: Vec<StateEntry>,
-    agents_active: Vec<AgentEntry>,
+    agents_active: Vec<ActorPresence>,
     agent_tasks: Vec<AgentTaskEntry>,
     timeline_steps: Vec<TimelineStepEntry>,
     markers_created: Vec<MarkerEntry>,
@@ -83,7 +83,7 @@ struct StateEntry {
 }
 
 #[derive(Serialize)]
-struct AgentEntry {
+struct ActorPresence {
     session_id: String,
     provider: Option<String>,
     model: Option<String>,
@@ -414,8 +414,8 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
     Ok(None)
 }
 
-fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<Vec<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<Vec<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let entries = registry.list().unwrap_or_default();
     let mut out = Vec::new();
     for entry in entries {
@@ -423,11 +423,10 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
         // within (since, now]. An agent that started before `since`
         // but is still Active counts; one that completed before
         // `since` does not.
-        let active_now = matches!(entry.status, objects::store::AgentStatus::Active);
+        let active_now = matches!(entry.status, objects::store::ActorPresenceStatus::Active);
         let last_activity = entry
             .completed_at
             .or(entry.last_progress_at)
-            .or(entry.heartbeat_at)
             .unwrap_or(entry.started_at);
         if !agent_window_overlaps(
             since_ts.map(|ts| ts.timestamp()),
@@ -437,7 +436,7 @@ fn collect_agents(repo: &Repository, since_ts: Option<DateTime<Utc>>) -> Result<
             continue;
         }
 
-        out.push(AgentEntry {
+        out.push(ActorPresence {
             session_id: entry.session_id.clone(),
             provider: entry.provider.clone(),
             model: entry.model.clone(),
@@ -460,11 +459,11 @@ fn collect_agent_tasks(
     since_ts: Option<DateTime<Utc>>,
     verbose: bool,
 ) -> Result<Vec<AgentTaskEntry>> {
-    let active_task_ids = AgentRegistry::new(repo.heddle_dir())
+    let active_task_ids = ActorPresenceStore::new(repo.heddle_dir())
         .list()
         .context("failed to list agent registry for retro task correlation")?
         .into_iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .filter_map(|entry| entry.task_assignment_id)
         .collect::<HashSet<_>>();
     let tasks = AgentTaskStore::new(repo.heddle_dir())

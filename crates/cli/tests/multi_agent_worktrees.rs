@@ -16,8 +16,8 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[path = "multi_agent_worktrees/agent_registry.rs"]
-mod agent_registry;
+#[path = "multi_agent_worktrees/actor_presence.rs"]
+mod actor_presence;
 #[cfg(target_os = "linux")]
 #[path = "multi_agent_worktrees/daemon_lifecycle.rs"]
 mod daemon_lifecycle;

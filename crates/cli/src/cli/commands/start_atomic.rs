@@ -1933,7 +1933,7 @@ mod tests {
 
     /// cid 3335586969 (the new sibling): a committed-before-bookkeeping retry.
     /// The start transaction committed (checkout + ref + record + commit marker),
-    /// then a crash interrupted the post-commit `AgentRegistry` reservation — so
+    /// then a crash interrupted the post-commit `ActorPresenceStore` reservation — so
     /// there is NO live reservation, yet the checkout is now NON-EMPTY. The retry
     /// must be RECOGNIZED as a committed retry (the epoch re-derived from the
     /// durable Active record yields the SAME key) and short-circuit exactly-once,
@@ -1945,7 +1945,7 @@ mod tests {
         let checkout = temp.path().join("iso");
 
         // A first start fully succeeds: checkout + ref + Active record + commit
-        // marker + the post-commit AgentRegistry reservation.
+        // marker + the post-commit ActorPresenceStore reservation.
         start_thread(&repo, solid_args("iso", &checkout, &state, false))
             .expect("first start should succeed");
         assert!(
@@ -1960,7 +1960,7 @@ mod tests {
         let entry = find_active_thread_entry(&repo, "iso")
             .unwrap()
             .expect("the first start created a reservation");
-        objects::store::AgentRegistry::new(repo.heddle_dir())
+        objects::store::ActorPresenceStore::new(repo.heddle_dir())
             .delete(&entry.session_id)
             .unwrap();
         assert!(

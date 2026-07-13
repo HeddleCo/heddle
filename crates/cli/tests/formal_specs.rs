@@ -410,14 +410,14 @@ mod agent_lifecycle {
     }
 
     #[derive(Debug, Clone)]
-    struct AgentEntry {
+    struct ActorPresence {
         status: Status,
         completed_at: Option<i32>,
     }
 
     #[derive(Debug, Clone)]
     struct AgentModel {
-        agents: BTreeMap<&'static str, AgentEntry>,
+        agents: BTreeMap<&'static str, ActorPresence>,
         current_time: i32,
     }
 
@@ -463,7 +463,7 @@ mod agent_lifecycle {
                     }
                     self.agents.insert(
                         id,
-                        AgentEntry {
+                        ActorPresence {
                             status: Status::Active,
                             completed_at: None,
                         },

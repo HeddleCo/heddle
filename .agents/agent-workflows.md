@@ -96,9 +96,10 @@ Agent reservations use a five-minute heartbeat lease. `agent heartbeat`,
 adds an early-death signal for a long-lived orchestrator process; PID liveness
 does not replace heartbeats.
 
-The current CLI returns `reservation_token`, but guarded commands do not yet
-accept it as ownership proof. Treat `session_id` as a lookup key, not a secret.
-Do not describe the current token as an authorization mechanism.
+`agent reserve` returns a `lease_id` and bearer `token`. Guarded commands
+require both. Prefer `HEDDLE_RESERVATION_TOKEN` over `--token` when process-list
+visibility matters. Actor session IDs identify provenance; they do not grant
+writer authority.
 
 ## Harness Integration Install
 

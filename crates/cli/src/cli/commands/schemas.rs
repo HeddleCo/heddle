@@ -1826,6 +1826,9 @@ pub struct AgentStopSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentReservationEnvelopeSchema {
     pub reservation: AgentReservationSchema,
+    pub token: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1839,21 +1842,17 @@ pub struct AgentReservationListSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentReservationSchema {
-    pub session_id: String,
-    pub reservation_token: Option<String>,
+    pub lease_id: String,
+    pub actor_session_id: Option<String>,
     pub thread: String,
     pub anchor_state: Option<String>,
     pub anchor_root: Option<String>,
     pub task_assignment_id: Option<String>,
     pub status: String,
     pub path: Option<String>,
-    pub task: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    pub probe_source: Option<String>,
-    pub probe_confidence: Option<f32>,
+    pub heartbeat_at: String,
+    pub lease_expires_at: String,
+    pub liveness: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

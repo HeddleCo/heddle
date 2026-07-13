@@ -17,7 +17,7 @@ use objects::{
     HeddleError,
     error::Result,
     object::{Principal, State, ThreadName},
-    store::{AgentEntry, AgentRegistry, AgentStatus},
+    store::{ActorPresence, ActorPresenceStatus, ActorPresenceStore},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
@@ -1652,9 +1652,9 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<StatusThreadSum
     names.extend(manager.list()?.into_iter().map(|thread| thread.thread));
 
     // Load the agent registry once for the whole summary walk. Per-thread
-    // `AgentRegistry::list()` re-reads the same on-disk table and dominated
+    // `ActorPresenceStore::list()` re-reads the same on-disk table and dominated
     // `thread_summary_ms` when many threads were present.
-    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+    let registry_entries = ActorPresenceStore::new(repo.heddle_dir()).list()?;
 
     let mut summaries = Vec::new();
     for name in names {
@@ -1688,14 +1688,14 @@ pub fn find_thread_summary_single(
     repo: &Repository,
     name: &str,
 ) -> Result<Option<StatusThreadSummary>> {
-    let registry_entries = AgentRegistry::new(repo.heddle_dir()).list()?;
+    let registry_entries = ActorPresenceStore::new(repo.heddle_dir()).list()?;
     find_thread_summary_with_agents(repo, name, &registry_entries)
 }
 
 fn find_thread_summary_with_agents(
     repo: &Repository,
     name: &str,
-    registry_entries: &[AgentEntry],
+    registry_entries: &[ActorPresence],
 ) -> Result<Option<StatusThreadSummary>> {
     let current = repo.current_lane()?;
     let is_current = current.as_deref() == Some(name);
@@ -1711,7 +1711,7 @@ fn find_thread_summary_with_agents(
     let mut thread =
         thread.unwrap_or_else(|| synthetic_thread(repo, name, ref_state.map(|id| id.short())));
     let _ = refresh_thread_freshness(repo, &mut thread);
-    let entries: Vec<&AgentEntry> = registry_entries
+    let entries: Vec<&ActorPresence> = registry_entries
         .iter()
         .filter(|entry| entry.thread == name)
         .collect();
@@ -1758,7 +1758,7 @@ fn thread_summary_from_thread(
     repo: &Repository,
     thread: Thread,
     is_current: bool,
-    primary: Option<&AgentEntry>,
+    primary: Option<&ActorPresence>,
 ) -> StatusThreadSummary {
     let thread_state = thread.state;
     let coordination_status = coordination_status_for_thread_state(&thread_state);
@@ -1825,11 +1825,11 @@ fn thread_summary_from_thread(
     }
 }
 
-fn primary_agent_entry_refs<'a>(entries: &[&'a AgentEntry]) -> Option<&'a AgentEntry> {
+fn primary_agent_entry_refs<'a>(entries: &[&'a ActorPresence]) -> Option<&'a ActorPresence> {
     entries
         .iter()
         .copied()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .max_by_key(|entry| entry.started_at)
         .or_else(|| entries.iter().copied().max_by_key(|entry| entry.started_at))
 }

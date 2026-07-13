@@ -3,7 +3,7 @@
 //!
 //! Owns:
 //! - listing registry entries into a typed report with stable JSON field names
-//! - pure active-only (and related) filters over [`AgentEntry`] slices
+//! - pure active-only (and related) filters over [`ActorPresence`] slices
 //! - assembling a single actor entry plus ancestry chain for show/spawn JSON
 //! - pure [`plan_actor_spawn`] / [`build_spawn_entry`] for `actor spawn`
 //! - pure [`complete_actor_entry`] / [`plan_actor_done`] and thin
@@ -15,7 +15,9 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
+use objects::store::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+};
 use repo::{Repository, ThreadId, ThreadIdError};
 use serde::Serialize;
 
@@ -74,11 +76,6 @@ pub struct ActorEntryReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub heartbeat_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease_expires_at: Option<String>,
-    pub liveness: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub report_flush_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attach_reason: Option<String>,
@@ -127,8 +124,8 @@ impl From<ActorChainNode> for ActorChainEntry {
     }
 }
 
-impl From<&AgentEntry> for ActorEntryReport {
-    fn from(entry: &AgentEntry) -> Self {
+impl From<&ActorPresence> for ActorEntryReport {
+    fn from(entry: &ActorPresence) -> Self {
         Self {
             session_id: entry.session_id.clone(),
             client_instance_id: entry.client_instance_id.clone(),
@@ -146,9 +143,6 @@ impl From<&AgentEntry> for ActorEntryReport {
             thinking_level: entry.thinking_level.clone(),
             usage_summary: entry.usage_summary.clone(),
             last_progress_at: entry.last_progress_at.map(|ts| ts.to_rfc3339()),
-            heartbeat_at: entry.heartbeat_at.map(|ts| ts.to_rfc3339()),
-            lease_expires_at: entry.lease_expires_at().map(|ts| ts.to_rfc3339()),
-            liveness: AgentRegistry::liveness_for(entry).to_string(),
             report_flush_state: entry.report_flush_state.clone(),
             attach_reason: entry.attach_reason.clone(),
             attach_precedence: entry.attach_precedence.clone(),
@@ -170,25 +164,25 @@ impl ActorEntryReport {
     }
 }
 
-/// Pure filter: when `active_only`, retain only [`AgentStatus::Active`] entries.
-pub fn filter_actors(entries: Vec<AgentEntry>, active_only: bool) -> Vec<AgentEntry> {
+/// Pure filter: when `active_only`, retain only [`ActorPresenceStatus::Active`] entries.
+pub fn filter_actors(entries: Vec<ActorPresence>, active_only: bool) -> Vec<ActorPresence> {
     if !active_only {
         return entries;
     }
     entries
         .into_iter()
-        .filter(|entry| entry.status == AgentStatus::Active)
+        .filter(|entry| entry.status == ActorPresenceStatus::Active)
         .collect()
 }
 
 /// Pure filter over a borrowed slice (for callers that already hold entries).
 pub fn filter_actors_ref<'a>(
-    entries: impl IntoIterator<Item = &'a AgentEntry>,
+    entries: impl IntoIterator<Item = &'a ActorPresence>,
     active_only: bool,
-) -> Vec<&'a AgentEntry> {
+) -> Vec<&'a ActorPresence> {
     entries
         .into_iter()
-        .filter(|entry| !active_only || entry.status == AgentStatus::Active)
+        .filter(|entry| !active_only || entry.status == ActorPresenceStatus::Active)
         .collect()
 }
 
@@ -197,13 +191,13 @@ pub fn filter_actors_ref<'a>(
 /// Applies the active-only filter when requested. Does not attach verification
 /// or render human text — CLI owns the envelope and presentation.
 pub fn list_actors(repo: &Repository, active_only: bool) -> Result<ActorListReport> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     list_actors_from_registry(&registry, active_only)
 }
 
-/// List actors from an already-opened [`AgentRegistry`].
+/// List actors from an already-opened [`ActorPresenceStore`].
 pub fn list_actors_from_registry(
-    registry: &AgentRegistry,
+    registry: &ActorPresenceStore,
     active_only: bool,
 ) -> Result<ActorListReport> {
     let entries = registry.current_entries()?;
@@ -220,8 +214,8 @@ pub fn list_actors_from_registry(
 /// Used by `actor show` / `actor spawn` machine JSON after the caller has
 /// resolved which registry entry to surface.
 pub fn assemble_actor_entry(
-    registry: &AgentRegistry,
-    entry: &AgentEntry,
+    registry: &ActorPresenceStore,
+    entry: &ActorPresence,
 ) -> Result<ActorEntryReport> {
     let chain = registry.actor_chain_for_session(&entry.session_id)?;
     Ok(ActorEntryReport::from(entry).with_chain(chain))
@@ -236,7 +230,7 @@ pub fn show_actor_by_session(
     repo: &Repository,
     session_id: &str,
 ) -> Result<Option<ActorShowReport>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let Some(entry) = registry.load(session_id)? else {
         return Ok(None);
     };
@@ -247,8 +241,8 @@ pub fn show_actor_by_session(
 
 /// Assemble show payload from a resolved entry (after CLI implicit resolve).
 pub fn show_actor_from_entry(
-    registry: &AgentRegistry,
-    entry: &AgentEntry,
+    registry: &ActorPresenceStore,
+    entry: &ActorPresence,
 ) -> Result<ActorShowReport> {
     Ok(ActorShowReport {
         actor: assemble_actor_entry(registry, entry)?,
@@ -487,18 +481,15 @@ pub fn resolve_spawn_thread_name(plan: &ActorSpawnPlan, session_id: &str) -> Str
 
 /// Pure assembly of a registry entry from a spawn plan and session runtime fields.
 ///
-/// Does not touch the filesystem. Caller supplies `pid`, `reservation_token`,
-/// and `now` so tests can inject deterministic values.
+/// Does not touch the filesystem. Caller supplies time for deterministic tests.
 pub fn build_spawn_entry(
     plan: &ActorSpawnPlan,
     session_id: &str,
-    pid: Option<u32>,
-    reservation_token: Option<String>,
     now: DateTime<Utc>,
-) -> AgentEntry {
+) -> ActorPresence {
     let thread = resolve_spawn_thread_name(plan, session_id);
     let rule = plan.attach_mode.rule().to_string();
-    AgentEntry {
+    ActorPresence {
         session_id: session_id.to_string(),
         client_instance_id: None,
         native_actor_key: None,
@@ -507,12 +498,8 @@ pub fn build_spawn_entry(
         heddle_session_id: None,
         thread_id: None,
         thread: thread.clone(),
-        pid,
-        boot_id: None,
-        heartbeat_at: Some(now),
         anchor_state: Some(plan.base_state_full.clone()),
         anchor_root: None,
-        reservation_token,
         path: None,
         base_state: plan.base_state_short.clone(),
         started_at: now,
@@ -529,7 +516,7 @@ pub fn build_spawn_entry(
         winning_attach_rule: Some(rule),
         probe_source: plan.probe_source.clone(),
         probe_confidence: plan.probe_confidence,
-        status: AgentStatus::Active,
+        status: ActorPresenceStatus::Active,
         completed_at: None,
         context_queries: vec![],
     }
@@ -550,42 +537,45 @@ pub struct ActorDoneOptions {
 pub struct ActorDonePlan {
     pub session_id: String,
     pub thread: String,
-    /// Always [`AgentStatus::Complete`] for a successful done plan.
-    pub status: AgentStatus,
+    /// Always [`ActorPresenceStatus::Complete`] for a successful done plan.
+    pub status: ActorPresenceStatus,
 }
 
 /// Build a done plan from a resolved registry entry (no I/O).
-pub fn plan_actor_done(entry: &AgentEntry) -> ActorDonePlan {
+pub fn plan_actor_done(entry: &ActorPresence) -> ActorDonePlan {
     ActorDonePlan {
         session_id: entry.session_id.clone(),
         thread: entry.thread.clone(),
-        status: AgentStatus::Complete,
+        status: ActorPresenceStatus::Complete,
     }
 }
 
 /// Pure status transition for `actor done`: mark complete with a timestamp.
-pub fn complete_actor_entry(mut entry: AgentEntry, completed_at: DateTime<Utc>) -> AgentEntry {
-    entry.status = AgentStatus::Complete;
+pub fn complete_actor_entry(
+    mut entry: ActorPresence,
+    completed_at: DateTime<Utc>,
+) -> ActorPresence {
+    entry.status = ActorPresenceStatus::Complete;
     entry.completed_at = Some(completed_at);
     entry
 }
 
 /// Mark an actor complete in the registry (thin store mutation).
-pub fn mark_actor_done(registry: &AgentRegistry, session_id: &str) -> Result<()> {
-    registry.update_status(session_id, AgentStatus::Complete)?;
+pub fn mark_actor_done(registry: &ActorPresenceStore, session_id: &str) -> Result<()> {
+    registry.update_status(session_id, ActorPresenceStatus::Complete)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::store::{AgentEntry, AgentStatus, AgentUsageSummary};
+    use objects::store::{ActorPresence, ActorPresenceStatus, AgentUsageSummary};
     use tempfile::TempDir;
 
     use super::*;
 
-    fn sample_entry(session_id: &str, status: AgentStatus, thread: &str) -> AgentEntry {
-        AgentEntry {
+    fn sample_entry(session_id: &str, status: ActorPresenceStatus, thread: &str) -> ActorPresence {
+        ActorPresence {
             session_id: session_id.to_string(),
             client_instance_id: None,
             native_actor_key: None,
@@ -594,12 +584,8 @@ mod tests {
             heddle_session_id: None,
             thread_id: None,
             thread: thread.to_string(),
-            pid: None,
-            boot_id: None,
-            heartbeat_at: None,
             anchor_state: None,
             anchor_root: None,
-            reservation_token: None,
             path: None,
             base_state: "abc123".to_string(),
             started_at: Utc::now(),
@@ -643,21 +629,25 @@ mod tests {
     #[test]
     fn filter_actors_active_only_keeps_active() {
         let entries = vec![
-            sample_entry("a1", AgentStatus::Active, "t1"),
-            sample_entry("a2", AgentStatus::Complete, "t2"),
-            sample_entry("a3", AgentStatus::Active, "t3"),
-            sample_entry("a4", AgentStatus::Merged, "t4"),
+            sample_entry("a1", ActorPresenceStatus::Active, "t1"),
+            sample_entry("a2", ActorPresenceStatus::Complete, "t2"),
+            sample_entry("a3", ActorPresenceStatus::Active, "t3"),
+            sample_entry("a4", ActorPresenceStatus::Merged, "t4"),
         ];
         let filtered = filter_actors(entries, true);
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|e| e.status == AgentStatus::Active));
+        assert!(
+            filtered
+                .iter()
+                .all(|e| e.status == ActorPresenceStatus::Active)
+        );
     }
 
     #[test]
     fn filter_actors_all_when_not_active_only() {
         let entries = vec![
-            sample_entry("a1", AgentStatus::Active, "t1"),
-            sample_entry("a2", AgentStatus::Complete, "t2"),
+            sample_entry("a1", ActorPresenceStatus::Active, "t1"),
+            sample_entry("a2", ActorPresenceStatus::Complete, "t2"),
         ];
         let filtered = filter_actors(entries, false);
         assert_eq!(filtered.len(), 2);
@@ -665,7 +655,11 @@ mod tests {
 
     #[test]
     fn entry_report_stable_json_field_names() {
-        let entry = sample_entry("agent-test", AgentStatus::Active, "actor/agent-test");
+        let entry = sample_entry(
+            "agent-test",
+            ActorPresenceStatus::Active,
+            "actor/agent-test",
+        );
         let report = ActorEntryReport::from(&entry);
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["session_id"], "agent-test");
@@ -688,7 +682,7 @@ mod tests {
             output_kind: "actor_list",
             actors: vec![ActorEntryReport::from(&sample_entry(
                 "agent-test",
-                AgentStatus::Active,
+                ActorPresenceStatus::Active,
                 "main",
             ))],
             active_only: true,
@@ -705,7 +699,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let heddle_dir = temp.path().join(".heddle");
         std::fs::create_dir_all(&heddle_dir).unwrap();
-        let registry = AgentRegistry::new(&heddle_dir);
+        let registry = ActorPresenceStore::new(&heddle_dir);
         let report = list_actors_from_registry(&registry, false).unwrap();
         assert_eq!(report.output_kind, "actor_list");
         assert!(report.actors.is_empty());
@@ -717,19 +711,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let heddle_dir = temp.path().join(".heddle");
         std::fs::create_dir_all(&heddle_dir).unwrap();
-        let registry = AgentRegistry::new(&heddle_dir);
+        let registry = ActorPresenceStore::new(&heddle_dir);
 
         registry
             .save(&sample_entry(
                 "agent-active",
-                AgentStatus::Active,
+                ActorPresenceStatus::Active,
                 "t-active",
             ))
             .unwrap();
         registry
             .save(&sample_entry(
                 "agent-complete",
-                AgentStatus::Complete,
+                ActorPresenceStatus::Complete,
                 "t-complete",
             ))
             .unwrap();
@@ -746,14 +740,14 @@ mod tests {
 
     #[test]
     fn with_chain_maps_nodes() {
-        let entry = sample_entry("leaf", AgentStatus::Active, "t-leaf");
+        let entry = sample_entry("leaf", ActorPresenceStatus::Active, "t-leaf");
         let chain = vec![
             ActorChainNode {
                 session_id: "root".to_string(),
                 native_actor_key: Some("root-key".to_string()),
                 native_parent_actor_key: None,
                 thread: "t-root".to_string(),
-                status: AgentStatus::Complete,
+                status: ActorPresenceStatus::Complete,
                 provider: None,
                 model: None,
                 harness: None,
@@ -763,7 +757,7 @@ mod tests {
                 native_actor_key: Some("leaf-key".to_string()),
                 native_parent_actor_key: Some("root-key".to_string()),
                 thread: "t-leaf".to_string(),
-                status: AgentStatus::Active,
+                status: ActorPresenceStatus::Active,
                 provider: Some("openai".to_string()),
                 model: Some("gpt-5".to_string()),
                 harness: Some("codex".to_string()),
@@ -866,16 +860,13 @@ mod tests {
     fn build_spawn_entry_assembles_active_registry_fields() {
         let plan = plan_actor_spawn(&spawn_options()).unwrap();
         let now = Utc::now();
-        let entry = build_spawn_entry(&plan, "agent-xyz", Some(42), Some("token".to_string()), now);
+        let entry = build_spawn_entry(&plan, "agent-xyz", now);
         assert_eq!(entry.session_id, "agent-xyz");
         assert_eq!(entry.thread, "actor/agent-xyz");
-        assert_eq!(entry.pid, Some(42));
-        assert_eq!(entry.reservation_token.as_deref(), Some("token"));
         assert_eq!(entry.base_state, "abcdef0");
         assert_eq!(entry.anchor_state.as_deref(), Some("abcdef0123456789"));
-        assert_eq!(entry.status, AgentStatus::Active);
+        assert_eq!(entry.status, ActorPresenceStatus::Active);
         assert_eq!(entry.started_at, now);
-        assert_eq!(entry.heartbeat_at, Some(now));
         assert_eq!(
             entry.winning_attach_rule.as_deref(),
             Some("explicit-actor-spawn")
@@ -896,20 +887,20 @@ mod tests {
 
     #[test]
     fn complete_actor_entry_sets_status_and_timestamp() {
-        let entry = sample_entry("agent-1", AgentStatus::Active, "t1");
+        let entry = sample_entry("agent-1", ActorPresenceStatus::Active, "t1");
         let done_at = Utc::now();
         let completed = complete_actor_entry(entry, done_at);
-        assert_eq!(completed.status, AgentStatus::Complete);
+        assert_eq!(completed.status, ActorPresenceStatus::Complete);
         assert_eq!(completed.completed_at, Some(done_at));
     }
 
     #[test]
     fn plan_actor_done_captures_session_and_thread() {
-        let entry = sample_entry("agent-1", AgentStatus::Active, "feature/x");
+        let entry = sample_entry("agent-1", ActorPresenceStatus::Active, "feature/x");
         let plan = plan_actor_done(&entry);
         assert_eq!(plan.session_id, "agent-1");
         assert_eq!(plan.thread, "feature/x");
-        assert_eq!(plan.status, AgentStatus::Complete);
+        assert_eq!(plan.status, ActorPresenceStatus::Complete);
     }
 
     #[test]
@@ -917,17 +908,17 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let heddle_dir = temp.path().join(".heddle");
         std::fs::create_dir_all(&heddle_dir).unwrap();
-        let registry = AgentRegistry::new(&heddle_dir);
+        let registry = ActorPresenceStore::new(&heddle_dir);
         registry
             .save(&sample_entry(
                 "agent-active",
-                AgentStatus::Active,
+                ActorPresenceStatus::Active,
                 "t-active",
             ))
             .unwrap();
         mark_actor_done(&registry, "agent-active").unwrap();
         let loaded = registry.load("agent-active").unwrap().unwrap();
-        assert_eq!(loaded.status, AgentStatus::Complete);
+        assert_eq!(loaded.status, ActorPresenceStatus::Complete);
         assert!(loaded.completed_at.is_some());
     }
 }

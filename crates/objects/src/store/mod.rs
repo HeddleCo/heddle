@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
-pub mod agent_registry;
+pub mod actor_presence;
 pub mod agent_task;
 pub mod codec;
 pub mod fs;
@@ -16,10 +16,11 @@ pub mod pack;
 pub mod shallow;
 pub mod source;
 pub mod store_compliance;
+pub mod writer_lease;
 
-pub use agent_registry::{
-    ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ContextQueryEntry,
-    ReserveOutcome, SessionRenewal, generate_agent_id,
+pub use actor_presence::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    ContextQueryEntry, generate_actor_session_id,
 };
 pub use agent_task::{
     AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
@@ -42,6 +43,11 @@ pub use shallow::ShallowInfo;
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
+pub use writer_lease::{
+    WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
+    WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,
+    generate_writer_lease_token,
+};
 
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 

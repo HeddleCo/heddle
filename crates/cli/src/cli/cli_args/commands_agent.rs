@@ -40,14 +40,14 @@ pub enum AgentCommands {
     // (Claude Code subagents, codex harnesses, etc.) call to
     // coordinate parallel writers on the same repo. Distinct from
     // the daemon-control variants above: these are one-shot CLI
-    // calls that mutate the repo's `.heddle/agents/` registry.
+    // calls that mutate writer leases and actor presence.
     /// Atomically reserve a thread for one writer.
     Reserve(AgentReserveArgs),
 
     /// Update reservation heartbeat.
     Heartbeat(AgentHeartbeatArgs),
 
-    /// Capture under a session-validated reservation.
+    /// Capture under a token-authenticated writer lease.
     Capture(AgentCaptureArgs),
 
     /// Mark a reservation's thread ready for integration.

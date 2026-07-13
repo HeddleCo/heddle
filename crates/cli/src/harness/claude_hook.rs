@@ -15,7 +15,7 @@
 //!   with agent attribution derived from the hook payload, then returns. The
 //!   capture is skipped when the worktree tree matches HEAD so repeated Stop
 //!   events do not create redundant states.
-//! * **SubagentStop** additionally marks the child `AgentEntry` as `Complete`
+//! * **SubagentStop** additionally marks the child `ActorPresence` as `Complete`
 //!   so `heddle agent list` distinguishes finished subagents from live ones.
 //! * **UserPromptSubmit** rotates the Heddle session segment so each user
 //!   prompt becomes a distinct attribution segment on subsequent captures.
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
-    store::{AgentRegistry, AgentStatus, ObjectStore},
+    store::{ActorPresenceStore, ActorPresenceStatus, ObjectStore},
 };
 use refs::Head;
 use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction};
@@ -359,7 +359,7 @@ pub(crate) fn handle_user_prompt_segment_rotate(
     }
 }
 
-/// SubagentStop handler: mark the child `AgentEntry` as `Complete` so
+/// SubagentStop handler: mark the child `ActorPresence` as `Complete` so
 /// `heddle agent list` reflects the distinction between live and finished
 /// subagents. The capture itself is handled by `handle_stop_capture`.
 pub(crate) fn mark_subagent_complete(repo: &Repository, payload: &Value) -> Result<()> {
@@ -369,13 +369,13 @@ pub(crate) fn mark_subagent_complete(repo: &Repository, payload: &Value) -> Resu
         return Ok(());
     };
     let native_actor_key = format!("claude-code:agent:{agent_id}");
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let Some(entry) = registry.find_active_by_native_actor_key(&native_actor_key)? else {
         debug!(%native_actor_key, "no active subagent entry to mark complete");
         return Ok(());
     };
-    registry.update_status(&entry.session_id, AgentStatus::Complete)?;
-    debug!(session_id = %entry.session_id, %native_actor_key, "marked subagent AgentEntry Complete");
+    registry.update_status(&entry.session_id, ActorPresenceStatus::Complete)?;
+    debug!(session_id = %entry.session_id, %native_actor_key, "marked subagent ActorPresence Complete");
     Ok(())
 }
 

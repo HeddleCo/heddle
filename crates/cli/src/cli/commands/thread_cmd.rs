@@ -18,7 +18,7 @@ use heddle_core::{
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
-    store::{AgentRegistry, ObjectStore},
+    store::{ActorPresenceStore, ObjectStore, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, ThreadUpdateSnapshots};
 use refs::Head;
@@ -1453,14 +1453,15 @@ pub(crate) fn drop_thread_silent(
         thread.updated_at = Utc::now();
         manager.save(&thread)?;
     }
-    if plan.strip_agent_registry {
-        let registry = AgentRegistry::new(repo.heddle_dir());
+    if plan.strip_actor_presence {
+        let registry = ActorPresenceStore::new(repo.heddle_dir());
         for entry in registry.list()? {
             if entry.thread == thread.thread || entry.thread_id.as_deref() == Some(thread_id) {
                 registry.delete(&entry.session_id)?;
             }
         }
     }
+    WriterLeaseStore::new(repo.heddle_dir()).abandon_thread(&thread.thread, Utc::now())?;
     let tn = ThreadName::new(&thread.thread);
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
         repo.refs().delete_thread(&tn)?;
@@ -1991,14 +1992,15 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
     if plan.delete_thread_ref && repo.refs().get_thread(&tn)?.is_some() {
         repo.refs().delete_thread(&tn)?;
     }
-    if plan.strip_agent_registry {
-        let registry = AgentRegistry::new(repo.heddle_dir());
+    if plan.strip_actor_presence {
+        let registry = ActorPresenceStore::new(repo.heddle_dir());
         for entry in registry.list()? {
             if entry.thread == thread.thread || entry.thread_id.as_deref() == Some(&thread.id) {
                 registry.delete(&entry.session_id)?;
             }
         }
     }
+    WriterLeaseStore::new(repo.heddle_dir()).abandon_thread(&thread.thread, Utc::now())?;
     Ok(())
 }
 

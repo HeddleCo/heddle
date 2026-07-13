@@ -27,7 +27,10 @@ pub use heddle_core::{
 };
 use objects::{
     object::{ChangeId, State, ThreadName},
-    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, ReserveOutcome},
+    store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
+        WriterLeaseStore,
+    },
 };
 use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -901,7 +904,12 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
 
-    let existing = find_active_thread_entry(repo, &args.name)?;
+    let existing = WriterLeaseStore::new(repo.heddle_dir())
+        .list()?
+        .into_iter()
+        .find(|lease| {
+            lease.status == WriterLeaseStatus::Active && lease.thread == args.name
+        });
     if active_reservation_blocks_start(existing.is_some()) {
         let entry = existing.expect("active reservation present");
         if let Some(ref requested_path) = args.path {
@@ -1248,7 +1256,7 @@ fn finalize_committed_start(
 
 /// The post-commit bookkeeping shared by a fresh `thread start` and a committed
 /// retry ([`finalize_committed_start`]): emit the hydrate note, create the
-/// `AgentRegistry` reservation entry (the "active reservation" a crash before
+/// `ActorPresenceStore` reservation entry (the "active reservation" a crash before
 /// this step leaves missing), and build the command output. Idempotent w.r.t. the
 /// reservation: it is only reached when no live owner exists (a live owner is
 /// caught earlier by `find_active_thread_entry`), so the retry completes the
@@ -1287,11 +1295,11 @@ fn finalize_thread_start(
         }
     }
 
-    let registry = AgentRegistry::new(repo.heddle_dir());
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     let path_for_entry = abs_path.to_path_buf();
     let thread_name = args.name.clone();
-    let outcome = registry.try_reserve_thread(&thread_name, |session_id| {
-        Ok(AgentEntry {
+    let entry = registry.create_generated_entry(|session_id| {
+        Ok(ActorPresence {
             session_id: session_id.to_string(),
             client_instance_id: None,
             native_actor_key: actor_identity.native_actor_key.clone(),
@@ -1300,12 +1308,8 @@ fn finalize_thread_start(
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
-            pid: None,
-            boot_id: None,
-            heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
             anchor_root: Some(base_root.to_string()),
-            reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
                 ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
@@ -1329,21 +1333,11 @@ fn finalize_thread_start(
             winning_attach_rule: Some("thread-start".to_string()),
             probe_source: actor_identity.probe_source.clone(),
             probe_confidence: actor_identity.probe_confidence,
-            status: AgentStatus::Active,
+            status: ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: vec![],
         })
     })?;
-    let entry = match outcome {
-        ReserveOutcome::Reserved(entry) => entry,
-        ReserveOutcome::LiveOwner(owner) => {
-            return Err(anyhow!(
-                "thread '{}' is reserved by active session {}",
-                thread_name,
-                owner.session_id
-            ));
-        }
-    };
 
     let summary = find_thread_summary(repo, &args.name)?;
     let message = match thread_mode {
@@ -1463,7 +1457,7 @@ fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> Rec
         "active_thread_reservation",
         format!("Thread '{thread}' already has an active reservation{location}"),
         format!(
-            "Inspect it with `{primary_command}`, or release that session before starting another writer."
+            "Inspect it with `{primary_command}`, or release that lease before starting another writer."
         ),
         format!("thread '{thread}' already has an active writer reservation{location}"),
         "starting another writer could create competing worktree materializations for the same thread",
@@ -2794,7 +2788,7 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     }
 }
 
-/// Return the most recently started *active* `AgentEntry` for `thread`, if
+/// Return the most recently started *active* `ActorPresence` for `thread`, if
 /// any. Used by `heddle status` to surface the actor for a thread, and
 /// (since the Phase-D demo work) by `heddle capture` to inherit the
 /// thread's actor as the captured state's `attribution.agent` — without
@@ -2802,8 +2796,8 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
 pub(crate) fn find_active_thread_entry(
     repo: &Repository,
     thread: &str,
-) -> Result<Option<AgentEntry>> {
-    let registry = AgentRegistry::new(repo.heddle_dir());
+) -> Result<Option<ActorPresence>> {
+    let registry = ActorPresenceStore::new(repo.heddle_dir());
     Ok(registry
         .active_entries()?
         .into_iter()

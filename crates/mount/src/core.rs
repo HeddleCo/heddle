@@ -4002,7 +4002,7 @@ impl ContentAddressedMount {
     /// ([`Repository::get_attribution`]) — this honours the
     /// `HEDDLE_AGENT_*` env, the repo config, and the user's
     /// principal. Richer attribution paths (CLI overrides,
-    /// `AgentRegistry`, session segments) live in
+    /// `ActorPresenceStore`, session segments) live in
     /// `crates/cli/src/cli/commands/snapshot.rs::build_attribution`;
     /// when the CLI wires this up it should call
     /// [`Self::capture_with_attribution`] instead and pass the result

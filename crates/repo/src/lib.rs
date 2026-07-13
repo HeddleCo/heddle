@@ -89,7 +89,9 @@ pub use objects::{
     },
     store::{
         AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
-        agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
+        actor_presence::{
+            ActorPresence, ActorPresenceStatus, ActorPresenceStore, generate_actor_session_id,
+        },
     },
 };
 #[cfg(feature = "async-source")]

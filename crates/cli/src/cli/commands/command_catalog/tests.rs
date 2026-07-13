@@ -40,19 +40,26 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(
         &["agent", "heartbeat"],
-        &["agent", "heartbeat", "--session", "session-1"],
+        &[
+            "agent",
+            "heartbeat",
+            "--lease",
+            "lease-1",
+            "--token",
+            "token",
+        ],
     ),
     sample(
         &["agent", "capture"],
-        &["agent", "capture", "--session", "session-1"],
+        &["agent", "capture", "--lease", "lease-1", "--token", "token"],
     ),
     sample(
         &["agent", "ready"],
-        &["agent", "ready", "--session", "session-1"],
+        &["agent", "ready", "--lease", "lease-1", "--token", "token"],
     ),
     sample(
         &["agent", "release"],
-        &["agent", "release", "--session", "session-1"],
+        &["agent", "release", "--lease", "lease-1", "--token", "token"],
     ),
     sample(&["agent", "list"], &["agent", "list"]),
     sample(

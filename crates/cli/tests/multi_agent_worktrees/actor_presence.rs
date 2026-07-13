@@ -850,9 +850,9 @@ fn retro_fails_loudly_on_corrupt_task_metadata() {
 }
 
 #[test]
-fn retro_fails_loudly_on_corrupt_agent_registry_metadata() {
+fn retro_fails_loudly_on_corrupt_actor_presence_metadata() {
     let main = setup_repo("base.txt", "base");
-    let agents_dir = main.path().join(".heddle").join("agents");
+    let agents_dir = main.path().join(".heddle").join("actor-presence");
     fs::create_dir_all(&agents_dir).unwrap();
     fs::write(
         agents_dir.join("agent-corrupt.toml"),
