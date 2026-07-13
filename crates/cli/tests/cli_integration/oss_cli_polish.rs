@@ -10199,36 +10199,6 @@ fn agent_reserve_reports_path_for_existing_materialized_thread() {
 }
 
 #[test]
-fn index_json_emits_one_value_for_maintenance_index() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let index = json_value(temp.path(), &["maintenance", "index", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["maintenance", "index"], &index);
-    assert_schema_declares_runtime_top_level(&["maintenance", "index"], &index);
-    assert_eq!(index["output_kind"], "index");
-    assert!(
-        index["present"].as_bool().is_some(),
-        "index JSON should report presence: {index}"
-    );
-    assert!(
-        index["file_entries"].as_u64().is_some(),
-        "index JSON should include file entry count: {index}"
-    );
-
-    let dump = json_value(
-        temp.path(),
-        &["maintenance", "index", "--dump", "--output", "json"],
-    );
-    assert_eq!(dump["output_kind"], "index");
-    assert!(
-        dump["dump"]
-            .as_str()
-            .is_some_and(|value| value.contains("WorktreeIndex")),
-        "index --dump JSON should carry dump text inside JSON, not stdout prose: {dump}"
-    );
-}
-
-#[test]
 fn default_output_is_text_and_json_requires_explicit_flag() {
     // Persona feedback (heddle#???): the old `--output auto` mode
     // emitted JSON whenever stdout wasn't a TTY (pipes, subprocesses,

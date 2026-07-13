@@ -3,9 +3,7 @@ use anyhow::Result;
 use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRunView};
 
 use crate::cli::{
-    Cli, MaintenanceCommands,
-    commands::{cmd_gc, cmd_index, cmd_monitor},
-    should_output_json, worktree_status_options,
+    Cli, MaintenanceCommands, commands::cmd_gc, should_output_json, worktree_status_options,
 };
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
@@ -54,7 +52,7 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 }
             }
         }
-        MaintenanceCommands::Run => {
+        MaintenanceCommands::Refresh => {
             let run = repo.run_maintenance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
                 println!("{}", serde_json::to_string(&run)?);
@@ -93,12 +91,6 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             dry_run,
         } => {
             return cmd_gc(cli, prune, aggressive, dry_run);
-        }
-        MaintenanceCommands::Index { dump } => {
-            return cmd_index(cli, dump);
-        }
-        MaintenanceCommands::Monitor { paths, serve } => {
-            return cmd_monitor(cli, paths, serve);
         }
     }
 

@@ -496,8 +496,8 @@ pub enum MaintenanceCommands {
     /// Inspect repository performance sidecars and repo shape.
     Inspect,
 
-    /// Rebuild repository performance sidecars without changing repository meaning.
-    Run,
+    /// Refresh repository performance sidecars without changing repository meaning.
+    Refresh,
 
     /// Garbage collect unreachable objects.
     Gc {
@@ -512,24 +512,6 @@ pub enum MaintenanceCommands {
         /// Show what would be removed without removing.
         #[arg(long)]
         dry_run: bool,
-    },
-
-    /// Inspect and debug the worktree index.
-    Index {
-        /// Dump the index contents in human-readable format.
-        #[arg(long)]
-        dump: bool,
-    },
-
-    /// Inspect the local change monitor state.
-    Monitor {
-        /// Print changed paths as well as backend/status summary.
-        #[arg(long)]
-        paths: bool,
-
-        /// Internal helper mode: serve monitor queries for this repo.
-        #[arg(long, hide = true)]
-        serve: bool,
     },
 }
 

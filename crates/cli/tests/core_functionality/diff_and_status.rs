@@ -347,12 +347,13 @@ fn test_native_status_warms_helper_for_second_run() {
     let attempts = if coverage_instrumented() { 300 } else { 60 };
     for _ in 0..attempts {
         let output = heddle_with_env(
-            &["maintenance", "monitor", "--output", "json"],
+            &["maintenance", "inspect", "--output", "json"],
             Some(temp.path()),
             &envs,
         )
         .unwrap();
-        let monitor: Value = serde_json::from_str(&output).unwrap();
+        let report: Value = serde_json::from_str(&output).unwrap();
+        let monitor = report["change_monitor"].clone();
         let helper_usable = monitor["backend"] == "native-helper" && monitor["status"] == "usable";
         let instrumented_fallback_usable = coverage_instrumented()
             && monitor["backend"] == "native"

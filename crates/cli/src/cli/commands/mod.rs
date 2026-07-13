@@ -36,14 +36,12 @@ pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
 mod import_progress;
-mod index;
 mod init;
 mod integration;
 mod log;
 mod maintenance;
 mod marker;
 mod merge;
-mod monitor;
 mod mount_lifecycle;
 mod next_action;
 mod operator_core;
@@ -133,7 +131,6 @@ pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 pub use hook::cmd_hook;
-pub use index::cmd_index;
 pub use init::cmd_init;
 pub use integration::{
     cmd_integration, maybe_prompt_init_install, perform_init_install, prompt_init_install_decision,
@@ -141,7 +138,6 @@ pub use integration::{
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
 pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
-pub use monitor::cmd_monitor;
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
