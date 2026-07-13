@@ -1514,8 +1514,6 @@ pub struct CloneSchema {
     pub local: Option<String>,
     pub branch: Option<String>,
     pub repository_capability: Option<String>,
-    pub commits_imported: Option<u64>,
-    pub states_created: Option<u64>,
     pub objects: Option<usize>,
     pub state: Option<String>,
 }

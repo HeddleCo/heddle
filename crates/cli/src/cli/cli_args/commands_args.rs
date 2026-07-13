@@ -1104,7 +1104,7 @@ pub struct ResolveArgs {
 /// option-only thread selector.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RemoteOperationArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Heddle remote name, native repository path, or hosted address.
     pub remote: Option<String>,
 
     /// Thread to act on.
@@ -1120,7 +1120,7 @@ pub struct RemoteOperationArgs {
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct PushArgs {
-    /// Remote name, local path, URL, or hosted address.
+    /// Heddle remote name, native repository path, or hosted address.
     pub remote: Option<String>,
 
     /// Thread to push.
@@ -1159,7 +1159,7 @@ impl PushArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Advanced (hidden) flags:
-  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
+  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only.
 ")]
 pub struct PullArgs {
     #[command(flatten)]
@@ -1184,12 +1184,12 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Git-overlay clones land on the remote's default branch; Heddle remotes check out `main` (pass --thread to pick another). --depth N limits history on Heddle remotes only. Never prompts. Full details: `heddle help clone`.
+  Clones native local or hosted Heddle repositories and checks out `main` (pass --thread to pick another). Git sources return exact `git clone` recovery argv. Never prompts. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
 
 Examples:
-  heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
+  heddle clone ../native-repo ./clone                # local native Heddle repository
   heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
@@ -1207,10 +1207,8 @@ pub struct CloneArgs {
     #[arg(long)]
     pub depth: Option<u32>,
 
-    // Hosted/network remotes only; Git-overlay clones reject it today —
-    // lazy hydration over the Git transport is planned for v0.3.1. The
-    // user-facing exposition lives in the after-help breadcrumb above and
-    // `heddle help clone`.
+    // Hosted/network remotes only. The user-facing exposition lives in the
+    // after-help breadcrumb above and `heddle help clone`.
     /// Leave blob content absent by design and hydrate it explicitly later.
     #[arg(long, hide = true)]
     pub lazy: bool,
@@ -1221,9 +1219,8 @@ pub struct CloneArgs {
 
     // Only `blob:none` is accepted (a synonym for --lazy on hosted
     // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
-    // rejected at parse time, and Git-overlay clones reject the flag at
-    // runtime until v0.3.1. See the after-help breadcrumb and
-    // `heddle help clone`.
+    // rejected at parse time. See the after-help breadcrumb and `heddle help
+    // clone`.
     /// Partial-clone filter spec (`blob:none` only).
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,

@@ -551,38 +551,36 @@ agent-flags` for capture attribution overrides.
 // `heddle clone --help` keeps the signature + flags + a one-screen
 // summary; this topic carries the full default-thread fallback chain and
 // --depth exposition that used to bloat the after-help (heddle#652).
-const CLONE_TOPIC: &str = r#"Cloning — Git repositories and Heddle remotes.
+const CLONE_TOPIC: &str = r#"Cloning — Heddle repositories.
 
     heddle clone <remote> <dir> [--thread <name>] [--depth <n>]
 
 Run `heddle clone --help` for the flag list.
 
-# Which thread the clone lands on (no --thread)
+# Repository authority
 
-- Git-overlay clones (cloning a Git repository) land on the remote's
-  advertised default branch (its Git HEAD); if the remote advertises
-  none, they fall back to a thread named `main`, then to the
-  alphabetically first imported thread.
-- Native-local and hosted Heddle clones target `main` directly with no
-  fallback chain; if the remote has no `main` thread the clone fails —
+- `heddle clone` accepts native local repositories and hosted Heddle remotes.
+- Git sources return a typed refusal with exact `git clone` argv. Run Git
+  directly, then use `heddle init` for Git Overlay or `heddle adopt` to move
+  source authority to Heddle.
+- Heddle clones target `main` directly; if the remote has no `main` thread,
   pass `--thread <name>` to select one.
 - Clone never prompts.
 
-# Shallow clones (--depth, Heddle remotes only)
+# Shallow clones (--depth)
 
 --depth 0 (the default) clones full history. --depth N fetches only the
 tip plus N generations of ancestry (--depth 1: the tip plus its immediate parents),
 so `heddle log` stops at the depth boundary; history older than that is
 not present locally — re-clone at a greater --depth (or --depth 0) to
-obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted
-and clones full history.
+obtain it.
 
 Depth controls history extent only — how many states the clone fetches —
 and says nothing about object contents. Whether a state's blobs are
 present locally or fetched lazily is a separate concern that `--depth`
 never governs. Advanced/planned flags `--lazy` and `--filter blob:none`
 skip blob content and hydrate it on demand for hosted/network Heddle
-remotes; local and Git-overlay clone paths reject them today.
+remotes; local clone paths reject them today.
 
 See `heddle help threads` for the thread model and `heddle help remotes`
 for remote management.
@@ -811,7 +809,7 @@ rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n
 Without an id, dedup is bypassed and the call executes normally. For the\n\
 authoritative per-command contract, use `heddle help --output json`.\n";
 
-const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and hosted destinations.\n\
+const REMOTES_TOPIC: &str = "Remotes — native local and hosted Heddle destinations.\n\
 \n\
 Native Heddle loop:\n\
 \n\
@@ -822,9 +820,13 @@ Native Heddle loop:\n\
     heddle verify\n\
 \n\
 Remote values may be hosted endpoints or native Heddle paths. `push` and `pull`\n\
-use the default remote unless a positional remote is supplied. In Git Overlay,\n\
-run `git fetch`, `git pull`, and `git push` directly. `heddle verify` reports repository verification\n\
-state before and after Heddle remote operations.\n\
+use the default remote unless a positional remote is supplied. These commands\n\
+are native-only: in Git Overlay, use `git remote`, `git fetch`, `git pull`, and\n\
+`git push` directly. Heddle returns typed recovery with exact direct-Git argv.\n\
+Setting a Git default requires both `git config remote.pushDefault <name>` and\n\
+`git config branch.<branch>.remote <name>`; Heddle does not hide that split.\n\
+`heddle verify` reports repository verification state before and after native\n\
+Heddle remote operations.\n\
 \n\
 When a remote action is unsafe, Heddle reports the blocker and one primary\n\
 next command, including exact direct-Git argv when Git owns source history.\n";

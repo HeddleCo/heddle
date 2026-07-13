@@ -1038,13 +1038,13 @@ verification.
   "status": "cloned",
   "success": true,
   "cloned": true,
-  "transport": "git",
-  "remote": "file:///tmp/source.git",
+  "transport": "heddle",
+  "remote": "heddle://example.com/team/repo",
   "local": "work",
   "branch": "main",
-  "repository_capability": "git-overlay",
-  "commits_imported": 3,
-  "states_created": 3
+  "repository_capability": "native-heddle",
+  "objects": 42,
+  "state": "hs-head456"
 }
 ```
 
@@ -1056,8 +1056,8 @@ verification.
   "remotes": [
     {
       "name": "origin",
-      "url": "file:///tmp/source.git",
-      "source": "git",
+      "url": "heddle://example.com/team/repo",
+      "source": "heddle",
       "is_default": true
     }
   ]
@@ -1070,8 +1070,8 @@ verification.
 {
   "output_kind": "remote_show",
   "name": "origin",
-  "url": "file:///tmp/source.git",
-  "source": "git",
+  "url": "heddle://example.com/team/repo",
+  "source": "heddle",
   "is_default": true
 }
 ```
@@ -1084,7 +1084,7 @@ verification.
   "status": "completed",
   "action": "remote_add",
   "name": "origin",
-  "url": "file:///tmp/source.git",
+  "url": "heddle://example.com/team/repo",
   "default": null,
   "message": "Added remote"
 }
@@ -1851,26 +1851,15 @@ the same ready envelope.
   "pulled": true,
   "changed": true,
   "success": true,
-  "transport": "git",
+  "transport": "heddle",
   "remote": "origin",
-  "branch": "main",
-  "old_git_head": "1111111111111111111111111111111111111111",
-  "new_git_head": "2222222222222222222222222222222222222222",
-  "old_state": "hd-old123",
-  "new_state": "hd-head456",
-  "states_created": 1,
-  "commits_seen": 1,
-  "commits_seen_scope": "branches_and_heddle_notes",
-  "materialized_checkout": true,
-  "changed_path_count": 1,
-  "changed_paths": ["src/app.rs"]
+  "thread": "main",
+  "state": "hs-head456",
+  "objects": 12
 }
 ```
 
 `heddle push --output json` emits:
-
-`heddle push <remote> <thread>` is accepted as a Git-shaped alias for
-`heddle push <remote> --thread <thread>`; the JSON output contract is the same.
 
 ```json
 {
@@ -1880,25 +1869,13 @@ the same ready envelope.
   "pushed": true,
   "changed": true,
   "success": true,
-  "transport": "git",
+  "transport": "heddle",
   "remote": "origin",
   "push_scope": "current_thread",
-  "ref_scope": "branch_and_heddle_notes",
-  "git_notes_ref": "refs/notes/heddle",
-  "refs_written": ["refs/heads/main", "refs/notes/heddle"],
-  "git_notes_visibility_warning": "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
-  "git_tracking_remote": "origin",
-  "git_remote_configured": {
-    "name": "origin",
-    "url": "file:///tmp/example.git"
-  },
-  "git_upstream_configured": {
-    "branch": "main",
-    "remote": "origin"
-  },
-  "tags_included": false,
   "force": false,
   "thread": "main",
+  "state": "hs-head456",
+  "objects": 12,
   "next_action": null,
   "next_action_template": null,
   "recommended_action": null,
@@ -1911,20 +1888,14 @@ the same ready envelope.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `output_kind`, `action`, `status`, `success`, `cloned`, `transport`, `remote`, `local`, `branch`, `repository_capability` | mixed | required for successful `clone` | Stable clone envelope, transport, source, destination, checked-out branch, and initialized repository capability. |
-| `commits_imported`, `states_created` | int \| null | required for Git-overlay `clone` | Import counts reported after clone verification. |
-| `objects`, `state` | int/string \| null | native/hosted Heddle clone only | Transferred object count and resulting Heddle state when the transport is native Heddle rather than Git-overlay. |
-| `verification` | object \| null | required for Git-overlay `clone` | Post-clone repository verification proof; clean clones report `clone_verification: "verified"`. |
+| `objects`, `state` | int/string \| null | Heddle clone | Transferred object count and resulting Heddle state. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
 | `pulled`, `pushed`, `success` | bool \| null | required when present | Transport result booleans. Pull reports `pulled`; push reports `pushed`. |
-| `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and transport kind. Git-overlay transfers report `transport: "git"`; native Heddle transfers report `transport: "heddle"`. |
-| `branch`, `old_git_head`, `new_git_head`, `old_state`, `new_state`, `states_created`, `commits_seen`, `commits_seen_scope`, `materialized_checkout`, `changed_path_count`, `changed_paths` | mixed | Git-overlay pull only | Concrete Git/Heddle movement proof for a pull, including imported commit scope and materialized path changes. |
-| `state`, `objects` | string/int \| null | native Heddle pull/push only | Resulting native Heddle state and transferred object count. Git-overlay transfers report Git ref publication details instead. |
-| `push_scope`, `ref_scope`, `tags_included`, `thread` | string/bool \| null | Git-overlay push only | Whether the push published only the current thread or all threads, the concrete Git ref scope, whether tags were included, and the thread whose branch was pushed. |
-| `force`, `force_discard_warning` | bool/string \| null | Git-overlay push only | Present for Git-overlay push. `force_discard_warning` is non-null when `--force` may move remote refs backward or discard remote-only commits. |
-| `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
-| `refs_written` | array<string> \| null | push | The fully-qualified Git refs this invocation actually wrote (e.g. `refs/heads/<thread>`, `refs/notes/heddle`); empty when the push was a no-op. Lets callers verify the round-trip with `git ls-remote`. |
-| `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |
+| `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and Heddle transport kind. |
+| `state`, `objects` | string/int \| null | pull/push | Resulting Heddle state and transferred object count. |
+| `push_scope`, `thread` | string \| null | push | Whether the push published the current thread or all threads, and the named thread when applicable. |
+| `force` | bool \| null | push | Whether Heddle-native ref protection was explicitly overridden. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
 | `verification` | object | required for pull/push | Post-transfer verification proof. |
 

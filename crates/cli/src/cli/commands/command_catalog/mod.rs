@@ -2055,7 +2055,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 json_discriminators(
                     documented_schemas(
                         CommandContract {
-                            writes_git_refs: true,
                             network_io: true,
                             ..WORKTREE_MUTATION
                         },
@@ -2081,7 +2080,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     json_discriminators(
                         documented_schemas(
                             CommandContract {
-                                writes_git_refs: true,
                                 network_io: true,
                                 ..REF_MUTATION
                             },
