@@ -90,9 +90,10 @@ env:
     heddle-grpc
     weft-client-shim
     heddle-client
+    heddle-ingest
+    heddle-git-projection
     heddle-core
     heddle-daemon
-    heddle-ingest
     heddle-mount
     heddle-cli
     heddle-devtools
