@@ -69,7 +69,10 @@ const ISSUE_SA_PROOF_SIG_HEADER: &str = "x-heddle-issue-sa-proof-sig-bin";
 
 pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
-        AuthCommand::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
+        AuthCommand::Login {
+            server,
+            open_browser,
+        } => cmd_auth_login(&server, open_browser).await,
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
         AuthCommand::CreateServiceToken {
@@ -93,7 +96,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
 }
 
 /// Authenticate via device authorization flow.
-async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
+async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -139,7 +142,7 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
     // so validate scheme/host (and reject shell metacharacters) before
     // spawning a browser helper — especially on Windows where `cmd /C start`
     // would otherwise interpret the URL.
-    if !no_browser {
+    if open_browser {
         let encoded_code = percent_encode_query_component(user_code);
         let url = format!("{verification_uri}?code={encoded_code}");
         match validate_browser_url(&url) {

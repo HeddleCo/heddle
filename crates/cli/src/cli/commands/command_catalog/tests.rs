@@ -110,7 +110,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "client")]
-    sample(&["auth", "login"], &["auth", "login", "--no-browser"]),
+    sample(&["auth", "login"], &["auth", "login", "--open-browser"]),
     #[cfg(feature = "client")]
     sample(&["auth", "logout"], &["auth", "logout"]),
     #[cfg(feature = "client")]
@@ -907,6 +907,36 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
             runtime.supports_json || !runtime.supports_json_compact,
             "`{}` cannot support json-compact without supporting json",
             runtime.display
+        );
+    }
+}
+
+#[test]
+fn leaf_catalog_entries_publish_exact_output_modes() {
+    let catalog = build_command_catalog();
+    for command in catalog
+        .commands
+        .iter()
+        .filter(|entry| !entry.has_subcommands)
+    {
+        assert_eq!(
+            command.output_modes.first().map(String::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            command.output_modes.iter().any(|mode| mode == "json"),
+            command.supports_json,
+            "{} must expose its JSON support without trial execution",
+            command.display,
+        );
+        assert_eq!(
+            command
+                .output_modes
+                .iter()
+                .any(|mode| mode == "json-compact"),
+            command_contract(&command.path).supports_json_compact,
+            "{} must expose its compact projection without trial execution",
+            command.display,
         );
     }
 }

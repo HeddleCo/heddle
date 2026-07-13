@@ -739,6 +739,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     print_cd_path: false,
                     daemon: true,
                     no_daemon: false,
+                    interactive_setup: false,
                     shared_target: false,
                     hydrate: false,
                 },

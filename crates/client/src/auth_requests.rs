@@ -4,7 +4,7 @@
 pub enum AuthCommand {
     Login {
         server: String,
-        no_browser: bool,
+        open_browser: bool,
     },
     Logout {
         server: Option<String>,

@@ -11,9 +11,9 @@ pub enum AuthCommands {
         #[arg(long, default_value = "grpc.heddle.sh")]
         server: String,
 
-        /// Don't open a browser automatically
+        /// Open the authorization URL in the system browser.
         #[arg(long)]
-        no_browser: bool,
+        open_browser: bool,
     },
 
     /// Remove stored credentials for a server
@@ -52,9 +52,13 @@ pub enum AuthCommands {
 impl From<AuthCommands> for heddle_client::AuthCommand {
     fn from(command: AuthCommands) -> Self {
         match command {
-            AuthCommands::Login { server, no_browser } => {
-                heddle_client::AuthCommand::Login { server, no_browser }
-            }
+            AuthCommands::Login {
+                server,
+                open_browser,
+            } => heddle_client::AuthCommand::Login {
+                server,
+                open_browser,
+            },
             AuthCommands::Logout { server } => heddle_client::AuthCommand::Logout { server },
             AuthCommands::Status { server } => heddle_client::AuthCommand::Status { server },
             AuthCommands::CreateServiceToken {

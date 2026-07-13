@@ -186,6 +186,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         print_cd_path: false,
         daemon: true,
         no_daemon: false,
+        interactive_setup: false,
         shared_target: false,
         hydrate: false,
     };

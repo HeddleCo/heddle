@@ -907,9 +907,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let existing = WriterLeaseStore::new(repo.heddle_dir())
         .list()?
         .into_iter()
-        .find(|lease| {
-            lease.status == WriterLeaseStatus::Active && lease.thread == args.name
-        });
+        .find(|lease| lease.status == WriterLeaseStatus::Active && lease.thread == args.name);
     if active_reservation_blocks_start(existing.is_some()) {
         let entry = existing.expect("active reservation present");
         if let Some(ref requested_path) = args.path {
@@ -1190,6 +1188,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             shared_target_dir: shared_target_dir_path,
             hydrate: hydrate_requested,
             mount_ownership,
+            interactive_setup: args.interactive_setup,
             record: thread_state,
         },
     )

@@ -616,7 +616,7 @@ continue.
 | `message` | string | required | Human-readable result. |
 | `thread` | object \| null | required | Thread summary when available. |
 | `path`, `execution_path` | string \| null | required | Materialized checkout path and effective execution path. |
-| `fskit_readiness` | object \| null | optional | macOS FSKit enable state for virtualized starts when the CLI made an FSKit-specific decision; includes `state`, `backend`, `action`, and optional `settings_url`. |
+| `fskit_readiness` | object \| null | optional | macOS FSKit enable state for virtualized starts when the CLI made an FSKit-specific decision; includes `state`, `backend`, `action`, and optional `settings_url`. Disabled FSKit fails without opening System Settings; an interactive terminal may opt into the bounded approval flow with `--interactive-setup`. |
 | `verification` | object \| null | required | Post-start verification proof. |
 
 ---
@@ -2423,6 +2423,7 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].summary` | string | required | First help line. |
 | `commands[].has_subcommands` | bool | required | Whether the command has public children. |
 | `commands[].supports_json` | bool | required | Whether the command supports JSON output. |
+| `commands[].output_modes` | array<string> | required | Exact output modes accepted by this command (`text`, optionally `json`, and optionally `json-compact`). Agents should inspect this field instead of probing commands and handling an unsupported-mode failure. |
 | `commands[].mutates` | bool | required | Whether the command can change repository or process state. |
 | `commands[].supports_op_id` | bool | required | Whether the command accepts caller-supplied idempotent `--op-id` / `HEDDLE_OPERATION_ID`. |
 | `commands[].persists_op_id` | bool | required | Whether the command contract may preserve a generated op-id across an interrupted retry loop. This is currently false for all commands; agents should supply explicit ids when they need replay. |
@@ -2506,6 +2507,7 @@ instead of treating it as a global catalog option.
       "summary": "Show repository status",
       "has_subcommands": false,
       "supports_json": true,
+      "output_modes": ["text", "json", "json-compact"],
       "mutates": false,
       "supports_op_id": false,
       "persists_op_id": false,
@@ -2573,7 +2575,7 @@ instead of treating it as a global catalog option.
   "recommended_action_templates": [
     {
       "action": "heddle capture -m \"...\"",
-      "argv_template": ["/path/to/heddle", "commit", "-m", "<message>"],
+      "argv_template": ["/path/to/heddle", "capture", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
     }

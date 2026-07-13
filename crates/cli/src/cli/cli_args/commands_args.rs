@@ -738,6 +738,12 @@ pub struct ThreadStartArgs {
     )]
     pub no_daemon: bool,
 
+    /// Allow this invocation to open System Settings and wait briefly for
+    /// FSKit approval. Requires an interactive terminal; otherwise setup
+    /// fails before opening a GUI.
+    #[arg(long)]
+    pub interactive_setup: bool,
+
     /// Redirect cargo's `target/` directory to a workspace-wide shared
     /// path (`.heddle/targets/<workspace-fingerprint>/`) instead of
     /// letting cargo create a per-thread `target/`. Saves multiples of

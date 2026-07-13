@@ -735,6 +735,7 @@ pub(crate) struct StartThread {
     pub hydrate: bool,
     /// Mount ownership for the virtualized path (unused for solid/materialized).
     pub mount_ownership: MountOwnership,
+    pub interactive_setup: bool,
     /// The fully-built thread record; `shared_target_dir` is reconciled with the
     /// cargo-config outcome inside `apply` before it is converged onto disk.
     pub record: Thread,
@@ -1083,15 +1084,21 @@ impl StartThread {
         let fwd_name = self.name.clone();
         let inv_name = self.name.clone();
         let ownership = self.mount_ownership;
+        let interactive_setup = self.interactive_setup;
         let mounted_owner = Rc::new(Cell::new(None));
         let fwd_owner = Rc::clone(&mounted_owner);
         let inv_owner = Rc::clone(&mounted_owner);
         let inv_root = root.clone();
         tx.step(
             move || {
-                let outcome =
-                    mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
-                        .map_err(apply_error)?;
+                let outcome = mount_lifecycle::establish_virtualized_mount(
+                    &root,
+                    &fwd_name,
+                    &abs,
+                    ownership,
+                    interactive_setup,
+                )
+                .map_err(apply_error)?;
                 fwd_owner.set(Some(outcome.owner));
                 Ok(outcome)
             },
@@ -1408,6 +1415,7 @@ mod tests {
             print_cd_path: false,
             daemon: false,
             no_daemon: true,
+            interactive_setup: false,
             shared_target: false,
             hydrate,
         }

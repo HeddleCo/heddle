@@ -58,6 +58,7 @@ pub struct CommandCatalogEntry {
     pub summary: String,
     pub has_subcommands: bool,
     pub supports_json: bool,
+    pub output_modes: Vec<String>,
     pub mutates: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
@@ -3009,6 +3010,7 @@ fn feature_gated_catalog_entry(
         summary: String::new(),
         has_subcommands: false,
         supports_json: contract.supports_json,
+        output_modes: supported_output_modes(contract),
         mutates: contract.mutates,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
@@ -3101,6 +3103,7 @@ fn catalog_entry(
         ),
         has_subcommands: command.get_subcommands().next().is_some(),
         supports_json: contract.supports_json,
+        output_modes: supported_output_modes(contract),
         mutates: contract.mutates,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
@@ -3145,6 +3148,17 @@ fn catalog_entry(
             })
             .collect(),
     }
+}
+
+fn supported_output_modes(contract: CommandContract) -> Vec<String> {
+    let mut modes = vec!["text".to_string()];
+    if contract.supports_json {
+        modes.push("json".to_string());
+    }
+    if contract.supports_json_compact {
+        modes.push("json-compact".to_string());
+    }
+    modes
 }
 
 fn canonical_action(contract: CommandContract) -> Option<CanonicalAction> {

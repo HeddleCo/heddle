@@ -172,13 +172,12 @@ Examples:
     /// Abort the active operation without remembering the specific subcommand.
     Abort,
 
-    /// Land a ready thread and optionally publish it.
+    /// Integrate a ready thread into its local target.
     ///
     /// `land` is the local integration verb: capture outstanding work if needed,
-    /// refresh against the target when safe, land the thread, write the
-    /// Git checkpoint, and optionally push. It fails closed when
-    /// conflicts or other blockers exist. Pair it with `ready` when you
-    /// want the verdict and next action before landing anything.
+    /// refresh against the target when safe, and land the thread. It fails
+    /// closed when conflicts or other blockers exist. Pair it with `ready`
+    /// when you want the verdict and next action before landing anything.
     Land(LandArgs),
 
     /// Prepare this thread for review or merge.
@@ -215,7 +214,8 @@ Examples:
 
     /// Show state details.
     Show {
-        /// State by change ID or hash prefix. Defaults to HEAD when omitted.
+        /// State by physical state ID, logical change ID, or unambiguous prefix.
+        /// Defaults to HEAD.
         state: Option<String>,
     },
 
