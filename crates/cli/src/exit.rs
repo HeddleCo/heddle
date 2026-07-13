@@ -109,7 +109,7 @@ impl HeddleExitCode {
             // - `--output json`/`json-compact` against a command without
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
-            "nothing_to_commit"
+            "nothing_to_capture"
             | "reconcile_direction_required"
             | "git_repair_direction_required"
             | "dirty_worktree"
@@ -315,12 +315,12 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_commit_advice_is_data_err() {
-        // `heddle commit` with nothing staged is semantic rejection of
+    fn nothing_to_capture_advice_is_data_err() {
+        // `heddle capture` with nothing selected is semantic rejection of
         // well-formed input (DataErr), not an IO failure.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
-            "nothing_to_commit",
-            "nothing to commit",
+            "nothing_to_capture",
+            "nothing to capture",
             "hint",
             "unsafe",
             "would change",
@@ -441,7 +441,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
-            ("nothing_to_commit", HeddleExitCode::DataErr),
+            ("nothing_to_capture", HeddleExitCode::DataErr),
             ("reconcile_direction_required", HeddleExitCode::DataErr),
             ("git_repair_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),

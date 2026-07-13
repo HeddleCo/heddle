@@ -407,7 +407,7 @@ fn missing_capture_intent_advice() -> RecoveryAdvice {
 
 fn nothing_to_capture_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
-        "nothing_to_commit",
+        "nothing_to_capture",
         "nothing to capture: worktree has no changes eligible for Heddle capture",
         "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
         "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",

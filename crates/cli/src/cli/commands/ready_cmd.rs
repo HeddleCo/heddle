@@ -859,9 +859,9 @@ mod tests {
     }
 
     #[test]
-    fn ready_suppresses_self_merge_when_thread_has_no_target() {
+    fn ready_suppresses_land_when_thread_has_no_target() {
         assert_eq!(
-            ready_report_recommended_action(&report("no_target", "heddle merge main --preview")),
+            ready_report_recommended_action(&report("no_target", "heddle land --thread main")),
             None
         );
     }
