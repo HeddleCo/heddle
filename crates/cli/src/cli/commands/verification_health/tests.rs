@@ -100,7 +100,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
             .argv_template[1..],
         [
             "fsck",
-            "--repair",
+            "repair",
             "git",
             "--prefer",
             "heddle",
@@ -137,9 +137,9 @@ fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
 #[test]
 fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
     let trust = verification_state(
-        "heddle fsck --repair git --ref main --preview",
+        "heddle fsck repair git --ref main --preview",
         vec![
-            "heddle fsck --repair git --ref main --preview".to_string(),
+            "heddle fsck repair git --ref main --preview".to_string(),
             "heddle verify".to_string(),
         ],
     );
@@ -157,7 +157,7 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 
     assert_eq!(
         advice.primary_command,
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
     assert_eq!(advice.recovery_commands, trust.recovery_commands);
 }
@@ -223,7 +223,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         unimported.recovery_commands,
         vec![
             "heddle import git --ref origin/main",
-            "heddle fsck --repair git --ref origin/main --preview"
+            "heddle fsck repair git --ref origin/main --preview"
         ]
     );
 
@@ -240,7 +240,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         stale_thread.recovery_commands,
         vec![
             "heddle import git --ref origin/main",
-            "heddle fsck --repair git --ref origin/main --preview"
+            "heddle fsck repair git --ref origin/main --preview"
         ]
     );
 }

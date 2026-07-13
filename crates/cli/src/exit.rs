@@ -333,12 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_direction_required_advice_is_data_err() {
-        // `heddle fsck --repair git` without a `--prefer` side requires
-        // manual resolution — the reconcile contract's documented DataErr.
+    fn fsck_authority_refusal_is_data_err() {
+        // An authority-conflicting `heddle fsck repair git --prefer ...`
+        // request is a semantic refusal, not an IO failure.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
-            "reconcile_direction_required",
-            "Refusing to reconcile 'main': choose a local side before applying",
+            "git_repair_requires_adoption",
+            "Git owns source history in this repository",
             "hint",
             "unsafe",
             "would change",

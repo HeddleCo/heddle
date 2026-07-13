@@ -159,7 +159,7 @@ Examples:
     ///
     /// With no `<verb>`, prints the registered schema verbs. `<verb>`
     /// is the joined subcommand path — e.g. `status`, `log`,
-    /// `fsck --repair git`, `marker list`.
+    /// `fsck repair git`, `marker list`.
     #[command(visible_alias = "schema")]
     Schemas {
         /// The verb whose schema to emit. Run `heddle schemas --help`

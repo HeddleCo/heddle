@@ -10,7 +10,7 @@
 //! Persona round 3/5 (HeddleCo/heddle#252) caught two such divergences
 //! (`push`/`commit` returning the `IoErr` catch-all instead of the
 //! documented `Config`/`DataErr`) plus the `pull` and
-//! `fsck --repair git` siblings. These tests pin the documented code
+//! `fsck repair git` siblings. These tests pin the documented code
 //! for a reproducible documented condition of each swept command so the
 //! contract can't regress.
 
@@ -157,14 +157,13 @@ fn sync_git_exits_zero() {
 }
 
 #[test]
-fn fsck_git_repair_without_side_is_data_err() {
-    // Documented: `65 DataErr` — manual resolution required. The
-    // `reconcile_direction_required` refusal (no `--prefer` side) was the
-    // `74 IoErr` catch-all before HeddleCo/heddle#252.
+fn fsck_git_repair_against_native_authority_is_data_err() {
+    // Documented: `65 DataErr` — the retained Git adapter cannot become
+    // authoritative through a repair command in a native repository.
     let repo = adopted_git_overlay();
     assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
     assert_exit(
-        &["fsck", "--repair", "git", "--ref", "main"],
+        &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
         repo.path(),
         65,
     );

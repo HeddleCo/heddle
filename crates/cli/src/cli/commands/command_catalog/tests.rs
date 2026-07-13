@@ -213,6 +213,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["doctor", "docs"], &["doctor", "docs"]),
     sample(&["doctor", "schemas"], &["doctor", "schemas"]),
     sample(&["fsck"], &["fsck"]),
+    sample(
+        &["fsck", "repair", "git"],
+        &["fsck", "repair", "git", "--ref", "main", "--preview"],
+    ),
     sample(&["oplog", "recover"], &["oplog", "recover"]),
     sample(&["help"], &["help"]),
     sample(&["hook", "list"], &["hook", "list"]),
@@ -489,8 +493,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
             "heddle import git --ref main",
             "heddle import git --ref origin/main",
             "heddle ready --thread origin/main",
-            "heddle fsck --repair git --ref main --preview",
-            "heddle fsck --repair git --prefer heddle --ref main --preview",
+            "heddle fsck repair git --ref main --preview",
+            "heddle fsck repair git --prefer heddle --ref main --preview",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -1352,9 +1356,17 @@ fn credential_and_trust_effect_sets_are_config_scoped() {
 }
 
 #[test]
-fn fsck_repair_effect_set_covers_all_targets() {
+fn fsck_observation_has_no_side_effects() {
+    assert_command_effects(&["fsck"], &[]);
+    let contract = raw_command_contract_for_path(["fsck"]).expect("fsck contract");
+    assert!(contract.observe_only);
+    assert!(!contract.supports_op_id);
+}
+
+#[test]
+fn fsck_repair_git_has_explicit_mutation_effects() {
     assert_command_effects(
-        &["fsck"],
+        &["fsck", "repair", "git"],
         &[
             CommandSideEffect::ImportGit,
             CommandSideEffect::WritesHeddleRefs,
@@ -1363,6 +1375,10 @@ fn fsck_repair_effect_set_covers_all_targets() {
             CommandSideEffect::WritesMetadata,
         ],
     );
+    let contract =
+        raw_command_contract_for_path(["fsck", "repair", "git"]).expect("fsck repair git contract");
+    assert!(contract.supports_op_id);
+    assert!(!contract.persists_op_id);
 }
 
 #[test]
@@ -1963,11 +1979,30 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
     let fsck_options = catalog
         .options_for_display("fsck")
         .expect("fsck should be cataloged");
-    let repair = fsck_options
+    for mutation_option in ["ref", "prefer", "preview"] {
+        assert!(
+            fsck_options
+                .iter()
+                .all(|option| option.long.as_deref() != Some(mutation_option)),
+            "bare fsck must not expose --{mutation_option}"
+        );
+    }
+    let repair_options = catalog
+        .options_for_display("fsck repair git")
+        .expect("fsck repair git should be cataloged");
+    let prefer = repair_options
         .iter()
-        .find(|option| option.long.as_deref() == Some("repair"))
-        .expect("fsck --repair should be cataloged");
-    assert_eq!(repair.possible_values, vec!["git"]);
+        .find(|option| option.long.as_deref() == Some("prefer"))
+        .expect("fsck repair git --prefer should be cataloged");
+    assert_eq!(prefer.possible_values, vec!["git", "heddle"]);
+    for expected in ["ref", "preview"] {
+        assert!(
+            repair_options
+                .iter()
+                .any(|option| option.long.as_deref() == Some(expected)),
+            "fsck repair git --{expected} should be cataloged"
+        );
+    }
 
     let integration_install_options = catalog
         .options_for_display("integration install")

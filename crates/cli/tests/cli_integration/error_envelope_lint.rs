@@ -43,7 +43,7 @@ const SWEPT_COVERAGE: &[&str] = &[
     "pull",
     "import git",
     "sync git",
-    "fsck --repair git",
+    "fsck repair git",
 ];
 
 /// One representative error case: the swept command it covers, the argv
@@ -170,9 +170,9 @@ fn cases() -> Vec<ErrorCase> {
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            covers: &["fsck --repair git"],
-            label: "fsck --repair git without a --prefer side",
-            argv: &["fsck", "--repair", "git", "--ref", "main"],
+            covers: &["fsck repair git"],
+            label: "fsck repair git against native source authority",
+            argv: &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
             fixture: adopted_git_overlay,
         },
     ]

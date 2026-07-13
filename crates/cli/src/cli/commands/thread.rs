@@ -2821,7 +2821,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle fsck --repair git --prefer heddle --ref feature/git --preview"
+            "heddle fsck repair git --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

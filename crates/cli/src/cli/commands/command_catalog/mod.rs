@@ -825,6 +825,15 @@ const IMPORTING_MUTATION: CommandContract = CommandContract {
     ..REF_MUTATION
 };
 
+const FSCK_GIT_REPAIR: CommandContract = CommandContract {
+    may_import_git: true,
+    may_write_worktree: true,
+    writes_git_refs: true,
+    writes_worktree: true,
+    writes_metadata: true,
+    ..REF_MUTATION
+};
+
 const ADOPT: CommandContract = CommandContract {
     may_initialize: true,
     may_import_git: true,
@@ -1859,19 +1868,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(
+            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+            "recovery",
+        ),
+    ),
+    entry(&["fsck", "repair"], category(GROUP, "recovery")),
+    entry(
+        &["fsck", "repair", "git"],
+        category(
             documented_schemas(
-                documented_core_report_schema(
-                    CommandContract {
-                        supports_op_id: false,
-                        writes_git_refs: true,
-                        writes_metadata: true,
-                        may_write_worktree: true,
-                        writes_worktree: true,
-                        ..IMPORTING_MUTATION
-                    },
-                    FsckReport::CONTRACT,
-                ),
-                &["fsck --repair git"],
+                documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
+                &["fsck repair git"],
             ),
             "recovery",
         ),
@@ -4421,7 +4428,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Complete { .. } => vec!["complete"],
         Commands::Resolve(_) => vec!["resolve"],
-        Commands::Fsck { .. } => vec!["fsck"],
+        Commands::Fsck(args) => match &args.command {
+            None => vec!["fsck"],
+            Some(crate::cli::FsckCommands::Repair { target }) => match target {
+                crate::cli::FsckRepairCommands::Git(_) => vec!["fsck", "repair", "git"],
+            },
+        },
         #[cfg(feature = "git-overlay")]
         Commands::Import { command } => match command {
             ImportCommands::Git { .. } => vec!["import", "git"],

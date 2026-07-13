@@ -362,11 +362,11 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck --repair git --ref feature/drop-in --preview"
+        "heddle fsck repair git --ref feature/drop-in --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle fsck --repair git --ref feature/drop-in --preview"])
+        serde_json::json!(["heddle fsck repair git --ref feature/drop-in --preview"])
     );
 }
 

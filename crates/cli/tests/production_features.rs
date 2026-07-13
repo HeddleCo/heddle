@@ -485,15 +485,15 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck", "--repair"], Some(temp.path()));
+        let result = heddle(&["fsck", "repair"], Some(temp.path()));
         assert!(
             result.is_err(),
-            "fsck --repair should require an explicit repair target"
+            "fsck repair should require an explicit repair target"
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("a value is required") || err.contains("requires a value"),
-            "bare repair flag should fail at CLI parsing, got: {err}"
+            err.contains("subcommand") || err.contains("required"),
+            "bare repair command should fail at CLI parsing, got: {err}"
         );
     }
 
@@ -503,12 +503,21 @@ mod fsck {
         setup_repo_with_file(&temp, "file.txt", "content");
 
         let result = heddle(
-            &["fsck", "--repair", "git", "--output", "json"],
+            &[
+                "fsck",
+                "repair",
+                "git",
+                "--ref",
+                "main",
+                "--preview",
+                "--output",
+                "json",
+            ],
             Some(temp.path()),
         );
         assert!(
             result.is_ok(),
-            "fsck --repair git --output json failed: {:?}",
+            "fsck repair git --output json failed: {:?}",
             result.err()
         );
 

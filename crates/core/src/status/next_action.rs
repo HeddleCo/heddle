@@ -221,7 +221,7 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
     match prefer {
         Some(prefer) => heddle_action([
             "fsck",
-            "--repair",
+            "repair",
             "git",
             "--prefer",
             prefer,
@@ -229,13 +229,13 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             ref_name,
             "--preview",
         ]),
-        None => heddle_action(["fsck", "--repair", "git", "--ref", ref_name, "--preview"]),
+        None => heddle_action(["fsck", "repair", "git", "--ref", ref_name, "--preview"]),
     }
 }
 
 pub fn canonical_git_repair_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
-        "fsck", "--repair", "git", "--prefer", prefer, "--ref", ref_name,
+        "fsck", "repair", "git", "--prefer", prefer, "--ref", ref_name,
     ])
 }
 

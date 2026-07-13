@@ -68,7 +68,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 }
 
 schema_registry! {
-    (&["fsck --repair git"], FsckReport),
+    (&["fsck repair git"], FsckReport),
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),

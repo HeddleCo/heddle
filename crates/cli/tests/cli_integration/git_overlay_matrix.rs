@@ -467,7 +467,7 @@ fn git_overlay_imported_ref_ready_and_ship_fail_closed() {
             "{envelope}"
         );
         assert_eq!(
-            envelope["primary_command"], "heddle fsck --repair git --ref feature --preview",
+            envelope["primary_command"], "heddle fsck repair git --ref feature --preview",
             "{envelope}"
         );
     }
@@ -2346,9 +2346,7 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
 
     let reconcile = json(
         temp.path(),
-        &[
-            "fsck", "--repair", "git", "--prefer", "git", "--ref", "main",
-        ],
+        &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
     );
     assert_eq!(reconcile["repair_target"], "git");
     assert_eq!(reconcile["valid"], true);
@@ -2372,7 +2370,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
 
     let output = heddle_output(
         &[
-            "--output", "json", "fsck", "--repair", "git", "--prefer", "heddle", "--ref", "main",
+            "--output", "json", "fsck", "repair", "git", "--prefer", "heddle", "--ref", "main",
         ],
         Some(temp.path()),
     )
@@ -2400,7 +2398,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_missing_thread_uses_typed_advice()
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle adopt --ref main")
-                && hint.contains("heddle fsck --repair git --prefer git --ref main")),
+                && hint.contains("heddle fsck repair git --prefer git --ref main")),
         "reconcile hint should offer import and prefer-git recovery: {stderr}"
     );
 }
@@ -3350,7 +3348,7 @@ fn git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle() 
     );
     assert_eq!(
         preview_envelope["primary_command"],
-        "heddle fsck --repair git --prefer heddle --ref main --preview"
+        "heddle fsck repair git --prefer heddle --ref main --preview"
     );
     assert_eq!(
         git_ref_snapshot(temp.path()),
@@ -3708,10 +3706,10 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         &["--output", "json", "import", "git", "--ref", "origin/main"],
     );
 
-    let merge_action = "heddle fsck --repair git --ref origin/main --preview";
+    let merge_action = "heddle fsck repair git --ref origin/main --preview";
     let merge_argv = Some(heddle_argv_json([
         "fsck",
-        "--repair",
+        "repair",
         "git",
         "--ref",
         "origin/main",
@@ -4491,11 +4489,11 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(status["changes"]["deleted"].as_array().unwrap().is_empty());
     assert_eq!(
         status["recommended_action"],
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["fsck", "--repair", "git", "--ref", "main", "--preview"])
+        heddle_argv_json(["fsck", "repair", "git", "--ref", "main", "--preview"])
     );
     assert!(
         status["blockers"]
@@ -4526,14 +4524,14 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert_eq!(verify["status"], "needs_reconcile");
     assert_eq!(
         verify["recommended_action"],
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
 
     let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "needs_reconcile");
     assert_eq!(
         bridge["recommended_action"],
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
 
     let refused = heddle_output(
@@ -4563,7 +4561,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),

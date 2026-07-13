@@ -2959,7 +2959,7 @@ fn core_loop_schemas_are_discoverable() {
         "agent list",
         "switch",
         "thread list",
-        "fsck --repair git",
+        "fsck repair git",
         "remote list",
         "remote show",
         "remote add",
@@ -11153,7 +11153,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
     for verb in [
         "switch",
         "thread list",
-        "fsck --repair git",
+        "fsck repair git",
         "capture",
         "commit",
         "agent presence list",
@@ -12106,11 +12106,11 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck --repair git --ref main --preview"
+        "heddle fsck repair git --ref main --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle fsck --repair git --ref main --preview"])
+        serde_json::json!(["heddle fsck repair git --ref main --preview"])
     );
     assert!(
         envelope["preserved"]
@@ -12121,7 +12121,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     );
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["fsck", "--repair", "git", "--ref", "main", "--preview",])
+        heddle_argv_json(["fsck", "repair", "git", "--ref", "main", "--preview",])
     );
 }
 
