@@ -157,9 +157,9 @@ classify_path() {
       add_reason "$path: benchmark discovery changed"
       return 0
       ;;
-    scripts/check-default-install-ships-worker.sh)
+    scripts/check-default-cli-contracts.sh)
       add_direct_package "$CLI_PACKAGE"
-      add_reason "$path: CLI install contract changed"
+      add_reason "$path: CLI executable contract changed"
       return 0
       ;;
     scripts/fuse-bench-compare.py|scripts/tests/*)

@@ -276,7 +276,7 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      # 1. Warm target/ for the affected package set, then run clippy and
+      # Warm target/ for the affected package set, then run clippy and
       #    tests against the same selection so all three commands reuse the
       #    same local build products. Selection is the changed crate(s) plus
       #    reverse dependents, so lower-level changes still exercise the crates
@@ -286,13 +286,18 @@ jobs:
         env:
           CARGO_PACKAGE_ARGS: ${{ needs.changes.outputs.cargo_package_args }}
           PACKAGE_NAMES: ${{ needs.changes.outputs.package_names_csv }}
+          CLI_CHECKS: ${{ needs.changes.outputs.cli_checks }}
         run: |
           set -euo pipefail
           read -r -a package_args <<< "$CARGO_PACKAGE_ARGS"
+          build_targets=(--tests)
+          if [ "$CLI_CHECKS" = "true" ]; then
+            build_targets+=(--bin heddle --bin heddle-fuse-worker)
+          fi
           echo "Selected packages: ${PACKAGE_NAMES:-<none>}"
 
           echo "::group::cargo build"
-          cargo build --locked "${package_args[@]}" --tests
+          cargo build --locked "${package_args[@]}" "${build_targets[@]}"
           echo "::endgroup::"
 
           echo "::group::cargo clippy"
@@ -302,13 +307,6 @@ jobs:
           echo "::group::cargo test"
           cargo test --locked "${package_args[@]}"
           echo "::endgroup::"
-
-      - name: Human and agent CLI cold flows
-        if: needs.changes.outputs.cli_checks == 'true'
-        run: |
-          set -euo pipefail
-          HEDDLE_BIN="$PWD/target/debug/heddle" bash scripts/verify-cold-flow-human.sh
-          HEDDLE_BIN="$PWD/target/debug/heddle" bash scripts/verify-cold-flow-agent.sh
 
       - name: No affected Rust packages
         if: needs.changes.outputs.skip_cargo == 'true'
@@ -321,25 +319,11 @@ jobs:
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      # Verify the default install produces `heddle-fuse-worker` before any
-      # alternate-feature compilation can replace default artifacts in this
-      # job's target directory. The sibling lookup in
-      # `mount::worker::default_worker_binary` depends on both binaries being
-      # installed together; otherwise Linux mounts silently fall back to NFS.
-      - name: Default install ships mount worker
+      # Enumerate the exact default-feature executables from one Cargo build,
+      # then exercise every binary-backed CLI contract against that artifact.
+      - name: Default CLI executable contracts
         if: needs.changes.outputs.cli_checks == 'true'
-        run: bash scripts/check-default-install-ships-worker.sh
-
-      # Assert `heddle doctor schemas` reports no drift between the
-      # generated schema mirrors and the documented `--output json`
-      # samples in `docs/json-schemas.md`. IMPROVEMENT_PLAN §7's DoD
-      # requires this surface stay clean after any Principal/output-
-      # boundary change (heddle#593); the script builds `heddle` from
-      # this checkout, runs `doctor schemas`, and propagates its
-      # non-zero exit on drift (heddle#605).
-      - name: Doctor schemas drift gate
-        if: needs.changes.outputs.cli_checks == 'true'
-        run: bash scripts/check-doctor-schemas-clean.sh
+        run: bash scripts/check-default-cli-contracts.sh
 
       - name: sccache stats
         run: sccache --show-stats
@@ -382,7 +366,8 @@ jobs:
           python3 scripts/discover-benches.py > benchmark-plan.tsv
           cat benchmark-plan.tsv
           selected=",$AFFECTED_PACKAGES,"
-          ran=0
+          declare -A benches_by_group=()
+          declare -a group_order=()
           while IFS=$'\t' read -r package bench features; do
             [ -n "$package" ] || continue
             if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
@@ -393,8 +378,28 @@ jobs:
               echo "skipping $package/$bench: package not affected"
               continue
             fi
-            echo "::group::$package/$bench"
-            cmd=(cargo build --locked -p "$package" --bench "$bench")
+
+            # Cargo can link sibling benchmark targets in one invocation. Keep
+            # package/feature shapes exact so a broader feature union cannot
+            # mask a target that fails under its declared feature contract.
+            key="${package}"$'\t'"${features}"
+            if [ -z "${benches_by_group[$key]+x}" ]; then
+              group_order+=("$key")
+              benches_by_group["$key"]="$bench"
+            else
+              benches_by_group["$key"]+=" $bench"
+            fi
+          done < benchmark-plan.tsv
+
+          for key in "${group_order[@]}"; do
+            IFS=$'\t' read -r package features <<< "$key"
+            read -r -a benches <<< "${benches_by_group[$key]}"
+            feature_label=${features:-default}
+            echo "::group::$package [$feature_label] (${benches[*]})"
+            cmd=(cargo build --locked -p "$package")
+            for bench in "${benches[@]}"; do
+              cmd+=(--bench "$bench")
+            done
             if [ -n "$features" ]; then
               cmd+=(--features "$features")
             fi
@@ -402,10 +407,9 @@ jobs:
             printf ' %q' "${cmd[@]}"
             printf '\n'
             "${cmd[@]}"
-            ran=1
             echo "::endgroup::"
-          done < benchmark-plan.tsv
-          if [ "$ran" -eq 0 ]; then
+          done
+          if [ "${#group_order[@]}" -eq 0 ]; then
             echo "No non-FUSE benchmark targets selected."
           fi
 

@@ -109,6 +109,11 @@ class AffectedRustPackagesTests(unittest.TestCase):
         self.assertFalse(result["all"])
         self.assertEqual(result["selected"], [])
 
+    def test_cli_contract_script_selects_cli(self):
+        result = self.select(["scripts/check-default-cli-contracts.sh"])
+        self.assertFalse(result["all"])
+        self.assertEqual(result["selected"], ["heddle-cli"])
+
 
 if __name__ == "__main__":
     unittest.main()
