@@ -11,12 +11,11 @@ use objects::{
     error::HeddleError,
     object::{
         Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
-        State,
+        State, StateAttachment, StateAttachmentBody, Tree,
     },
     store::ObjectStore,
 };
-use refs::Head;
-use repo::{Repository, ResolvePolicy};
+use repo::{Repository, ResolvePolicy, StateAttachmentKind};
 use serde::Serialize;
 
 use super::{
@@ -259,10 +258,10 @@ pub(crate) fn resolve_target(
     }
 }
 
-/// Resolve a state specifier to a [`ChangeId`], accepting short prefixes
-/// (e.g. `hd-q99fkjzgjmjv`), full IDs, or ref-manager names — matching the
+/// Resolve a state specifier to a [`StateId`], accepting short prefixes
+/// (e.g. `hs-q99fkjzgjmjv123`), full IDs, or ref-manager names — matching the
 /// disambiguation that `heddle show` and `heddle context list --ref` already do.
-pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects::object::ChangeId> {
+pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects::object::StateId> {
     let user_config = UserConfig::load_default().unwrap_or_default();
     // The bootstrap hook must return a HeddleError, but ensure_current_state's
     // failure carries CLI-level context (IO/snapshot causes) that must reach
@@ -293,7 +292,7 @@ pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<objects:
 pub(crate) fn target_label(target: &ContextTarget) -> (String, String) {
     match target {
         ContextTarget::File { path } => ("file".to_string(), path.clone()),
-        ContextTarget::State { change_id } => ("state".to_string(), change_id.to_string_full()),
+        ContextTarget::State { state_id } => ("state".to_string(), state_id.to_string_full()),
     }
 }
 
@@ -336,48 +335,42 @@ pub(crate) fn compute_source_hash(
     ))
 }
 
-pub(crate) fn build_context_state(
+pub(crate) fn context_root_for_state(
     repo: &Repository,
-    head_state: &State,
-    new_context_root: Option<ContentHash>,
-    intent: String,
-) -> Result<State> {
-    let user_config = UserConfig::load_default()?;
-    let attribution = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)?;
-    let mut new_state =
-        State::new(head_state.tree, vec![head_state.change_id], attribution).with_intent(intent);
-    if let Some(root) = new_context_root {
-        new_state = new_state.with_context(root);
-    }
-    if let Some(provenance) = head_state.provenance {
-        new_state = new_state.with_provenance(provenance);
-    }
-    // #836: carry discussions forward on a non-capture (annotation/context)
-    // state advance. `context set` does NOT change the tree, so the parent's
-    // discussion anchors are still valid verbatim — no re-anchoring / symbol
-    // analysis needed (that's the capture path's job via
-    // compute_and_persist_discussion_anchor_travel). Without this, HEAD
-    // advances to a discussion-less state and `discuss show <id>` (HEAD-only)
-    // can no longer resolve the discussion. `discussions` is a side-band
-    // pointer NOT part of the state hash (see state_core.rs
-    // `w1_tail_fields_are_not_part_of_state_hash`), so this does NOT change
-    // `change_id`.
-    if let Some(discussions) = head_state.discussions {
-        new_state = new_state.with_discussions(discussions);
-    }
-    Ok(new_state)
+    state: &State,
+) -> Result<Option<ContentHash>> {
+    Ok(repo
+        .latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?
+        .and_then(|attachment| match attachment.body {
+            StateAttachmentBody::Context(root) => Some(root),
+            _ => None,
+        }))
 }
 
-pub(crate) fn apply_new_state(repo: &Repository, state: &State) -> Result<()> {
-    // Authored-state chokepoint (heddle#482): a context annotation advances
-    // HEAD to a new author-created state, so it is auto-signed like a capture.
-    // Sign a local copy (signing only adds `.signature`; `change_id` and every
-    // other field are unchanged) so callers that reuse `state.change_id`
-    // afterward still see the right id.
-    let mut signed = state.clone();
-    repo.put_authored_state(&mut signed)?;
-    advance_head(repo, &signed)?;
-    Ok(())
+pub(crate) fn put_context_attachment(
+    repo: &Repository,
+    state: &State,
+    new_context_root: Option<ContentHash>,
+) -> Result<ContentHash> {
+    let root = match new_context_root {
+        Some(root) => root,
+        None => repo.store().put_tree(&Tree::new())?,
+    };
+    let prior = repo.latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?;
+    let user_config = UserConfig::load_default()?;
+    let attribution = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)?;
+    let created_at = prior
+        .as_ref()
+        .map(|attachment| attachment.created_at + chrono::Duration::nanoseconds(1))
+        .map_or_else(chrono::Utc::now, |minimum| minimum.max(chrono::Utc::now()));
+    repo.put_state_attachment(&StateAttachment {
+        state_id: state.state_id,
+        body: StateAttachmentBody::Context(root),
+        attribution,
+        created_at,
+        supersedes: prior.map(|attachment| attachment.id()),
+    })?;
+    Ok(root)
 }
 
 pub(crate) fn print_context_get(
@@ -430,54 +423,45 @@ fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
     heddle_core::extract_scope_bytes(source, range)
 }
 
-fn advance_head(repo: &Repository, state: &State) -> Result<()> {
-    let head = repo.refs().read_head()?;
-    match head {
-        Head::Attached { thread } => {
-            repo.refs().set_thread(&thread, &state.change_id)?;
-        }
-        Head::Detached { .. } => {
-            repo.refs().write_head(&Head::Detached {
-                state: state.change_id,
-            })?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ChangeId, Principal, Tree};
+    use objects::object::Tree;
 
     use super::*;
 
-    /// `heddle context get --state <short>` must accept the 12-char short prefix
-    /// that the rest of the CLI emits, not just the full 26-char ChangeId.
-    /// Regression: previously fell through to `ChangeId::parse`, which errored
-    /// with `invalid length (expected 16 bytes)` on any short prefix.
+    /// `heddle context get --state <short>` must accept the short prefix that
+    /// the rest of the CLI emits, not just the full StateId.
+    /// Regression: previously fell through to `StateId::parse`, which errored
+    /// with `invalid length (expected 32 bytes)` on any short prefix.
     #[test]
-    fn resolve_target_accepts_short_change_id_prefix() {
+    fn resolve_target_accepts_short_state_id_prefix() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
         let repo = Repository::init_default(temp.path()).expect("init repo");
 
         let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
-        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
-        let state = State::new(tree_hash, vec![], attribution).with_change_id(ChangeId::generate());
+        let state = State::new(
+            tree_hash,
+            vec![],
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Test",
+                "test@example.com",
+            )),
+        );
         repo.store().put_state(&state).expect("put state");
 
-        let full = state.change_id.to_string_full();
-        let short = state.change_id.short();
+        let full = state.state_id.to_string_full();
+        let short = state.state_id.short();
         assert_ne!(full, short, "short form should differ from full form");
 
         let target = resolve_target(&repo, None, Some(short.clone())).expect("resolve short");
         match target {
-            ContextTarget::State { change_id } => assert_eq!(change_id, state.change_id),
+            ContextTarget::State { state_id } => assert_eq!(state_id, state.state_id),
             other => panic!("expected state target, got {other:?}"),
         }
 
         let target = resolve_target(&repo, None, Some(full)).expect("resolve full");
         match target {
-            ContextTarget::State { change_id } => assert_eq!(change_id, state.change_id),
+            ContextTarget::State { state_id } => assert_eq!(state_id, state.state_id),
             other => panic!("expected state target, got {other:?}"),
         }
     }
@@ -555,69 +539,44 @@ mod tests {
         }
     }
 
-    /// #836 root cause: a non-capture state advance (`context set`) built by
-    /// `build_context_state` MUST carry the parent's `discussions` side-band
-    /// pointer forward. `context set` does not change the tree, so the anchors
-    /// stay valid verbatim — no re-anchoring. Before the fix, `State::new`
-    /// initialised `discussions: None` and nothing copied it, so HEAD advanced
-    /// to a discussion-less state and `discuss show` (HEAD-only) could no
-    /// longer resolve the discussion.
     #[test]
-    fn build_context_state_carries_discussions_forward() {
+    fn context_updates_preserve_state_and_form_attachment_history() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
         let repo = Repository::init_default(temp.path()).expect("init repo");
+        let head_id = repo.head().expect("read head").expect("head state");
+        let head_state = repo
+            .store()
+            .get_state(&head_id)
+            .expect("read state")
+            .expect("state exists");
+        let original = head_state.clone();
 
-        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
-        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
-        let discussions_hash = ContentHash::compute(b"discussions-blob-836");
-        let head_state = State::new(tree_hash, vec![], attribution)
-            .with_change_id(ChangeId::generate())
-            .with_discussions(discussions_hash);
+        let first_root = ContentHash::compute(b"first-context");
+        put_context_attachment(&repo, &head_state, Some(first_root)).expect("first attachment");
+        let first = repo
+            .latest_state_attachment(&head_id, StateAttachmentKind::Context)
+            .expect("read first")
+            .expect("first exists");
 
-        let advanced =
-            build_context_state(&repo, &head_state, None, "advance".to_string()).expect("build");
+        let second_root = ContentHash::compute(b"second-context");
+        put_context_attachment(&repo, &head_state, Some(second_root)).expect("second attachment");
+        let second = repo
+            .latest_state_attachment(&head_id, StateAttachmentKind::Context)
+            .expect("read second")
+            .expect("second exists");
 
+        assert_eq!(repo.head().expect("read head"), Some(head_id));
         assert_eq!(
-            advanced.discussions,
-            Some(discussions_hash),
-            "discussions side-band pointer must ride forward on a context advance"
+            repo.store()
+                .get_state(&head_id)
+                .expect("read state")
+                .expect("state exists"),
+            original
         );
+        assert_eq!(second.supersedes, Some(first.id()));
         assert_eq!(
-            advanced.tree, head_state.tree,
-            "context set does not change the tree, so anchors stay valid verbatim"
-        );
-    }
-
-    /// The change_id-unchanged guarantee that de-risks the carry-forward:
-    /// `discussions` is a side-band pointer NOT part of the state hash
-    /// (state_core.rs `w1_tail_fields_are_not_part_of_state_hash`). Carrying it
-    /// forward must NOT perturb the advanced state's `change_id` — otherwise it
-    /// would diverge the oplog / break "same state?" checks. Proven here by
-    /// clearing the discussions on the built state and confirming the hash is
-    /// byte-identical.
-    #[test]
-    fn carried_discussions_do_not_change_the_state_hash() {
-        let temp = tempfile::TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
-
-        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
-        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
-        let head_state = State::new(tree_hash, vec![], attribution)
-            .with_change_id(ChangeId::generate())
-            .with_discussions(ContentHash::compute(b"discussions-blob-836"));
-
-        let with_discussions =
-            build_context_state(&repo, &head_state, None, "advance".to_string()).expect("build");
-        assert!(with_discussions.discussions.is_some());
-
-        // The same built state with discussions stripped must hash identically:
-        // the side-band pointer is not part of state identity.
-        let mut without_discussions = with_discussions.clone();
-        without_discussions.discussions = None;
-        assert_eq!(
-            with_discussions.compute_hash(),
-            without_discussions.compute_hash(),
-            "discussions carry-forward must not perturb the state hash / change_id"
+            context_root_for_state(&repo, &head_state).unwrap(),
+            Some(second_root)
         );
     }
 }

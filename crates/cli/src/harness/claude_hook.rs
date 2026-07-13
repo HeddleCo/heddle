@@ -31,7 +31,7 @@ use objects::{
     store::{AgentRegistry, AgentStatus, ObjectStore},
 };
 use refs::Head;
-use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction};
+use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction, StateAttachmentKind};
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -190,7 +190,7 @@ pub(crate) fn handle_stop_capture(
         .map(|s| s.to_string())
         .unwrap_or_else(|| intent_hint.to_string());
     let output = create_snapshot(repo, user_config, Some(intent), None, overrides)?;
-    debug!(change_id = %output.change_id, "heddle stop-hook captured state");
+    debug!(state_id = %output.state_id, "heddle stop-hook captured state");
     Ok(())
 }
 
@@ -225,7 +225,13 @@ fn load_active_annotations(repo: &Repository, rel_path: &Path) -> Result<Vec<Act
     let Some(state) = repo.store().get_state(&head_id)? else {
         return Ok(Vec::new());
     };
-    let Some(ctx_root) = state.context else {
+    let Some(ctx_root) = repo
+        .latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?
+        .and_then(|attachment| match attachment.body {
+            objects::object::StateAttachmentBody::Context(root) => Some(root),
+            _ => None,
+        })
+    else {
         return Ok(Vec::new());
     };
     let path_str = rel_path.to_string_lossy().to_string();
