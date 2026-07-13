@@ -2,7 +2,6 @@
 //! CLI argument structures.
 
 mod cli_base;
-mod commands_advanced;
 mod commands_agent;
 mod commands_args;
 #[cfg(feature = "client")]
@@ -28,9 +27,6 @@ mod output_mode;
 
 pub use cli_base::Cli;
 pub use cli_shared::OutputMode;
-pub use commands_advanced::{
-    TransactionAbortArgs, TransactionBeginArgs, TransactionCommands, TransactionIdArgs,
-};
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands,
     AgentServeArgs, AgentTaskCommands,

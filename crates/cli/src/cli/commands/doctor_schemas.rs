@@ -689,7 +689,7 @@ mod tests {
                     "machine_contract_coverage": {
                         "summary": "old",
                         "json_commands_total": 1,
-                        "accepted_opaque_schema_examples": ["transaction begin"]
+                        "accepted_opaque_schema_examples": ["help"]
                     }
                 },
                 "command_contract_schema_coverage": {
@@ -701,7 +701,7 @@ mod tests {
         let machine = serde_json::json!({
             "summary": "new",
             "json_commands_total": 2,
-            "accepted_opaque_schema_examples": ["transaction begin", "transaction abort"]
+            "accepted_opaque_schema_examples": ["help", "redact list"]
         });
         let command = serde_json::json!({
             "summary": "new doctor",

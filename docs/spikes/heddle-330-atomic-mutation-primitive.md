@@ -1,5 +1,10 @@
 # heddle#330 — atomic-mutation primitive (trait + generic executor, no `dyn`)
 
+> Historical design record. The detection-only transaction sentinel and hidden
+> `heddle transaction` CLI described below were removed; they never provided
+> atomic commit or abort. The in-process `AtomicMutation` primitive is the
+> supported implementation direction.
+
 **Status:** spike (decision doc). No production code lands in this issue. Trait
 sketches below are illustrative. The follow-up impl epic shape is proposed in
 §7 — to confirm with the orchestrator/user before filing.

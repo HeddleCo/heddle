@@ -4,7 +4,7 @@
 //! `agent serve` runs a local-only gRPC daemon
 //! over a Unix-domain socket inside the repo's `.heddle/sockets/`. The
 //! daemon hosts agent services (state-review, discussion, signal,
-//! operation-log query, transaction, hook) so a tight agent loop avoids
+//! operation-log query, timeline, hook) so a tight agent loop avoids
 //! per-command process startup latency.
 //!
 //! `heddle agent serve` is intentionally distinct from `heddle daemon`,

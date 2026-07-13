@@ -441,16 +441,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["timeline", "reset", "--step", "tls-abc"],
     ),
     sample(&["timeline", "recover"], &["timeline", "recover"]),
-    sample(&["transaction", "begin"], &["transaction", "begin"]),
-    sample(
-        &["transaction", "commit"],
-        &["transaction", "commit", "tx-1"],
-    ),
-    sample(&["transaction", "abort"], &["transaction", "abort", "tx-1"]),
-    sample(
-        &["transaction", "status"],
-        &["transaction", "status", "tx-1"],
-    ),
     sample(&["verify"], &["verify"]),
     sample(
         &["visibility", "set"],
@@ -1287,9 +1277,6 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["timeline", "record-finish"],
         &["timeline", "fork"],
         &["timeline", "recover"],
-        &["transaction", "begin"],
-        &["transaction", "commit"],
-        &["transaction", "abort"],
         &["visibility", "set"],
         &["visibility", "promote"],
     ] {
@@ -2057,8 +2044,6 @@ fn command_contract_table_drives_help_tiers() {
         assert_eq!(command_help_visibility(display), visibility);
         assert_eq!(command_canonical_command(display), canonical);
     }
-    assert_eq!(command_help_tier("transaction"), "hidden");
-
     let thread_list = catalog
         .commands
         .iter()

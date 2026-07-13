@@ -10,7 +10,6 @@ pub mod progress_render;
 pub mod render;
 pub mod style;
 pub mod tips;
-pub mod transaction_sentinel;
 
 #[cfg(feature = "client")]
 pub use cli_args::AuthCommands;

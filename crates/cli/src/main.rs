@@ -32,9 +32,9 @@ use cli::{
             cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_pull, cmd_push,
             cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
             cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
-            cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try,
-            cmd_undo, cmd_verify, cmd_watch, command_runtime_contract_for_command,
-            print_error_with_hint, print_parse_error_json_envelope,
+            cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_try, cmd_undo,
+            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            print_parse_error_json_envelope,
         },
         render::write_json_stdout,
     },
@@ -721,8 +721,6 @@ async fn async_main() -> Result<()> {
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
 
         Commands::Query(args) => cmd_query(&cli, args).await,
-
-        Commands::Transaction { command } => cmd_transaction(&cli, command).await,
 
         Commands::Review { command } => cmd_review(&cli, command).await,
 

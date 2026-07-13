@@ -123,7 +123,6 @@ schema_registry! {
     (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
-    (&["transaction commit"], TransactionCommitSchema),
     (&["export git"], ExportGitSchema),
     (&["import git"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
@@ -2530,14 +2529,6 @@ pub struct ReviewHealthEntrySchema {
     pub module_id: String,
     pub fire_rate: f64,
     pub warn: bool,
-}
-
-// ---- transaction commit ---------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TransactionCommitSchema {
-    pub state_id: String,
-    pub op_count: u32,
 }
 
 // ---- command/schema introspection ----------------------------------------

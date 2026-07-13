@@ -2638,30 +2638,6 @@ top-level `null`.
 {"output_kind": "review_health", "entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
 ```
 
----
-
-## `heddle transaction commit`
-
-```json
-{"change_id": "hd-def456", "op_count": 7}
-```
-
-`change_id` was previously named `state_id`; the rename matches the
-canonical naming for state identifiers across the CLI.
-
----
-
-## `heddle transaction begin|abort|status --output json`
-
-Hidden transaction-management commands are schema-backed so agents can
-discover and validate internal recovery flows.
-
-```json
-{"status": "ok"}
-```
-
----
-
 ## `heddle integration relay --output json`
 
 Hidden integration relay output is registered as a generic object payload.
@@ -2858,46 +2834,40 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add"
     ],
-    "accepted_opaque_schema_verbs_total": 46,
+    "accepted_opaque_schema_verbs_total": 43,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add"
     ],
-    "advanced_scope_json_commands_total": 112,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 46,
-    "advanced_scope_mutating_commands_total": 66,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
-    "catalog_commands_total": 190,
-    "catalog_mutating_commands_total": 94,
-    "json_commands_total": 155,
-    "json_commands_with_accepted_opaque_schema": 46,
-    "json_commands_with_schema": 109,
+    "advanced_scope_json_commands_total": 108,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 43,
+    "advanced_scope_mutating_commands_total": 63,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 23,
+    "catalog_commands_total": 185,
+    "catalog_mutating_commands_total": 91,
+    "json_commands_total": 151,
+    "json_commands_with_accepted_opaque_schema": 43,
+    "json_commands_with_schema": 108,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 92,
+    "json_mutating_commands_total": 89,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 92,
-    "mutating_commands_with_accepted_opaque_schema": 26,
-    "mutating_commands_with_schema": 66,
+    "mutating_commands_total": 89,
+    "mutating_commands_with_accepted_opaque_schema": 23,
+    "mutating_commands_with_schema": 65,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 46,
+    "opaque_schema_verbs_total": 43,
     "status": "available",
-    "summary": "190 command(s), 155 JSON command(s), 94 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 46 accepted opaque schema(s) outside clean verification",
+    "summary": "185 command(s), 151 JSON command(s), 91 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -2935,7 +2905,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "190 command(s), 155 JSON command(s), 94 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 46 accepted opaque schema(s) outside clean verification",
+  "summary": "185 command(s), 151 JSON command(s), 91 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 43 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

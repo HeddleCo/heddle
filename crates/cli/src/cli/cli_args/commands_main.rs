@@ -10,7 +10,7 @@ use super::SemanticCommands;
 use super::{
     AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
-    ShellCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
+    ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
         AdoptArgs, CloneArgs, CollapseArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
         LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
@@ -249,18 +249,6 @@ Examples:
     /// actor, time window, signal kind, symbol, thread, verbs. Returns
     /// structured results consumable by agents.
     Query(QueryArgs),
-
-    /// Transactional multi-step edits. Begin, commit, abort,
-    /// status. Operations within don't produce intermediate states.
-    ///
-    /// Hidden in alpha: buffered-op replay at commit and rewind-on-abort
-    /// are still follow-on work; the verb stays available for testing
-    /// but is not advertised in `heddle help advanced`.
-    #[command(hide = true)]
-    Transaction {
-        #[command(subcommand)]
-        command: TransactionCommands,
-    },
 
     /// Review a state — render the payload, sign, see signal health.
     ///

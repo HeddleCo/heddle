@@ -12,7 +12,7 @@ recorded as uncertain rather than treated as proof that a capability is dead.
 
 - Heddle local daemon: `DiscussionService`, `HookService`,
   `OperationLogQueryService`, `SignalService`, `StateReviewService`,
-  `TimelineService`, and `TransactionService`.
+  and `TimelineService`.
 - Weft hosted handlers: `AuthService`, `ContentService`, `DiscussionService`,
   `FeedService`, `HookService`, `HostedUserService`,
   `OperationLogQueryService`, `RepoEventService`, `ReviewService`,
@@ -26,6 +26,11 @@ recorded as uncertain rather than treated as proof that a capability is dead.
 
 These services and the shared messages reachable from them stay in the extracted
 contract.
+
+`TransactionService` stays because Weft has a hosted handler. Heddle's local
+transaction sentinel and CLI were removed: they recorded operations after those
+operations had already executed, so commit was not atomic and abort did not
+restore source or worktree state.
 
 ## Removed before 0.23
 

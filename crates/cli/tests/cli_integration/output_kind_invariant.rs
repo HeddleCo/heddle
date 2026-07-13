@@ -231,10 +231,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "thread check-merge",
     "thread current",
     "thread move",
-    "transaction abort",
-    "transaction begin",
-    "transaction commit",
-    "transaction status",
     "try",
     "watch",
 ];

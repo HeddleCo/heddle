@@ -25,7 +25,7 @@ use crate::cli::{
     TimelineCommands, VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands, AgentTaskCommands,
-        DiscussCommands, ReviewCommands, TransactionCommands,
+        DiscussCommands, ReviewCommands,
     },
     render::shell_quote,
 };
@@ -2741,23 +2741,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["transaction"], hidden(GROUP)),
-    entry(
-        &["transaction", "begin"],
-        hidden(opaque_schemas(METADATA_MUTATION, &["transaction begin"])),
-    ),
-    entry(
-        &["transaction", "commit"],
-        documented_schemas(METADATA_MUTATION, &["transaction commit"]),
-    ),
-    entry(
-        &["transaction", "abort"],
-        hidden(opaque_schemas(METADATA_MUTATION, &["transaction abort"])),
-    ),
-    entry(
-        &["transaction", "status"],
-        hidden(opaque_schemas(READ_JSON, &["transaction status"])),
-    ),
     entry(
         &["verify"],
         exits(
@@ -4378,12 +4361,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DiscussCommands::Show(_) => vec!["discuss", "show"],
         },
         Commands::Query(_) => vec!["query"],
-        Commands::Transaction { command } => match command {
-            TransactionCommands::Begin(_) => vec!["transaction", "begin"],
-            TransactionCommands::Commit(_) => vec!["transaction", "commit"],
-            TransactionCommands::Abort(_) => vec!["transaction", "abort"],
-            TransactionCommands::Status(_) => vec!["transaction", "status"],
-        },
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
