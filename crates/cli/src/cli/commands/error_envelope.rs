@@ -577,6 +577,16 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         "heddle status",
                     );
                 }
+                HeddleError::Lock(_) => {
+                    return ErrorClassification::known(
+                        "repository_lock_unavailable",
+                        "Retry after the other Heddle operation finishes.",
+                        "another operation or lock acquisition failure made the repository unavailable",
+                        "continuing without the repository lock could interleave incompatible writes",
+                        "the command stopped before its protected mutation",
+                        "heddle status",
+                    );
+                }
                 HeddleError::Io(io) => {
                     if objects::fs_atomic::is_out_of_space(io) {
                         return ErrorClassification::known(
@@ -782,6 +792,16 @@ mod tests {
         assert_eq!(classified.kind, "no_merge_in_progress");
         assert_eq!(classified.primary_command, "heddle status");
         assert!(classified.unsafe_condition.contains("no active merge"));
+    }
+
+    #[test]
+    fn typed_lock_failure_is_transient_not_integrity_failure() {
+        let err = anyhow!(HeddleError::Lock(objects::lock::LockError::Acquire(
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "contended"),
+        )));
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "repository_lock_unavailable");
+        assert_eq!(classified.primary_command, "heddle status");
     }
 
     #[test]

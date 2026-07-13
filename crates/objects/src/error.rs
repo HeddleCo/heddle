@@ -163,6 +163,8 @@ pub enum HeddleError {
     },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("repository lock unavailable: {0}")]
+    Lock(#[from] crate::lock::LockError),
     #[error("serialization error: {0}")]
     Serialization(String),
     #[error("configuration error: {0}")]

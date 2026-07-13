@@ -177,6 +177,7 @@ impl HeddleExitCode {
                         return Self::DataErr;
                     }
                     objects::error::HeddleError::Config(_) => return Self::Config,
+                    objects::error::HeddleError::Lock(_) => return Self::TempFail,
                     // Stored state that fails msgpack decoding is corrupted
                     // data, not a transient IO problem — same class as the
                     // serde_json/toml parse failures below.
@@ -247,6 +248,17 @@ mod tests {
         let err: anyhow::Error =
             std::io::Error::new(IoErrorKind::PermissionDenied, "denied").into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::NoPerm);
+    }
+
+    #[test]
+    fn typed_repository_lock_failure_maps_to_tempfail() {
+        let err = objects::error::HeddleError::Lock(objects::lock::LockError::Acquire(
+            std::io::Error::new(IoErrorKind::WouldBlock, "contended"),
+        ));
+        assert_eq!(
+            HeddleExitCode::from_error(&anyhow::Error::new(err)),
+            HeddleExitCode::TempFail
+        );
     }
 
     #[test]

@@ -420,8 +420,8 @@ fn codec_error(error: impl std::fmt::Display) -> HeddleError {
     HeddleError::InvalidObject(error.to_string())
 }
 
-fn lock_error(error: impl std::fmt::Display) -> HeddleError {
-    HeddleError::InvalidObject(format!("collaboration store lock: {error}"))
+fn lock_error(error: objects::lock::LockError) -> HeddleError {
+    error.into()
 }
 
 #[cfg(test)]
