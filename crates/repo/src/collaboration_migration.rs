@@ -172,7 +172,11 @@ pub fn apply_legacy_discussion_migration(
 
 fn collect_candidates(repository: &Repository) -> Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
-    for state_id in repository.reachable_states()? {
+    for state_id in repository.reachable_states().map_err(|error| {
+        HeddleError::InvalidObject(format!(
+            "walk reachable states for discussion migration: {error}"
+        ))
+    })? {
         let attachments = repository.list_state_attachments(&state_id)?;
         for attachment in attachments {
             let StateAttachmentBody::Discussions(blob_hash) = attachment.body else {

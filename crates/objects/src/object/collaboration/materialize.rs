@@ -128,7 +128,7 @@ pub fn materialize_repository_collaboration(
         let next = by_id
             .iter()
             .filter(|(id, operation)| {
-                !visible.contains(id)
+                !visible.contains(*id)
                     && operation
                         .operation
                         .parents
